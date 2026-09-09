@@ -1554,15 +1554,26 @@ def _load_provider_state_with_source(
 
 
 @contextmanager
-def _provider_state_transaction(provider_id: str):
+def _provider_state_transaction(
+    provider_id: str,
+    *,
+    timeout_seconds: float = AUTH_LOCK_TIMEOUT_SECONDS,
+):
     """Lock the active auth store and any global fallback source in order.
 
     Profile-backed refresh paths must take the global auth-store lock before
     any provider-specific shared-store lock. Re-reading the source after the
     target lock is acquired prevents both stale refreshes and whole-file lost
     updates without inverting the documented auth -> shared lock order.
+
+    ``timeout_seconds`` applies to BOTH the outer profile lock and (when a
+    fallback source is in play) the inner source lock — a caller whose
+    protected work can itself run long (e.g. a network token refresh) should
+    pass a timeout at least that long, or a sibling process waiting on either
+    lock could time out mid-refresh even though the lock is healthy and will
+    release shortly.
     """
-    with _auth_store_lock():
+    with _auth_store_lock(timeout_seconds=timeout_seconds):
         auth_store = _load_auth_store()
         state, source_path = _load_provider_state_with_source(
             auth_store,
@@ -1573,7 +1584,7 @@ def _provider_state_transaction(provider_id: str):
             yield auth_store, state, source_path
             return
 
-        with _auth_store_lock(target_path=source_path):
+        with _auth_store_lock(target_path=source_path, timeout_seconds=timeout_seconds):
             source_store = _load_auth_store(source_path)
             source_providers = source_store.get("providers")
             source_state = None
@@ -4405,25 +4416,15 @@ def _print_loopback_ssh_hint(redirect_uri: str, *, docs_url: str | None = None) 
 # where one app's refresh invalidates the other's session.
 # =============================================================================
 
-def _read_codex_tokens(*, _lock: bool = True) -> Dict[str, Any]:
-    """Read Codex OAuth tokens from Hermes auth store (~/.hermes/auth.json).
-    
-    Returns dict with 'tokens' (access_token, refresh_token) and 'last_refresh'.
-    Raises AuthError if no Codex tokens are stored.
+def _validate_codex_provider_state(state: Dict[str, Any]) -> Dict[str, Any]:
+    """Validate a raw ``providers.openai-codex`` state dict and extract tokens.
+
+    Shared by ``_read_codex_tokens`` (single-lock read) and the
+    transaction-protected refresh path in ``resolve_codex_runtime_credentials``
+    (see ``_provider_state_transaction``) so both raise the identical
+    ``AuthError`` shape for a missing/malformed state, regardless of whether
+    the state came from the profile's own store or the global-root fallback.
     """
-    if _lock:
-        with _auth_store_lock():
-            auth_store = _load_auth_store()
-    else:
-        auth_store = _load_auth_store()
-    state = _load_provider_state(auth_store, "openai-codex")
-    if not state:
-        raise AuthError(
-            "No Codex credentials stored. Run `hermes auth` to authenticate.",
-            provider="openai-codex",
-            code="codex_auth_missing",
-            relogin_required=True,
-        )
     tokens = state.get("tokens")
     if not isinstance(tokens, dict):
         raise AuthError(
@@ -4452,6 +4453,28 @@ def _read_codex_tokens(*, _lock: bool = True) -> Dict[str, Any]:
         "tokens": tokens,
         "last_refresh": state.get("last_refresh"),
     }
+
+
+def _read_codex_tokens(*, _lock: bool = True) -> Dict[str, Any]:
+    """Read Codex OAuth tokens from Hermes auth store (~/.hermes/auth.json).
+
+    Returns dict with 'tokens' (access_token, refresh_token) and 'last_refresh'.
+    Raises AuthError if no Codex tokens are stored.
+    """
+    if _lock:
+        with _auth_store_lock():
+            auth_store = _load_auth_store()
+    else:
+        auth_store = _load_auth_store()
+    state = _load_provider_state(auth_store, "openai-codex")
+    if not state:
+        raise AuthError(
+            "No Codex credentials stored. Run `hermes auth` to authenticate.",
+            provider="openai-codex",
+            code="codex_auth_missing",
+            relogin_required=True,
+        )
+    return _validate_codex_provider_state(state)
 
 
 def _sync_codex_pool_entries(
@@ -4555,12 +4578,52 @@ def _sync_codex_pool_entries(
         entry["last_error_reset_at"] = None
 
 
-def _save_codex_tokens(tokens: Dict[str, str], last_refresh: str = None, label: str = None) -> None:
-    """Save Codex OAuth tokens to Hermes auth store (~/.hermes/auth.json)."""
+def _save_codex_tokens(
+    tokens: Dict[str, str],
+    last_refresh: str = None,
+    label: str = None,
+    *,
+    source_path: Optional[Path] = None,
+) -> None:
+    """Save Codex OAuth tokens to Hermes auth store (~/.hermes/auth.json).
+
+    ``source_path`` is the auth.json the token state being refreshed actually
+    came from (see ``_load_provider_state_with_source`` /
+    ``_provider_state_transaction``). When it names a store OTHER than the
+    active profile's own auth.json — i.e. this profile has no local
+    ``providers.openai-codex`` entry and is running on the global-root
+    fallback grant — the fresh tokens are written through to THAT source
+    store (locked + re-read fresh under its own lock) instead of the active
+    profile, so every profile sharing the imported grant converges on one
+    lineage rather than each refresh silently forking a profile-local copy
+    that shadows the (now stale) global grant on every future read. This
+    mirrors the write-through ``resolve_nous_access_token`` already does for
+    the "nous" provider via ``_save_provider_state_to_source`` — Codex is in
+    ``SINGLE_USE_REFRESH_POOL_PROVIDERS`` for the same single-use-refresh-token
+    reason but, before this fix, had no equivalent write-through of its own.
+
+    ``source_path=None`` (or a path resolving to the active store) preserves
+    the exact prior behavior: lock + load + save the profile's own store only,
+    including the ``credential_pool`` mirror sync. Non-imported credentials
+    are therefore unaffected by this parameter.
+    """
     if last_refresh is None:
         last_refresh = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
-    with _auth_store_lock():
-        auth_store = _load_auth_store()
+
+    active_path = _auth_file_path()
+    write_target = source_path if source_path is not None else active_path
+    same_store = _same_path(write_target, active_path)
+    lock_target = None if same_store else write_target
+    load_target = None if same_store else write_target
+
+    with _auth_store_lock(target_path=lock_target):
+        # Re-read the target store fresh, under its own lock, right before
+        # writing — this is the "never clobber a newer grant" guard: any
+        # refresh completed by another Hermes profile/process since this
+        # refresh cycle started is already reflected here because the lock
+        # serializes against it (see _provider_state_transaction's lock
+        # ordering, which this nests inside for the source-write-through case).
+        auth_store = _load_auth_store(load_target)
         state = _load_provider_state(auth_store, "openai-codex") or {}
         # Capture the previous singleton tokens BEFORE overwriting them.  The
         # pool-sync step uses this to distinguish legacy singleton-aliases
@@ -4580,11 +4643,22 @@ def _save_codex_tokens(tokens: Dict[str, str], last_refresh: str = None, label: 
             last_refresh,
             previous_singleton_tokens=previous_singleton_tokens,
         )
-        _save_auth_store(auth_store)
+        _save_auth_store(auth_store, target_path=load_target)
 
 
-def _recover_codex_tokens_from_cli(reason: str) -> Optional[Dict[str, str]]:
-    """Adopt a valid Codex CLI token pair into Hermes auth, if available."""
+def _recover_codex_tokens_from_cli(
+    reason: str,
+    *,
+    source_path: Optional[Path] = None,
+) -> Optional[Dict[str, str]]:
+    """Adopt a valid Codex CLI token pair into Hermes auth, if available.
+
+    ``source_path``, when supplied by a caller already holding a resolved
+    ``_provider_state_transaction`` lock, write-throughs the adopted grant to
+    that same source store (see ``_save_codex_tokens``) instead of the active
+    profile — keeping a profile that self-heals from a shared/imported grant
+    from forking its own private copy.
+    """
     imported = _import_codex_cli_tokens()
     # Require BOTH tokens before adopting: persisting a payload without a
     # usable refresh_token would only break the next refresh cycle.
@@ -4595,7 +4669,7 @@ def _recover_codex_tokens_from_cli(reason: str) -> Optional[Dict[str, str]]:
     ):
         return None
     logger.info("Codex auth recovered from Codex CLI auth.json (%s).", reason)
-    _save_codex_tokens(imported)
+    _save_codex_tokens(imported, source_path=source_path)
     return dict(imported)
 
 
@@ -4762,10 +4836,16 @@ def refresh_codex_oauth_pure(
 def _refresh_codex_auth_tokens(
     tokens: Dict[str, str],
     timeout_seconds: float,
+    *,
+    source_path: Optional[Path] = None,
 ) -> Dict[str, str]:
     """Refresh Codex access token using the refresh token.
-    
-    Saves the new tokens to Hermes auth store automatically.
+
+    Saves the new tokens to Hermes auth store automatically. ``source_path``
+    (see ``_save_codex_tokens``) directs both the success write and the
+    self-heal-from-CLI write to the store the refreshed state actually came
+    from, so a profile running on the global-root fallback grant converges
+    the shared grant on the source instead of forking a profile-local copy.
     """
     try:
         refreshed = refresh_codex_oauth_pure(
@@ -4786,10 +4866,19 @@ def _refresh_codex_auth_tokens(
         # 401'ing until a manual re-auth. Transient failures (e.g. 429 quota)
         # keep relogin_required=False — the stored token is still valid there, so
         # we never self-heal those and re-raise unchanged.
+        #
+        # NOTE this self-heal reads a THIRD store (~/.codex/auth.json, the
+        # Codex CLI's own file) that Hermes does not lock — there is no
+        # cross-CLI file lock available there. The Hermes-side lock this
+        # function runs under (the caller's _provider_state_transaction)
+        # only serializes Hermes processes against each other; it cannot
+        # prevent the Codex CLI itself from rotating ~/.codex/auth.json
+        # concurrently. Import-then-adopt is the recovery, not prevention.
         if not getattr(exc, "relogin_required", False):
             raise
         imported = _recover_codex_tokens_from_cli(
-            f"refresh_token rejected: {getattr(exc, 'code', None) or 'auth_error'}"
+            f"refresh_token rejected: {getattr(exc, 'code', None) or 'auth_error'}",
+            source_path=source_path,
         )
         if not imported:
             raise
@@ -4799,7 +4888,7 @@ def _refresh_codex_auth_tokens(
     updated_tokens["access_token"] = refreshed["access_token"]
     updated_tokens["refresh_token"] = refreshed["refresh_token"]
 
-    _save_codex_tokens(updated_tokens)
+    _save_codex_tokens(updated_tokens, source_path=source_path)
     return updated_tokens
 
 
@@ -4952,9 +5041,32 @@ def resolve_codex_runtime_credentials(
     if (not should_refresh) and refresh_if_expiring:
         should_refresh = _codex_access_token_is_expiring(access_token, refresh_skew_seconds)
     if should_refresh:
-        # Re-read under lock to avoid racing with other Hermes processes
-        with _auth_store_lock(timeout_seconds=max(float(AUTH_LOCK_TIMEOUT_SECONDS), refresh_timeout_seconds + 5.0)):
-            data = _read_codex_tokens(_lock=False)
+        # Re-read under a SOURCE-aware transaction lock to avoid racing with
+        # other Hermes processes. In profile mode a Codex grant is frequently
+        # resolved via the global-root fallback (no profile-local entry yet —
+        # see _load_provider_state_with_source): locking only the profile's
+        # own auth.json (the prior behavior, plain _auth_store_lock()) left
+        # the true shared source unprotected, so two profiles could each pass
+        # their own uncontended profile lock and both redeem the same
+        # single-use refresh_token concurrently — and the refresh write went
+        # only to the profile, silently forking the grant. Locking + writing
+        # through the resolved source (_provider_state_transaction +
+        # source_path threaded into _refresh_codex_auth_tokens /
+        # _save_codex_tokens below) keeps every profile sharing an imported
+        # grant converged on one lineage — the same write-through pattern
+        # resolve_nous_access_token already uses for "nous".
+        with _provider_state_transaction(
+            "openai-codex",
+            timeout_seconds=max(float(AUTH_LOCK_TIMEOUT_SECONDS), refresh_timeout_seconds + 5.0),
+        ) as (_auth_store, state, source_path):
+            if not state:
+                raise AuthError(
+                    "No Codex credentials stored. Run `hermes auth` to authenticate.",
+                    provider="openai-codex",
+                    code="codex_auth_missing",
+                    relogin_required=True,
+                )
+            data = _validate_codex_provider_state(state)
             tokens = dict(data["tokens"])
             access_token = str(tokens.get("access_token", "") or "").strip()
 
@@ -4963,7 +5075,9 @@ def resolve_codex_runtime_credentials(
                 should_refresh = _codex_access_token_is_expiring(access_token, refresh_skew_seconds)
 
             if should_refresh:
-                tokens = _refresh_codex_auth_tokens(tokens, refresh_timeout_seconds)
+                tokens = _refresh_codex_auth_tokens(
+                    tokens, refresh_timeout_seconds, source_path=source_path,
+                )
                 access_token = str(tokens.get("access_token", "") or "").strip()
 
     base_url = (
