@@ -63,9 +63,15 @@ class GatewaySessionWatchersMixin:
             self._sweep_agent_cache_under_pressure()
         except Exception as e:
             logger.debug("Agent cache pressure sweep failed: %s", e)
-        # Prune stale SessionStore entries: the dict + sessions.json otherwise grow unbounded.
+        # Clean private pending-turn rows and prune stale routing entries on the same hourly gate.
+        # Pending-turn retention is independent of session_store_max_age_days.
         prune_ts = getattr(self, "_last_session_store_prune_ts", 0.0)  # tests may omit
         if time.time() - prune_ts > _SESSION_STORE_PRUNE_INTERVAL:
+            try:
+                if n := await self.async_session_store.gc_pending_turn_drafts():
+                    logger.info("Pending-turn cleanup: dropped %d expired/invalid record(s)", n)
+            except Exception as e:
+                logger.warning("Pending-turn cleanup failed: %s", e)
             try:
                 max_age = int(getattr(self.config, "session_store_max_age_days", 0) or 0)
                 if max_age > 0 and (n := await self.async_session_store.prune_old_entries(max_age)):

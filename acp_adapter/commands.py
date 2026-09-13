@@ -62,6 +62,11 @@ class SlashCommandsMixin:
             "Queue a prompt to run after the current turn finishes",
             "prompt to run next",
         ),
+        "recover": (
+            "Review or resolve durable pending-input recovery",
+            "Resolve a pending-input recovery by exact admission ID",
+            "admission-id retry|delivered|acknowledge",
+        ),
         "version": ("Show Hermes version", "Show Hermes version", None),
     }
 
@@ -211,6 +216,79 @@ class SlashCommandsMixin:
             else "Tip: run /compress to compress manually before the threshold."
         )
         return "\n".join(lines)
+
+    def _cmd_recover(self, args: str, state: SessionState) -> str:
+        """List or explicitly resolve this ACP surface's durable recovery records."""
+        from agent.pending_input_recovery import (
+            PendingInputRecoveryError,
+            acknowledge_pending_input_recovery_loss,
+            get_pending_input_recovery,
+            list_pending_input_recoveries,
+            remove_pending_input_admission_from_messages,
+            resolve_pending_input_recovery_dispatch,
+        )
+
+        db = self.session_manager._get_db()
+        surface = f"acp:{state.session_id}"
+        parts = args.split()
+        if not parts:
+            records = [
+                value for value in list_pending_input_recoveries(db)
+                if value.get("surface_key") == surface
+            ]
+            if not records:
+                return "No pending ACP input recoveries."
+            lines = ["Pending ACP input recoveries:"]
+            for value in records:
+                reasons = ",".join(value.get("loss_reasons") or []) or "none"
+                lines.append(
+                    f"  {value.get('admission_id')} status={value.get('status')} "
+                    f"dispatch={value.get('dispatch_state') or 'not-started'} "
+                    f"generation={int(value.get('claim_generation') or 0)} loss={reasons}"
+                )
+            lines.append(
+                "Use /recover <id> retry|delivered for uncertain dispatch, or "
+                "/recover <id> acknowledge for a disclosed loss notice."
+            )
+            return "\n".join(lines)
+        if len(parts) != 2 or parts[1].lower() not in {"retry", "delivered", "acknowledge"}:
+            return "Usage: /recover <admission-id> retry|delivered|acknowledge"
+        admission_id, action = parts[0], parts[1].lower()
+        record = get_pending_input_recovery(db, admission_id)
+        if not isinstance(record, dict) or record.get("surface_key") != surface:
+            return "No matching ACP pending-input recovery."
+        try:
+            with state.runtime_lock:
+                if state.is_running:
+                    return (
+                        "Recovery cannot be resolved while this session has an active turn. "
+                        "Retry /recover after the turn finishes."
+                    )
+                if action == "acknowledge":
+                    acknowledge_pending_input_recovery_loss(db, admission_id)
+                    return "Loss notice acknowledged. Reattach or re-enter omitted content manually."
+                resolved, _changed = resolve_pending_input_recovery_dispatch(
+                    db, admission_id,
+                    resend_id=str(record.get("resend_id") or ""),
+                    claim_generation=int(record.get("claim_generation") or 0),
+                    resolution=action,
+                )
+        except (PendingInputRecoveryError, ValueError) as exc:
+            return f"Recovery was not changed: {exc}"
+        resend_id = str(record.get("resend_id") or "")
+        if resend_id and not resolved.get("provider_response_received"):
+            state.history, _ = remove_pending_input_admission_from_messages(
+                state.history, resend_id
+            )
+            session_messages = getattr(state.agent, "_session_messages", None)
+            if isinstance(session_messages, list):
+                state.agent._session_messages, _ = remove_pending_input_admission_from_messages(
+                    session_messages, resend_id
+                )
+            self.session_manager.save_session(state.session_id)
+        if action == "retry":
+            return "Recovery returned to pending. Resend it manually; Hermes will not auto-submit it."
+        return "Recovery marked delivered; Hermes will not resend it."
 
     def _cmd_reset(self, args: str, state: SessionState) -> str:
         state.history.clear()

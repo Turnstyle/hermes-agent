@@ -241,13 +241,16 @@ async def test_a_chained_queued_turn_carries_its_own_inbound_id():
     pending_event = SimpleNamespace(
         source=topic, message_id="6002", channel_prompt=None, message_type=None)
 
-    await GatewayRunner._run_agent_queued_followup(
+    merged = await GatewayRunner._run_agent_queued_followup(
         runner, turn_ctx, adapter=None, pending="hi again", pending_event=pending_event,
         response="resp", result={"interrupted": True, "messages": []}, stream_task=None)
 
     runner._run_agent.assert_awaited_once()
     assert runner._run_agent.await_args.kwargs["inbound_message_id"] == "6002"
     assert runner._run_agent.await_args.kwargs["event_message_id"] is None
+    assert merged["_queued_terminal_event"] is pending_event
+    assert merged["_queued_terminal_source"] is topic
+    assert merged["_queued_terminal_session_key"] == TOPIC_SESSION_KEY
 
 
 # ---------------------------------------------------------------------------

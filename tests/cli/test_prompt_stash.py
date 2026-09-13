@@ -188,6 +188,19 @@ class TestNoSilentClobber:
             stash.stash(f"d{i}")
         assert len(stash) == MAX_STASH_ITEMS
 
+    def test_full_recovery_stash_refuses_silent_eviction(self):
+        stash = PromptStash(max_items=2, clock=_FakeClock())
+        outcomes = []
+        for admission_id in ("a", "b", "c"):
+            outcomes.append(stash.stash(
+                "same",
+                recovery_admission_id=admission_id,
+                recovery_surface_key="cli:session-a",
+                allow_eviction=False,
+            ))
+        assert outcomes == [True, True, False]
+        assert [entry.recovery_admission_id for entry in stash.items] == ["b", "a"]
+
 
 # -------------------------------------------------------------- indicator state
 
@@ -301,6 +314,53 @@ class TestStashEntry:
         assert entries[0].stashed_at == 560.0  # newest first
         assert entries[1].stashed_at == 500.0
 
+    def test_duplicate_text_keeps_distinct_recovery_identity(self, stash):
+        surface = "cli:session-a"
+        stash.stash(
+            "same text",
+            recovery_admission_id="recovery-a",
+            recovery_surface_key=surface,
+        )
+        stash.stash(
+            "same text",
+            recovery_admission_id="recovery-b",
+            recovery_surface_key=surface,
+        )
+
+        assert [entry.recovery_admission_id for entry in stash.items] == [
+            "recovery-b",
+            "recovery-a",
+        ]
+        assert stash.pop() == ("same text", [])
+        assert stash.take_last_restored_entry().recovery_admission_id == "recovery-b"
+        assert stash.pop() == ("same text", [])
+        assert stash.take_last_restored_entry().recovery_admission_id == "recovery-a"
+
+    def test_recovery_capacity_never_evicts_existing_identity(self):
+        stash = PromptStash(max_items=2, clock=_FakeClock())
+        for recovery_id in ("a", "b", "c"):
+            stash.stash(
+                "same text",
+                recovery_admission_id=recovery_id,
+                recovery_surface_key="cli:session-a",
+                allow_eviction=False,
+            )
+        assert [entry.recovery_admission_id for entry in stash.items] == ["b", "a"]
+
+        stash.open_panel()
+        assert stash.delete_at_cursor() is True
+        assert [entry.recovery_admission_id for entry in stash.items] == ["a"]
+
+    def test_ordinary_same_text_entry_has_no_recovery_identity(self, stash):
+        stash.stash("same text")
+        stash.stash(
+            "same text",
+            recovery_admission_id="recovery-a",
+            recovery_surface_key="cli:session-a",
+        )
+        assert stash.items[0].recovery_admission_id == "recovery-a"
+        assert stash.items[1].recovery_admission_id is None
+
 
 # --------------------------------------------------------------- panel browsing
 
@@ -338,6 +398,22 @@ class TestPanelBrowsing:
         assert three.delete_at_cursor() is True
         assert [e.text for e in three.items] == ["newest", "oldest"]
         assert three.panel_open is True
+
+    def test_delete_duplicate_text_removes_only_selected_identity(self):
+        stash = PromptStash(clock=_FakeClock())
+        stash.stash(
+            "same",
+            recovery_admission_id="a",
+            recovery_surface_key="cli:session-a",
+        )
+        stash.stash(
+            "same",
+            recovery_admission_id="b",
+            recovery_surface_key="cli:session-a",
+        )
+        stash.open_panel()
+        assert stash.delete_at_cursor()
+        assert [entry.recovery_admission_id for entry in stash.items] == ["a"]
 
     def test_delete_last_row_reclamps_cursor(self, three):
         three.move_cursor(2)  # bottom row

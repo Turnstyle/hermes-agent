@@ -133,11 +133,13 @@ def test_merge_pending_message_event_merges_text_and_photo_followups():
         text="first follow-up",
         message_type=MessageType.TEXT,
         source=source,
+        message_id="delivery-text",
     )
     photo_event = MessageEvent(
         text="see screenshot",
         message_type=MessageType.PHOTO,
         source=source,
+        message_id="delivery-photo",
         media_urls=["/tmp/test.png"],
         media_types=["image/png"],
     )
@@ -150,6 +152,7 @@ def test_merge_pending_message_event_merges_text_and_photo_followups():
     assert merged.text == "first follow-up\n\nsee screenshot"
     assert merged.media_urls == ["/tmp/test.png"]
     assert merged.media_types == ["image/png"]
+    assert merged._accepted_delivery_ids == ("delivery-text", "delivery-photo")
 
 
 @pytest.mark.asyncio

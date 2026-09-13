@@ -7,6 +7,7 @@ for GatewayRunner (mixin bound via the MRO).
 
 from __future__ import annotations
 
+from dataclasses import replace
 import logging
 from typing import TYPE_CHECKING
 import asyncio
@@ -278,11 +279,16 @@ class GatewayBusySessionMixin:
         "gateway_session_id", "gateway_session_strict",
     )
 
-    def _queue_or_replace_pending_event(self, session_key: str, event: MessageEvent) -> None:
-        from gateway.platforms.base import merge_pending_message_event
+    def _queue_or_replace_pending_event(self, session_key: str, event: MessageEvent) -> bool:
+        """Admit one busy follow-up, returning false when no durable queue slot exists."""
+
+        from gateway.platforms.base import (
+            _pending_events_share_principal,
+            merge_pending_message_event,
+        )
         adapter = self._adapter_for_source(event.source)
         if not adapter:
-            return
+            return False
         # FIFO so each follow-up gets its own turn in arrival order (the single pending slot used to
         # be silently OVERWRITTEN). Photo bursts still merge into the head slot (album semantics).
         pending_slot = getattr(adapter, "_pending_messages", None)
@@ -291,7 +297,8 @@ class GatewayBusySessionMixin:
         # messages arrived in ``busy_input_mode: queue``.
         existing = pending_slot.get(session_key) if isinstance(pending_slot, dict) else None
         same_security_context = existing is not None and (
-            getattr(existing, "internal", False) == getattr(event, "internal", False)
+            _pending_events_share_principal(existing, event)
+            and getattr(existing, "internal", False) == getattr(event, "internal", False)
             and getattr(existing, "allow_gateway_control", True)
             == getattr(event, "allow_gateway_control", True)
             and all(
@@ -307,21 +314,24 @@ class GatewayBusySessionMixin:
             or bool(getattr(event, "media_urls", None))
         ):
             # Preserve photo-burst / media-merge semantics for the head slot.
-            merge_pending_message_event(
+            merged = merge_pending_message_event(
                 adapter._pending_messages, session_key, event,
                 merge_text=event.message_type == MessageType.TEXT,
             )
-            event._gateway_accepted = True
-            return
+            if merged:
+                event._gateway_accepted = True
+                return True
 
         if self._queue_depth(session_key, adapter=adapter) >= self._BUSY_QUEUE_MAX_PENDING:
             logger.warning(
                 "Dropping busy-mode follow-up for session %s — pending queue at cap (%d).",
                 session_key, self._BUSY_QUEUE_MAX_PENDING,
             )
-            return
+            event._gateway_accepted = False
+            return False
 
         self._enqueue_fifo(session_key, event, adapter)
+        return getattr(event, "_gateway_accepted", False) is True
 
     async def _prepare_busy_steer_text(self, event: MessageEvent) -> str:
         """Steerable text for a busy follow-up, transcribing voice-message media first.
@@ -406,10 +416,19 @@ class GatewayBusySessionMixin:
         if not adapter:
             return
         if self._queue_during_drain_enabled(effective_mode):
-            self._queue_or_replace_pending_event(session_key, event)
-            message = f"⏳ Gateway {self._status_action_gerund()} — queued for the next turn after it comes back."
+            admitted = self._queue_or_replace_pending_event(session_key, event)
+            message = (
+                f"⏳ Gateway {self._status_action_gerund()} — queued for the next "
+                "turn after it comes back."
+                if admitted
+                else f"⏳ Gateway is {self._status_action_gerund()} and is not "
+                "accepting another turn right now."
+            )
         else:
-            message = f"⏳ Gateway is {self._status_action_gerund()} and is not accepting another turn right now."
+            message = (
+                f"⏳ Gateway is {self._status_action_gerund()} and is not accepting "
+                "another turn right now."
+            )
         await self._send_busy_reply(event, adapter, message)
 
     # Bare-word approval replies → (verb, args) for the synthesized slash command.
@@ -475,7 +494,7 @@ class GatewayBusySessionMixin:
     async def _resolve_busy_steer_or_redirect(
         self, event: MessageEvent, session_key: str, effective_mode: str, running_agent: Any
     ) -> "GatewayRunner._BusySteerOutcome":
-        """Apply interrupt->queue demotions, then attempt steer (steer mode) or redirect (interrupt mode)."""
+        """Apply safety demotions, then attempt steer (steer mode) or redirect (interrupt mode)."""
         from gateway.run import _AGENT_PENDING_SENTINEL
         # Steer injects mid-run via running_agent.steer(), falling back to queue (nothing lost) when
         # the agent isn't running yet, lacks steer(), or the payload is empty. Interrupt is demoted
@@ -484,12 +503,19 @@ class GatewayBusySessionMixin:
             effective_mode == "interrupt" and self._agent_has_active_subagents(running_agent)
         )
         if demoted_for_subagents:
-            effective_mode = self._demote_interrupt(session_key, "the running agent has active subagents (#30170)")
-        demoted_for_compression = (
-            effective_mode == "interrupt" and await self._session_has_compression_in_flight(session_key)
+            effective_mode = self._demote_busy_mode(
+                session_key, effective_mode, "the running agent has active subagents (#30170)"
+            )
+        # Neither interrupt nor steer may mutate the live run while its conversation is being
+        # compressed. Interrupt can fork from the pre-rotation parent, while steer can append new
+        # input to the history snapshot being rotated. Preserve the event at the next turn boundary.
+        demoted_for_compression = effective_mode in {"interrupt", "steer"} and (
+            await self._session_has_compression_in_flight(session_key)
         )
         if demoted_for_compression:
-            effective_mode = self._demote_interrupt(session_key, "context compression is in flight (#56391)")
+            effective_mode = self._demote_busy_mode(
+                session_key, effective_mode, "context compression is in flight (#56391)"
+            )
         steered = redirected = False
         agent_live = running_agent is not None and running_agent is not _AGENT_PENDING_SENTINEL
         plain_text = (
@@ -525,8 +551,8 @@ class GatewayBusySessionMixin:
         )
 
     @staticmethod
-    def _demote_interrupt(session_key: str, why: str) -> str:
-        logger.info("Demoting busy_input_mode 'interrupt' to 'queue' for session %s because %s", session_key, why)
+    def _demote_busy_mode(session_key: str, mode: str, why: str) -> str:
+        logger.info("Demoting busy_input_mode %r to 'queue' for session %s because %s", mode, session_key, why)
         return "queue"
 
     def _try_agent_verb(
@@ -700,10 +726,6 @@ class GatewayBusySessionMixin:
         running_agent = _busy_state.turn.agent if _busy_state else None
         _steer = await self._resolve_busy_steer_or_redirect(event, session_key, effective_mode, running_agent)
         effective_mode, redirected = _steer.effective_mode, _steer.redirected
-        # Queue as the next turn — skipped after a successful steer/redirect (the text is already in
-        # the run and must NOT replay). FIFO gives each text its own turn (raw merge would join them).
-        if not _steer.steered and not redirected:
-            self._queue_or_replace_pending_event(session_key, event)
         # Store the message so it's processed as the next turn after the current run finishes (or is
         # interrupted). Skip this for a successful steer — the text already landed inside the run and must
         # NOT also be replayed as a next-turn user message. Route through _queue_or_replace_pending_event
@@ -713,6 +735,11 @@ class GatewayBusySessionMixin:
         # messages sent while the agent was busy (interrupt mode, or a steer that fell back to queue)
         # arrived as one mashed-together turn (#43066 sub-bug 2). The FIFO path gives each text its own turn
         # in arrival order while still preserving photo-burst / album merge semantics for media.
+        if not _steer.steered and not redirected:
+            if not self._queue_or_replace_pending_event(session_key, event):
+                # Capacity rejection is handled but not accepted. Do not interrupt the active run
+                # or send a positive queue acknowledgement for a message that was dropped.
+                return True
         is_queue_mode = effective_mode == "queue"
         is_steer_mode = effective_mode == "steer"
         is_redirect_mode = effective_mode == "interrupt" and redirected
@@ -922,13 +949,19 @@ class GatewayBusySessionMixin:
             # Turn-boundary fallback: queue the steer text as its own follow-up turn.
             adapter = self._adapter_for_source(source)
             if adapter:
-                self._enqueue_fifo(quick_key, MessageEvent(
-                    text=steer_text, message_type=MessageType.TEXT, source=event.source,
-                    message_id=event.message_id, channel_prompt=event.channel_prompt,
-                    channel_context=event.channel_context,
-                ), adapter)
+                # ``replace`` keeps the original delivery identity, source, reply/channel context,
+                # and every constituent delivery id while creating a distinct queued event.
+                self._enqueue_fifo(
+                    quick_key,
+                    replace(event, text=steer_text, message_type=MessageType.TEXT),
+                    adapter,
+                )
             return reply
 
+        if await self._session_has_compression_in_flight(quick_key):
+            return _queue_fallback(
+                "Context compression is in flight — /steer queued for the next turn."
+            )
         if running_agent is _AGENT_PENDING_SENTINEL:
             return _queue_fallback("Agent still starting — /steer queued for the next turn.")
         if not running_agent or not hasattr(running_agent, "steer"):

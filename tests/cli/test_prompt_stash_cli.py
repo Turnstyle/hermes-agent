@@ -14,6 +14,7 @@ tests/cli/test_cli_extension_hooks.py.
 from __future__ import annotations
 
 import importlib
+import queue
 import sys
 from unittest.mock import MagicMock, patch
 
@@ -91,6 +92,374 @@ class TestStashStateInit:
         assert len(b._prompt_stash) == 0
 
 
+class TestRecoveryComposerIdentity:
+    @staticmethod
+    def _event(text=""):
+        buffer = MagicMock()
+        buffer.text = text
+        buffer.cursor_position = len(text)
+        app = MagicMock()
+        app.current_buffer = buffer
+        return MagicMock(app=app), buffer
+
+    def test_restore_carries_entry_identity_through_submission(self):
+        cli = _make_cli()
+        cli._prompt_stash.clear()
+        cli._attached_images = []
+        cli._prompt_stash.stash(
+            "retry exactly",
+            recovery_admission_id="recovery-a",
+            recovery_surface_key="cli:session-a",
+        )
+        event, buffer = self._event()
+        cli._tui_restore_stash_payload(event, cli._prompt_stash.pop())
+        assert cli._composer_recovery_entry.recovery_admission_id == "recovery-a"
+
+        cli._tui_multiline_shortcuts = False
+        cli._tui_enter_overlay = MagicMock(return_value=False)
+        cli._tui_enter_inline_command = MagicMock(return_value=False)
+        cli._agent_running = False
+        cli._pending_input = queue.Queue()
+        cli._inline_pastes = MagicMock()
+        cli._tui_handle_enter(event)
+
+        submitted = cli._pending_input.get_nowait()
+        assert submitted == "retry exactly"
+        assert submitted.recovery_admission_id == "recovery-a"
+        assert submitted.recovery_surface_key == "cli:session-a"
+        assert cli._composer_recovery_entry is None
+        buffer.reset.assert_called_once_with(append_to_history=True)
+
+    def test_restored_whitespace_recovery_submits_exact_text_and_identity(self):
+        cli = _make_cli()
+        cli._prompt_stash.clear()
+        cli._attached_images = []
+        raw = "  retry exactly\n"
+        cli._prompt_stash.stash(
+            raw,
+            recovery_admission_id="recovery-whitespace",
+            recovery_surface_key="cli:session-a",
+        )
+        event, _buffer = self._event()
+        cli._tui_restore_stash_payload(event, cli._prompt_stash.pop())
+        cli._tui_multiline_shortcuts = False
+        cli._tui_enter_overlay = MagicMock(return_value=False)
+        cli._tui_enter_inline_command = MagicMock(return_value=False)
+        cli._agent_running = False
+        cli._pending_input = queue.Queue()
+        cli._inline_pastes = MagicMock()
+
+        cli._tui_handle_enter(event)
+
+        submitted = cli._pending_input.get_nowait()
+        assert str(submitted) == raw
+        assert submitted.recovery_admission_id == "recovery-whitespace"
+        assert submitted.recovery_surface_key == "cli:session-a"
+
+    def test_edit_then_retype_same_text_is_ordinary(self):
+        cli = _make_cli()
+        cli._prompt_stash.clear()
+        cli._attached_images = []
+        cli._prompt_stash.stash(
+            "same text",
+            recovery_admission_id="recovery-a",
+            recovery_surface_key="cli:session-a",
+        )
+        event, buffer = self._event()
+        cli._tui_restore_stash_payload(event, cli._prompt_stash.pop())
+        cli._tui_reconcile_prompt_recoveries = MagicMock(return_value=0)
+        buffer.text = "edited"
+        cli._tui_prev_text_len = 0
+        cli._tui_prev_newline_count = 0
+        cli._tui_paste_just_collapsed = False
+        cli._skip_paste_collapse = False
+        cli._tui_on_text_changed(buffer)
+        cli._tui_reconcile_prompt_recoveries.assert_called_once_with()
+        buffer.text = "same text"
+
+        cli._tui_multiline_shortcuts = False
+        cli._tui_enter_overlay = MagicMock(return_value=False)
+        cli._tui_enter_inline_command = MagicMock(return_value=False)
+        cli._agent_running = False
+        cli._pending_input = queue.Queue()
+        cli._inline_pastes = MagicMock()
+        cli._tui_handle_enter(event)
+
+        submitted = cli._pending_input.get_nowait()
+        assert type(submitted) is str
+        assert not hasattr(submitted, "recovery_admission_id")
+
+    def test_restored_recovery_can_be_stashed_again_without_losing_identity(self):
+        cli = _make_cli()
+        cli._attached_images = []
+        cli._prompt_stash.stash(
+            "retry later",
+            recovery_admission_id="recovery-a",
+            recovery_surface_key="cli:session-a",
+        )
+        event, buffer = self._event()
+        cli._tui_restore_stash_payload(event, cli._prompt_stash.pop())
+
+        cli._tui_handle_prompt_stash(event)
+
+        entry = cli._prompt_stash.peek()
+        assert entry.text == "retry later"
+        assert entry.recovery_admission_id == "recovery-a"
+        assert entry.recovery_surface_key == "cli:session-a"
+        assert cli._composer_recovery_entry is None
+        buffer.reset.assert_called_once_with()
+
+    def test_restored_recovery_forces_queue_while_agent_busy(self):
+        cli = _make_cli()
+        cli._prompt_stash.clear()
+        cli._attached_images = []
+        cli._prompt_stash.stash(
+            "retry later",
+            recovery_admission_id="recovery-a",
+            recovery_surface_key="cli:session-a",
+        )
+        event, _buffer = self._event()
+        cli._tui_restore_stash_payload(event, cli._prompt_stash.pop())
+        cli._tui_multiline_shortcuts = False
+        cli._tui_enter_overlay = MagicMock(return_value=False)
+        cli._tui_enter_inline_command = MagicMock(return_value=False)
+        cli._agent_running = True
+        cli.busy_input_mode = "steer"
+        cli.agent = MagicMock()
+        cli._pending_input = queue.Queue()
+        cli._inline_pastes = MagicMock()
+        cli._tui_handle_enter(event)
+
+        submitted = cli._pending_input.get_nowait()
+        assert submitted.recovery_admission_id == "recovery-a"
+        cli.agent.steer.assert_not_called()
+
+    def test_process_sanitizers_preserve_only_byte_identical_submission(self):
+        from hermes_cli.prompt_stash import ComposerSubmission
+
+        cli = _make_cli()
+        submitted = ComposerSubmission(
+            "retry exactly",
+            recovery_admission_id="recovery-a",
+            recovery_surface_key="cli:session-a",
+        )
+        cli._tui_unwrap_input = MagicMock(
+            return_value=(submitted, False, False)
+        )
+        cli._typed_voice_stop = MagicMock(return_value=False)
+        cli._pending_resume_sessions = None
+        cli.handle_bang_shell = MagicMock(return_value=False)
+        cli._print_user_message_preview = MagicMock()
+        cli._turn_summary_begin = MagicMock()
+        cli._app = MagicMock()
+        cli.chat = MagicMock()
+        cli._tui_after_turn = MagicMock()
+
+        cli._tui_process_one_input(submitted)
+
+        actual = cli.chat.call_args.args[0]
+        assert actual == "retry exactly"
+        assert actual.recovery_admission_id == "recovery-a"
+        assert actual.recovery_surface_key == "cli:session-a"
+
+    def test_duplicate_text_recoveries_are_distinct_and_idempotent(self):
+        cli = _make_cli()
+        base = {
+            "version": 1,
+            "kind": "accepted_user_input",
+            "status": "pending",
+            "safe_to_replay": True,
+            "input_kind": "plain_text",
+            "exact": True,
+            "lossy": False,
+            "provider_call_sent": False,
+            "text": "identical",
+            "surface_key": "cli:session-a",
+        }
+        assert cli._chat_project_pending_input_recovery({**base, "admission_id": "a"})
+        assert cli._chat_project_pending_input_recovery({**base, "admission_id": "b"})
+        assert not cli._chat_project_pending_input_recovery({**base, "admission_id": "a"})
+        assert [entry.recovery_admission_id for entry in cli._prompt_stash.items] == ["b", "a"]
+
+        cli._prompt_stash.open_panel()
+        cli._prompt_stash.move_cursor(1)
+        assert cli._prompt_stash.restore_at_cursor() == ("identical", [])
+        assert cli._prompt_stash.take_last_restored_entry().recovery_admission_id == "a"
+        assert cli._prompt_stash.peek().recovery_admission_id == "b"
+
+    @pytest.mark.parametrize(
+        "changes",
+        [
+            {"input_kind": "structured", "safe_to_replay": False},
+            {"dispatch_state": "started"},
+            {"exact": False, "lossy": True},
+        ],
+    )
+    def test_structured_lossy_or_uncertain_recovery_is_not_replayable(self, changes):
+        cli = _make_cli()
+        value = {
+            "version": 1,
+            "kind": "accepted_user_input",
+            "status": "pending",
+            "safe_to_replay": True,
+            "input_kind": "plain_text",
+            "exact": True,
+            "lossy": False,
+            "provider_call_sent": False,
+            "text": "do not guess",
+            "surface_key": "cli:session-a",
+            "admission_id": "recovery-a",
+            **changes,
+        }
+        assert not cli._chat_project_pending_input_recovery(value)
+        assert len(cli._prompt_stash) == 0
+
+    def test_uncertain_dispatch_warns_by_id_without_exposing_prompt(self):
+        cli = _make_cli()
+        cli._session_db = MagicMock()
+        cli._pending_input_recoveries_restored = False
+        value = {
+            "status": "claimed",
+            "dispatch_state": "started",
+            "admission_id": "recovery-sensitive-a",
+            "text": "raw prompt must stay hidden",
+            "surface_key": "cli:session-a",
+        }
+        import cli as cli_mod
+
+        with patch(
+            "agent.pending_input_recovery.list_pending_input_recoveries",
+            return_value=[value],
+        ), patch.object(cli_mod, "_cprint") as printed:
+            assert cli._restore_pending_input_recoveries_to_stash() == 0
+
+        warning = printed.call_args.args[0]
+        assert "recovery-sensitive-a" in warning
+        assert "uncertain provider dispatch" in warning
+        assert "raw prompt must stay hidden" not in warning
+        assert len(cli._prompt_stash) == 0
+
+    def test_more_than_max_recoveries_are_bounded_deduped_and_reported(self):
+        from hermes_cli.prompt_stash import MAX_STASH_ITEMS
+
+        cli = _make_cli()
+        cli._session_db = MagicMock()
+        cli._pending_input_recovery_backlog_ids = ()
+        values = [
+            {
+                "version": 1,
+                "kind": "accepted_user_input",
+                "status": "pending",
+                "safe_to_replay": True,
+                "input_kind": "plain_text",
+                "exact": True,
+                "lossy": False,
+                "provider_call_sent": False,
+                "text": "same raw prompt must not appear in backlog warning",
+                "surface_key": "cli:session-a",
+                "admission_id": f"recovery-{index:02d}",
+            }
+            for index in range(MAX_STASH_ITEMS + 1)
+        ]
+        import cli as cli_mod
+
+        with patch(
+            "agent.pending_input_recovery.list_pending_input_recoveries",
+            return_value=values,
+        ), patch.object(cli_mod, "_cprint") as printed:
+            assert cli._restore_pending_input_recoveries_to_stash() == MAX_STASH_ITEMS
+            assert cli._restore_pending_input_recoveries_to_stash() == 0
+
+        ids = [entry.recovery_admission_id for entry in cli._prompt_stash.items]
+        assert len(ids) == MAX_STASH_ITEMS
+        assert len(set(ids)) == MAX_STASH_ITEMS
+        assert cli._pending_input_recovery_backlog_ids == (f"recovery-{MAX_STASH_ITEMS:02d}",)
+        warning = "\n".join(call.args[0] for call in printed.call_args_list)
+        assert "1 additional pending input remains durable" in warning
+        assert f"recovery-{MAX_STASH_ITEMS:02d}" in warning
+        assert "same raw prompt must not appear" not in warning
+
+    def test_recovery_backlog_refills_as_composer_slot_opens(self):
+        from hermes_cli.prompt_stash import MAX_STASH_ITEMS
+
+        cli = _make_cli()
+        cli._session_db = MagicMock()
+        values = [
+            {
+                "version": 1,
+                "kind": "accepted_user_input",
+                "status": "pending",
+                "safe_to_replay": True,
+                "input_kind": "plain_text",
+                "exact": True,
+                "lossy": False,
+                "provider_call_sent": False,
+                "text": "identical",
+                "surface_key": "cli:session-a",
+                "admission_id": f"recovery-{index:02d}",
+            }
+            for index in range(MAX_STASH_ITEMS + 2)
+        ]
+        import cli as cli_mod
+
+        with patch(
+            "agent.pending_input_recovery.list_pending_input_recoveries",
+            return_value=values,
+        ), patch.object(cli_mod, "_cprint"):
+            assert cli._restore_pending_input_recoveries_to_stash() == MAX_STASH_ITEMS
+            restored_entry = cli._prompt_stash.peek()
+            cli._prompt_stash.pop()
+            cli._composer_recovery_entry = restored_entry
+            assert cli._restore_pending_input_recoveries_to_stash() == 1
+
+        ids = {entry.recovery_admission_id for entry in cli._prompt_stash.items}
+        assert len(ids) == MAX_STASH_ITEMS
+        assert restored_entry.recovery_admission_id not in ids
+        assert restored_entry.recovery_admission_id not in cli._pending_input_recovery_backlog_ids
+        assert cli._pending_input_recovery_backlog_ids == (f"recovery-{MAX_STASH_ITEMS + 1:02d}",)
+
+    def test_delete_pages_to_next_recovery_without_resolving_deleted_id(self):
+        from hermes_cli.prompt_stash import MAX_STASH_ITEMS
+
+        cli = _make_cli()
+        cli._session_db = MagicMock()
+        values = [
+            {
+                "version": 1,
+                "kind": "accepted_user_input",
+                "status": "pending",
+                "safe_to_replay": True,
+                "input_kind": "plain_text",
+                "exact": True,
+                "lossy": False,
+                "provider_call_sent": False,
+                "text": "identical",
+                "surface_key": "cli:session-a",
+                "admission_id": f"recovery-{index:02d}",
+            }
+            for index in range(MAX_STASH_ITEMS + 1)
+        ]
+        import cli as cli_mod
+
+        with patch(
+            "agent.pending_input_recovery.list_pending_input_recoveries",
+            return_value=values,
+        ), patch.object(cli_mod, "_cprint"):
+            cli._restore_pending_input_recoveries_to_stash()
+            cli._prompt_stash.open_panel()
+            deleted_id = cli._prompt_stash.peek().recovery_admission_id
+            event = MagicMock()
+            cli._tui_handle_stash_panel_delete(event)
+
+        ids = {entry.recovery_admission_id for entry in cli._prompt_stash.items}
+        assert len(ids) == MAX_STASH_ITEMS
+        assert deleted_id not in ids
+        assert f"recovery-{MAX_STASH_ITEMS:02d}" in ids
+        assert cli._pending_input_recovery_backlog_ids == (deleted_id,)
+        assert deleted_id in cli._suppressed_pending_input_recovery_ids
+        event.app.invalidate.assert_called_once_with()
+
+
 class TestKeybindingRegistration:
     """Behavioral coverage for the stash keybinding surface.
 
@@ -116,6 +485,46 @@ class TestKeybindingRegistration:
         kb = KeyBindings()
         assert cli._register_extra_tui_keybindings(kb, input_area=None) is None
         assert kb.bindings == []
+
+
+class TestStartupProjectionOrder:
+    def test_recovery_projection_precedes_layout_and_first_render(self):
+        cli = _make_cli()
+        order = []
+        cli._claim_active_session = MagicMock(return_value=True)
+        cli._tui_print_startup = MagicMock()
+
+        def init_run_state():
+            order.append("run-state")
+            assert cli._session_db is not None
+
+        def restore():
+            order.append("recovery")
+            assert cli._session_db is not None
+            return 0
+
+        cli._tui_init_run_state = init_run_state
+        cli._restore_pending_input_recoveries_to_stash = restore
+        cli._tui_build_key_bindings = MagicMock(
+            side_effect=lambda: order.append("keybindings") or MagicMock()
+        )
+        cli._tui_build_layout = MagicMock(
+            side_effect=lambda _kb: order.append("layout") or (MagicMock(), MagicMock())
+        )
+        cli._tui_build_application = MagicMock(return_value=MagicMock())
+        cli._install_resize_recovery = MagicMock()
+        cli._tui_install_signal_handlers = MagicMock()
+        cli._tui_stdin_usable = MagicMock(return_value=False)
+        cli._print_exit_summary = MagicMock()
+
+        import cli as cli_mod
+
+        with patch.object(cli_mod.threading, "Thread", return_value=MagicMock()), patch.object(
+            cli_mod.atexit, "register"
+        ), patch.object(cli_mod, "_run_cleanup"):
+            cli.run()
+
+        assert order == ["run-state", "recovery", "keybindings", "layout"]
 
 
 class TestLayoutSlot:

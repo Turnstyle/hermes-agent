@@ -64,6 +64,10 @@ COMMAND_REGISTRY: list[CommandDef] = [
     CommandDef("save", "Export the current conversation (bare /save shows usage)", "Session",
                args_hint="<json|md|html> [filename] [redact]"),
     CommandDef("retry", "Retry the last message (resend to agent)", "Session"),
+    CommandDef(
+        "recover", "Review or resolve durable pending-input recovery", "Session",
+        args_hint="[admission-id] [retry|delivered|acknowledge]", cli_only=True,
+    ),
     CommandDef("prompt", "Compose your next prompt in $EDITOR (markdown), then send it", "Session",
                cli_only=True, args_hint="[initial text]", aliases=("compose",)),
     CommandDef("undo", "Back up N user turns and re-prompt (default 1)", "Session",

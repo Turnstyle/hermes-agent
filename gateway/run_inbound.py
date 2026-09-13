@@ -485,12 +485,21 @@ class GatewayInboundMixin:
 
     def _hm_merge_pending_for_source(
         self, source: SessionSource, _quick_key: str, event: "MessageEvent", *, merge_text: bool = False
-    ) -> None:
-        """Merge *event* into the source adapter's pending slot (no-op without an adapter)."""
+    ) -> bool:
+        """Merge into the pending slot, or enqueue separately when its principal differs."""
         from gateway.platforms.base import merge_pending_message_event
         adapter = self._adapter_for_source(source)
-        if adapter:
-            merge_pending_message_event(adapter._pending_messages, _quick_key, event, merge_text=merge_text)
+        if not adapter:
+            return False
+        if merge_pending_message_event(
+            adapter._pending_messages, _quick_key, event, merge_text=merge_text
+        ):
+            event._gateway_accepted = True
+            return True
+        # A shared route may already hold another participant's event. Preserve both in the
+        # runner FIFO instead of attributing one participant's content and delivery ids to another.
+        self._queue_or_replace_pending_event(_quick_key, event)
+        return bool(event._gateway_accepted)
 
     async def _hm_busy_slash_or_photo(
         self, event: "MessageEvent", source: SessionSource, _quick_key: str
@@ -634,6 +643,12 @@ class GatewayInboundMixin:
             self._queue_or_replace_pending_event(_quick_key, event)
             return None
         if effective_busy_input_mode == "steer":
+            if await self._session_has_compression_in_flight(_quick_key):
+                self._demote_busy_mode(
+                    _quick_key, "steer", "context compression is in flight (#56391)"
+                )
+                self._queue_or_replace_pending_event(_quick_key, event)
+                return None
             self._hm_busy_steer(event, running_agent, _quick_key)
             return None
         # Subagent protection: an interrupt cascades through ``_active_children`` and aborts

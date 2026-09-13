@@ -31,11 +31,17 @@ def _timeout_fallback_prompt(agent, system_message: str) -> str:
 
 def _report_compression_timeout(
     agent, *, idle: float, waited: float, since_progress: float, total_ceiling: float, total_exhausted: bool,
-    progress_observed: bool,
+    progress_observed: bool, poisoned_compression_lock_identity=None,
 ) -> None:
     """Host-side timeout bookkeeping: log, activity stamp, cooldown ladder, user warning."""
     from agent.conversation_compression import mark_context_compression_timed_out
-    mark_context_compression_timed_out(agent)
+    # The authority to cross a retained total-ceiling lease is bound to this
+    # exact attempt's fence.  Never combine a stale timeout flag with whatever
+    # holder a concurrent compression later publishes on the agent.
+    poisoned_identity = poisoned_compression_lock_identity if total_exhausted else None
+    mark_context_compression_timed_out(
+        agent, poisoned_compression_lock_identity=poisoned_identity,
+    )
     if total_exhausted:
         logger.warning(
             "Context compression reached its total ceiling after %.1fs (progress observed=%s); continuing without compression",
@@ -126,14 +132,33 @@ def _run_under_progress_timeout(
         result_msgs, result_prompt = run(fence, target_messages=snapshot)
         return (messages if result_msgs is snapshot else result_msgs), result_prompt
 
-    timeout_cause = {"total_exhausted": False, "progress_observed": False}
+    timeout_cause = {
+        "total_exhausted": False,
+        "progress_observed": False,
+        "fence": active_fence,
+    }
 
-    def _on_timeout_cause(total_exhausted, progress_observed):
-        timeout_cause.update(total_exhausted=total_exhausted, progress_observed=progress_observed)
+    def _on_timeout_cause(total_exhausted, progress_observed, timeout_fence):
+        timeout_cause.update(
+            total_exhausted=total_exhausted,
+            progress_observed=progress_observed,
+            fence=timeout_fence,
+        )
 
     def _on_timeout(idle, waited, since_progress):
+        timeout_fence = timeout_cause["fence"]
         _report_compression_timeout(
-            agent, idle=idle, waited=waited, since_progress=since_progress, total_ceiling=total_ceiling, **timeout_cause
+            agent,
+            idle=idle,
+            waited=waited,
+            since_progress=since_progress,
+            total_ceiling=total_ceiling,
+            total_exhausted=timeout_cause["total_exhausted"],
+            progress_observed=timeout_cause["progress_observed"],
+            poisoned_compression_lock_identity=(
+                timeout_fence.durable_lock_identity
+                if timeout_cause["total_exhausted"] else None
+            ),
         )
 
     def _publish_new_fence():

@@ -500,6 +500,7 @@ class CLISessionMixin:
             CLI_CONFIG, _parse_reasoning_config, _parse_service_tier_config,
             _sync_process_session_id, datetime)
         old_session_id = self.session_id
+        self._settle_pending_input_recovery_history()
         _boundary_snapshot = None
         if self.agent:
             if self.conversation_history:
@@ -594,6 +595,140 @@ class CLISessionMixin:
             else:
                 print("(^_^)v New session started!")
 
+        # The recovery ledger is independent of the old session.  Re-project it
+        # into the composer only; never enqueue or submit it.
+        self._pending_input_recoveries_restored = False
+        getattr(self, "_restore_pending_input_recoveries_to_stash", lambda: 0)()
+
+    def _settle_pending_input_recovery_history(self) -> int:
+        """Remove any durably recovered, non-executable row from CLI snapshots."""
+        agent = getattr(self, "agent", None)
+        db = getattr(agent, "_session_db", None) or getattr(self, "_session_db", None)
+        if db is None:
+            return 0
+        # A transient startup DB failure can leave the long-lived agent without
+        # the authoritative CLI DB even after the CLI has reopened it. Session
+        # boundaries must use one handle for durable settlement and projection
+        # cleanup, or a same-process claim can be stranded across /new.
+        if agent is not None and getattr(agent, "_session_db", None) is not db:
+            agent._session_db = db
+        from agent.pending_input_recovery import (
+            get_pending_input_recovery, pending_input_admission,
+            reconcile_pending_input_recovery_rows,
+            remove_pending_input_admission_from_messages,
+            return_pending_input_recovery_without_dispatch,
+        )
+
+        def _filter(messages):
+            if not isinstance(messages, list):
+                return messages, 0
+            recovery_ids = []
+            seen = set()
+            for message in messages:
+                admission_id, _surface_key = pending_input_admission(message)
+                if not admission_id or admission_id in seen:
+                    continue
+                recovery = get_pending_input_recovery(db, admission_id)
+                if not (
+                    isinstance(recovery, dict)
+                    and recovery.get("status") in {"pending", "claimed"}
+                ):
+                    continue
+                seen.add(admission_id)
+                recovery_ids.append(admission_id)
+
+            settled = list(messages)
+            removed = 0
+            # Use the same exact-admission replacement primitive as the durable
+            # staging transaction. It preserves merged todo/checkpoint carriers
+            # and the hidden assistant bridge required for strict alternation;
+            # reimplementing the split here can silently destroy both before a
+            # /new or close flush overwrites the correct durable projection.
+            for admission_id in recovery_ids:
+                settled, count = remove_pending_input_admission_from_messages(
+                    settled, admission_id,
+                )
+                removed += count
+            return settled, removed
+
+        import contextlib
+
+        lock = getattr(agent, "_session_persist_lock", None)
+        with lock if lock is not None else contextlib.nullcontext():
+            recovery_id = getattr(agent, "_pending_input_recovery_claim_id", None)
+            resend_id = getattr(agent, "_pending_input_recovery_resend_id", None)
+            if (
+                isinstance(recovery_id, str) and recovery_id.strip()
+                and isinstance(resend_id, str) and resend_id.strip()
+            ):
+                recovery = get_pending_input_recovery(db, recovery_id)
+                if (
+                    isinstance(recovery, dict)
+                    and recovery.get("status") == "claimed"
+                    and recovery.get("resend_id") == resend_id
+                    and recovery.get("dispatch_state") not in {"started", "uncertain"}
+                ):
+                    # Composer admission is not provider entry. Return it before
+                    # reset_session_state changes the session identity; PID and
+                    # process-incarnation liveness would otherwise make the
+                    # restored record unclaimable by this same process.
+                    return_pending_input_recovery_without_dispatch(
+                        db, recovery_id, resend_id=resend_id,
+                        turn_lease_holder=getattr(
+                            agent, "_active_session_turn_lease_holder", None,
+                        ),
+                    )
+                    recovery = get_pending_input_recovery(db, recovery_id)
+                if not (
+                    isinstance(recovery, dict)
+                    and recovery.get("status") == "claimed"
+                    and recovery.get("resend_id") == resend_id
+                    and recovery.get("dispatch_state") not in {"started", "uncertain"}
+                ):
+                    # Pending, consumed, or explicit uncertain state is now the
+                    # durable authority. Never carry old-session attribution
+                    # into the newly reset agent.
+                    agent._pending_input_recovery_claim_id = None
+                    agent._pending_input_recovery_resend_id = None
+                    if pending_input_admission(
+                        getattr(agent, "_pending_cli_user_message", None)
+                    )[0] == resend_id:
+                        agent._pending_cli_user_message = None
+                    completed = getattr(
+                        agent, "_pending_input_recovery_provider_completed", None,
+                    )
+                    if completed == (recovery_id, resend_id):
+                        agent._pending_input_recovery_provider_completed = None
+            history = getattr(self, "conversation_history", None)
+            history, reconciled = reconcile_pending_input_recovery_rows(
+                db,
+                history if isinstance(history, list) else [],
+                turn_lease_holder=getattr(
+                    agent, "_active_session_turn_lease_holder", None,
+                ),
+            )
+            self.conversation_history, removed = _filter(history)
+            removed += reconciled
+            if agent is not None:
+                session_messages = getattr(agent, "_session_messages", None)
+                session_messages, reconciled = reconcile_pending_input_recovery_rows(
+                    db,
+                    session_messages if isinstance(session_messages, list) else [],
+                    turn_lease_holder=getattr(
+                        agent, "_active_session_turn_lease_holder", None,
+                    ),
+                )
+                session_messages, extra = _filter(session_messages)
+                if isinstance(session_messages, list):
+                    agent._session_messages = session_messages
+                removed += reconciled + extra
+                pending = getattr(agent, "_pending_cli_user_message", None)
+                admission_id, _surface_key = pending_input_admission(pending)
+                recovery = get_pending_input_recovery(db, admission_id) if admission_id else None
+                if isinstance(recovery, dict) and recovery.get("status") in {"pending", "claimed"}:
+                    agent._pending_cli_user_message = None
+        return removed
+
     def _consume_pending_resume_selection(self, text: str) -> bool:
         """Resolve a bare numeric reply following a bare ``/resume`` prompt.
 
@@ -621,6 +756,97 @@ class CLISessionMixin:
             return True
         self._handle_resume_command(f"/resume {index}")
         return True
+
+    def _handle_recover_command(self, cmd: str) -> None:
+        """List or explicitly resolve durable pending-input records by exact ID."""
+        from cli import _cprint
+        from agent.pending_input_recovery import (
+            PendingInputRecoveryError,
+            acknowledge_pending_input_recovery_loss,
+            get_pending_input_recovery,
+            list_pending_input_recoveries,
+            remove_pending_input_admission_from_messages,
+            resolve_pending_input_recovery_dispatch,
+        )
+
+        db = getattr(self, "_session_db", None)
+        if db is None:
+            _cprint("  Pending-input recovery is unavailable (no durable session database).")
+            return
+        parts = cmd.strip().split()
+        args = parts[1:]
+        if not args:
+            records = list_pending_input_recoveries(db, surface_prefix="cli:")
+            if not records:
+                _cprint("  No pending CLI input recoveries.")
+                return
+            _cprint("  Pending CLI input recoveries:")
+            for value in records:
+                reasons = ",".join(value.get("loss_reasons") or []) or "none"
+                _cprint(
+                    f"  {value.get('admission_id')}  status={value.get('status')} "
+                    f"dispatch={value.get('dispatch_state') or 'not-started'} "
+                    f"generation={int(value.get('claim_generation') or 0)} "
+                    f"loss={reasons}"
+                )
+            _cprint(
+                "  Use /recover <id> retry|delivered for an uncertain dispatch, "
+                "or /recover <id> acknowledge for a disclosed loss notice."
+            )
+            return
+        if len(args) != 2 or args[1].lower() not in {"retry", "delivered", "acknowledge"}:
+            _cprint(
+                "  Usage: /recover <admission-id> retry|delivered|acknowledge"
+            )
+            return
+        admission_id, action = args[0], args[1].lower()
+        record = get_pending_input_recovery(db, admission_id)
+        if not (
+            isinstance(record, dict)
+            and str(record.get("surface_key") or "").startswith("cli:")
+        ):
+            _cprint("  No matching CLI pending-input recovery.")
+            return
+        try:
+            if action == "acknowledge":
+                resolved, _changed = acknowledge_pending_input_recovery_loss(db, admission_id)
+            else:
+                resolved, _changed = resolve_pending_input_recovery_dispatch(
+                    db, admission_id,
+                    resend_id=str(record.get("resend_id") or ""),
+                    claim_generation=int(record.get("claim_generation") or 0),
+                    resolution=action,
+                )
+        except (PendingInputRecoveryError, ValueError) as exc:
+            _cprint(f"  Recovery was not changed: {exc}")
+            return
+        if (
+            action in {"retry", "delivered"}
+            and not resolved.get("provider_response_received")
+        ):
+            resend_id = str(record.get("resend_id") or "")
+            if resend_id:
+                history = getattr(self, "conversation_history", None)
+                if isinstance(history, list):
+                    self.conversation_history, _ = remove_pending_input_admission_from_messages(
+                        history, resend_id
+                    )
+                agent = getattr(self, "agent", None)
+                session_messages = getattr(agent, "_session_messages", None)
+                if isinstance(session_messages, list):
+                    agent._session_messages, _ = remove_pending_input_admission_from_messages(
+                        session_messages, resend_id
+                    )
+        if action == "retry":
+            self._chat_project_pending_input_recovery(resolved)
+            _cprint(
+                "  Recovery returned to pending. It will appear in the composer stash "
+                "when a slot opens; Hermes will not submit it automatically."
+            )
+        elif action == "delivered":
+            _cprint("  Recovery marked delivered; Hermes will not resend it.")
+        else:
+            _cprint("  Loss notice acknowledged; reattach or re-enter the omitted input manually.")
 
     def save_conversation(self, cmd: str = "/save"):
         """Handle ``/save [json|md|html] [filename] [redact]``.
@@ -1190,6 +1416,11 @@ class CLISessionMixin:
         if not agent or not hasattr(agent, "_persist_session"):
             return
 
+        # A timeout may settle between the worker return and UI rendering.  Strip
+        # its inert recovery projection before close snapshots can append it as an
+        # ordinary conversation row.
+        self._settle_pending_input_recovery_history()
+
         persist_lock = getattr(agent, "_session_persist_lock", None)
 
         def _snapshot_and_persist() -> None:
@@ -1198,6 +1429,18 @@ class CLISessionMixin:
             # stamps that dict durable without writing a row.
             messages = getattr(agent, "_session_messages", None)
             pending_cli_message = getattr(agent, "_pending_cli_user_message", None)
+            if isinstance(pending_cli_message, dict):
+                from agent.pending_input_recovery import (
+                    get_pending_input_recovery, pending_input_admission,
+                )
+
+                recovery_id, _surface_key = pending_input_admission(pending_cli_message)
+                recovery = get_pending_input_recovery(
+                    getattr(agent, "_session_db", None), recovery_id
+                ) if recovery_id else None
+                if isinstance(recovery, dict) and recovery.get("status") in {"pending", "claimed"}:
+                    agent._pending_cli_user_message = None
+                    pending_cli_message = None
             if not isinstance(messages, list):
                 messages = getattr(self, "conversation_history", None)
             if not isinstance(messages, list):

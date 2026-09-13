@@ -379,7 +379,7 @@ class SimplexAdapter(BasePlatformAdapter):
     # Text batching: enqueue lives on BasePlatformAdapter.
 
     def _text_batch_key(self, event: MessageEvent) -> str:
-        return f"{event.source.platform.value}:{event.source.chat_id}"
+        return super()._text_batch_key(event)
 
     async def _flush_text_batch(self, key: str) -> None:
         """Wait for the quiet period then dispatch the aggregated text."""

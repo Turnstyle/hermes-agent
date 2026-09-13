@@ -1758,6 +1758,7 @@ class TurnRunner:
         common = {
             "messages": result.get("messages", []), "api_calls": result.get("api_calls", 0),
             "failed": result.get("failed", False), "failure_reason": result.get("failure_reason"),
+            "turn_exit_reason": result.get("turn_exit_reason"),
             "partial": result.get("partial", False), "completed": result.get("completed"),
             "interrupted": result.get("interrupted", False), "interrupt_message": result.get("interrupt_message"),
             "error": result.get("error"),
@@ -1767,6 +1768,11 @@ class TurnRunner:
             "history_offset": history_offset, "compacted_in_place": compacted_in_place, "session_id": effective_session_id,
             **usage,
         }
+        if "unprocessed_input" in result:
+            # Present only on the no-main-provider-call turn-start timeout.  Preserve
+            # absence for later compression exhaustion so consumers cannot infer that a
+            # generic failed turn is safe to replay.
+            common["unprocessed_input"] = result["unprocessed_input"]
         if not final_response:
             final_response = _normalize_empty_agent_response(result, final_response or "", history_len=len(agent_history))
             final_response = _sanitize_gateway_final_response(ctx.source.platform, final_response)

@@ -301,19 +301,68 @@ def compression_made_progress(
 
 
 class PreflightCompressionTimedOut(RuntimeError):
-    """Raised when an oversized turn cannot safely finish preflight."""
+    """Raised when an oversized turn cannot safely finish preflight.
+
+    ``conversation_history`` is the latest flush baseline adopted by turn setup.  It
+    deliberately travels with the failure: compression may rotate the agent onto a child
+    session (or commit an earlier pass) before a later pass times out, so the caller's
+    original history can already belong to the wrong session.
+    """
+
+    def __init__(
+        self, message: str,
+        conversation_history: Optional[List[Dict[str, Any]]] = None,
+        *, live_messages: Optional[List[Dict[str, Any]]] = None,
+        accepted_input_durably_committed: bool = False,
+        accepted_input_session_ids: Optional[List[str]] = None,
+        poisoned_compression_lock_identity: Optional[tuple[str, str]] = None,
+    ) -> None:
+        super().__init__(message)
+        self.conversation_history = (
+            list(conversation_history) if conversation_history is not None else None
+        )
+        # Latest active head, independent of the ``None`` rotation flush sentinel.
+        self.live_messages = list(live_messages or [])
+        self.accepted_input_durably_committed = bool(accepted_input_durably_committed)
+        self.accepted_input_session_ids = list(accepted_input_session_ids or [])
+        identity = poisoned_compression_lock_identity
+        self.poisoned_compression_lock_identity = (
+            (identity[0], identity[1])
+            if (
+                isinstance(identity, tuple)
+                and len(identity) == 2
+                and all(isinstance(value, str) and value.strip() for value in identity)
+            )
+            else None
+        )
 
 
-def _fail_closed_after_preflight_timeout(agent, request_tokens: int) -> None:
+def _fail_closed_after_preflight_timeout(
+    agent, request_tokens: int,
+    conversation_history: Optional[List[Dict[str, Any]]] = None,
+    *, live_messages: Optional[List[Dict[str, Any]]] = None,
+    accepted_input_durably_committed: bool = False,
+    accepted_input_session_ids: Optional[List[str]] = None,
+) -> None:
     """Stop an oversized turn instead of sending its unchanged provider payload."""
-    from agent.conversation_compression import context_compression_timed_out
+    from agent.conversation_compression import (
+        context_compression_timed_out,
+        context_compression_timeout_poisoned_lock_identity,
+    )
 
     if not context_compression_timed_out(agent):
         return
     raise PreflightCompressionTimedOut(
         "Context compression timed out before it could commit while the request "
         f"was still approximately {request_tokens:,} tokens. The provider call "
-        "was not sent. Run /compress and wait for it to finish, then retry."
+        "was not sent. Run /compress and wait for it to finish, then retry.",
+        conversation_history=conversation_history,
+        live_messages=live_messages,
+        accepted_input_durably_committed=accepted_input_durably_committed,
+        accepted_input_session_ids=accepted_input_session_ids,
+        poisoned_compression_lock_identity=(
+            context_compression_timeout_poisoned_lock_identity(agent)
+        ),
     )
 
 
@@ -891,20 +940,53 @@ def build_turn_context(
     _reset_per_turn_agent_state(agent)
 
     _preview_text = summarize_user_message_for_log(user_message)
-    _msg_preview = _preview_text[:80] + ("..." if len(_preview_text) > 80 else "")
     logger.info(
-        "conversation turn: session=%s model=%s provider=%s platform=%s history=%d msg=%r",
+        "conversation turn: session=%s model=%s provider=%s platform=%s history=%d "
+        "msg_chars=%d msg_kind=%s",
         agent.session_id or "none", agent.model, agent.provider or "unknown",
         agent.platform or "unknown", len(conversation_history or []),
-        _msg_preview.replace("\n", " "),
+        len(_preview_text), "text" if isinstance(user_message, str) else "structured",
     )
 
+    # A prior process may have died after persisting a recovery resend, either
+    # before provider entry or while its dispatch outcome was unknowable. Under
+    # this turn's durable lease, remove those exact orphan rows before any later
+    # prompt can merge them back into a provider request. Keep this turn's own
+    # explicitly claimed resend.
+    from agent.pending_input_recovery import reconcile_pending_input_recovery_rows
+
+    conversation_history, _orphaned_recovery_rows = reconcile_pending_input_recovery_rows(
+        getattr(agent, "_session_db", None), conversation_history or [],
+        current_recovery_id=getattr(agent, "_pending_input_recovery_claim_id", None),
+        current_resend_id=getattr(agent, "_pending_input_recovery_resend_id", None),
+        turn_lease_holder=getattr(agent, "_active_session_turn_lease_holder", None),
+    )
     # Copy so the caller's list is never mutated.
     messages = list(conversation_history) if conversation_history else []
     user_msg, pending_cli_message = _stage_turn_user_message(
         agent, user_message, persist_user_message, persist_user_timestamp,
         persist_user_platform_id, persist_user_display_kind, persist_user_display_metadata,
     )
+    # Every accepted input gets a UUID before any compaction can materialize it in
+    # an in-place or rotated transcript.  ACP/CLI stamp earlier at UI admission;
+    # other surfaces receive the same fail-closed fallback here.
+    from hashlib import sha256
+    from agent.pending_input_recovery import stamp_pending_input_admission
+    from agent.prompt_builder import STEER_DISPLAY_KIND
+
+    _surface_digest = sha256(str(agent.session_id or "none").encode("utf-8")).hexdigest()[:24]
+    _admission_surface = getattr(agent, "_pending_input_surface_key", None) or (
+        f"{getattr(agent, 'platform', None) or 'agent'}:{_surface_digest}"
+    )
+    # Internal/synthetic rows are not recoverable human admissions (and several
+    # have an exact presentation-metadata contract).  Real user and typed steer
+    # rows carry the durable identity through turn-start persistence.
+    if not user_msg.get("display_kind") or user_msg.get("display_kind") == STEER_DISPLAY_KIND:
+        stamp_pending_input_admission(
+            user_msg,
+            admission_id=getattr(agent, "_pending_input_admission_id", None),
+            surface_key=_admission_surface,
+        )
     _hydrate_from_history(agent, conversation_history)
     # Every estimator this turn prices images at the cost learned from this model's real usage.
     bind_image_token_cost(agent)

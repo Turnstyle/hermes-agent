@@ -76,6 +76,7 @@ def _make_runner(session_entry: SessionEntry):
     runner._send_voice_reply = AsyncMock()
     runner._capture_gateway_honcho_if_configured = lambda *args, **kwargs: None
     runner._emit_gateway_run_progress = AsyncMock()
+    runner._session_has_compression_in_flight = AsyncMock(return_value=False)
     return runner, adapter
 
 
@@ -173,6 +174,42 @@ async def test_steer_agent_without_steer_method_falls_back():
         adapter._pending_messages[sk].channel_context
         == "[Thread context]\nAlice: earlier request"
     )
+
+
+@pytest.mark.asyncio
+async def test_steer_queues_original_delivery_context_during_compression():
+    """Explicit /steer cannot inject while compression rotates the conversation."""
+    runner, adapter = _make_runner(_session_entry())
+    sk = build_session_key(_make_source())
+    running_agent = MagicMock()
+    running_agent.steer.return_value = True
+    runner._running_agents[sk] = running_agent
+    runner._session_has_compression_in_flight = AsyncMock(return_value=True)
+
+    event = _make_event(
+        "/steer keep this after rotation",
+        channel_context="[Thread context]\nAlice: deployment question",
+    )
+    event.source.message_id = "source-m1"
+    event.channel_prompt = "Channel-specific instructions"
+    event.raw_message = {"wire_id": "raw-m1"}
+    event._accepted_delivery_ids = ("constituent-m0", "m1")
+
+    result = await runner._handle_message(event)
+
+    assert result is not None and "compress" in result.lower()
+    running_agent.steer.assert_not_called()
+    running_agent.interrupt.assert_not_called()
+    queued = adapter._pending_messages[sk]
+    assert queued is not event
+    assert queued.text == "keep this after rotation"
+    assert queued.source is event.source
+    assert queued.message_id == "m1"
+    assert queued.source.message_id == "source-m1"
+    assert queued.channel_prompt == "Channel-specific instructions"
+    assert queued.channel_context == "[Thread context]\nAlice: deployment question"
+    assert queued.raw_message == {"wire_id": "raw-m1"}
+    assert queued._accepted_delivery_ids == ("constituent-m0", "m1")
 
 
 if __name__ == "__main__":  # pragma: no cover

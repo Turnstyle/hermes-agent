@@ -187,6 +187,57 @@ class TestBusySessionAck:
         # Verify agent interrupt was called
         agent.interrupt.assert_called_once_with("Are you working?")
 
+    @pytest.mark.asyncio
+    async def test_queue_capacity_rejection_neither_interrupts_nor_sends_positive_ack(self):
+        runner, _sentinel = _make_runner()
+        runner._busy_input_mode = "interrupt"
+        runner._BUSY_QUEUE_MAX_PENDING = 1
+        runner._queued_events = {}
+        adapter = _make_adapter()
+        event = _make_event(text="cannot fit")
+        sk = build_session_key(event.source)
+        adapter._pending_messages[sk] = _make_event(text="already queued")
+        runner.adapters[event.source.platform] = adapter
+
+        agent = MagicMock()
+        agent._active_children = []
+        runner._running_agents[sk] = agent
+
+        handled = await runner._handle_active_session_busy_message(event, sk)
+
+        assert handled is True
+        assert adapter._pending_messages[sk].text == "already queued"
+        assert runner._queued_events.get(sk, []) == []
+        assert event._gateway_accepted is False
+        agent.interrupt.assert_not_called()
+        adapter._send_with_retry.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_drain_capacity_rejection_reports_not_accepted(self):
+        runner, _sentinel = _make_runner()
+        runner._draining = True
+        runner._restart_requested = True
+        runner._busy_input_mode = "queue"
+        runner._BUSY_QUEUE_MAX_PENDING = 1
+        runner._queued_events = {}
+        adapter = _make_adapter()
+        event = _make_event(text="cannot fit during restart")
+        sk = build_session_key(event.source)
+        adapter._pending_messages[sk] = _make_event(text="already queued")
+        runner.adapters[event.source.platform] = adapter
+
+        agent = MagicMock()
+        runner._running_agents[sk] = agent
+
+        handled = await runner._handle_active_session_busy_message(event, sk)
+
+        assert handled is True
+        assert event._gateway_accepted is False
+        agent.interrupt.assert_not_called()
+        adapter._send_with_retry.assert_awaited_once()
+        content = adapter._send_with_retry.await_args.kwargs["content"]
+        assert "not accepting another turn" in content
+        assert "queued for the next turn" not in content
 
     @pytest.mark.asyncio
     async def test_steer_mode_calls_agent_steer_no_interrupt_no_queue(self, monkeypatch):
@@ -517,5 +568,3 @@ class TestLongRunningNotificationOwnership:
         assert runner._should_emit_long_running_notification(
             "sess", original_agent, executor_task=None
         ) is False
-
-

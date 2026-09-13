@@ -243,6 +243,64 @@ class SessionPersistenceMixin:
             logger.warning("gateway.session: state.db routing load failed: %s", e)
             return False
 
+    def reconcile_durable_routing_entry(
+        self, session_key: str, *, expected_session_id: str
+    ) -> Optional[SessionEntry]:
+        """Read one route from durable storage and adopt it without trusting ``_entries``.
+
+        Structural transitions publish storage before memory. A storage call can therefore
+        commit and then raise, leaving the in-process index on ``expected_session_id`` even
+        though the durable route advanced. The routing database is authoritative when it has
+        the key; a missing database row falls back to the legacy JSON mirror. Read failures or
+        malformed rows raise so callers keep recovery state instead of guessing.
+
+        Lock order matches every writer (``_lock`` then ``_save_lock``).
+        """
+
+        session_key = str(session_key or "").strip()
+        expected_session_id = str(expected_session_id or "").strip()
+        if not session_key or not expected_session_id:
+            raise ValueError("durable routing readback requires a route and expected session")
+
+        from gateway.session import SessionEntry
+
+        with self._lock:
+            self._ensure_loaded_locked()
+            with self._lazy("_save_lock", threading.Lock):
+                loader = self._routing_db_method("load_gateway_routing_entries")
+                if loader is not None:
+                    durable = loader(scope=self._routing_scope())
+                    if not isinstance(durable, dict):
+                        raise RuntimeError("durable routing database returned invalid data")
+                    if session_key in durable:
+                        entry = self._routing_entry_from_json(
+                            session_key, durable[session_key]
+                        )
+                        if entry is None:
+                            raise RuntimeError("durable routing database row is invalid")
+                        self._entries[session_key] = entry
+                        return entry
+
+                sessions_file = self.sessions_dir / "sessions.json"
+                try:
+                    with open(sessions_file, "r", encoding="utf-8") as handle:
+                        fallback = json.load(handle)
+                except FileNotFoundError:
+                    return None
+                if not isinstance(fallback, dict):
+                    raise RuntimeError("durable routing mirror returned invalid data")
+                entry_data = fallback.get(session_key)
+                if entry_data is None:
+                    return None
+                if not isinstance(entry_data, dict):
+                    raise RuntimeError("durable routing mirror row is invalid")
+                try:
+                    entry = SessionEntry.from_dict(entry_data)
+                except (KeyError, TypeError, ValueError) as exc:
+                    raise RuntimeError("durable routing mirror row is invalid") from exc
+                self._entries[session_key] = entry
+                return entry
+
     @staticmethod
     def _routing_entry_from_json(key: str, entry_json: str) -> Optional[SessionEntry]:
         """Parse one gateway_routing row; None (with a warning) when invalid."""

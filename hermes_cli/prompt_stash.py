@@ -38,10 +38,42 @@ class StashEntry:
     images: List[Any] = field(default_factory=list)
     stashed_at: float = 0.0
     preview: str = ""
+    # Durable recovery provenance belongs to the individual entry, not its text.
+    # Two pending recoveries may legitimately have identical editable text.
+    recovery_admission_id: Optional[str] = None
+    recovery_surface_key: Optional[str] = None
 
     def as_dict(self) -> dict:
         """Shape ``HermesCLI._render_stash_panel`` consumes."""
-        return {"text": self.text, "images": list(self.images), "stashed_at": self.stashed_at, "preview": self.preview}
+        return {
+            "text": self.text,
+            "images": list(self.images),
+            "stashed_at": self.stashed_at,
+            "preview": self.preview,
+            "recovery_admission_id": self.recovery_admission_id,
+            "recovery_surface_key": self.recovery_surface_key,
+        }
+
+
+class ComposerSubmission(str):
+    """Plain composer text carrying exact recovery provenance through the input queue.
+
+    It remains a ``str`` for every existing command/routing path.  Only a stash
+    restoration creates one, and editing the composer clears the restoration
+    marker before submission.
+    """
+
+    def __new__(
+        cls,
+        value: str,
+        *,
+        recovery_admission_id: str,
+        recovery_surface_key: str,
+    ):
+        obj = super().__new__(cls, value)
+        obj.recovery_admission_id = recovery_admission_id
+        obj.recovery_surface_key = recovery_surface_key
+        return obj
 
 
 class PromptStash:
@@ -53,6 +85,7 @@ class PromptStash:
         self._clock = clock or time.monotonic
         self.panel_open = False
         self.panel_cursor = 0
+        self._last_restored_entry: Optional[StashEntry] = None
 
     def __len__(self) -> int:
         return len(self._items)
@@ -77,25 +110,60 @@ class PromptStash:
             return f"Ctrl+S to restore: {self._items[0].preview}"
         return f"Ctrl+S to browse {n} stashed drafts" if n else ""
 
-    def stash(self, text: str, images: Optional[Sequence[Any]] = None) -> bool:
+    def stash(
+        self,
+        text: str,
+        images: Optional[Sequence[Any]] = None,
+        *,
+        recovery_admission_id: Optional[str] = None,
+        recovery_surface_key: Optional[str] = None,
+        allow_eviction: bool = True,
+    ) -> bool:
         """Push a draft. A blank buffer with no images is a no-op (returns False) so Ctrl+S on an
         empty composer triggers the restore half of the gesture instead of pushing junk.
         """
         if not (text or "").strip() and not images:
             return False
 
-        entry = StashEntry(text=text or "", images=list(images or []), stashed_at=self._clock(),
-                           preview=build_preview(text or "") or "(images only)")
+        if len(self._items) >= self._max_items:
+            if not allow_eviction:
+                return False
+            # User drafts retain the historical bounded-stack behavior, but a
+            # durable recovery projection is never silently displaced. Evict
+            # only the oldest ordinary draft; if every slot is a recovery, the
+            # new draft stays in the composer because stash() returns False.
+            eviction_index = next(
+                (
+                    index
+                    for index in range(len(self._items) - 1, -1, -1)
+                    if not self._items[index].recovery_admission_id
+                ),
+                None,
+            )
+            if eviction_index is None:
+                return False
+            self._items.pop(eviction_index)
+
+        self._last_restored_entry = None
+        entry = StashEntry(
+            text=text or "",
+            images=list(images or []),
+            stashed_at=self._clock(),
+            preview=build_preview(text or "") or "(images only)",
+            recovery_admission_id=recovery_admission_id,
+            recovery_surface_key=recovery_surface_key,
+        )
         self._items.insert(0, entry)
-        del self._items[self._max_items:]  # drop the oldest past the cap
         self.close_panel()  # a push invalidates any open browse session
         return True
 
     def pop(self, index: int = 0) -> Optional[Tuple[str, List[Any]]]:
         """Remove and return ``(text, images)`` at ``index``, or None."""
+        self._last_restored_entry = None
         if not 0 <= index < len(self._items):
             return None
         entry = self._items.pop(index)
+        self._last_restored_entry = entry
         if not self._items:
             self.panel_open = False
         self.panel_cursor = self._clamp_cursor(self.panel_cursor)
@@ -106,7 +174,14 @@ class PromptStash:
 
     def clear(self) -> None:
         self._items.clear()
+        self._last_restored_entry = None
         self.close_panel()
+
+    def take_last_restored_entry(self) -> Optional[StashEntry]:
+        """Return and clear provenance for the immediately preceding pop/restore."""
+        entry = self._last_restored_entry
+        self._last_restored_entry = None
+        return entry
 
     # ------------------------------------------------------------ panel state
 
@@ -160,7 +235,12 @@ ACTION_CLOSE_PANEL = "close_panel"
 
 
 def resolve_ctrl_s(
-    stash: PromptStash, buffer_text: str, images: Optional[Sequence[Any]] = None
+    stash: PromptStash,
+    buffer_text: str,
+    images: Optional[Sequence[Any]] = None,
+    *,
+    recovery_admission_id: Optional[str] = None,
+    recovery_surface_key: Optional[str] = None,
 ) -> Tuple[str, Optional[Tuple[str, List[Any]]]]:
     """Decide what one Ctrl+S press does. Returns ``(action, payload)`` where ``payload`` is
     ``(text, images)`` for :data:`ACTION_RESTORED`, else None.
@@ -172,7 +252,16 @@ def resolve_ctrl_s(
 
     # Something to park → park it (onto a stack, so an earlier draft is still reachable).
     if (buffer_text or "").strip() or images:
-        return (ACTION_STASHED if stash.stash(buffer_text, images) else ACTION_NOOP), None
+        return (
+            ACTION_STASHED
+            if stash.stash(
+                buffer_text,
+                images,
+                recovery_admission_id=recovery_admission_id,
+                recovery_surface_key=recovery_surface_key,
+            )
+            else ACTION_NOOP
+        ), None
 
     # Empty buffer → restore half of the gesture.
     count = len(stash)

@@ -2,6 +2,7 @@
 
 import asyncio
 import contextlib
+import hashlib
 import inspect
 import ipaddress
 import logging
@@ -430,9 +431,15 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 from gateway.config import Platform, PlatformConfig
 from gateway.platforms.helpers import fence_state_after
-from gateway.platforms.event import MessageEvent, MessageType, ProcessingOutcome
+from gateway.platforms.event import (
+    MessageEvent,
+    MessageType,
+    ProcessingOutcome,
+    merge_accepted_delivery_ids,
+)
 from gateway.session import SessionSource, build_session_key
 from gateway.session_transcript import TranscriptReadError
+from gateway.whatsapp_identity import canonical_whatsapp_identifier
 from hermes_constants import get_default_hermes_root, get_hermes_dir, get_hermes_home
 
 if TYPE_CHECKING:
@@ -1656,13 +1663,56 @@ class EphemeralReply(str):
         return str.__str__(self)
 
 
+def _pending_event_principal(event: MessageEvent) -> Optional[Tuple[str, str, str]]:
+    """Stable sender identity for pending-event coalescing.
+
+    Shared group/thread sessions deliberately omit the participant from their session key, so
+    the key alone is not authority to combine two deliveries. Prefer the platform's stable alt
+    id (Signal/Feishu), then its ordinary user id. A DM without either may use its unique chat id,
+    matching the recovery principal fallback. Shared rooms without a sender fail closed.
+    """
+    source = getattr(event, "source", None)
+    if source is None:
+        return None
+    platform = _platform_name(getattr(source, "platform", None))
+    if not platform:
+        return None
+    sender = getattr(source, "user_id_alt", None) or getattr(source, "user_id", None)
+    if sender:
+        normalized_sender = str(sender)
+        if platform == "whatsapp":
+            normalized_sender = canonical_whatsapp_identifier(normalized_sender) or normalized_sender
+        return platform, "user", normalized_sender
+    chat_type = str(getattr(source, "chat_type", "") or "").lower()
+    chat_id = getattr(source, "chat_id", None)
+    if chat_id and chat_type in {"", "dm", "direct", "private"}:
+        normalized_chat = str(chat_id)
+        if platform == "whatsapp":
+            normalized_chat = canonical_whatsapp_identifier(normalized_chat) or normalized_chat
+        return platform, "dm-chat", normalized_chat
+    return None
+
+
+def _pending_events_share_principal(existing: MessageEvent, event: MessageEvent) -> bool:
+    """Whether two pending deliveries have the same resolved sender principal."""
+    existing_principal = _pending_event_principal(existing)
+    return existing_principal is not None and existing_principal == _pending_event_principal(event)
+
+
 def merge_pending_message_event(pending_messages: Dict[str, MessageEvent], session_key: str,
-                                event: MessageEvent, *, merge_text: bool = False) -> None:
+                                event: MessageEvent, *, merge_text: bool = False) -> bool:
     """Store or merge a pending event: photo bursts/albums merge into the queued event so the next
     turn sees the whole burst; with ``merge_text`` rapid TEXT follow-ups append instead of
-    replace."""
+    replace.
+
+    Return ``False`` without modifying the occupied slot when the deliveries do not resolve to
+    the same sender principal. A runner with FIFO support must enqueue that event separately; a
+    bare adapter can then fail closed without falsely claiming admission.
+    """
     existing = pending_messages.get(session_key)
     if existing:
+        if not _pending_events_share_principal(existing, event):
+            return False
         existing_type = getattr(existing, "message_type", None)
         existing_is_photo = existing_type == MessageType.PHOTO
         incoming_is_photo = event.message_type == MessageType.PHOTO
@@ -1679,6 +1729,7 @@ def merge_pending_message_event(pending_messages: Dict[str, MessageEvent], sessi
         # A photo burst always absorbs; otherwise merge only when media is involved on either
         # side. Captions merge in every absorbing case.
         if both_photo or existing.media_urls or incoming_has_media:
+            merge_accepted_delivery_ids(existing, event)
             if both_photo or incoming_has_media:
                 existing.media_urls.extend(event.media_urls)
                 existing.media_types.extend(event.media_types)
@@ -1694,13 +1745,15 @@ def merge_pending_message_event(pending_messages: Dict[str, MessageEvent], sessi
             for attr in ("_gateway_pending_stt_text", "_gateway_pending_stt_transcripts"):
                 if hasattr(existing, attr):
                     delattr(existing, attr)
-            return
+            return True
         both_text = existing_type == MessageType.TEXT and event.message_type == MessageType.TEXT
         if merge_text and both_text:
+            merge_accepted_delivery_ids(existing, event)
             if event.text:
                 existing.text = _append_text(existing.text, event.text)
-            return
+            return True
     pending_messages[session_key] = event
+    return True
 
 
 # Transient *connection* failures worth retrying. Plain/read/write "timeout" excluded on purpose:
@@ -2280,16 +2333,40 @@ class BasePlatformAdapter(ABC):
             profile=self._session_key_profile(event.source))
 
     def _text_batch_key(self, event: "MessageEvent") -> str:
-        """Session-scoped key for text batching (subclasses may override)."""
-        return self._event_session_key(event)
+        """Principal-scoped key for text batching (subclasses may override).
+
+        A shared group/thread session key deliberately omits the participant.  Text batching
+        happens before runner ingress, so using that route key alone could combine two users and
+        their delivery ids before the guarded queue has a chance to preserve the boundary.
+        Hash the same alt-id-first principal used by pending-event merging so logs do not gain a
+        raw sender id.  An unresolved sender gets an event-local nonce and therefore cannot merge.
+        """
+        route_key = self._event_session_key(event)
+        principal = _pending_event_principal(event)
+        if principal is None:
+            nonce = getattr(event, "_gateway_text_batch_nonce", None)
+            if not isinstance(nonce, str) or not nonce:
+                nonce = uuid.uuid4().hex
+                event._gateway_text_batch_nonce = nonce  # type: ignore[attr-defined]
+            discriminator = f"unresolved-{nonce}"
+        else:
+            material = "\0".join(principal).encode("utf-8", errors="surrogatepass")
+            discriminator = hashlib.sha256(material).hexdigest()
+        return f"{route_key}:batch-principal:{discriminator}"
 
     def _enqueue_text_event(self, event: "MessageEvent") -> None:
         """Buffer a text event (merging into a pending one) and restart the flush timer."""
         key = self._text_batch_key(event)
         existing = self._pending_text_batches.get(key)
+        if existing is not None and not _pending_events_share_principal(existing, event):
+            # Defence in depth for a third-party override that omits the principal (or an
+            # effectively impossible digest collision): preserve both events and both timers.
+            key = f"{key}:principal-mismatch:{uuid.uuid4().hex}"
+            existing = None
         if existing is None:
             existing = self._pending_text_batches[key] = event
         else:
+            merge_accepted_delivery_ids(existing, event)
             if event.text:
                 existing.text = _append_text(existing.text, event.text)
             if event.media_urls:
@@ -3268,20 +3345,7 @@ class BasePlatformAdapter(ABC):
 
     def _can_merge_text_debounce_events(self, existing: MessageEvent, event: MessageEvent) -> bool:
         """Return True when two text debounce events came from the same sender."""
-
-        def _identity(candidate: MessageEvent) -> tuple[str, ...] | None:
-            source = getattr(candidate, "source", None)
-            if source is None:
-                return None
-            platform = _platform_name(getattr(source, "platform", None))
-            sender = getattr(source, "user_id_alt", None) or getattr(source, "user_id", None)
-            if sender:
-                return (platform, str(sender))
-            if getattr(source, "chat_type", None) in {"dm", "private"} and getattr(source, "chat_id", None):
-                return (platform, "dm", str(source.chat_id))
-            return None
-        existing_sender = _identity(existing)
-        return existing_sender is not None and existing_sender == _identity(event)
+        return _pending_events_share_principal(existing, event)
 
     def _text_debounce_delay(self, session_key: str) -> float:
         """Return bounded busy-text debounce delay for ``session_key``."""
@@ -3304,13 +3368,17 @@ class BasePlatformAdapter(ABC):
             if state is not None and not self._can_merge_text_debounce_events(state.event, event):
                 existing_pending = self._pending_messages.get(session_key)
                 if existing_pending is not None and self._can_merge_text_debounce_events(existing_pending, event):
-                    merge_pending_message_event(self._pending_messages, session_key, event, merge_text=True)
+                    event._gateway_accepted = merge_pending_message_event(
+                        self._pending_messages, session_key, event, merge_text=True
+                    )
                 return
         now = time.monotonic()
         if state is None:
             state = TextDebounceState(event=event, task=None, first_ts=now, last_ts=now)
             store[session_key] = state
         else:
+            # Preserve the previous id before ``message_id`` moves to the latest reply anchor.
+            merge_accepted_delivery_ids(state.event, event)
             if event.text:
                 state.event.text = _append_text(state.event.text, event.text)
             latest_message_id = getattr(event, "message_id", None)
@@ -3348,8 +3416,12 @@ class BasePlatformAdapter(ABC):
         pending = self._pending_messages.get(session_key)
         if pending is not None and not self._can_merge_text_debounce_events(pending, state.event):
             return False
+        if not merge_pending_message_event(
+            self._pending_messages, session_key, state.event, merge_text=True
+        ):
+            return False
         store.pop(session_key, None)
-        merge_pending_message_event(self._pending_messages, session_key, state.event, merge_text=True)
+        state.event._gateway_accepted = True
         return True
 
     def _discard_text_debounce(self, session_key: str) -> None:
@@ -3562,8 +3634,16 @@ class BasePlatformAdapter(ABC):
         # Photo bursts/albums: queue without interrupting; they run after the current task.
         if event.message_type == MessageType.PHOTO:
             logger.debug("[%s] Queuing photo follow-up for session %s without interrupt", self.name, session_key)
-            merge_pending_message_event(self._pending_messages, session_key, event)
-            event._gateway_accepted = True
+            event._gateway_accepted = merge_pending_message_event(
+                self._pending_messages, session_key, event
+            )
+            if not event._gateway_accepted:
+                logger.warning(
+                    "[%s] Refusing to merge a photo follow-up from another principal into "
+                    "occupied session %s (runner FIFO unavailable)",
+                    self.name,
+                    session_key,
+                )
             return
         if self._is_queue_text_debounce_candidate(event):
             logger.debug("[%s] New text message while session %s is active — "
@@ -3573,9 +3653,19 @@ class BasePlatformAdapter(ABC):
         else:
             logger.debug("[%s] New message while session %s is active — queuing follow-up "
                          "(no interrupt, will cascade after current turn)", self.name, session_key)
-            merge_pending_message_event(self._pending_messages, session_key, event,
-                                        merge_text=event.message_type == MessageType.TEXT)
-            event._gateway_accepted = True
+            event._gateway_accepted = merge_pending_message_event(
+                self._pending_messages,
+                session_key,
+                event,
+                merge_text=event.message_type == MessageType.TEXT,
+            )
+            if not event._gateway_accepted:
+                logger.warning(
+                    "[%s] Refusing to merge a follow-up from another principal into occupied "
+                    "session %s (runner FIFO unavailable)",
+                    self.name,
+                    session_key,
+                )
 
     @staticmethod
     def _get_human_delay() -> float:

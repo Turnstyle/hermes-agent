@@ -36,6 +36,15 @@ class CLIChatTurnMixin:
         """
         from cli import ChatConsole, _ChatTurn, _DIM, _RST, _accent_hex, _cprint, set_secret_capture_callback
         from tools.process_registry_notifications import SubagentNotification
+        recovery_admission_id = getattr(message, "recovery_admission_id", None)
+        recovery_surface_key = getattr(message, "recovery_surface_key", None)
+        recovery_provenance = bool(
+            isinstance(recovery_admission_id, str)
+            and recovery_admission_id
+            and isinstance(recovery_surface_key, str)
+            and recovery_surface_key.startswith("cli:")
+        )
+        self._restore_pending_input_recoveries_to_stash()
         # Single-query and direct chat callers do not go through run().
         set_secret_capture_callback(self._secret_capture_callback)
         # Reset per turn; only a real interrupt flips it, so early returns leave it False.
@@ -57,7 +66,11 @@ class CLIChatTurnMixin:
             return None
         message = self._chat_route_images(message, images)
 
-        if isinstance(message, str) and not isinstance(message, SubagentNotification):
+        if (
+            isinstance(message, str)
+            and not isinstance(message, SubagentNotification)
+            and not recovery_provenance
+        ):
             message, blocked = self._chat_expand_context_references(message)
             if blocked is not None:
                 return blocked
@@ -65,15 +78,24 @@ class CLIChatTurnMixin:
             from agent.message_sanitization import _sanitize_surrogates
             message = _sanitize_surrogates(message)
 
-        self._chat_stage_user_message(agent, message)
-        if isinstance(message, SubagentNotification):
-            message = str(message)  # UI metadata is on the staged row, never in model content.
-
-        ChatConsole().print(f"[{_accent_hex()}]{'─' * 40}[/]")
-        print(flush=True)
-
         turn = _ChatTurn()
         try:
+            # Recovery claim/staging belongs to the same rollback boundary as
+            # the provider worker. A terminal/UI exception after the durable
+            # claim but before thread start must return that exact claim and
+            # remove every surface-local projection.
+            self._chat_stage_user_message(
+                agent,
+                message,
+                recovery_admission_id=recovery_admission_id,
+                recovery_surface_key=recovery_surface_key,
+            )
+            if isinstance(message, SubagentNotification):
+                message = str(message)  # UI metadata is on the staged row, never in model content.
+
+            ChatConsole().print(f"[{_accent_hex()}]{'─' * 40}[/]")
+            print(flush=True)
+
             self._reset_stream_state()
             # Not part of _reset_stream_state: must persist across intermediate turn
             # boundaries (tool-calling loops), reset once per user turn.
@@ -89,6 +111,7 @@ class CLIChatTurnMixin:
             self._chat_settle_turn(turn)
             return self._chat_render_turn(turn, agent_thread, interrupt_msg)
         except Exception as e:
+            self._chat_return_recovery_without_dispatch(agent)
             print(f"Error: {e}")
             return None
         finally:
@@ -190,7 +213,14 @@ class CLIChatTurnMixin:
                 logging.warning("native image attach failed, falling back to text: %s", _img_exc)
         return self._preprocess_images_with_vision(text, images)
 
-    def _chat_stage_user_message(self, agent, message):
+    def _chat_stage_user_message(
+        self,
+        agent,
+        message,
+        *,
+        recovery_admission_id=None,
+        recovery_surface_key=None,
+    ):
         """Append the staged user dict to the transcript under the agent's persist lock."""
         # Copy before appending: mutating ``agent._session_messages`` in this UI-only step
         # would expose a duplicate-prone snapshot to terminal-close persistence.
@@ -211,8 +241,166 @@ class CLIChatTurnMixin:
             if isinstance(message, SubagentNotification):
                 staged_user_message.update(content=str(message), display_kind="async_delegation_complete",
                                            display_metadata={"display_text": message.display_text})
+            from agent.pending_input_recovery import (
+                claim_pending_input_recovery, get_pending_input_recovery,
+                mint_pending_input_admission_id, pending_input_admission,
+                stamp_pending_input_admission,
+                remove_pending_input_admission_from_messages,
+            )
+
+            new_admission_id = mint_pending_input_admission_id()
+            # Submission claims the recovery but does not consume it; only the
+            # later durable successor flush does that. Merely restoring into
+            # PromptStash never touches the record.
+            agent_db = getattr(agent, "_session_db", None)
+            cli_db = getattr(self, "_session_db", None)
+            # The CLI can reopen state.db after a transient startup failure while
+            # a cached agent still holds ``None``. A recovery claimed through the
+            # CLI fallback must bind that same authoritative handle onto the
+            # provider/facade/rollback object before the durable transition.
+            db = cli_db or agent_db
+            if (
+                isinstance(recovery_admission_id, str)
+                and recovery_admission_id
+                and db is not None
+                and agent_db is not db
+            ):
+                agent._session_db = db
+                try:
+                    agent._session_db_created = bool(
+                        db.get_session(str(getattr(agent, "session_id", None) or self.session_id))
+                    )
+                except Exception:
+                    # The handle is still authoritative; turn admission will
+                    # fail closed if its session row cannot be verified.
+                    agent._session_db_created = False
+            replay = (
+                get_pending_input_recovery(db, recovery_admission_id)
+                if isinstance(recovery_admission_id, str) and recovery_admission_id
+                else None
+            )
+            if not (
+                isinstance(replay, dict)
+                and replay.get("status") in {"pending", "claimed"}
+                and replay.get("safe_to_replay") is True
+                and replay.get("input_kind") == "plain_text"
+                and replay.get("exact") is True
+                and replay.get("lossy") is False
+                and replay.get("provider_call_sent") is False
+                and replay.get("dispatch_state") not in {"started", "uncertain"}
+                and replay.get("text") == message
+                and replay.get("surface_key") == recovery_surface_key
+                and isinstance(recovery_surface_key, str)
+                and recovery_surface_key.startswith("cli:")
+            ):
+                replay = None
+            if replay is not None:
+                previous_resend_id = (
+                    replay.get("resend_id") if replay.get("status") == "claimed" else None
+                )
+                claim_pending_input_recovery(
+                    db, replay["admission_id"], resend_id=new_admission_id,
+                    claim_session_id=str(getattr(agent, "session_id", None) or self.session_id),
+                )
+                # Publish the exact generation identity immediately after the
+                # durable claim. Any later staging/projection failure is caught
+                # by chat()'s encompassing rollback boundary.
+                agent._pending_input_recovery_claim_id = replay["admission_id"]
+                agent._pending_input_recovery_resend_id = new_admission_id
+                if previous_resend_id and previous_resend_id != new_admission_id:
+                    self.conversation_history, _removed = (
+                        remove_pending_input_admission_from_messages(
+                            self.conversation_history, previous_resend_id,
+                        )
+                    )
+                    session_messages = getattr(agent, "_session_messages", None)
+                    if isinstance(session_messages, list):
+                        agent._session_messages, _removed_agent = (
+                            remove_pending_input_admission_from_messages(
+                                session_messages, previous_resend_id,
+                            )
+                        )
+                    pending_message = getattr(agent, "_pending_cli_user_message", None)
+                    if pending_input_admission(pending_message)[0] == previous_resend_id:
+                        agent._pending_cli_user_message = None
+            else:
+                agent._pending_input_recovery_claim_id = None
+                agent._pending_input_recovery_resend_id = None
+            stamp_pending_input_admission(
+                staged_user_message,
+                admission_id=new_admission_id,
+                surface_key=f"cli:{self.session_id}",
+            )
             agent._pending_cli_user_message = staged_user_message
             self.conversation_history.append(staged_user_message)
+
+    def _chat_return_recovery_without_dispatch(self, agent) -> bool:
+        """Return a CLI resend claim only when durable state proves no dispatch.
+
+        This covers failures between composer admission and the provider seam.
+        The SessionDB transition removes any flushed resend row atomically; the
+        matching live projections are removed only after that succeeds.
+        """
+        recovery_id = getattr(agent, "_pending_input_recovery_claim_id", None)
+        resend_id = getattr(agent, "_pending_input_recovery_resend_id", None)
+        if not (
+            isinstance(recovery_id, str) and recovery_id.strip()
+            and isinstance(resend_id, str) and resend_id.strip()
+        ):
+            return False
+        persist_lock = getattr(agent, "_session_persist_lock", None)
+        import contextlib
+
+        try:
+            from agent.pending_input_recovery import (
+                pending_input_admission,
+                remove_pending_input_admission_from_messages,
+                return_pending_input_recovery_without_dispatch,
+            )
+
+            # Close persistence uses the same lock. Keep the durable state change
+            # and every surface/agent projection in one critical section so a
+            # concurrent close cannot reappend the just-withdrawn resend.
+            with persist_lock if persist_lock is not None else contextlib.nullcontext():
+                return_pending_input_recovery_without_dispatch(
+                    getattr(agent, "_session_db", None), recovery_id,
+                    resend_id=resend_id,
+                    turn_lease_holder=getattr(
+                        agent, "_active_session_turn_lease_holder", None,
+                    ),
+                )
+                self.conversation_history, _removed = (
+                    remove_pending_input_admission_from_messages(
+                        self.conversation_history, resend_id,
+                    )
+                )
+                session_messages = getattr(agent, "_session_messages", None)
+                if isinstance(session_messages, list):
+                    agent._session_messages, _removed_session = (
+                        remove_pending_input_admission_from_messages(
+                            session_messages, resend_id,
+                        )
+                    )
+                if pending_input_admission(
+                    getattr(agent, "_pending_cli_user_message", None)
+                )[0] == resend_id:
+                    agent._pending_cli_user_message = None
+                if (
+                    getattr(agent, "_pending_input_recovery_claim_id", None) == recovery_id
+                    and getattr(agent, "_pending_input_recovery_resend_id", None) == resend_id
+                ):
+                    agent._pending_input_recovery_claim_id = None
+                    agent._pending_input_recovery_resend_id = None
+        except Exception:
+            # A started/uncertain provider dispatch must remain claimed. Storage
+            # failure likewise keeps the live pointers so the close/restart path
+            # cannot misclassify this generation as ordinary history.
+            logging.error(
+                "Could not return undispatched CLI recovery to pending",
+                exc_info=True,
+            )
+            return False
+        return True
 
     def _chat_setup_turn_audio(self, turn, message, voice_input):
         """Arm the full-duplex listener and the streaming-TTS pipeline for this turn (voice mode only)."""
@@ -327,9 +515,19 @@ class CLIChatTurnMixin:
         except Exception as exc:
             logging.error("run_conversation raised: %s", exc, exc_info=True)
             _summary = getattr(self.agent, '_summarize_api_error', lambda e: str(e)[:300])(exc)
+            recovery_returned = self._chat_return_recovery_without_dispatch(self.agent)
             turn.result = {
-                "final_response": f"Error: {_summary}", "messages": [], "api_calls": 0,
+                "final_response": f"Error: {_summary}",
+                "messages": list(self.conversation_history), "api_calls": 0,
                 "completed": False, "failed": True, "error": _summary,
+                **(
+                    {
+                        "recovery_persisted": True,
+                        "recovery_returned_without_dispatch": True,
+                        "provider_call_sent": False,
+                    }
+                    if recovery_returned else {}
+                ),
             }
         finally:
             if _one_turn_model_restore:
@@ -466,6 +664,7 @@ class CLIChatTurnMixin:
         Returns the response text.
         """
         from cli import _DIM, _RST, _cprint, _suspend_output_history
+        self._chat_stash_unprocessed_input(turn)
         response = turn.result.get("final_response", "") if turn.result else ""
         # "failed"/"partial" with an empty final_response: no usable answer.
         if turn.result and (turn.result.get("failed") or turn.result.get("partial")) and not response:
@@ -534,6 +733,160 @@ class CLIChatTurnMixin:
             self._pending_input.put(_leftover_steer)
 
         return response
+
+    def _chat_stash_unprocessed_input(self, turn) -> bool:
+        """Project a safe turn-start timeout into the editable PromptStash.
+
+        PromptStash restoration only fills the composer; it never submits a turn.
+        Deliberately do not touch ``_pending_input``, whose consumer auto-runs.
+        """
+
+        result = turn.result if isinstance(getattr(turn, "result", None), dict) else {}
+        value = result.get("unprocessed_input")
+        if not (
+            result.get("turn_exit_reason") == "context_compression_timeout"
+            and result.get("api_calls") == 0
+            and result.get("recovery_persisted") is True
+            and isinstance(value, dict)
+            and value.get("version") == 1
+            and value.get("kind") == "accepted_user_input"
+            and value.get("provider_call_sent") is False
+            and value.get("safe_to_replay") is True
+            and isinstance(value.get("text"), str)
+            and value.get("text", "").strip()
+        ):
+            return False
+        text = value["text"]
+        if len(text.encode("utf-8")) > 64 * 1024:
+            return False
+        try:
+            from agent.redact import redact_sensitive_text
+
+            if redact_sensitive_text(text, force=True) != text:
+                return False
+        except Exception:
+            return False
+        return self._chat_project_pending_input_recovery(value)
+
+    def _chat_project_pending_input_recovery(self, value) -> bool:
+        """Put one exact durable recovery in PromptStash with entry provenance."""
+        if not isinstance(value, dict):
+            return False
+        text = value.get("text")
+        admission_id = value.get("admission_id")
+        if not (
+            value.get("version") == 1
+            and value.get("kind") == "accepted_user_input"
+            and value.get("status") in {"pending", "claimed"}
+            and value.get("safe_to_replay") is True
+            and value.get("input_kind") == "plain_text"
+            and value.get("exact") is True
+            and value.get("lossy") is False
+            and value.get("provider_call_sent") is False
+            and value.get("dispatch_state") not in {"started", "uncertain"}
+            and isinstance(text, str)
+            and text.strip()
+            and isinstance(admission_id, str)
+            and admission_id
+            and isinstance(value.get("surface_key"), str)
+            and value["surface_key"].startswith("cli:")
+        ):
+            return False
+        stash = getattr(self, "_prompt_stash", None)
+        if stash is None:
+            return False
+        # Reconciliation is ID-idempotent while allowing multiple exact records
+        # with identical editable text. Ordinary same-text drafts have no ID.
+        if any(entry.recovery_admission_id == admission_id for entry in stash.items):
+            return False
+        composer_entry = getattr(self, "_composer_recovery_entry", None)
+        if getattr(composer_entry, "recovery_admission_id", None) == admission_id:
+            return False
+        return stash.stash(
+            text,
+            recovery_admission_id=admission_id,
+            recovery_surface_key=value.get("surface_key"),
+            allow_eviction=False,
+        )
+
+    def _restore_pending_input_recoveries_to_stash(self) -> int:
+        """Reconcile durable exact CLI recoveries into the bounded composer stash.
+
+        Re-running is intentional: admission-ID dedupe makes it idempotent, while
+        newly free slots admit durable backlog records. Projection never evicts an
+        existing stash entry and never acknowledges or auto-runs a recovery.
+        """
+        db = getattr(self, "_session_db", None)
+        stash = getattr(self, "_prompt_stash", None)
+        if db is None or stash is None:
+            return 0
+        from agent.pending_input_recovery import list_pending_input_recoveries
+        from cli import _DIM, _RST, _cprint
+
+        restored = 0
+        deferred_ids = []
+        suppressed_ids = getattr(self, "_suppressed_pending_input_recovery_ids", set())
+        reported = getattr(self, "_pending_input_recovery_warning_keys", set())
+        if not isinstance(reported, set):
+            reported = set()
+        self._pending_input_recovery_warning_keys = reported
+        for value in list_pending_input_recoveries(db, surface_prefix="cli:"):
+            admission_id = value.get("admission_id")
+            if (
+                value.get("status") == "claimed"
+                and value.get("dispatch_state") in {"started", "uncertain"}
+            ):
+                # Never expose possibly-dispatched content as an executable
+                # composer draft. The admission ID is safe and actionable;
+                # raw prompt text is deliberately omitted.
+                warning_key = ("uncertain", admission_id)
+                if warning_key not in reported:
+                    _cprint(
+                        f"  {_DIM}⚠ Pending input {admission_id} has an "
+                        f"uncertain provider dispatch and was not restored. Review with "
+                        f"/recover {admission_id} retry|delivered.{_RST}"
+                    )
+                    reported.add(warning_key)
+                continue
+            if value.get("safe_to_replay") is False:
+                warning_key = ("lossy", admission_id)
+                if warning_key not in reported:
+                    reasons = ", ".join(value.get("loss_reasons") or []) or "non-text input"
+                    _cprint(
+                        f"  {_DIM}⚠ Pending input {admission_id} could not be "
+                        f"restored exactly ({reasons}). Reattach or re-enter the omitted content, "
+                        f"then acknowledge with /recover {admission_id} acknowledge.{_RST}"
+                    )
+                    reported.add(warning_key)
+                continue
+            already_projected = any(
+                entry.recovery_admission_id == admission_id for entry in stash.items
+            ) or getattr(
+                getattr(self, "_composer_recovery_entry", None),
+                "recovery_admission_id",
+                None,
+            ) == admission_id
+            if admission_id in suppressed_ids:
+                deferred_ids.append(admission_id)
+                continue
+            projected = bool(self._chat_project_pending_input_recovery(value))
+            restored += projected
+            if not projected and not already_projected:
+                deferred_ids.append(admission_id)
+        backlog_ids = tuple(value for value in deferred_ids if isinstance(value, str) and value)
+        previous_backlog = tuple(getattr(self, "_pending_input_recovery_backlog_ids", ()) or ())
+        self._pending_input_recovery_backlog_ids = backlog_ids
+        if backlog_ids and backlog_ids != previous_backlog:
+            shown = ", ".join(backlog_ids[:8])
+            extra = len(backlog_ids) - min(len(backlog_ids), 8)
+            suffix = f" (+{extra} more; use /recover to list all)" if extra else ""
+            _cprint(
+                f"  {_DIM}⚠ {len(backlog_ids)} additional pending input"
+                f"{'s remain' if len(backlog_ids) != 1 else ' remains'} durable; "
+                f"IDs: {shown}{suffix}.{_RST}"
+            )
+        self._pending_input_recoveries_restored = True
+        return restored
 
     def _chat_resolve_interrupt(self, turn, agent_thread, interrupt_msg, response):
         """Return ``(pending_message, show_marker)``; clears a stale agent interrupt flag.

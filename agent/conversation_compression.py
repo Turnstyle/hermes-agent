@@ -400,6 +400,11 @@ class CompressionCommitFence:
         self._progress_observed = False
         self._deadline: float | None = None
         self._retain_cancelled_lock_until_worker_done = False
+        # Exact durable lease owned by this compression attempt.  The host may
+        # need to cross a still-retained lease after a total-ceiling timeout in
+        # order to quarantine accepted input.  Keep that authority on the
+        # attempt fence -- never reconstruct it later from mutable agent state.
+        self._durable_lock_identity: Optional[Tuple[str, str]] = None
         # Set once the active-row watermark is captured: later rows survive as tail, so hosts may keep admission.
         self._commit_watermark_fenced = False
         if total_ceiling_seconds is not None:
@@ -499,6 +504,19 @@ class CompressionCommitFence:
     def retain_compression_lock_until_worker_done(self) -> None:
         """Prevent a timed-out live worker from overlapping a retry."""
         self._retain_cancelled_lock_until_worker_done = True
+
+    def bind_durable_lock_identity(self, session_id: str, holder: str) -> None:
+        """Bind the exact durable lease acquired by this fenced attempt."""
+        session_id = str(session_id or "").strip()
+        holder = str(holder or "").strip()
+        if not session_id or not holder:
+            raise ValueError("compression lock identity requires session and holder")
+        self._durable_lock_identity = (session_id, holder)
+
+    @property
+    def durable_lock_identity(self) -> Optional[Tuple[str, str]]:
+        """Exact ``(session_id, holder)`` owned by this attempt, if any."""
+        return self._durable_lock_identity
 
     def mark_commit_watermark_fenced(self) -> None:
         """Record a watermark-bounded commit (later rows survive as tail); a detached worker may keep admission.
@@ -816,7 +834,8 @@ def _retry_compression_on_fallback_chain(
     *, worker: Callable[[CompressionCommitFence], Tuple[list, str]], messages: list,
     system_prompt_fallback: Any, idle_timeout_seconds: float, total_ceiling_seconds: float,
     on_commit_overrun: Optional[Callable[[float, float], None]] = None,
-    on_timeout_cause: Optional[Callable[[bool, bool], None]] = None, telemetry_agent: Any = None,
+    on_timeout_cause: Optional[Callable[[bool, bool, CompressionCommitFence], None]] = None,
+    telemetry_agent: Any = None,
     new_fence: Optional[Callable[[], CompressionCommitFence]] = None,
 ) -> Optional[Tuple[list, str]]:
     """Re-run an aborted compression once with the summary route pinned.
@@ -993,7 +1012,7 @@ def run_compress_context_with_progress_timeout(
     *, worker: Callable[[CompressionCommitFence], Tuple[list, str]], messages: list,
     system_prompt_fallback: Any, idle_timeout_seconds: float, total_ceiling_seconds: float,
     on_timeout: Optional[Callable[[float, float, float], None]] = None,
-    on_timeout_cause: Optional[Callable[[bool, bool], None]] = None,
+    on_timeout_cause: Optional[Callable[[bool, bool, CompressionCommitFence], None]] = None,
     on_commit_overrun: Optional[Callable[[float, float], None]] = None,
     fence: Optional[CompressionCommitFence] = None, telemetry_agent: Any = None, stall_fallback: bool = True,
     new_fence: Optional[Callable[[], CompressionCommitFence]] = None,
@@ -1088,7 +1107,9 @@ def run_compress_context_with_progress_timeout(
             fence.retain_compression_lock_until_worker_done()
         if on_timeout_cause is not None:
             with _swallow('compress_context timeout-cause callback failed', exc_info=True):
-                on_timeout_cause(total_exhausted, fence.progress_observed)
+                on_timeout_cause(
+                    total_exhausted, fence.progress_observed, fence,
+                )
         if not _cancel_or_join_worker(fence):
             result = _await_in_flight_commit(
                 future, ceiling=ceiling, wait_started=wait_started, on_commit_overrun=on_commit_overrun
@@ -1267,16 +1288,31 @@ def _get_context_compression_timeout_state(
         return lock, state if isinstance(state, threading.local) else None
 
 
-def _set_context_compression_timeout_outcome(agent: Any, timed_out: bool) -> None:
+def _set_context_compression_timeout_outcome(
+    agent: Any, timed_out: bool,
+    poisoned_compression_lock_identity: Optional[Tuple[str, str]] = None,
+) -> None:
     """Write this thread's owned-compression timeout outcome.
     The ``agent._last_compression_timed_out`` mirror stays authoritative for minimal agent doubles that do not
     support ``vars()``."""
     lock, state = _get_context_compression_timeout_state(agent, create=True) or (None, None)
     if state is None:
         agent._last_compression_timed_out = timed_out
+        try:
+            agent._last_compression_timeout_poisoned_lock_identity = (
+                poisoned_compression_lock_identity if timed_out else None
+            )
+        except AttributeError:
+            # Minimal slotted doubles may expose only the legacy boolean.
+            # They cannot carry a poison capability, so the reader safely
+            # falls back to None.
+            pass
         return
     with lock:
         state.timed_out = timed_out
+        state.poisoned_compression_lock_identity = (
+            poisoned_compression_lock_identity if timed_out else None
+        )
         agent._last_compression_timed_out = timed_out
 
 
@@ -1285,9 +1321,15 @@ def reset_context_compression_timeout_outcome(agent: Any) -> None:
     _set_context_compression_timeout_outcome(agent, False)
 
 
-def mark_context_compression_timed_out(agent: Any) -> None:
+def mark_context_compression_timed_out(
+    agent: Any,
+    *, poisoned_compression_lock_identity: Optional[Tuple[str, str]] = None,
+) -> None:
     """Mark the current owned compression as host-timed-out."""
-    _set_context_compression_timeout_outcome(agent, True)
+    _set_context_compression_timeout_outcome(
+        agent, True,
+        poisoned_compression_lock_identity=poisoned_compression_lock_identity,
+    )
 
 
 def context_compression_timed_out(agent: Any) -> bool:
@@ -1301,6 +1343,30 @@ def context_compression_timed_out(agent: Any) -> bool:
             if isinstance(state, threading.local):
                 return getattr(state, "timed_out", None) is True
     return getattr(agent, "_last_compression_timed_out", None) is True
+
+
+def context_compression_timeout_poisoned_lock_identity(
+    agent: Any,
+) -> Optional[Tuple[str, str]]:
+    """Return this thread's exact poison-fenced compression lease, if any."""
+    locked_state = _get_context_compression_timeout_state(agent, create=False)
+    identity = None
+    if locked_state is not None:
+        lock, state = locked_state
+        with lock:
+            if isinstance(state, threading.local):
+                identity = getattr(state, "poisoned_compression_lock_identity", None)
+    else:
+        identity = getattr(
+            agent, "_last_compression_timeout_poisoned_lock_identity", None,
+        )
+    if not (
+        isinstance(identity, tuple)
+        and len(identity) == 2
+        and all(isinstance(value, str) and value.strip() for value in identity)
+    ):
+        return None
+    return identity
 
 
 def _automatic_compression_gate_blocks(agent: Any, bypass_cooldown: bool, *, include_cooldown: bool = True) -> bool:
@@ -2055,6 +2121,21 @@ def _merge_anchor_into_user_message(target: dict, anchor: dict) -> None:
     and synthetic flags are cleared."""
     anchor_content = anchor.get("content")
     target_content = target.get("content")
+    carrier_snapshot: dict[str, Any] = {
+        "role": "user",
+        "content": copy.deepcopy(target_content),
+    }
+    if target.get("display_kind") is not None:
+        carrier_snapshot["display_kind"] = target["display_kind"]
+    target_display_metadata = target.get("display_metadata")
+    if isinstance(target_display_metadata, dict):
+        carrier_metadata = copy.deepcopy(target_display_metadata)
+        carrier_metadata.pop("_hermes_pending_input_recovery", None)
+        if carrier_metadata:
+            carrier_snapshot["display_metadata"] = carrier_metadata
+    for flag in _SYNTHETIC_USER_FLAGS:
+        if flag in target:
+            carrier_snapshot[flag] = copy.deepcopy(target[flag])
     if isinstance(anchor_content, list) or isinstance(target_content, list):
 
         def _parts(content: Any) -> list:
@@ -2064,6 +2145,27 @@ def _merge_anchor_into_user_message(target: dict, anchor: dict) -> None:
     else:
         merged = f"{anchor_content or ''}\n\n{target_content or ''}".strip()
         _replace_message_content(target, merged)
+    # Preserve only the namespaced accepted-input identity from the human
+    # anchor while retaining all unrelated scaffolding display metadata.  A
+    # later preflight timeout needs this UUID after the first compaction pass
+    # merges the anchor into a synthetic user turn.
+    from agent.pending_input_recovery import (
+        PENDING_INPUT_DISPLAY_METADATA_KEY,
+        PENDING_INPUT_MERGED_CARRIER_KEY,
+    )
+
+    anchor_metadata = anchor.get("display_metadata")
+    anchor_recovery = (
+        anchor_metadata.get(PENDING_INPUT_DISPLAY_METADATA_KEY)
+        if isinstance(anchor_metadata, dict) else None
+    )
+    if isinstance(anchor_recovery, dict):
+        anchor_recovery = copy.deepcopy(anchor_recovery)
+        anchor_recovery[PENDING_INPUT_MERGED_CARRIER_KEY] = carrier_snapshot
+        target_metadata = target.get("display_metadata")
+        target_metadata = dict(target_metadata) if isinstance(target_metadata, dict) else {}
+        target_metadata[PENDING_INPUT_DISPLAY_METADATA_KEY] = anchor_recovery
+        target["display_metadata"] = target_metadata
     for flag in _SYNTHETIC_USER_FLAGS:
         target.pop(flag, None)
 
@@ -2381,6 +2483,9 @@ def _try_acquire_durable_lock(lease: _CompressionLease, try_acquire: Any, commit
     try:
         acquired = try_acquire(lease.sid, lease.holder, ttl_seconds=lease.ttl)
         if acquired:
+            if commit_fence is not None:
+                with contextlib.suppress(AttributeError):  # test doubles without the method
+                    commit_fence.bind_durable_lock_identity(lease.sid, lease.holder)
             try:
                 lease.watermark = lease.db.get_active_message_watermark(lease.sid)
                 # A captured watermark makes the commit safe against later rows on BOTH commit

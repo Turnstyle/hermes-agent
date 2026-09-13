@@ -84,6 +84,22 @@ class MessageEvent:
     # so untrusted payload text stays conversational. Kept last for positional compat.
     allow_gateway_control: bool = True
 
+    # Ordered platform delivery ids absorbed into this process-local event. Busy text debounce and
+    # media/albums can collapse several deliveries into one model turn; recovery must tombstone
+    # every constituent id, not only whichever id remains in ``message_id``. Keep at most one
+    # overflow sentinel beyond the durable record limit so staging fails closed instead of silently
+    # forgetting an accepted delivery. This field is never persisted as routing metadata.
+    _accepted_delivery_ids: tuple[str, ...] = field(
+        default_factory=tuple, repr=False, compare=False
+    )
+
+    # Trusted process-local marker: this delivery was already accepted and queued before another
+    # turn on the same route produced a recovery generation. It may run after that reset, but must
+    # not masquerade as the user's later manual resend acknowledgement.
+    _predates_pending_turn_recovery: bool = field(
+        default=False, repr=False, compare=False
+    )
+
     # Process-local admission receipt, never routing metadata or execution acknowledgement.
     _gateway_accepted: bool = field(default=False, init=False, repr=False, compare=False)
 
@@ -107,3 +123,46 @@ class MessageEvent:
         args = parts[1] if len(parts) > 1 else ""
         # iOS auto-corrects -- to — (em dash) and - to – (en dash)
         return args.replace("\u2014\u2014", "--").replace("\u2014", "--").replace("\u2013", "-")
+
+
+# Durable pending-turn rows accept at most 64 distinct platform delivery ids. Retaining one extra
+# id is intentional: callers can hand the 65-item tuple to the validator and refuse reset rather
+# than truncate a replay tombstone.
+_MAX_ACCEPTED_DELIVERY_IDS_WITH_OVERFLOW_SENTINEL = 65
+
+
+def accepted_delivery_ids(event: MessageEvent) -> tuple[str, ...]:
+    """Return the ordered, deduplicated delivery ids represented by ``event``."""
+
+    values = list(getattr(event, "_accepted_delivery_ids", ()) or ())
+    message_id = getattr(event, "message_id", None)
+    if message_id is not None and str(message_id).strip():
+        values.append(str(message_id))
+    result: list[str] = []
+    seen: set[str] = set()
+    for value in values:
+        normalized = str(value)
+        if not normalized.strip() or normalized in seen:
+            continue
+        seen.add(normalized)
+        result.append(normalized)
+        if len(result) >= _MAX_ACCEPTED_DELIVERY_IDS_WITH_OVERFLOW_SENTINEL:
+            break
+    return tuple(result)
+
+
+def merge_accepted_delivery_ids(target: MessageEvent, incoming: MessageEvent) -> None:
+    """Carry every constituent delivery id into a collapsed pending event, fail-closed bounded."""
+
+    combined: list[str] = []
+    seen: set[str] = set()
+    for event in (target, incoming):
+        for value in accepted_delivery_ids(event):
+            if value in seen:
+                continue
+            seen.add(value)
+            combined.append(value)
+            if len(combined) >= _MAX_ACCEPTED_DELIVERY_IDS_WITH_OVERFLOW_SENTINEL:
+                target._accepted_delivery_ids = tuple(combined)
+                return
+    target._accepted_delivery_ids = tuple(combined)

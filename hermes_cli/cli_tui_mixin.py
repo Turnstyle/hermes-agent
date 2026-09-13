@@ -962,14 +962,37 @@ class CLITuiMixin:
         if not payload:
             return
         text, images = payload
+        restored_entry = self._prompt_stash.take_last_restored_entry()
         buf = event.app.current_buffer
         buf.text = text
         buf.cursor_position = len(text)
+        # Assign provenance after buffer text: on_text_changed observes the
+        # assignment and would otherwise clear the just-restored marker.
+        self._composer_recovery_entry = (
+            restored_entry
+            if (
+                restored_entry is not None
+                and restored_entry.recovery_admission_id
+                and restored_entry.recovery_surface_key
+                and not restored_entry.images
+            )
+            else None
+        )
         # Extend rather than replace attachments: the user may have attached something new since
         # the stash was taken and dropping it silently would be data loss.
         for img in images or ():
             if img not in self._attached_images:
                 self._attached_images.append(img)
+
+    def _tui_reconcile_prompt_recoveries(self) -> int:
+        """Best-effort durable backlog refill before the composer redraws."""
+        try:
+            return self._restore_pending_input_recoveries_to_stash()
+        except Exception:
+            from cli import logger
+
+            logger.debug("pending-input composer reconciliation failed", exc_info=True)
+            return 0
 
     def _tui_handle_stash_panel_up(self, event):
         self._prompt_stash.move_cursor(-1)
@@ -981,7 +1004,15 @@ class CLITuiMixin:
 
     def _tui_handle_stash_panel_delete(self, event):
         """D in the browse panel discards the highlighted draft."""
+        entry = self._prompt_stash.peek(self._prompt_stash.panel_cursor)
+        if entry is not None and entry.recovery_admission_id:
+            suppressed = getattr(self, "_suppressed_pending_input_recovery_ids", None)
+            if not isinstance(suppressed, set):
+                suppressed = set()
+                self._suppressed_pending_input_recovery_ids = suppressed
+            suppressed.add(entry.recovery_admission_id)
         self._prompt_stash.delete_at_cursor()
+        self._tui_reconcile_prompt_recoveries()
         event.app.invalidate()
 
     def _tui_handle_stash_panel_close(self, event):
@@ -1332,19 +1363,48 @@ class CLITuiMixin:
         has_images = bool(self._attached_images)
         if not (text or has_images):
             return
-        if self._tui_enter_inline_command(event, text, has_images):
+        composer_recovery = getattr(self, "_composer_recovery_entry", None)
+        exact_recovery_text = bool(
+            composer_recovery is not None
+            and not has_images
+            and composer_recovery.text == raw_text
+            and composer_recovery.recovery_admission_id
+            and composer_recovery.recovery_surface_key
+        )
+        if not exact_recovery_text and self._tui_enter_inline_command(event, text, has_images):
+            self._composer_recovery_entry = None
+            self._tui_reconcile_prompt_recoveries()
             return
         # Snapshot and clear attached images; bundle text + images as a tuple when present.
         images = list(self._attached_images)
         self._attached_images.clear()
         event.app.invalidate()
+        recovery_submission = bool(
+            exact_recovery_text and not images
+        )
+        if recovery_submission:
+            from hermes_cli.prompt_stash import ComposerSubmission
+
+            text = ComposerSubmission(
+                raw_text,
+                recovery_admission_id=composer_recovery.recovery_admission_id,
+                recovery_surface_key=composer_recovery.recovery_surface_key,
+            )
+        self._composer_recovery_entry = None
         payload = (text, images) if images else text
         # A bang command is treated like a slash command while the agent is busy: it must never
         # be routed into steer/redirect (injecting `!git status` into the model's context as a
         # prompt). It queues and runs locally once the loop drains.
-        _is_local_dispatch = bool(text) and (_looks_like_slash_command(text) or text.strip().startswith("!"))
+        _is_local_dispatch = bool(text) and not recovery_submission and (
+            _looks_like_slash_command(text) or text.strip().startswith("!")
+        )
         if self._agent_running and not _is_local_dispatch:
-            self._tui_enter_while_busy(text, images, payload)
+            self._tui_enter_while_busy(
+                text,
+                images,
+                payload,
+                force_queue=recovery_submission,
+            )
         else:
             self._pending_input.put(payload)
         # History stores real pasted content, not the placeholder, so up-arrow recall restores it.
@@ -1380,7 +1440,14 @@ class CLITuiMixin:
         event.app.invalidate()
         return True
 
-    def _tui_enter_while_busy(self, text: str, images: list, payload) -> None:
+    def _tui_enter_while_busy(
+        self,
+        text: str,
+        images: list,
+        payload,
+        *,
+        force_queue: bool = False,
+    ) -> None:
         """Route a submission typed while the agent runs, per ``busy_input_mode``.
 
         steer → agent.steer(text) mid-run (images can't ride along and a missing/rejecting
@@ -1389,7 +1456,9 @@ class CLITuiMixin:
         multimodal follow-ups, or a turn that finished in the race). queue → next turn.
         """
         from cli import CLI_CONFIG, _ACCENT, _DIM, _RST, _cprint, _hermes_home
-        _effective_mode = self.busy_input_mode
+        # A restored recovery is an explicit new-turn resend. Never reinterpret
+        # it as in-flight steering/interrupt input and lose its admission ID.
+        _effective_mode = "queue" if force_queue else self.busy_input_mode
         redirected = False
         if _effective_mode == "steer":
             if images or not text:
@@ -1646,6 +1715,12 @@ class CLITuiMixin:
         but batch newlines; Alt+Enter adds 1 newline per event so never trips it).
         """
         from cli import _strip_leaked_bracketed_paste_wrappers, _strip_leaked_terminal_responses_with_meta
+        composer_recovery = getattr(self, "_composer_recovery_entry", None)
+        if composer_recovery is not None and buf.text != composer_recovery.text:
+            # Edited recovery text is a new ordinary prompt. It carries no
+            # durable identity, even if it later becomes textually identical.
+            self._composer_recovery_entry = None
+            self._tui_reconcile_prompt_recoveries()
         text = _strip_leaked_bracketed_paste_wrappers(buf.text)
         text, _had_mouse_reports = _strip_leaked_terminal_responses_with_meta(text)
         if _had_mouse_reports:
@@ -1685,19 +1760,38 @@ class CLITuiMixin:
         """
         from hermes_cli.prompt_stash import ACTION_RESTORED, ACTION_STASHED, resolve_ctrl_s
         buf = event.app.current_buffer
-        action, payload = resolve_ctrl_s(self._prompt_stash, buf.text, self._attached_images)
+        composer_recovery = getattr(self, "_composer_recovery_entry", None)
+        preserve_recovery = bool(
+            composer_recovery is not None
+            and not self._attached_images
+            and composer_recovery.text == buf.text
+        )
+        action, payload = resolve_ctrl_s(
+            self._prompt_stash,
+            buf.text,
+            self._attached_images,
+            recovery_admission_id=(
+                composer_recovery.recovery_admission_id if preserve_recovery else None
+            ),
+            recovery_surface_key=(
+                composer_recovery.recovery_surface_key if preserve_recovery else None
+            ),
+        )
         if action == ACTION_STASHED:
+            self._composer_recovery_entry = None
             # reset() (not `text = ""`) also clears completion state, selection and the undo stack.
             buf.reset()
             self._attached_images.clear()
         elif action == ACTION_RESTORED:
             self._tui_restore_stash_payload(event, payload)
+            self._tui_reconcile_prompt_recoveries()
         # ACTION_OPEN_PANEL: resolve_ctrl_s already flipped panel_open.
         event.app.invalidate()
 
     def _tui_handle_stash_panel_restore(self, event):
         """Enter in the browse panel restores the highlighted draft."""
         self._tui_restore_stash_payload(event, self._prompt_stash.restore_at_cursor())
+        self._tui_reconcile_prompt_recoveries()
         event.app.invalidate()
 
     def _tui_history_up(self, event):
@@ -1784,6 +1878,7 @@ class CLITuiMixin:
 
         self._attached_images: list[Path] = []  # clipboard image attachments
         self._image_counter = 0
+        self._composer_recovery_entry = None
 
         # Voice mode state (protected by _voice_lock for cross-thread access).
         self._voice_lock = threading.Lock()

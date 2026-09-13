@@ -16,6 +16,81 @@ from agent.lazy_forward import forward as _forward
 logger = logging.getLogger("run_agent")
 
 
+def _settle_undispatched_pending_input(agent: Any, result: Any) -> Any:
+    """Return an exact recovery claim when a turn exits before provider entry.
+
+    CLI and ACP claim before this facade acquires the durable session turn lease.
+    Every normal early result (lease admission, preflight, rate-limit guard, or
+    middleware short-circuit) crosses this boundary.  The durable helper refuses
+    started/uncertain dispatches, so invoking it here cannot turn ambiguity into
+    a replayable draft.
+    """
+    recovery_id = getattr(agent, "_pending_input_recovery_claim_id", None)
+    resend_id = getattr(agent, "_pending_input_recovery_resend_id", None)
+    if not (
+        isinstance(recovery_id, str) and recovery_id.strip()
+        and isinstance(resend_id, str) and resend_id.strip()
+    ):
+        return result
+    try:
+        from agent.turn_api_call import _return_pending_input_recovery_without_dispatch
+
+        returned_resend_id = _return_pending_input_recovery_without_dispatch(
+            agent, recovery_id=recovery_id, resend_id=resend_id,
+        )
+    except Exception:
+        # A timeout path may already have atomically replaced this recovery with
+        # a successor. Clear only stale live pointers to an exact consumed
+        # predecessor; otherwise keep the claim intact and fail closed.
+        try:
+            from agent.pending_input_recovery import get_pending_input_recovery
+
+            durable = get_pending_input_recovery(
+                getattr(agent, "_session_db", None), recovery_id,
+            )
+        except Exception:
+            durable = None
+        if (
+            isinstance(durable, dict)
+            and durable.get("status") == "consumed"
+            and durable.get("resend_id") == resend_id
+        ):
+            if getattr(agent, "_pending_input_recovery_claim_id", None) == recovery_id:
+                agent._pending_input_recovery_claim_id = None
+            if getattr(agent, "_pending_input_recovery_resend_id", None) == resend_id:
+                agent._pending_input_recovery_resend_id = None
+        return result
+    if not returned_resend_id:
+        return result
+
+    from agent.pending_input_recovery import (
+        pending_input_admission,
+        remove_pending_input_admission_from_messages,
+    )
+
+    if isinstance(result, dict) and isinstance(result.get("messages"), list):
+        result["messages"], _removed = remove_pending_input_admission_from_messages(
+            result["messages"], returned_resend_id,
+        )
+        result.update(
+            recovery_persisted=True,
+            recovery_returned_without_dispatch=True,
+            provider_call_sent=False,
+        )
+    session_messages = getattr(agent, "_session_messages", None)
+    if isinstance(session_messages, list):
+        agent._session_messages, _removed_session = (
+            remove_pending_input_admission_from_messages(
+                session_messages, returned_resend_id,
+            )
+        )
+    if pending_input_admission(
+        getattr(agent, "_pending_cli_user_message", None)
+    )[0] == returned_resend_id:
+        agent._pending_cli_user_message = None
+    return result
+
+
 class TurnFacadeMixin:
     """run_conversation()/chat() (see module docstring)."""
 
@@ -82,7 +157,7 @@ class TurnFacadeMixin:
                 relay_outcome = (
                     "cancelled" if admission.early_result.get("interrupted") else "timed_out"
                 )
-                return admission.early_result
+                return _settle_undispatched_pending_input(self, admission.early_result)
             lease = admission.lease
             conversation_history = admission.conversation_history
 
@@ -142,7 +217,7 @@ class TurnFacadeMixin:
             if task_started:
                 task_finished = True
                 finish_task_run(**task_context, result=result)
-            return result
+            return _settle_undispatched_pending_input(self, result)
         except BaseException as exc:
             if isinstance(exc, (KeyboardInterrupt, InterruptedError)) or (
                 type(exc).__name__ == "CancelledError"
@@ -157,6 +232,11 @@ class TurnFacadeMixin:
             if task_started and not task_finished:
                 task_finished = True
                 finish_task_run(**task_context, error=exc)
+            # Preserve the exact claim identity for the owning surface's
+            # exception handler.  CLI/ACP each have additional staged history
+            # outside the agent object; clearing the IDs here would prevent
+            # those handlers from withdrawing that surface-local copy. Normal
+            # early results are settled at the shared return boundary above.
             raise
         finally:
             try:

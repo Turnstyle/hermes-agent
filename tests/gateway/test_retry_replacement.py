@@ -12,10 +12,30 @@ from agent.context_compressor import (
     SUMMARY_PREFIX,
     _SUMMARY_END_MARKER,
 )
-from gateway.config import GatewayConfig
+from gateway.config import GatewayConfig, Platform
 from gateway.platforms.event import MessageEvent, MessageType
 from gateway.run import GatewayRunner
-from gateway.session import SessionStore
+from gateway.session import SessionSource, SessionStore, build_session_key
+
+
+class _EmptyPendingTurnDB:
+    """Healthy durable-DB seam with no pending recovery generations."""
+
+    @staticmethod
+    def _execute_write(callback):
+        connection = MagicMock()
+        connection.execute.return_value.fetchall.return_value = []
+        return callback(connection)
+
+
+def _retry_source() -> SessionSource:
+    return SessionSource(
+        platform=Platform.SLACK,
+        chat_id="C1",
+        chat_type="dm",
+        user_id="U1",
+        scope_id="W1",
+    )
 
 
 def _composite_carrier(ask="REAL ASK"):
@@ -378,10 +398,16 @@ async def test_gateway_retry_rejects_media_before_redispatch_or_token_reset():
     gw = GatewayRunner.__new__(GatewayRunner)
     backing_store = MagicMock()
     gw.session_store = backing_store
-    session_entry = SimpleNamespace(session_id="sid", last_prompt_tokens=123)
+    source = _retry_source()
+    session_entry = SimpleNamespace(
+        session_id="sid",
+        session_key=build_session_key(source),
+        last_prompt_tokens=123,
+    )
     facade = SimpleNamespace(
         _store=backing_store,
         get_or_create_session=AsyncMock(return_value=session_entry),
+        _db_for_key=AsyncMock(return_value=_EmptyPendingTurnDB()),
         load_transcript=AsyncMock(
             return_value=[
                 {
@@ -400,7 +426,7 @@ async def test_gateway_retry_rejects_media_before_redispatch_or_token_reset():
     gw._handle_message = AsyncMock()
 
     result = await gw._handle_retry_command(
-        MessageEvent(text="/retry", message_type=MessageType.TEXT, source=MagicMock())
+        MessageEvent(text="/retry", message_type=MessageType.TEXT, source=source)
     )
 
     assert result.startswith("Cannot retry that message safely:")
@@ -414,10 +440,16 @@ async def test_gateway_retry_preserves_composite_media_diagnostic_from_store():
     gw = GatewayRunner.__new__(GatewayRunner)
     backing_store = MagicMock()
     gw.session_store = backing_store
-    session_entry = SimpleNamespace(session_id="sid", last_prompt_tokens=123)
+    source = _retry_source()
+    session_entry = SimpleNamespace(
+        session_id="sid",
+        session_key=build_session_key(source),
+        last_prompt_tokens=123,
+    )
     facade = SimpleNamespace(
         _store=backing_store,
         get_or_create_session=AsyncMock(return_value=session_entry),
+        _db_for_key=AsyncMock(return_value=_EmptyPendingTurnDB()),
         load_transcript=AsyncMock(
             return_value=[
                 _composite_carrier(),
@@ -432,7 +464,7 @@ async def test_gateway_retry_preserves_composite_media_diagnostic_from_store():
     gw._handle_message = AsyncMock()
 
     result = await gw._handle_retry_command(
-        MessageEvent(text="/retry", message_type=MessageType.TEXT, source=MagicMock())
+        MessageEvent(text="/retry", message_type=MessageType.TEXT, source=source)
     )
 
     assert result == (
@@ -447,10 +479,16 @@ async def test_gateway_retry_stops_when_transcript_rewrite_fails():
     gw = GatewayRunner.__new__(GatewayRunner)
     backing_store = MagicMock()
     gw.session_store = backing_store
-    session_entry = SimpleNamespace(session_id="sid", last_prompt_tokens=123)
+    source = _retry_source()
+    session_entry = SimpleNamespace(
+        session_id="sid",
+        session_key=build_session_key(source),
+        last_prompt_tokens=123,
+    )
     facade = SimpleNamespace(
         _store=backing_store,
         get_or_create_session=AsyncMock(return_value=session_entry),
+        _db_for_key=AsyncMock(return_value=_EmptyPendingTurnDB()),
         load_transcript=AsyncMock(
             return_value=[
                 {"role": "user", "content": "retry me"},
@@ -463,7 +501,7 @@ async def test_gateway_retry_stops_when_transcript_rewrite_fails():
     gw._handle_message = AsyncMock()
 
     result = await gw._handle_retry_command(
-        MessageEvent(text="/retry", message_type=MessageType.TEXT, source=MagicMock())
+        MessageEvent(text="/retry", message_type=MessageType.TEXT, source=source)
     )
 
     assert result.startswith("Retry failed;")

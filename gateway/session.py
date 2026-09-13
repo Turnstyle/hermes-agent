@@ -1048,6 +1048,100 @@ class SessionStore(
         """
         return self._update_entry(session_key, lambda e: e.metadata.__setitem__(key, value))
 
+    def gc_pending_turn_drafts(self, *, now: Optional[datetime] = None) -> int:
+        """Clean bounded pending-turn rows from every reachable profile SessionDB.
+
+        Multiplex gateways enumerate the canonical served-profile set so an expired draft is
+        still collected after its last routing entry was pruned. Handles are deduplicated by
+        their resolved database path (or object identity for test/fallback handles), and one
+        broken profile cannot prevent cleanup of its siblings.
+        """
+        from gateway.pending_turn_draft import gc_pending_turn_drafts
+
+        with self._lock:
+            self._ensure_loaded_locked()
+            session_keys = tuple(self._entries)
+
+        representative_keys: Dict[Optional[str], str] = {}
+        for session_key in session_keys:
+            try:
+                profile = self._named_profile_for_key(session_key)
+            except Exception as exc:
+                logger.warning(
+                    "Pending-turn cleanup could not resolve one routed profile: %s", exc
+                )
+                continue
+            representative_keys.setdefault(profile, session_key)
+
+        candidates: List[tuple[str, Any]] = []
+        for label, resolver in (
+            ("active", lambda: self._db),
+            ("default", lambda: self._routing_db),
+        ):
+            try:
+                candidates.append((label, resolver()))
+            except Exception as exc:
+                logger.warning("Pending-turn cleanup could not open %s SessionDB: %s", label, exc)
+
+        config = getattr(self, "config", None)
+        if getattr(config, "multiplex_profiles", False):
+            try:
+                from hermes_cli.profiles import profiles_to_serve
+
+                served_profiles = profiles_to_serve(
+                    True, getattr(config, "multiplex_profile_allowlist", None)
+                )
+            except Exception as exc:
+                logger.warning(
+                    "Pending-turn cleanup could not enumerate served profiles: %s", exc
+                )
+                served_profiles = ()
+            for profile, profile_home in served_profiles:
+                try:
+                    candidates.append(
+                        (
+                            f"served-profile:{profile}",
+                            self._open_session_db_for_active_scope(
+                                db_path=Path(profile_home) / "state.db"
+                            ),
+                        )
+                    )
+                except Exception as exc:
+                    logger.warning(
+                        "Pending-turn cleanup could not open served profile %r SessionDB: %s",
+                        profile,
+                        exc,
+                    )
+
+        for profile, session_key in representative_keys.items():
+            if profile is None:
+                continue
+            try:
+                candidates.append((f"profile:{profile}", self._db_for_key(session_key)))
+            except Exception as exc:
+                logger.warning(
+                    "Pending-turn cleanup could not open profile %r SessionDB: %s", profile, exc
+                )
+
+        seen: set[tuple[str, Any]] = set()
+        total_deleted = 0
+        for label, db in candidates:
+            if db is None:
+                continue
+            db_path = getattr(db, "db_path", None)
+            try:
+                identity = ("path", str(Path(db_path).resolve())) if db_path else ("object", id(db))
+            except (OSError, TypeError, ValueError):
+                identity = ("object", id(db))
+            if identity in seen:
+                continue
+            seen.add(identity)
+            try:
+                total_deleted += int(gc_pending_turn_drafts(db, now=now))
+            except Exception as exc:
+                logger.warning("Pending-turn cleanup failed for %s SessionDB: %s", label, exc)
+        return total_deleted
+
     def set_model_override(self, session_key: str, override: Optional[Dict[str, Any]]) -> None:
         """Persist (or clear, with ``None``) the /model override; non-secret keys only."""
         cleaned = sanitize_model_override(override)
@@ -1091,14 +1185,24 @@ class SessionStore(
         return new_entry
 
     def _replace_route_locked(self, session_key, old_entry, session_id, now, **fields) -> SessionEntry:
-        """Publish a fresh entry (inheriting origin/platform/chat_type) and save. Lock held."""
+        """Durably replace a route before publishing it in memory. Lock held.
+
+        A failed save leaves ``_entries`` pointing at ``old_entry`` so same-process readback
+        cannot mistake a volatile replacement for a durable reset.
+        """
         new_entry = SessionEntry(
             session_key=session_key, session_id=session_id, created_at=now, updated_at=now,
             origin=old_entry.origin, platform=old_entry.platform, chat_type=old_entry.chat_type,
             **fields,
         )
+        # Route replacements are structural transitions. Persist a full candidate snapshot so
+        # both the authoritative routing DB and the legacy sessions.json mirror advance together,
+        # but do not expose the candidate to same-process readers until that write succeeds.
+        candidate_data = self._entries_as_dicts()
+        candidate_data[session_key] = new_entry.to_dict()
+        generation = self._next_routing_generation_locked()
+        self._persist_routing_data(candidate_data, generation)
         self._entries[session_key] = new_entry
-        self._save()
         return new_entry
 
     # Compression repoint is store bookkeeping, not user activity — leave ``updated_at`` alone so a

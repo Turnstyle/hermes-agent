@@ -12,6 +12,7 @@ import json
 import logging
 import re
 import time
+from contextlib import nullcontext
 from dataclasses import dataclass, field, fields
 from typing import Any, Dict, List, Optional
 
@@ -20,6 +21,7 @@ from agent.fast_mode import begin_turn as begin_fast_mode_turn
 from agent.message_metadata import append_message
 from agent.message_sanitization import _repair_tool_call_arguments, _sanitize_surrogates
 from agent.model_metadata import MINIMUM_CONTEXT_LENGTH, _estimate_tools_tokens_rough
+from agent.pending_input_recovery import PendingInputDispatchUncertainError
 from agent.process_bootstrap import _install_safe_stdio
 from agent.prompt_builder import RUNTIME_ENVIRONMENT_END, RUNTIME_ENVIRONMENT_HEADING
 from agent.prompt_caching import (
@@ -1245,21 +1247,274 @@ def _decode_inline_moa_turn(user_message, persist_user_message):
     return user_message, None, persist_user_message
 
 
-def _preflight_timeout_result(agent, exc, conversation_history) -> Dict[str, Any]:
+_STRUCTURED_RECOVERY_MARKER = (
+    "[Structured input was accepted before reset; structured components were not retained.]"
+)
+_NATIVE_IMAGE_RECOVERY_MARKER = (
+    "[Native-image input was accepted before reset; attachments were not retained.]"
+)
+_MOA_RECOVERY_MARKER = (
+    "[MoA input was accepted before reset; one-shot per-turn semantics were not retained.]"
+)
+
+
+def _structured_input_has_native_image(value: Any) -> bool:
+    """Inspect only bounded structural metadata, never attachment payload contents."""
+
+    pending = [value]
+    seen: set[int] = set()
+    inspected = 0
+    while pending and inspected < 128:
+        current = pending.pop()
+        inspected += 1
+        if isinstance(current, dict):
+            marker = id(current)
+            if marker in seen:
+                continue
+            seen.add(marker)
+            part_type = str(current.get("type") or "").lower()
+            if part_type in {"image", "image_url", "input_image"}:
+                return True
+            for key in ("content", "parts"):
+                nested = current.get(key)
+                if isinstance(nested, (dict, list, tuple)):
+                    pending.append(nested)
+        elif isinstance(current, (list, tuple)):
+            marker = id(current)
+            if marker in seen:
+                continue
+            seen.add(marker)
+            pending.extend(current[:128])
+    return False
+
+
+def _accepted_input_recovery(
+    user_message: Any,
+    persist_user_message: Optional[Any],
+    *,
+    moa_active: bool = False,
+) -> Optional[Dict[str, Any]]:
+    """Describe accepted input truthfully for bounded, manual-only recovery.
+
+    Plain text may also populate the classic CLI's editable PromptStash when it is exact;
+    gateway recovery never executes any record. Structured/native input gets a fixed marker
+    plus an optional plain persistence caption, never serialized attachment content. MoA is
+    text-shaped after decoding but remains lossy because its one-shot fan-out semantics are
+    not reconstructable by a later turn.
+    """
+
+    loss_reasons: list[str] = []
+    if not isinstance(user_message, str):
+        native_image = _structured_input_has_native_image(user_message)
+        input_kind = "native_image" if native_image else "structured"
+        markers = [
+            _NATIVE_IMAGE_RECOVERY_MARKER if native_image else _STRUCTURED_RECOVERY_MARKER
+        ]
+        loss_reasons.append(
+            "attachments_not_retained"
+            if native_image
+            else "structured_components_not_retained"
+        )
+        if moa_active:
+            # MoA does not make an attachment-shaped turn text-only: both the
+            # structured payload and the one-shot fan-out semantics are lost.
+            markers.append(_MOA_RECOVERY_MARKER)
+            loss_reasons.append("per_turn_semantics_not_retained")
+        caption = (
+            persist_user_message.strip()
+            if isinstance(persist_user_message, str) and persist_user_message.strip()
+            else ""
+        )
+        marker_text = "\n".join(markers)
+        recovery_text = f"{marker_text}\n\n{caption}" if caption else marker_text
+    elif moa_active:
+        input_kind = "moa"
+        loss_reasons.append("per_turn_semantics_not_retained")
+        accepted = persist_user_message if persist_user_message is not None else user_message
+        if isinstance(accepted, str) and accepted.strip():
+            recovery_text = accepted
+        else:
+            caption = (
+                persist_user_message.strip()
+                if isinstance(persist_user_message, str) and persist_user_message.strip()
+                else ""
+            )
+            recovery_text = (
+                f"{_MOA_RECOVERY_MARKER}\n\n{caption}" if caption else _MOA_RECOVERY_MARKER
+            )
+    else:
+        input_kind = "plain_text"
+        accepted = persist_user_message if persist_user_message is not None else user_message
+        if not isinstance(accepted, str) or not accepted.strip():
+            return None
+        recovery_text = accepted
+
+    normalized = _sanitize_surrogates(recovery_text)
+    normalization_changed = normalized != recovery_text
+    if normalization_changed:
+        loss_reasons.append("surrogate_normalization")
+    exact = input_kind == "plain_text" and not loss_reasons
+    value: Dict[str, Any] = {
+        "version": 1,
+        "kind": "accepted_user_input",
+        "text": normalized,
+        "input_kind": input_kind,
+        "exact": exact,
+        "lossy": not exact,
+        "loss_reasons": loss_reasons,
+        "safe_to_replay": exact,
+        "provider_call_sent": False,
+        "executable": False,
+    }
+    if normalization_changed:
+        value["normalization_changed"] = True
+    return value
+
+
+def _preflight_timeout_result(
+    agent, exc: PreflightCompressionTimedOut,
+    accepted_input: Optional[Dict[str, Any]],
+) -> Dict[str, Any]:
     """Typed recovery result when turn-start preflight compression timed out (#98424): no
     provider call was sent, and surfaces would otherwise hide the actionable guidance."""
     logger.warning(
         "Turn-start preflight compression timed out — ending turn with typed recovery result: %s", exc,
     )
-    # Clear the tripwire slot note_turn_start registered (the early return skips the persist
-    # funnel). The user row is deliberately NOT persisted (#7100).
+    # Atomically move the accepted input out of every active transcript copy before
+    # returning it to any UI.  A successful first pass may already have materialized
+    # it in an in-place session or in both sides of a rotation boundary.
     from agent.agent_runtime_helpers import note_turn_persisted
+    from agent.pending_input_recovery import (
+        PendingInputRecoverySuperseded,
+        pending_input_admission,
+        remove_pending_input_admission_from_messages,
+        stage_pending_input_recovery,
+    )
+
+    live_messages = list(exc.live_messages)
+    recovery_persisted = False
+    recovery_error = None
+    durable_recovery = accepted_input
+    if accepted_input is not None:
+        marked = [pending_input_admission(message) for message in live_messages]
+        marked = [(admission_id, surface_key) for admission_id, surface_key in marked if admission_id]
+        if len(marked) == 1:
+            admission_id, surface_key = marked[0]
+            surface_key = surface_key or f"{getattr(agent, 'platform', None) or 'agent'}:{agent.session_id}"
+            try:
+                persist_lock = getattr(agent, "_session_persist_lock", None)
+                lock_context = persist_lock if persist_lock is not None else nullcontext()
+                with lock_context:
+                    predecessor_recovery_id = getattr(
+                        agent, "_pending_input_recovery_claim_id", None
+                    )
+                    predecessor_resend_id = getattr(
+                        agent, "_pending_input_recovery_resend_id", None
+                    )
+                    if not (
+                        isinstance(predecessor_recovery_id, str)
+                        and predecessor_recovery_id.strip()
+                        and isinstance(predecessor_resend_id, str)
+                        and predecessor_resend_id.strip()
+                    ):
+                        predecessor_recovery_id = None
+                        predecessor_resend_id = None
+                    durable_recovery, live_messages = stage_pending_input_recovery(
+                        getattr(agent, "_session_db", None),
+                        accepted_input=accepted_input,
+                        live_messages=live_messages,
+                        session_ids=exc.accepted_input_session_ids or [agent.session_id],
+                        admission_id=admission_id,
+                        surface_key=surface_key,
+                        accepted_input_durably_committed=exc.accepted_input_durably_committed,
+                        turn_lease_holder=getattr(
+                            agent, "_active_session_turn_lease_holder", None
+                        ),
+                        poisoned_compression_lock_identity=(
+                            exc.poisoned_compression_lock_identity
+                        ),
+                        predecessor_recovery_id=predecessor_recovery_id,
+                        predecessor_resend_id=predecessor_resend_id,
+                    )
+                    agent._pending_input_recovery_claim_id = None
+                    agent._pending_input_recovery_resend_id = None
+                    if durable_recovery.get("accepted_input_durably_committed"):
+                        restored = agent._session_db.get_messages_as_conversation(agent.session_id)
+                        live_messages = restored
+                    agent._pending_cli_user_message = None
+                    agent._persist_user_message_idx = None
+                    agent._persist_user_message_override = None
+                    agent._session_messages = live_messages
+                recovery_persisted = True
+            except PendingInputRecoverySuperseded as recovery_exc:
+                # The original recovery is still durable under a newer claim.
+                # Staging atomically removed this stale claimant's exact row and
+                # deliberately did not mint a second replayable record.
+                durable_recovery = recovery_exc.recovery
+                live_messages = recovery_exc.live_messages
+                agent._pending_input_recovery_claim_id = None
+                agent._pending_input_recovery_resend_id = None
+                agent._pending_cli_user_message = None
+                agent._persist_user_message_idx = None
+                agent._persist_user_message_override = None
+                agent._session_messages = live_messages
+                recovery_persisted = True
+            except Exception as recovery_exc:
+                recovery_error = type(recovery_exc).__name__
+                # Durable staging can be unavailable (AIAgent supports no
+                # SessionDB) or fail closed behind a live lease. Never return
+                # the accepted row as executable history alongside the typed
+                # inert recovery payload.
+                try:
+                    live_messages, _ = remove_pending_input_admission_from_messages(
+                        live_messages, admission_id,
+                    )
+                except Exception:
+                    live_messages = [
+                        message for message in live_messages
+                        if pending_input_admission(message)[0] != admission_id
+                    ]
+                agent._pending_cli_user_message = None
+                agent._persist_user_message_idx = None
+                agent._persist_user_message_override = None
+                agent._session_messages = live_messages
+                logger.error(
+                    "Turn-start accepted input could not be staged durably (session=%s)",
+                    agent.session_id or "none", exc_info=True,
+                )
+        else:
+            recovery_error = "admission_marker_mismatch"
+            logger.error(
+                "Turn-start accepted input had %d admission markers (session=%s)",
+                len(marked), agent.session_id or "none",
+            )
+    else:
+        recovery_error = "accepted_input_unavailable"
+    # Clear the overlap tripwire only after recovery settlement; the early return
+    # skips the ordinary persist funnel.
     note_turn_persisted(agent)
     # Not _COMPRESSION_TIMEOUT_FINAL_RESPONSE — that describes a different state
     # (compression ran, could not reduce); the exception text carries the guidance.
+    flags: Dict[str, Any] = {
+        "failed": True,
+        "compression_exhausted": True,
+        "turn_exit_reason": "context_compression_timeout",
+    }
+    if accepted_input is not None:
+        # This discriminator is intentionally exclusive to the turn-start timeout above:
+        # later compression failures may follow provider/tool side effects. Gateway recovery
+        # treats even exact text as non-executable; ``safe_to_replay`` is only the classic
+        # CLI's editable-composer projection contract.
+        flags["unprocessed_input"] = durable_recovery
+    flags["recovery_persisted"] = recovery_persisted
+    flags["accepted_input_durably_committed"] = bool(
+        durable_recovery and durable_recovery.get("accepted_input_durably_committed")
+    )
+    if recovery_error:
+        flags["recovery_error"] = recovery_error
     return _partial_turn_result(
-        str(exc), list(conversation_history or []), 0,
-        failed=True, compression_exhausted=True, turn_exit_reason="context_compression_timeout",
+        str(exc), live_messages, 0,
+        **flags,
     )
 
 
@@ -1339,6 +1594,12 @@ class _LoopState:
     _llm_middleware_trace: Any = None
     api_duration: Any = None
     assistant_message: Any = None
+    # Terminal provider seam output for a recovered resend. A definitive
+    # middleware/Relay short-circuit returns the durable claim to pending and
+    # the retry loop removes the exact live row instead of finalizing a
+    # synthetic assistant response against it.
+    recovery_returned_without_dispatch: bool = False
+    recovery_resend_id: str = ""
 
 
 # _LoopState fields seeded from TurnContext (same name minus the leading underscore).
@@ -1375,6 +1636,13 @@ def _run_phase(fn, agent, state: _LoopState, **extra):
     return verdict
 
 
+def _ack_pending_input_recovery_after_provider_response(agent: Any) -> None:
+    """Compatibility/test seam; production acknowledgement lives in the terminal call."""
+    from agent.turn_api_call import _ack_pending_input_recovery_after_provider_response as _ack
+
+    _ack(agent)
+
+
 def _run_api_retry_loop(agent, s: _LoopState) -> Optional[Dict[str, Any]]:
     """One API call with its retry/recovery loop (guard → build → call → check, error handlers).
 
@@ -1388,13 +1656,170 @@ def _run_api_retry_loop(agent, s: _LoopState) -> Optional[Dict[str, Any]]:
             return None
         try:
             _run_phase(build_api_request, agent, s)
-            if _run_phase(perform_api_call, agent, s).action == "break":
+            _provider_verdict = _run_phase(perform_api_call, agent, s)
+            if _provider_verdict.recovery_returned_without_dispatch:
+                from agent.pending_input_recovery import (
+                    pending_input_admission,
+                    remove_pending_input_admission_from_messages,
+                )
+
+                resend_id = _provider_verdict.recovery_resend_id
+                s.messages, _removed = remove_pending_input_admission_from_messages(
+                    s.messages, resend_id,
+                )
+                if isinstance(s.conversation_history, list):
+                    s.conversation_history, _removed_history = (
+                        remove_pending_input_admission_from_messages(
+                            s.conversation_history, resend_id,
+                        )
+                    )
+                session_messages = getattr(agent, "_session_messages", None)
+                if isinstance(session_messages, list):
+                    agent._session_messages, _removed_session = (
+                        remove_pending_input_admission_from_messages(
+                            session_messages, resend_id,
+                        )
+                    )
+                if pending_input_admission(
+                    getattr(agent, "_pending_cli_user_message", None)
+                )[0] == resend_id:
+                    agent._pending_cli_user_message = None
+                return {
+                    "final_response": (
+                        "The recovered input did not reach a provider. Hermes returned "
+                        "it to pending recovery; submit it explicitly when ready."
+                    ),
+                    "messages": s.messages,
+                    "api_calls": s.api_call_count,
+                    "completed": False,
+                    "failed": True,
+                    "recovery_persisted": True,
+                    "provider_call_sent": False,
+                    "recovery_returned_without_dispatch": True,
+                    "turn_exit_reason": "pending_input_not_dispatched",
+                }
+            if _provider_verdict.action == "break":
                 return None
+            if _provider_verdict.recovered_provider_call_completed:
+                # Empty/malformed output normally enters retry/fallback. For an
+                # explicitly recovered input the physical callback already
+                # returned, so that policy could execute the same accepted
+                # intent twice. Quarantine the exact resend and terminate with
+                # explicit at-most-once guidance instead.
+                from agent.turn_recovery import validate_response_shape
+                response_invalid, error_details = validate_response_shape(
+                    agent, s.response,
+                )
+                if response_invalid:
+                    from agent.pending_input_recovery import (
+                        consume_pending_input_recovery_without_durable_projection,
+                        pending_input_admission,
+                        remove_pending_input_admission_from_messages,
+                    )
+                    from agent.turn_api_call import _completed_recovery_dispatch_ids
+
+                    recovery_id, resend_id = _completed_recovery_dispatch_ids(agent)
+                    settled = False
+                    if recovery_id and resend_id:
+                        try:
+                            consume_pending_input_recovery_without_durable_projection(
+                                getattr(agent, "_session_db", None), recovery_id,
+                                resend_id=resend_id,
+                                turn_lease_holder=getattr(
+                                    agent, "_active_session_turn_lease_holder", None,
+                                ),
+                            )
+                            settled = True
+                            agent._pending_input_recovery_provider_completed = None
+                        except Exception:
+                            logger.error(
+                                "Could not quarantine recovered input after invalid "
+                                "provider response (session=%s)",
+                                agent.session_id or "none", exc_info=True,
+                            )
+                    if resend_id:
+                        s.messages, _removed = remove_pending_input_admission_from_messages(
+                            s.messages, resend_id,
+                        )
+                        if isinstance(s.conversation_history, list):
+                            s.conversation_history, _removed_history = (
+                                remove_pending_input_admission_from_messages(
+                                    s.conversation_history, resend_id,
+                                )
+                            )
+                        session_messages = getattr(agent, "_session_messages", None)
+                        if isinstance(session_messages, list):
+                            agent._session_messages, _removed_session = (
+                                remove_pending_input_admission_from_messages(
+                                    session_messages, resend_id,
+                                )
+                            )
+                        if pending_input_admission(
+                            getattr(agent, "_pending_cli_user_message", None)
+                        )[0] == resend_id:
+                            agent._pending_cli_user_message = None
+                    return {
+                        "final_response": (
+                            "The recovered input reached the provider, but its response "
+                            "was invalid. Hermes did not retry it automatically; review "
+                            "the provider/session state before choosing another action."
+                        ),
+                        "messages": s.messages,
+                        "api_calls": s.api_call_count,
+                        "completed": False,
+                        "failed": True,
+                        "recovery_persisted": settled or bool(recovery_id),
+                        "provider_call_sent": True,
+                        "recovery_dispatch_uncertain": True,
+                        "invalid_response_details": list(error_details),
+                        "turn_exit_reason": "recovered_provider_response_invalid",
+                    }
             _rc = _run_phase(check_api_response, agent, s)
             if _rc.action == "return":
                 return _rc.result
             if _rc.action == "break":
                 return None
+        except PendingInputDispatchUncertainError as uncertain:
+            if uncertain.resend_id:
+                from agent.pending_input_recovery import (
+                    pending_input_admission,
+                    remove_pending_input_admission_from_messages,
+                )
+
+                s.messages, _removed = remove_pending_input_admission_from_messages(
+                    s.messages, uncertain.resend_id,
+                )
+                if isinstance(s.conversation_history, list):
+                    s.conversation_history, _removed_history = (
+                        remove_pending_input_admission_from_messages(
+                            s.conversation_history, uncertain.resend_id,
+                        )
+                    )
+                session_messages = getattr(agent, "_session_messages", None)
+                if isinstance(session_messages, list):
+                    agent._session_messages, _removed_session = (
+                        remove_pending_input_admission_from_messages(
+                            session_messages, uncertain.resend_id,
+                        )
+                    )
+                if pending_input_admission(
+                    getattr(agent, "_pending_cli_user_message", None)
+                )[0] == uncertain.resend_id:
+                    agent._pending_cli_user_message = None
+            return {
+                "final_response": (
+                    "The provider dispatch outcome is uncertain. Hermes retained the "
+                    "recovery record and will not resubmit it automatically. Review the "
+                    "provider/session state before choosing whether to retry."
+                ),
+                "messages": s.messages,
+                "api_calls": s.api_call_count,
+                "completed": False,
+                "failed": True,
+                "recovery_persisted": True,
+                "recovery_dispatch_uncertain": True,
+                "turn_exit_reason": "pending_input_dispatch_uncertain",
+            }
         except InterruptedError:
             if _run_phase(handle_api_interrupt, agent, s).action == "break":
                 return None
@@ -1431,6 +1856,10 @@ def _run_conversation_turn(
         user_message, moa_config, persist_user_message = _decode_inline_moa_turn(
             user_message, persist_user_message
         )
+    moa_active = bool(
+        moa_config is not None
+        or (getattr(agent, "provider", "") or "").strip().lower() == "moa"
+    )
 
     # The gateway caches agents across turns; compression state is per-turn, or a stale
     # in-place boundary would make a later uncompressed result look compacted.
@@ -1462,10 +1891,18 @@ def _run_conversation_turn(
             ra=_ra,
             # MoA turns append per-call aggregated context to the API copy of the
             # user message, so no byte-stable api_content sidecar can be stamped.
-            moa_active=bool(moa_config),
+            moa_active=moa_active,
         )
     except PreflightCompressionTimedOut as _preflight_timeout_exc:
-        return _preflight_timeout_result(agent, _preflight_timeout_exc, conversation_history)
+        return _preflight_timeout_result(
+            agent,
+            _preflight_timeout_exc,
+            _accepted_input_recovery(
+                user_message,
+                persist_user_message,
+                moa_active=moa_active,
+            ),
+        )
 
     # Per-turn agent state (the gateway caches agents across turns, so none of this may
     # leak into the next message): interim-commentary dedup spans the whole turn but not
@@ -1490,11 +1927,12 @@ def _run_conversation_turn(
     # Opt-in runtime: api_mode == codex_app_server hands the whole turn to the codex
     # app-server subprocess (see agent/transports/codex_app_server_session.py).
     if agent.api_mode == "codex_app_server":
-        return agent._run_codex_app_server_turn(
+        result = agent._run_codex_app_server_turn(
             user_message=s.user_message, original_user_message=s.original_user_message,
             messages=s.messages, effective_task_id=s.effective_task_id,
             should_review_memory=s._should_review_memory,
         )
+        return result
 
     while (s.api_call_count < agent.max_iterations and agent.iteration_budget.remaining > 0) or agent._budget_grace_call:
         if _run_phase(begin_iteration, agent, s).action == "break":
@@ -1548,6 +1986,15 @@ def _run_conversation_turn(
         name: getattr(s, name)
         for name in inspect.signature(finalize_turn).parameters if name != "agent"
     })
+    # The terminal provider seam attempts the durable acknowledgement before
+    # finalization. If that write failed transiently, retry only after the
+    # complete user/assistant pair has been persisted. A permanent failure stays
+    # recoverable: restart reconciliation recognizes the durable answer and
+    # preserves the pair rather than withdrawing only its user row.
+    if isinstance(
+        getattr(agent, "_pending_input_recovery_provider_completed", None), tuple
+    ):
+        _ack_pending_input_recovery_after_provider_response(agent)
     if s._compression_timeout_exhausted:
         # Reuse the gateway's context-recovery contract: transcript stays intact while
         # future input can move to a clean session (#98722).
@@ -1592,6 +2039,14 @@ def run_conversation(
         persist_user_platform_id=persist_user_platform_id,
         moa_config=moa_config,
     )
+    # Some terminal/error paths return before the ordinary finalize block. A
+    # recovered physical callback is acknowledged only if its exact response
+    # pair is now durable; otherwise the generation-fenced marker remains
+    # visible and restart reconciliation quarantines the resend.
+    if isinstance(
+        getattr(agent, "_pending_input_recovery_provider_completed", None), tuple
+    ):
+        _ack_pending_input_recovery_after_provider_response(agent)
     return export_current_turn_boundary(agent, result, user_message)
 
 

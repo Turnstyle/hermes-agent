@@ -410,14 +410,14 @@ def _ensure_codex_session(agent) -> None:
     )
 
 
-def _persist_projected_messages(agent, turn, messages: List[Dict[str, Any]]) -> None:
+def _persist_projected_messages(agent, turn, messages: List[Dict[str, Any]]) -> bool:
     """Splice the projected messages into ``messages`` and flush them to the session DB.
 
     Bypasses conversation_loop's per-step _persist_session(); the flush dedups via _DB_PERSISTED_MARKER so
     only the new codex rows are written. The agent stays the sole persister (agent_persisted=True): a
     gateway re-write would re-INSERT the user turn."""
     if not turn.projected_messages:
-        return
+        return False
     from agent.message_metadata import append_message
     projected_messages = turn.projected_messages
     # Turn-start persistence owns the accepted input. Codex's leading user item
@@ -430,7 +430,7 @@ def _persist_projected_messages(agent, turn, messages: List[Dict[str, Any]]) -> 
     for projected_message in projected_messages:
         append_message(messages, projected_message)
     if getattr(agent, "_session_db", None) is None:
-        return
+        return False
     flush_ok = False
     try:
         flush_ok = agent._flush_messages_to_session_db(messages)
@@ -440,6 +440,7 @@ def _persist_projected_messages(agent, turn, messages: List[Dict[str, Any]]) -> 
         # Output already streamed and agent_persisted cannot flip to False: surface the gap loudly.
         logger.warning("codex app-server turn was delivered but could NOT be persisted to the session DB "
                        "(session=%s) — this turn will be missing after restart/resume", getattr(agent, "session_id", None))
+    return bool(flush_ok)
 
 
 def _finish_codex_turn(agent, turn, messages: List[Dict[str, Any]], *, original_user_message: Any,
@@ -477,29 +478,246 @@ def run_codex_app_server_turn(agent, *, user_message: str, original_user_message
         from agent.conversation_compression import _checkpoint_blocked
         raise _checkpoint_blocked("codex_app_server owns the authoritative thread and compacts it "
                                   "without a truthful pre-compaction transcript boundary")
-    _ensure_codex_session(agent)
+    recovery_id = getattr(agent, "_pending_input_recovery_claim_id", None)
+    recovery_resend_id = getattr(agent, "_pending_input_recovery_resend_id", None)
+    # Loose test doubles and adapters may synthesize arbitrary truthy attributes
+    # through ``__getattr__``. Recovery activates only for concrete IDs; malformed
+    # values stay on the ordinary turn path and cannot reach durable recovery APIs.
+    recovery_active = bool(
+        isinstance(recovery_id, str)
+        and recovery_id.strip()
+        and isinstance(recovery_resend_id, str)
+        and recovery_resend_id.strip()
+    )
+    dispatch_attempted = False
+    turn_start_was_accepted = False
+
+    def _clean_recovery_resend() -> None:
+        nonlocal messages
+        if not recovery_active:
+            return
+        from agent.pending_input_recovery import (
+            pending_input_admission,
+            remove_pending_input_admission_from_messages,
+        )
+
+        messages, _removed = remove_pending_input_admission_from_messages(
+            messages, recovery_resend_id,
+        )
+        session_messages = getattr(agent, "_session_messages", None)
+        if isinstance(session_messages, list):
+            agent._session_messages, _removed_session = (
+                remove_pending_input_admission_from_messages(
+                    session_messages, recovery_resend_id,
+                )
+            )
+        if pending_input_admission(
+            getattr(agent, "_pending_cli_user_message", None)
+        )[0] == recovery_resend_id:
+            agent._pending_cli_user_message = None
+
+    def _before_turn_start() -> None:
+        nonlocal dispatch_attempted
+        from agent.pending_input_recovery import mark_pending_input_recovery_dispatch_started
+
+        mark_pending_input_recovery_dispatch_started(
+            getattr(agent, "_session_db", None), recovery_id,
+            resend_id=recovery_resend_id,
+            turn_lease_holder=getattr(
+                agent, "_active_session_turn_lease_holder", None,
+            ),
+        )
+        dispatch_attempted = True
+
+    def _turn_start_accepted() -> None:
+        nonlocal turn_start_was_accepted
+        from agent.pending_input_recovery import (
+            mark_pending_input_recovery_provider_returned,
+        )
+
+        # ``turn/start`` returned a concrete response. Persist that exact
+        # generation-fenced acceptance before attempting to consume the inert
+        # recovery, so an acknowledgement write failure/restart can never turn
+        # a definitely accepted turn into a replayable prompt.
+        turn_start_was_accepted = True
+        try:
+            mark_pending_input_recovery_provider_returned(
+                getattr(agent, "_session_db", None), recovery_id,
+                resend_id=recovery_resend_id,
+            )
+        except Exception:
+            # Acceptance is already definitive. A marker write failure must not
+            # abort/close the live Codex turn; the later consume can still
+            # persist that fact. If both writes fail, the started claim remains
+            # visible as uncertain instead of being silently replayed.
+            logger.error(
+                "Could not persist recovered-input Codex turn/start acceptance "
+                "(session=%s)", agent.session_id or "none", exc_info=True,
+            )
+        agent._pending_input_recovery_provider_completed = (
+            recovery_id, recovery_resend_id,
+        )
+
     try:
-        turn = agent._codex_session.run_turn(user_input=user_message)
+        _ensure_codex_session(agent)
     except Exception as exc:
+        if recovery_active:
+            from agent.pending_input_recovery import return_pending_input_recovery_without_dispatch
+
+            return_pending_input_recovery_without_dispatch(
+                getattr(agent, "_session_db", None), recovery_id,
+                resend_id=recovery_resend_id,
+                turn_lease_holder=getattr(agent, "_active_session_turn_lease_holder", None),
+            )
+            _clean_recovery_resend()
+            agent._pending_input_recovery_claim_id = None
+            agent._pending_input_recovery_resend_id = None
+        logger.exception("codex app-server startup failed")
+        return _turn_result(
+            _consume_user_interrupt(agent), messages, api_calls=0, completed=False,
+            error=str(exc), turn_start_accepted=False,
+            final_response=f"Codex app-server startup failed: {exc}. Fall back to default runtime with `/codex-runtime auto`.",
+        )
+    codex_session = agent._codex_session
+    previous_before = getattr(codex_session, "_before_turn_start_callback", None)
+    previous_accepted = getattr(codex_session, "_turn_start_accepted_callback", None)
+    if recovery_active:
+        codex_session._before_turn_start_callback = _before_turn_start
+        codex_session._turn_start_accepted_callback = _turn_start_accepted
+    try:
+        turn = codex_session.run_turn(user_input=user_message)
+    except Exception as exc:
+        if recovery_active:
+            from agent.pending_input_recovery import (
+                quarantine_pending_input_recovery_dispatch,
+                return_pending_input_recovery_without_dispatch,
+            )
+
+            try:
+                if dispatch_attempted or turn_start_was_accepted:
+                    quarantine_pending_input_recovery_dispatch(
+                        getattr(agent, "_session_db", None), recovery_id,
+                        resend_id=recovery_resend_id,
+                        turn_lease_holder=getattr(
+                            agent, "_active_session_turn_lease_holder", None,
+                        ),
+                    )
+                else:
+                    return_pending_input_recovery_without_dispatch(
+                        getattr(agent, "_session_db", None), recovery_id,
+                        resend_id=recovery_resend_id,
+                        turn_lease_holder=getattr(
+                            agent, "_active_session_turn_lease_holder", None,
+                        ),
+                    )
+            finally:
+                _clean_recovery_resend()
+                # This Codex turn is terminal. Never carry its recovery
+                # attribution into a later unrelated turn, even when the
+                # durable quarantine write itself fails. The started record is
+                # still the sole restart authority in that failure case.
+                agent._pending_input_recovery_claim_id = None
+                agent._pending_input_recovery_resend_id = None
+                agent._pending_input_recovery_provider_completed = None
         logger.exception("codex app-server turn failed")
         _close_codex_session(agent)
         return _turn_result(
             _consume_user_interrupt(agent), messages, api_calls=0, completed=False, error=str(exc),
+            turn_start_accepted=False,
             final_response=f"Codex app-server turn failed: {exc}. Fall back to default runtime with `/codex-runtime auto`.",
         )
+    finally:
+        if recovery_active:
+            codex_session._before_turn_start_callback = previous_before
+            codex_session._turn_start_accepted_callback = previous_accepted
+    if recovery_active and not getattr(turn, "turn_start_accepted", False):
+        from agent.pending_input_recovery import (
+            quarantine_pending_input_recovery_dispatch,
+            return_pending_input_recovery_without_dispatch,
+        )
+
+        try:
+            if getattr(turn, "turn_start_attempted", False) or dispatch_attempted:
+                quarantine_pending_input_recovery_dispatch(
+                    getattr(agent, "_session_db", None), recovery_id,
+                    resend_id=recovery_resend_id,
+                    turn_lease_holder=getattr(
+                        agent, "_active_session_turn_lease_holder", None,
+                    ),
+                )
+            else:
+                return_pending_input_recovery_without_dispatch(
+                    getattr(agent, "_session_db", None), recovery_id,
+                    resend_id=recovery_resend_id,
+                    turn_lease_holder=getattr(
+                        agent, "_active_session_turn_lease_holder", None,
+                    ),
+                )
+        finally:
+            _clean_recovery_resend()
+            agent._pending_input_recovery_claim_id = None
+            agent._pending_input_recovery_resend_id = None
+            agent._pending_input_recovery_provider_completed = None
     interrupt = _consume_user_interrupt(agent, turn.interrupted)
     # Wedged client (deadline blown, watchdog tripped, OAuth refresh died, subprocess exited): retire it.
     if getattr(turn, "should_retire", False):
         logger.warning("codex app-server session retired (turn error: %s)", turn.error)
         _close_codex_session(agent)
-    _persist_projected_messages(agent, turn, messages)
+    projected_response_persisted = _persist_projected_messages(agent, turn, messages)
+    if recovery_active and isinstance(
+        getattr(agent, "_pending_input_recovery_provider_completed", None), tuple
+    ):
+        # The first consume may fail before the accepted turn's projected rows
+        # are durable. Retry after persistence; on permanent failure the
+        # provider-return marker still lets restart preserve/settle the pair.
+        if projected_response_persisted:
+            from agent.turn_api_call import _ack_pending_input_recovery_after_provider_response
+
+            _ack_pending_input_recovery_after_provider_response(agent)
+        else:
+            # turn/start was definitively accepted, but no assistant projection
+            # was durably paired with its resend row. At-most-once wins: atomically
+            # withdraw that executable local turn and settle it with explicit
+            # projection-loss provenance.
+            try:
+                from agent.pending_input_recovery import (
+                    consume_pending_input_recovery_without_durable_projection,
+                )
+
+                consume_pending_input_recovery_without_durable_projection(
+                    getattr(agent, "_session_db", None), recovery_id,
+                    resend_id=recovery_resend_id,
+                    turn_lease_holder=getattr(
+                        agent, "_active_session_turn_lease_holder", None,
+                    ),
+                )
+            except Exception:
+                logger.error(
+                    "Could not quarantine accepted Codex turn after projection failure "
+                    "(session=%s)", agent.session_id or "none", exc_info=True,
+                )
+            finally:
+                _clean_recovery_resend()
+                agent._pending_input_recovery_claim_id = None
+                agent._pending_input_recovery_resend_id = None
+                agent._pending_input_recovery_provider_completed = None
     usage_result = _finish_codex_turn(
         agent, turn, messages, original_user_message=original_user_message, should_review_memory=should_review_memory,
     )
+    if recovery_active and isinstance(
+        getattr(agent, "_pending_input_recovery_provider_completed", None), tuple
+    ):
+        # Match the classic runtime's post-finalization retry: a transient first
+        # consume failure must not require restart, while a permanent failure
+        # keeps the durable acceptance marker for reconciliation.
+        from agent.turn_api_call import _ack_pending_input_recovery_after_provider_response
+
+        _ack_pending_input_recovery_after_provider_response(agent)
     return _turn_result(
         interrupt, messages, api_calls=1, completed=not turn.interrupted and turn.error is None, error=turn.error,
         # We flushed the projected rows ourselves (agent_persisted); the gateway must skip its own DB write.
         final_response=turn.final_text, agent_persisted=True, codex_thread_id=turn.thread_id, codex_turn_id=turn.turn_id,
+        turn_start_accepted=bool(getattr(turn, "turn_start_accepted", False)),
         **usage_result,
     )
 

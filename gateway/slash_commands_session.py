@@ -375,6 +375,44 @@ class GatewaySessionCommandsMixin:
 
     # ------------------------------------------------------------------ /retry, /undo
 
+    async def _handle_pending_turn_draft_retry(
+        self, event: MessageEvent, session_entry
+    ) -> Optional[str]:
+        """Return owner-only recovery guidance, or ``None`` for normal /retry semantics."""
+
+        from gateway.pending_turn_draft import (
+            PENDING_TURN_RECOVERY_UNAVAILABLE_NOTICE,
+            PendingTurnDraftError,
+            PendingTurnDraftUnauthorized,
+            PENDING_TURN_MANUAL_RESEND_NOTICE,
+            has_unacknowledged_pending_turn_draft,
+            pending_turn_principal_fingerprint,
+        )
+
+        source = event.source
+        session_key = str(getattr(session_entry, "session_key", "") or build_session_key(source))
+        try:
+            principal = pending_turn_principal_fingerprint(source)
+        except PendingTurnDraftUnauthorized:
+            return None
+        try:
+            db = await self.async_session_store._db_for_key(session_key)
+            has_unacknowledged = await asyncio.to_thread(
+                has_unacknowledged_pending_turn_draft,
+                db,
+                session_key=session_key,
+                principal_fingerprint=principal,
+            )
+        except PendingTurnDraftUnauthorized:
+            return None
+        except (PendingTurnDraftError, AttributeError, TypeError, OSError):
+            return PENDING_TURN_RECOVERY_UNAVAILABLE_NOTICE
+        except Exception:
+            return PENDING_TURN_RECOVERY_UNAVAILABLE_NOTICE
+        # Never read retained text, synthesize a recovery event, invoke hooks, or enter the
+        # model. Only the matching principal receives manual-resend guidance.
+        return PENDING_TURN_MANUAL_RESEND_NOTICE if has_unacknowledged else None
+
     async def _handle_retry_command(self, event: MessageEvent) -> str:
         """Handle /retry command - re-send the last user message."""
         # The canonical projection skips bookkeeping rows (role=user + display_kind) and pure
@@ -385,6 +423,11 @@ class GatewaySessionCommandsMixin:
 
         source = event.source
         session_entry = await self.async_session_store.get_or_create_session(source)
+        _pending_reply = await self._handle_pending_turn_draft_retry(
+            event, session_entry
+        )
+        if _pending_reply is not None:
+            return _pending_reply
         try:
             history = await self.async_session_store.load_transcript(session_entry.session_id)
         except TranscriptReadError:

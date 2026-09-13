@@ -50,7 +50,7 @@ def _make_event(text: str) -> MessageEvent:
     return MessageEvent(text=text, source=_make_source(), message_id="m1")
 
 
-def _make_runner(*, compression_in_flight: bool):
+def _make_runner(*, compression_in_flight: bool, busy_input_mode: str = "interrupt"):
     """Minimal GatewayRunner with an active running agent for this session.
 
     Mirrors tests/gateway/test_running_agent_session_toggles.py's harness
@@ -107,7 +107,8 @@ def _make_runner(*, compression_in_flight: bool):
     runner._capture_gateway_honcho_if_configured = lambda *args, **kwargs: None
     runner._emit_gateway_run_progress = AsyncMock()
     runner._draining = False
-    runner._busy_input_mode = "interrupt"
+    runner._busy_input_mode = busy_input_mode
+    runner._busy_text_mode = "interrupt"
 
     # No subagents active — isolates the compression-demotion behavior from
     # the (already-correct) subagent-demotion branch.
@@ -134,16 +135,39 @@ def _make_runner(*, compression_in_flight: bool):
 
 
 @pytest.mark.asyncio
-async def test_priority_path_does_not_interrupt_when_compression_in_flight():
-    """A plain-text follow-up must NOT interrupt the running agent while
-    context compression is in flight — it must queue instead, mirroring
-    _handle_active_session_busy_message's #56391 demotion."""
-    runner, agent_mock, sk = _make_runner(compression_in_flight=True)
+@pytest.mark.parametrize("busy_input_mode", ["interrupt", "steer"])
+async def test_priority_path_queues_mutating_busy_modes_during_compression(
+    busy_input_mode,
+):
+    """Neither interrupt nor steer may mutate a run while its history rotates."""
+    runner, agent_mock, sk = _make_runner(
+        compression_in_flight=True, busy_input_mode=busy_input_mode
+    )
 
     await runner._handle_message(_make_event("still there?"))
 
     agent_mock.interrupt.assert_not_called()
+    agent_mock.steer.assert_not_called()
     queued = runner.adapters[Platform.TELEGRAM]._pending_messages.get(sk)
     assert queued is not None and queued.text == "still there?"
 
+
+@pytest.mark.asyncio
+async def test_adapter_busy_path_queues_configured_steer_during_compression(monkeypatch):
+    """The adapter callback path uses the same no-steer compression barrier."""
+    runner, agent_mock, sk = _make_runner(
+        compression_in_flight=True, busy_input_mode="steer"
+    )
+    runner._route_plaintext_approval_while_busy = AsyncMock(return_value=False)
+    monkeypatch.setenv("HERMES_GATEWAY_BUSY_ACK_ENABLED", "false")
+
+    handled = await runner._handle_active_session_busy_message(
+        _make_event("preserve this"), sk
+    )
+
+    assert handled is True
+    agent_mock.steer.assert_not_called()
+    agent_mock.interrupt.assert_not_called()
+    queued = runner.adapters[Platform.TELEGRAM]._pending_messages.get(sk)
+    assert queued is not None and queued.text == "preserve this"
 

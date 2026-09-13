@@ -37,6 +37,16 @@ from acp_adapter.session import SessionManager, SessionState, _expand_acp_enable
 from acp_adapter.tools import build_tool_complete, build_tool_start, coerce_tool_args
 from agent.context_compressor import (COMPRESSED_SUMMARY_METADATA_KEY, ContextCompressor)
 from agent.interrupt_compat import request_hard_interrupt
+from agent.pending_input_recovery import (
+    PendingInputRecoveryError,
+    claim_pending_input_recovery,
+    get_pending_input_recovery,
+    get_surface_pending_input_recovery,
+    mint_pending_input_admission_id,
+    quarantine_pending_input_recovery_dispatch,
+    remove_pending_input_admission_from_messages,
+    return_pending_input_recovery_without_dispatch,
+)
 from tools.approval_context import reset_hermes_interactive_context, set_hermes_interactive_context
 
 logger = logging.getLogger(__name__)
@@ -689,7 +699,8 @@ class HermesACPAgent(SlashCommandsMixin, acp.Agent):
         return user_text, user_content
 
     def _claim_turn_or_queue(
-        self, state: SessionState, session_id: str, user_text: str, user_content: Any, text_only: bool
+        self, state: SessionState, session_id: str, user_text: str, user_content: Any,
+        text_only: bool, admission_id: str = "", recovery_resend: bool = False,
     ) -> str | None:
         """Mark the session running; if a turn is active, redirect it (text-only, supported
         runtime) or queue it. Returns the client message when absorbed, else None."""
@@ -697,7 +708,20 @@ class HermesACPAgent(SlashCommandsMixin, acp.Agent):
             if not state.is_running:
                 state.is_running = True
                 state.current_prompt_text = user_text or "[Image attachment]"
+                # ACP has no platform delivery id. Keep the full typed input and our
+                # stable generation in memory until durable recovery is verified.
+                state.current_prompt_content = user_content
+                state.current_prompt_admission_id = admission_id
                 return None
+            if recovery_resend:
+                # Recovery identity must be claimed only when this exact input
+                # owns turn admission. Redirecting it into another generation,
+                # or placing raw text in the legacy memory-only queue, would let
+                # it reach a provider without settling the durable record.
+                return (
+                    "Pending-input recovery cannot be redirected or queued while "
+                    "another turn is active. Retry it when this session is idle."
+                )
             if text_only and isinstance(user_content, str) and hasattr(state.agent, "redirect") and (
                 getattr(state.agent, "_supports_active_turn_redirect", False) is True
             ):
@@ -706,12 +730,113 @@ class HermesACPAgent(SlashCommandsMixin, acp.Agent):
                         return "Redirected the active turn with your correction."
                 except Exception:
                     logger.debug("ACP active-turn redirect failed for %s", session_id, exc_info=True)
-            state.queued_prompts.append(user_text or "[Image attachment]")
+            if not text_only or not isinstance(user_content, str):
+                return (
+                    "Structured prompts cannot be queued safely while another turn is active. "
+                    "Retry when this turn is idle so attachments and components are preserved."
+                )
+            # Preserve the exact text bytes accepted from ACP.  ``user_text`` is
+            # stripped for command/display handling and is not a replay identity.
+            state.queued_prompts.append(user_content)
             return f"Queued for the next turn. ({len(state.queued_prompts)} queued)"
+
+    def _return_recovery_claim_if_not_dispatched(
+        self, state: SessionState, db: Any, recovery_id: str, resend_id: str,
+    ) -> bool:
+        """Fenced rollback for a claimed ACP recovery that never reached a provider.
+
+        The durable transition refuses a started/uncertain dispatch.  Those records
+        deliberately remain claimed for explicit reconciliation rather than becoming
+        an automatic duplicate retry.
+        """
+        if not recovery_id or not resend_id:
+            return False
+        try:
+            return_pending_input_recovery_without_dispatch(
+                db,
+                recovery_id,
+                resend_id=resend_id,
+                turn_lease_holder=getattr(
+                    state.agent, "_active_session_turn_lease_holder", None,
+                ),
+            )
+        except PendingInputRecoveryError:
+            try:
+                record = get_pending_input_recovery(db, recovery_id)
+            except Exception:
+                logger.exception(
+                    "Could not inspect undispatched ACP recovery %s after rollback refusal",
+                    recovery_id,
+                )
+                return False
+            exact_claim = bool(
+                isinstance(record, dict)
+                and record.get("status") == "claimed"
+                and record.get("resend_id") == resend_id
+            )
+            if exact_claim and record.get("dispatch_state") in {"started", "uncertain"}:
+                try:
+                    quarantine_pending_input_recovery_dispatch(
+                        db,
+                        recovery_id,
+                        resend_id=resend_id,
+                        turn_lease_holder=getattr(
+                            state.agent, "_active_session_turn_lease_holder", None,
+                        ),
+                    )
+                except Exception:
+                    logger.exception(
+                        "Could not quarantine started ACP recovery %s resend %s",
+                        recovery_id,
+                        resend_id,
+                    )
+                logger.warning(
+                    "ACP recovery %s failed after provider dispatch may have started; "
+                    "leaving resend %s quarantined",
+                    recovery_id, resend_id,
+                )
+            else:
+                logger.warning(
+                    "ACP recovery %s resend %s changed before rollback completed; "
+                    "leaving its newer durable state unchanged",
+                    recovery_id, resend_id,
+                )
+            return False
+        except Exception:
+            logger.exception(
+                "Could not return undispatched ACP recovery %s to pending",
+                recovery_id,
+            )
+            return False
+
+        with state.runtime_lock:
+            state.history, _removed = remove_pending_input_admission_from_messages(
+                state.history, resend_id,
+            )
+            session_messages = getattr(state.agent, "_session_messages", None)
+            if isinstance(session_messages, list):
+                state.agent._session_messages, _removed_session = (
+                    remove_pending_input_admission_from_messages(
+                        session_messages, resend_id,
+                    )
+                )
+            if getattr(state.agent, "_pending_input_admission_id", None) == resend_id:
+                state.agent._pending_input_admission_id = None
+                if (
+                    getattr(state.agent, "_pending_input_surface_key", None)
+                    == f"acp:{state.session_id}"
+                ):
+                    state.agent._pending_input_surface_key = None
+            if getattr(state.agent, "_pending_input_recovery_claim_id", None) == recovery_id:
+                state.agent._pending_input_recovery_claim_id = None
+            if getattr(state.agent, "_pending_input_recovery_resend_id", None) == resend_id:
+                state.agent._pending_input_recovery_resend_id = None
+        return True
 
     def _run_agent_turn(
         self, *, state: SessionState, session_id: str, user_text: str, user_content: Any, conn: Any,
         loop: asyncio.AbstractEventLoop, approval_cb: Any, edit_approval_requester: Any,
+        admission_id: str = "", recovery_claim_id: str = "",
     ) -> dict:
         """Executor-thread body of one turn, run inside ``contextvars.copy_context()`` so
         ContextVar writes are isolated from concurrent sessions.
@@ -764,14 +889,43 @@ class HermesACPAgent(SlashCommandsMixin, acp.Agent):
                     loop.call_soon_threadsafe(asyncio.create_task, self._send_session_info_update(session_id))
 
             agent._on_session_title = _notify_title_update
+            previous_admission = getattr(agent, "_pending_input_admission_id", None)
+            previous_surface = getattr(agent, "_pending_input_surface_key", None)
+            previous_claim = getattr(agent, "_pending_input_recovery_claim_id", None)
+            previous_resend = getattr(agent, "_pending_input_recovery_resend_id", None)
+            agent._pending_input_admission_id = admission_id
+            agent._pending_input_surface_key = f"acp:{session_id}"
+            agent._pending_input_recovery_claim_id = recovery_claim_id or None
+            agent._pending_input_recovery_resend_id = admission_id if recovery_claim_id else None
             try:
-                return agent.run_conversation(
-                    user_message=user_content, conversation_history=state.history, task_id=session_id,
-                    persist_user_message=user_text or "[Image attachment]",
-                )
-            except Exception as e:
-                logger.exception("Agent error in session %s", session_id)
-                return {"final_response": f"Error: {e}", "messages": state.history}
+                try:
+                    return agent.run_conversation(
+                        user_message=user_content, conversation_history=state.history, task_id=session_id,
+                        # Text-only recovery must be byte-exact with the content
+                        # first sent to the provider.  ``user_text`` is a stripped
+                        # display/command view and would corrupt leading/trailing
+                        # whitespace while still claiming ``exact=True``.
+                        persist_user_message=(
+                            user_content
+                            if isinstance(user_content, str)
+                            else user_text or "[Image attachment]"
+                        ),
+                    )
+                except Exception as e:
+                    logger.exception("Agent error in session %s", session_id)
+                    if recovery_claim_id:
+                        self._return_recovery_claim_if_not_dispatched(
+                            state,
+                            self.session_manager._get_db(),
+                            recovery_claim_id,
+                            admission_id,
+                        )
+                    return {"final_response": f"Error: {e}", "messages": state.history}
+            finally:
+                agent._pending_input_admission_id = previous_admission
+                agent._pending_input_surface_key = previous_surface
+                agent._pending_input_recovery_claim_id = previous_claim
+                agent._pending_input_recovery_resend_id = previous_resend
 
     async def prompt(self, prompt: list[PromptBlock], session_id: str, **kwargs: Any) -> PromptResponse:
         """Run Hermes on the user's prompt and stream events back to the editor."""
@@ -786,10 +940,44 @@ class HermesACPAgent(SlashCommandsMixin, acp.Agent):
         if not user_text and not (isinstance(user_content, list) and user_content):
             return PromptResponse(stop_reason="end_turn")
 
-        user_text, user_content = self._rewrite_prompt_for_interrupt(state, user_text, user_content, text_only_prompt)
+        # Prompts drained from the already-accepted busy queue are independent
+        # admissions, not proof that the user explicitly resent an older lost
+        # generation.  They may run, but must never claim/ack that recovery.
+        allow_recovery_claim = kwargs.pop("_allow_recovery_claim", True) is True
+        db = self.session_manager._get_db()
+        recovery_surface = f"acp:{session_id}"
+        surface_recovery = (
+            get_surface_pending_input_recovery(db, recovery_surface)
+            if (
+                allow_recovery_claim
+                and db is not None
+                and hasattr(db, "get_meta")
+                and hasattr(db, "list_meta_prefix")
+            )
+            else None
+        )
+        replay = (
+            surface_recovery
+            if text_only_prompt and isinstance(user_content, str) else None
+        )
+        if not (
+            isinstance(replay, dict)
+            and replay.get("safe_to_replay") is True
+            and replay.get("dispatch_state") not in {"started", "uncertain"}
+            and replay.get("text") == user_content
+        ):
+            replay = None
+
+        # Durable recovery identity is defined by the exact raw ACP payload.  Do
+        # not consume and prepend a cancelled prompt before deciding whether this
+        # submission is the explicit resend of that older accepted generation.
+        if replay is None:
+            user_text, user_content = self._rewrite_prompt_for_interrupt(
+                state, user_text, user_content, text_only_prompt,
+            )
 
         # Slash commands are text-only; a prompt with media goes to the agent even if it starts with "/".
-        if text_only_prompt and isinstance(user_content, str) and user_text.startswith("/"):
+        if replay is None and text_only_prompt and isinstance(user_content, str) and user_text.startswith("/"):
             response_text = self._handle_slash_command(user_text, state)
             if response_text is not None:
                 if self._conn:
@@ -797,25 +985,119 @@ class HermesACPAgent(SlashCommandsMixin, acp.Agent):
                     await self._send_usage_update(state)
                 return PromptResponse(stop_reason="end_turn")
 
-        absorbed = self._claim_turn_or_queue(state, session_id, user_text, user_content, text_only_prompt)
+        # Mint before executor admission. An exact text submit may claim the
+        # surface's exact inert recovery; it is consumed only after its successor
+        # is durable. Queued prompts never reach this acknowledgement boundary.
+        admission_id = mint_pending_input_admission_id()
+        if isinstance(surface_recovery, dict) and (
+            surface_recovery.get("safe_to_replay") is False
+            or surface_recovery.get("dispatch_state") in {"started", "uncertain"}
+        ):
+            notified = getattr(self, "_pending_recovery_notices", None)
+            if not isinstance(notified, set):
+                notified = set()
+                self._pending_recovery_notices = notified
+            recovery_id = str(surface_recovery.get("admission_id") or "")
+            if recovery_id and recovery_id not in notified and self._conn:
+                if surface_recovery.get("dispatch_state") in {"started", "uncertain"}:
+                    notice = (
+                        f"Pending input {recovery_id} has an uncertain provider dispatch and "
+                        f"will not be replayed automatically. Use /recover {recovery_id} "
+                        "retry|delivered after reviewing provider state."
+                    )
+                else:
+                    reasons = ", ".join(surface_recovery.get("loss_reasons") or []) or "non-text input"
+                    notice = (
+                        f"Pending input {recovery_id} could not be retained exactly ({reasons}). "
+                        "Attachments/components must be reattached or re-entered manually; use "
+                        f"/recover {recovery_id} acknowledge after reviewing the loss notice."
+                    )
+                await self._conn.session_update(
+                    session_id, acp.update_agent_message_text(notice)
+                )
+                notified.add(recovery_id)
+        absorbed = self._claim_turn_or_queue(
+            state, session_id, user_text, user_content, text_only_prompt, admission_id,
+            recovery_resend=replay is not None,
+        )
         if absorbed is not None:
             if self._conn:
                 await self._conn.session_update(session_id, acp.update_agent_message_text(absorbed))
             return PromptResponse(stop_reason="end_turn")
+        if replay is not None:
+            claim_succeeded = False
+            try:
+                previous_resend_id = (
+                    replay.get("resend_id") if replay.get("status") == "claimed" else None
+                )
+                claim_pending_input_recovery(
+                    db, replay["admission_id"], resend_id=admission_id,
+                    claim_session_id=str(getattr(state.agent, "session_id", None) or ""),
+                )
+                claim_succeeded = True
+                if previous_resend_id and previous_resend_id != admission_id:
+                    with state.runtime_lock:
+                        state.history, _removed = remove_pending_input_admission_from_messages(
+                            state.history, previous_resend_id,
+                        )
+            except PendingInputRecoveryError:
+                if claim_succeeded:
+                    self._return_recovery_claim_if_not_dispatched(
+                        state, db, replay["admission_id"], admission_id,
+                    )
+                with state.runtime_lock:
+                    state.is_running = False
+                    if state.current_prompt_admission_id == admission_id:
+                        state.current_prompt_text = ""
+                        state.current_prompt_content = None
+                        state.current_prompt_admission_id = ""
+                if claim_succeeded:
+                    logger.exception(
+                        "ACP recovery claim setup failed for session %s", session_id,
+                    )
+                    return PromptResponse(stop_reason="end_turn")
+                logger.warning(
+                    "ACP recovery resend was already claimed for session %s", session_id,
+                )
+                return PromptResponse(stop_reason="refusal")
+            except Exception:
+                logger.exception(
+                    "ACP recovery claim setup failed for session %s", session_id,
+                )
+                self._return_recovery_claim_if_not_dispatched(
+                    state, db, replay["admission_id"], admission_id,
+                )
+                with state.runtime_lock:
+                    state.is_running = False
+                    if state.current_prompt_admission_id == admission_id:
+                        state.current_prompt_text = ""
+                        state.current_prompt_content = None
+                        state.current_prompt_admission_id = ""
+                return PromptResponse(stop_reason="end_turn")
 
-        logger.info("Prompt on session %s: %s", session_id, user_text[:100])
+        logger.info("Prompt on session %s (%d text chars)", session_id, len(user_text))
         conn, loop = self._conn, asyncio.get_running_loop()
-        if state.cancel_event:
-            state.cancel_event.clear()
-        cbs = self._wire_turn_callbacks(state, session_id, conn, loop)
-
-        def _run_agent() -> dict:
-            return self._run_agent_turn(
-                state=state, session_id=session_id, user_text=user_text, user_content=user_content, conn=conn,
-                loop=loop, approval_cb=cbs.approval_cb, edit_approval_requester=cbs.edit_approval_requester,
-            )
-
         try:
+            if state.cancel_event:
+                state.cancel_event.clear()
+            cbs = self._wire_turn_callbacks(state, session_id, conn, loop)
+
+            def _run_agent() -> dict:
+                return self._run_agent_turn(
+                    state=state,
+                    session_id=session_id,
+                    user_text=user_text,
+                    user_content=user_content,
+                    conn=conn,
+                    loop=loop,
+                    approval_cb=cbs.approval_cb,
+                    edit_approval_requester=cbs.edit_approval_requester,
+                    admission_id=admission_id,
+                    recovery_claim_id=(
+                        replay["admission_id"] if replay is not None else ""
+                    ),
+                )
+
             # ACP `session_id` is the stable handle; agent.session_id is the internal head that
             # compression may rotate — snapshot it to detect rotation after the turn.
             pre_turn_hermes_id = getattr(state.agent, "session_id", None)
@@ -824,12 +1106,22 @@ class HermesACPAgent(SlashCommandsMixin, acp.Agent):
             result = await loop.run_in_executor(_executor, ctx.run, _run_agent)
         except Exception:
             logger.exception("Executor error for session %s", session_id)
+            if replay is not None:
+                self._return_recovery_claim_if_not_dispatched(
+                    state, db, replay["admission_id"], admission_id,
+                )
             with state.runtime_lock:
                 state.is_running = False
-                state.current_prompt_text = ""
+                if state.current_prompt_admission_id == admission_id:
+                    state.current_prompt_text = ""
+                    state.current_prompt_content = None
+                    state.current_prompt_admission_id = ""
             return PromptResponse(stop_reason="end_turn")
 
-        return await self._finish_turn(state, session_id, conn, result, pre_turn_hermes_id, cbs.streamed)
+        return await self._finish_turn(
+            state, session_id, conn, result, pre_turn_hermes_id, cbs.streamed,
+            admission_id,
+        )
 
     def _wire_turn_callbacks(
         self, state: SessionState, session_id: str, conn: Any, loop: asyncio.AbstractEventLoop
@@ -872,12 +1164,25 @@ class HermesACPAgent(SlashCommandsMixin, acp.Agent):
 
     async def _finish_turn(
         self, state: SessionState, session_id: str, conn: Any, result: dict, pre_turn_hermes_id: Any,
-        streamed_message: bool,
+        streamed_message: bool, admission_id: str = "",
     ) -> PromptResponse:
         """Persist, emit provenance/final text, drain queued prompts, report usage."""
-        if result.get("messages"):
+        if "messages" in result and isinstance(result.get("messages"), list):
             state.history = result["messages"]
             self.session_manager.save_session(session_id)
+
+        recovery_timeout = result.get("turn_exit_reason") == "context_compression_timeout"
+        recovery_record = (
+            get_pending_input_recovery(self.session_manager._get_db(), admission_id)
+            if recovery_timeout and admission_id else None
+        )
+        recovery_retained = bool(
+            recovery_timeout
+            and result.get("recovery_persisted") is True
+            and isinstance(recovery_record, dict)
+            and recovery_record.get("status") == "pending"
+            and recovery_record.get("admission_id") == admission_id
+        )
 
         # Head rotated (compression split): emit provenance so clients can render the boundary.
         post_turn_hermes_id = getattr(state.agent, "session_id", None)
@@ -891,6 +1196,19 @@ class HermesACPAgent(SlashCommandsMixin, acp.Agent):
                 logger.debug("Could not emit ACP provenance update after rotation for %s", session_id, exc_info=True)
 
         final_response = result.get("final_response", "")
+        if recovery_timeout and not recovery_retained:
+            final_response = (
+                f"{final_response}\n\nRecovery preservation failed. The accepted input remains "
+                "attached to this ACP session and was not submitted to the provider."
+            ).strip()
+        elif recovery_retained and recovery_record.get("safe_to_replay") is False:
+            reasons = ", ".join(recovery_record.get("loss_reasons") or []) or "non-text input"
+            recovery_id = recovery_record.get("admission_id")
+            final_response = (
+                f"{final_response}\n\nInput recovery {recovery_id} is a non-executable loss "
+                f"notice only ({reasons}). Attachments/components were not retained; reattach "
+                "or re-enter them manually before retrying."
+            ).strip()
         cancelled = bool(state.cancel_event and state.cancel_event.is_set())
         # The local "waiting for model" interrupt status is metadata, not prose; stop_reason carries it.
         from agent.conversation_loop import INTERRUPT_WAITING_FOR_MODEL_PREFIX
@@ -904,7 +1222,16 @@ class HermesACPAgent(SlashCommandsMixin, acp.Agent):
         # Go idle before draining so recursive prompt() calls can acquire the session.
         with state.runtime_lock:
             state.is_running = False
-            state.current_prompt_text = ""
+            if not recovery_timeout or recovery_retained:
+                state.current_prompt_text = ""
+                state.current_prompt_content = None
+                state.current_prompt_admission_id = ""
+        if recovery_timeout and not recovery_retained:
+            # Preservation failed, so the full accepted prompt is still held in
+            # memory. Do not reorder a queued prompt ahead of that unresolved
+            # generation.
+            await self._send_usage_update(state)
+            return PromptResponse(stop_reason="end_turn")
         while True:
             with state.runtime_lock:
                 if not state.queued_prompts:
@@ -912,7 +1239,11 @@ class HermesACPAgent(SlashCommandsMixin, acp.Agent):
                 next_prompt = state.queued_prompts.pop(0)
             if conn:
                 await conn.session_update(session_id, acp.update_user_message_text(next_prompt))
-            await self.prompt(prompt=[TextContentBlock(type="text", text=next_prompt)], session_id=session_id)
+            await self.prompt(
+                prompt=[TextContentBlock(type="text", text=next_prompt)],
+                session_id=session_id,
+                _allow_recovery_claim=False,
+            )
 
         usage = None
         if any(result.get(k) is not None for k in ("prompt_tokens", "completion_tokens", "total_tokens")):

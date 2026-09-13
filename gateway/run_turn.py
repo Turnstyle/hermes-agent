@@ -30,6 +30,7 @@ from gateway.session import (
 from gateway.session_transcript import TranscriptReadError
 from gateway.turn_context import TurnContext
 from gateway.turn_lease import DEFAULT_LEASE_WAIT, TurnLeaseTimeoutError
+from gateway.run_turn_recovery import GatewayTurnRecoveryMixin
 from hermes_constants import get_hermes_home_override
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Tuple
@@ -43,7 +44,7 @@ if TYPE_CHECKING:  # string annotations only; never imported at runtime (cycle)
 logger = logging.getLogger("gateway.run")
 
 
-class GatewayTurnMixin:
+class GatewayTurnMixin(GatewayTurnRecoveryMixin):
     """Agent-turn execution for GatewayRunner (see module docstring)."""
 
     def _resolve_session_agent_runtime(
@@ -1548,50 +1549,6 @@ class GatewayTurnMixin:
             )
         return agent_failed_early, hidden_reasoning_incomplete, is_context_overflow_failure
 
-    async def _hmwa_compression_exhaustion_reset(
-        self, agent_result, response, session_entry, session_key, source,
-    ):
-        """Auto-reset a permanently oversized session so the next message starts fresh instead of
-        replaying the oversized context forever. Never on a lock-contended defer — that is the
-        OPPOSITE case (a concurrent path holds the lock and is shrinking it). Returns
-        ``(response, session_entry)``."""
-        # When compression is exhausted, the session is permanently too large to process. (#9893) Never wipe
-        # the session for that — retry-next-message semantics apply (#69870 lock-skip consumer; salvaged
-        # from #49874).
-        if agent_result.get("compression_deferred"):
-            logger.info(
-                "Compression deferred for session %s — the compression "
-                "lock is held by a concurrent compressor. Keeping the "
-                "session intact; the next message retries normally.",
-                session_entry.session_id if session_entry else "?",
-            )
-        elif agent_result.get("compression_exhausted") and session_entry and session_key:
-            logger.info("Auto-resetting session %s after compression exhaustion.", session_entry.session_id)
-            new_entry = await self.async_session_store.reset_session(session_key)
-            self._evict_cached_agent(session_key)
-            # Conversation boundary: the funnel clears every conversation-scoped per-session dict.
-            self._clear_conversation_scope(session_key, reason="compression_exhausted_reset")
-            if new_entry is not None:
-                # Re-point the Telegram topic binding at the fresh session, or the binding-heal walk
-                # switches the next message back onto the bloated child and re-triggers exhaustion
-                # forever. No-op on non-topic lanes.
-                # Compression rotated session_entry.session_id to the oversized compressed child earlier
-                # this turn (the agent-result sync above), and that _sync also rewrote the (chat_id,
-                # thread_id) -> bloated-child binding. reset_session swaps in a clean, parentless session,
-                # but without re-syncing the binding the next inbound message in this topic gets
-                # switch_session'd back onto the bloated child by the binding-heal walk, reloads the
-                # oversized transcript, and re-triggers compression exhaustion forever (#35809 — regression
-                # of the #9893/#10063 auto-reset).
-                session_entry = new_entry
-                await asyncio.to_thread(
-                    self._sync_telegram_topic_binding, source, session_entry, reason="compression-exhausted-reset",
-                )
-            response = (response or "") + (
-                "\n\n🔄 Session auto-reset — the conversation exceeded the maximum context size and "
-                "could not be compressed further. Your next message will start a fresh session."
-            )
-        return response, session_entry
-
     @staticmethod
     def _hmwa_user_transcript_entry(event, prepared, ts):
         """Transcript row for the inbound user turn (clean text + event time when captured)."""
@@ -1931,6 +1888,11 @@ class GatewayTurnMixin:
         if resolved is None:
             return
         source, session_entry, session_key = resolved
+        redelivery_notice = await self._hmwa_pending_turn_redelivery_notice(
+            event, source, session_entry, session_key
+        )
+        if redelivery_notice is not None:
+            return redelivery_notice
         prepared, _session_env_tokens = await self._hmwa_prepare_turn(
             event, source, session_entry, session_key, _quick_key, run_generation,
         )
@@ -1971,8 +1933,15 @@ class GatewayTurnMixin:
                 persist_user_display_kind=prepared.persist_user_display_kind,
                 persist_user_display_metadata={"gateway_input_owner": prepared.persistence_owner},
                 message_type=event.message_type,
+                turn_event=event,
             )
             _turn_seconds = time.monotonic() - _turn_started_monotonic
+            (
+                _resend_ack_notice,
+                _terminal_turn_event,
+                _terminal_turn_source,
+                _terminal_turn_session_key,
+            ) = self._hmwa_pop_turn_recovery_metadata(agent_result)
 
             # A queued (/queue) chain answered the LAST message of the chain, so the outer final
             # send (bracketed by the adapter against this event) must be ledgered under that
@@ -1994,6 +1963,8 @@ class GatewayTurnMixin:
                 _quick_key, run_generation, _run_start_session_id, _platform_name, _msg_start_time,
             )
             response = self._hmwa_prepend_reasoning(agent_result, response, source, _intentional_silence)
+            if _resend_ack_notice:
+                response = f"{response}\n\n{_resend_ack_notice}" if response else _resend_ack_notice
             _footer_line = self._hmwa_runtime_footer_line(agent_result, source, _turn_seconds)
             # Streaming already delivered the body: the footer goes out as a trailing send instead.
             if _footer_line and response and not agent_result.get("already_sent") and not _intentional_silence:
@@ -2003,8 +1974,16 @@ class GatewayTurnMixin:
             agent_failed_early, hidden_reasoning_incomplete, is_context_overflow_failure = (
                 self._hmwa_classify_turn_failure(agent_result, history, session_entry)
             )
-            response, session_entry = await self._hmwa_compression_exhaustion_reset(
-                agent_result, response, session_entry, session_key, source,
+            response, session_entry = await self._hmwa_reset_completed_turn(
+                agent_result=agent_result,
+                response=response,
+                session_entry=session_entry,
+                session_key=session_key,
+                source=source,
+                event=event,
+                terminal_event=_terminal_turn_event,
+                terminal_source=_terminal_turn_source,
+                terminal_session_key=_terminal_turn_session_key,
             )
             await self._hmwa_persist_turn_transcript(
                 event=event, source=source, session_entry=session_entry, session_key=session_key,
@@ -3411,7 +3390,6 @@ class GatewayTurnMixin:
         response: Any, result: Any, stream_task: Any,
     ) -> Any:
         """Run the queued / interrupting follow-up as the next turn (recursive ``_run_agent``)."""
-        from gateway.platforms.base import merge_pending_message_event
         from gateway.run import _preserve_queued_followup_history_offset
         source, session_id, session_key, run_generation = (
             turn_ctx.source, turn_ctx.session_id, turn_ctx.session_key, turn_ctx.run_generation,
@@ -3420,6 +3398,16 @@ class GatewayTurnMixin:
             turn_ctx._interrupt_depth, turn_ctx.history, turn_ctx._status_thread_metadata,
         )
         logger.debug("Processing pending message: '%s...'", pending[:40])
+
+        if await self._hmwa_defer_queued_followup_for_recovery(
+            adapter=adapter,
+            session_key=session_key,
+            source=source,
+            pending_event=pending_event,
+            pending=pending,
+            result=result,
+        ):
+            return result
 
         # Clear the interrupt event so the recursive _run_agent isn't re-interrupted (infinite loop).
         _active = getattr(adapter, "_active_sessions", None) if adapter else None
@@ -3435,7 +3423,18 @@ class GatewayTurnMixin:
             )
             adapter = self._adapter_for_source(source)
             if adapter and pending_event:
-                merge_pending_message_event(adapter._pending_messages, session_key, pending_event)
+                if not self._hmwa_requeue_pending_followup(
+                    adapter=adapter,
+                    session_key=session_key,
+                    source=source,
+                    pending_event=pending_event,
+                    pending=pending,
+                ):
+                    logger.error(
+                        "Could not restore deferred follow-up for session %s at the "
+                        "interrupt recursion cap.",
+                        session_key or "?",
+                    )
             elif adapter and hasattr(adapter, 'queue_message'):
                 adapter.queue_message(session_key, pending)
             return turn_ctx.result_holder[0] or {"final_response": response, "messages": history}
@@ -3514,17 +3513,17 @@ class GatewayTurnMixin:
             run_generation=run_generation, _interrupt_depth=_interrupt_depth + 1,
             event_message_id=next_message_id, inbound_message_id=next_inbound_id,
             channel_prompt=next_channel_prompt, message_type=next_message_type,
+            turn_event=pending_event,
         )
         merged = _preserve_queued_followup_history_offset(result, followup_result)
-        # The TERMINAL turn of the chain owns the ledger identity for the outer final send, which
-        # the adapter brackets against the event that OPENED the chain. Without this the terminal
-        # reply is recorded under the first message's id, so a first reply that was refused (flood
-        # control) has its outstanding row replaced and marked delivered by an identical-text
-        # terminal reply, and is never redelivered. A deeper recursion has already set its own id,
-        # so only fill the key while it is still absent: the innermost turn wins.
-        if isinstance(merged, dict) and "queued_terminal_inbound_id" not in merged:
-            merged = {**merged, "queued_terminal_inbound_id": next_inbound_id}
-        return merged
+        return self._hmwa_attach_queued_terminal_provenance(
+            merged,
+            pending_event=pending_event,
+            pending=pending,
+            next_source=next_source,
+            next_session_key=next_session_key,
+            next_inbound_id=next_inbound_id,
+        )
 
     async def _run_agent_cleanup_turn_tasks(
         self, turn_ctx: TurnContext, *, progress_task: Any, log_task: Any, interrupt_monitor: "asyncio.Task",
@@ -3811,16 +3810,21 @@ class GatewayTurnMixin:
         persist_user_message: Optional[Any] = None, persist_user_timestamp: Optional[float] = None,
         persist_user_display_kind: Optional[str] = None, message_type: Optional[str] = None,
         persist_user_display_metadata: Optional[dict] = None,
+        turn_event: Optional[MessageEvent] = None,
     ) -> Dict[str, Any]:
         """Run the agent; returns the full run_conversation result dict.
 
         Keys: "final_response", "messages", "api_calls", "completed"."""
         if self._get_proxy_url():
-            return await self._run_agent_via_proxy(
+            proxy_result = await self._run_agent_via_proxy(
                 message=message, context_prompt=context_prompt, history=history, source=source,
                 session_id=session_id, session_key=session_key, run_generation=run_generation,
                 event_message_id=event_message_id,
             )
+            proxy_result, _ = await self._hmwa_settle_turn_resend_acknowledgement(
+                turn_event, source, session_key, proxy_result
+            )
+            return proxy_result
 
         from run_agent import AIAgent
 
@@ -3867,11 +3871,21 @@ class GatewayTurnMixin:
             result = turn_ctx.result_holder[0]
             adapter = self._adapter_for_source(source)
             await self._run_agent_finalize_streaming_tts(turn_ctx, adapter)
-            pending_event, pending = await self._run_agent_drain_pending(result, adapter, source, session_key)
-            if pending_event or pending:
-                return await self._run_agent_queued_followup(
-                    turn_ctx, adapter, pending, pending_event, response, result, stream_task,
+            response, recovery_unsettled = (
+                await self._hmwa_settle_turn_resend_acknowledgement(
+                    turn_event, source, session_key, response
                 )
+            )
+            # An unsettled binding deliberately leaves the adapter slot untouched. A fresh outer
+            # dispatch must authorize that pending event after this recovery generation.
+            if not recovery_unsettled:
+                pending_event, pending = await self._run_agent_drain_pending(
+                    result, adapter, source, session_key
+                )
+                if pending_event or pending:
+                    return await self._run_agent_queued_followup(
+                        turn_ctx, adapter, pending, pending_event, response, result, stream_task,
+                    )
         finally:
             await self._run_agent_cleanup_turn_tasks(
                 turn_ctx, progress_task=progress_task, log_task=log_task, interrupt_monitor=interrupt_monitor,

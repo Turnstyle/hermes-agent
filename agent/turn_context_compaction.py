@@ -35,6 +35,21 @@ class CompactionOutcome:
     compressed: bool = False
     # Preflight proved an immediate retry ineffective (no progress / insufficient).
     blocked: bool = False
+    # Session ids through which this turn's accepted input may have been copied.
+    accepted_input_session_ids: List[str] | None = None
+    accepted_input_durably_committed: bool = False
+
+
+def _record_accepted_input_compaction_boundary(agent: Any, out: CompactionOutcome) -> None:
+    """Track every session in which compaction may have materialized this turn."""
+    if getattr(agent, "_last_compression_attempt_in_place", None) is not None:
+        out.accepted_input_durably_committed = True
+    session_id = getattr(agent, "session_id", None)
+    if session_id:
+        if out.accepted_input_session_ids is None:
+            out.accepted_input_session_ids = []
+        if str(session_id) not in out.accepted_input_session_ids:
+            out.accepted_input_session_ids.append(str(session_id))
 
 
 # ── Helpers shared by every compression-attempt site ──
@@ -134,6 +149,7 @@ def run_turn_start_compaction(
     out = CompactionOutcome(
         messages=messages, active_system_prompt=active_system_prompt,
         conversation_history=conversation_history, current_turn_user_idx=current_turn_user_idx,
+        accepted_input_session_ids=[str(agent.session_id)] if getattr(agent, "session_id", None) else [],
     )
     _idle_compaction(agent, out, system_message, user_message, effective_task_id)
     _preflight_compression(agent, out, system_message, user_message, effective_task_id)
@@ -210,6 +226,7 @@ def _idle_compaction(
         out.conversation_history = conversation_history_after_compression(
             agent, out.messages, out.conversation_history
         )
+        _record_accepted_input_compaction_boundary(agent, out)
         out.current_turn_user_idx = _reanchor(agent, out.messages, user_message)
 
 
@@ -249,6 +266,25 @@ def _preflight_compression(
     _preflight_tokens = _tc._preflight_request_tokens(
         agent, out.messages, out.active_system_prompt or ""
     )
+    # Idle compaction runs first.  If that attempt timed out, its freshly
+    # persisted cooldown would otherwise route through the ordinary skip branch
+    # below and let the unchanged oversized prompt reach the provider.  A
+    # timeout at/above the configured threshold is terminal for this turn and
+    # must enter the typed durable-recovery boundary instead.
+    from agent.conversation_compression import context_compression_timed_out
+
+    if (
+        context_compression_timed_out(agent)
+        and _preflight_tokens >= _compressor.threshold_tokens
+    ):
+        _tc._fail_closed_after_preflight_timeout(
+            agent,
+            _preflight_tokens,
+            out.conversation_history,
+            live_messages=out.messages,
+            accepted_input_durably_committed=out.accepted_input_durably_committed,
+            accepted_input_session_ids=out.accepted_input_session_ids,
+        )
     # getattr guard: compressor doubles and plugin engines lack this method — absence
     # means no snapshot and the finalizer's rollback stays disarmed.
     _snapshot_fn = getattr(_compressor, "snapshot_preflight_display_tokens", None)
@@ -403,12 +439,18 @@ def _run_preflight_passes(
         if not _tc.compression_made_progress(
             _orig_len, len(out.messages), _orig_tokens, _preflight_tokens
         ):
-            _tc._fail_closed_after_preflight_timeout(agent, _preflight_tokens)
+            _tc._fail_closed_after_preflight_timeout(
+                agent, _preflight_tokens, out.conversation_history,
+                live_messages=out.messages,
+                accepted_input_durably_committed=out.accepted_input_durably_committed,
+                accepted_input_session_ids=out.accepted_input_session_ids,
+            )
             out.blocked = True
             break  # Cannot compress further: neither rows nor tokens moved
         out.conversation_history = conversation_history_after_compression(
             agent, out.messages, out.conversation_history
         )
+        _record_accepted_input_compaction_boundary(agent, out)
         _reset_retry_state_after_compaction(agent)
         if not _compressor.should_compress(_preflight_tokens):
             break

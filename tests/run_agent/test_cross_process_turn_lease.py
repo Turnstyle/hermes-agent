@@ -7,7 +7,15 @@ import threading
 import time
 from types import SimpleNamespace
 
+import pytest
+
 from agent import relay_runtime
+from agent.pending_input_recovery import (
+    claim_pending_input_recovery,
+    get_pending_input_recovery,
+    stage_pending_input_recovery,
+    stamp_pending_input_admission,
+)
 from hermes_state import SessionDB
 from run_agent import AIAgent
 
@@ -64,6 +72,36 @@ def _agent_with_db(db, *, session_id="stale-parent", platform="desktop"):
     agent._execution_thread_id = None
     agent._interrupt_thread_signal_pending = False
     return agent
+
+
+def _stage_facade_recovery(db, session_id="stale-parent"):
+    surface = f"cli:{session_id}"
+    original = {"role": "user", "content": "retry me exactly"}
+    stamp_pending_input_admission(
+        original, admission_id="facade-recovery", surface_key=surface,
+    )
+    stage_pending_input_recovery(
+        db,
+        accepted_input={
+            "version": 1, "kind": "accepted_user_input",
+            "text": original["content"], "input_kind": "plain_text",
+            "exact": True, "lossy": False, "loss_reasons": [],
+            "safe_to_replay": True, "provider_call_sent": False,
+            "executable": False,
+        },
+        live_messages=[original], session_ids=[session_id],
+        admission_id="facade-recovery", surface_key=surface,
+        accepted_input_durably_committed=False,
+    )
+    claim_pending_input_recovery(
+        db, "facade-recovery", resend_id="facade-resend",
+        claim_session_id=session_id,
+    )
+    resend = {"role": "user", "content": original["content"]}
+    stamp_pending_input_admission(
+        resend, admission_id="facade-resend", surface_key=surface,
+    )
+    return resend
 
 
 def test_run_conversation_acquires_then_reloads_latest_tip(monkeypatch):
@@ -229,6 +267,90 @@ def test_run_conversation_lease_timeout_returns_resend_notice(monkeypatch):
         kind == "warn" and text and "send it again" in text
         for kind, text in status_events
     )
+
+
+def test_recovered_resend_lease_timeout_returns_claim_to_pending(tmp_path, monkeypatch):
+    """Claimed composer work stays retryable when turn admission never succeeds."""
+    db = SessionDB(tmp_path / "state.db")
+    db.create_session("stale-parent", source="cli")
+    resend = _stage_facade_recovery(db)
+    monkeypatch.setattr(
+        db, "acquire_session_turn_lease", lambda *_args, **_kwargs: False,
+    )
+    agent = _agent_with_db(db, platform="cli")
+    agent._session_messages = [resend]
+    agent._pending_cli_user_message = resend
+    agent._pending_input_recovery_claim_id = "facade-recovery"
+    agent._pending_input_recovery_resend_id = "facade-resend"
+
+    monkeypatch.setattr(
+        "agent.conversation_loop.run_conversation",
+        lambda *_a, **_k: (_ for _ in ()).throw(
+            AssertionError("turn must not start without a lease")
+        ),
+    )
+    result = AIAgent.run_conversation(
+        agent, "retry me exactly", conversation_history=[resend],
+    )
+
+    record = get_pending_input_recovery(db, "facade-recovery")
+    assert result["failed"] is True
+    assert result["provider_call_sent"] is False
+    assert result["recovery_returned_without_dispatch"] is True
+    assert result["messages"] == []
+    assert record["status"] == "pending"
+    assert record["previous_resend_id"] == "facade-resend"
+    assert agent._session_messages == []
+    assert agent._pending_cli_user_message is None
+    assert agent._pending_input_recovery_claim_id is None
+    assert agent._pending_input_recovery_resend_id is None
+
+
+@pytest.mark.parametrize(
+    "early_error", ["nous_rate_limit_guard", "preflight_gate_return"],
+)
+def test_recovered_resend_normal_early_result_is_settled_at_facade_boundary(
+    tmp_path, monkeypatch, early_error,
+):
+    """Every normal no-provider result crosses one durable cleanup boundary."""
+    db = SessionDB(tmp_path / f"{early_error}.db")
+    db.create_session("stale-parent", source="cli")
+    resend = _stage_facade_recovery(db)
+    db.append_message(
+        "stale-parent", "user", resend["content"],
+        display_metadata=resend["display_metadata"],
+    )
+    agent = _agent_with_db(db, platform="cli")
+    agent._session_messages = [resend]
+    agent._pending_cli_user_message = resend
+    agent._pending_input_recovery_claim_id = "facade-recovery"
+    agent._pending_input_recovery_resend_id = "facade-resend"
+
+    calls = []
+
+    def _early_result(_agent, *_args, **_kwargs):
+        calls.append(early_error)
+        return {
+            "final_response": "not dispatched", "messages": [resend],
+            "api_calls": 0, "completed": False, "failed": True,
+            "error": early_error,
+        }
+
+    monkeypatch.setattr("agent.conversation_loop.run_conversation", _early_result)
+    result = AIAgent.run_conversation(
+        agent, "retry me exactly", conversation_history=[resend],
+    )
+
+    assert calls == [early_error]
+    assert result["provider_call_sent"] is False
+    assert result["recovery_returned_without_dispatch"] is True
+    assert result["messages"] == []
+    assert db.get_messages_as_conversation("stale-parent") == []
+    record = get_pending_input_recovery(db, "facade-recovery")
+    assert record["status"] == "pending"
+    assert record["previous_resend_id"] == "facade-resend"
+    assert agent._pending_input_recovery_claim_id is None
+    assert agent._pending_input_recovery_resend_id is None
 
 
 def test_run_conversation_lease_wait_honors_interrupt(monkeypatch):

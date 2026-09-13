@@ -53,6 +53,11 @@ class TurnResult:
     compacted: bool = False
     # Codex likely wedged (turn timeout, watchdog, token refresh failure): caller respawns next turn.
     should_retire: bool = False
+    # Exact admission proof for pending-input recovery. ``attempted`` is set
+    # only after the durable pre-dispatch callback succeeds; ``accepted`` only
+    # after ``turn/start`` returns a concrete response.
+    turn_start_attempted: bool = False
+    turn_start_accepted: bool = False
 
 
 # Some codex versions stream ``<turn_aborted>`` as raw agentMessage text when an
@@ -344,12 +349,20 @@ class CodexAppServerSession:
                 result.interrupted = True
             else:
                 result.submitted_user_text = _coerce_turn_input_text(user_input)
+                before_turn_start = getattr(self, "_before_turn_start_callback", None)
+                if callable(before_turn_start):
+                    before_turn_start()
+                result.turn_start_attempted = True
                 ts = self._request_for(
                     result, "turn/start",
                     {"threadId": self._thread_id, "input": [{"type": "text", "text": result.submitted_user_text}]},
                     "turn/start",
                 )
                 if ts is not None:
+                    result.turn_start_accepted = True
+                    accepted_turn_start = getattr(self, "_turn_start_accepted_callback", None)
+                    if callable(accepted_turn_start):
+                        accepted_turn_start()
                     self._run_started_turn(result, ts, turn_timeout, notification_poll_timeout, post_tool_quiet_timeout)
         self._interrupt_event.clear()
         return result

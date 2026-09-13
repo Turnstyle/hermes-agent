@@ -2915,6 +2915,11 @@ class HermesCLI(CLIProcessNotificationsMixin, CLIAgentSetupMixin, CLICommandsMix
         # Ctrl+S prompt stash; in-memory only because drafts routinely contain secrets.
         from hermes_cli.prompt_stash import PromptStash as _PromptStash
         self._prompt_stash = _PromptStash()
+        self._composer_recovery_entry = None
+        self._pending_input_recoveries_restored = False
+        self._pending_input_recovery_backlog_ids = ()
+        self._pending_input_recovery_warning_keys = set()
+        self._suppressed_pending_input_recovery_ids = set()
         self.preloaded_skills: list[str] = []
         self._startup_skills_line_shown = False
         # Background --skills preload, joined by finalize_preloaded_skills before any agent is built.
@@ -3449,6 +3454,13 @@ class HermesCLI(CLIProcessNotificationsMixin, CLIAgentSetupMixin, CLICommandsMix
         user_input, is_voice_input, is_seeded_query = self._tui_unwrap_input(user_input)
         if not user_input:
             return
+        recovery_admission_id = getattr(user_input, "recovery_admission_id", None)
+        recovery_surface_key = getattr(user_input, "recovery_surface_key", None)
+        recovery_original_text = (
+            str(user_input)
+            if recovery_admission_id and recovery_surface_key and isinstance(user_input, str)
+            else None
+        )
         self._status_bar_suppressed_after_resize = False  # input ends post-resize suppression
 
         submit_images = []
@@ -3491,6 +3503,22 @@ class HermesCLI(CLIProcessNotificationsMixin, CLIAgentSetupMixin, CLICommandsMix
 
         if isinstance(user_input, str) and _PASTE_REF_RE.search(user_input):
             user_input = self._expand_paste_references(user_input)
+        # Sanitizers and reference expansion return base ``str`` objects. Restore
+        # composer provenance only when the final prompt is still byte-identical
+        # and unstructured; every transformation drops it fail-closed.
+        if (
+            recovery_original_text is not None
+            and not submit_images
+            and isinstance(user_input, str)
+            and user_input == recovery_original_text
+        ):
+            from hermes_cli.prompt_stash import ComposerSubmission
+
+            user_input = ComposerSubmission(
+                user_input,
+                recovery_admission_id=recovery_admission_id,
+                recovery_surface_key=recovery_surface_key,
+            )
         print()
         self._print_user_message_preview(notification_preview or user_input)
 
@@ -3531,6 +3559,9 @@ class HermesCLI(CLIProcessNotificationsMixin, CLIAgentSetupMixin, CLICommandsMix
         self._pet_react_turn_end()
         self._turn_summary_emit()
         self._interactive_turn = False
+        # A restore/delete/settled turn may have opened a bounded stash slot.
+        # Reconcile before the next idle composer is rendered.
+        getattr(self, "_tui_reconcile_prompt_recoveries", lambda: 0)()
         self._app.invalidate()
 
         # After an interrupt the renderer may have drifted (leaked CPR text, VT100 parser
@@ -3819,6 +3850,9 @@ class HermesCLI(CLIProcessNotificationsMixin, CLIAgentSetupMixin, CLICommandsMix
 
         self._tui_print_startup()
         self._tui_init_run_state()
+        # The session DB and PromptStash are ready now. Project durable inert
+        # recoveries before layout/application construction can render composer #1.
+        self._restore_pending_input_recoveries_to_stash()
         kb = self._tui_build_key_bindings()
         layout, style = self._tui_build_layout(kb)
 

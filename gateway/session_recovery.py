@@ -331,7 +331,10 @@ class SessionRecoveryMixin:
         explicit reset boundary (with the specific reason so state.db is auditable, e.g.
         ``suspended`` vs plain ``session_reset``), then INSERT the new row + routing
         peer. Both best-effort: failures are warned and self-healed by the next peer refresh."""
-        if self._db_for_key(session_key) and end_session_id:
+        # Keep resolver calls inside the two helpers: both catch and report their own
+        # failures. A resolver preflight here can raise *after* the durable route was
+        # published, turning best-effort SQLite bookkeeping into a false reset failure.
+        if end_session_id:
             self._promote_session_reset(
                 session_key, end_session_id, end_reason,
                 log=lambda e: logger.warning(
@@ -339,7 +342,7 @@ class SessionRecoveryMixin:
                     "open and may win restart recovery until the next successful peer refresh",
                     end_session_id, session_key, during, e),
             )
-        if self._db_for_key(session_key) and create_kwargs:
+        if create_kwargs:
             self._create_session_row(
                 session_key, create_kwargs, origin, display_name,
                 log=lambda e: logger.warning(
