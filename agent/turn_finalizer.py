@@ -194,20 +194,39 @@ def finalize_turn(
         iteration_limit_fallback = True
         preserved_verification_fallback = True
     elif final_response is None and budget_fallback_eligible:
-        # Budget exhausted — ask the model for a summary via one extra
-        # API call with tools stripped.  _handle_max_iterations injects a
-        # user message and makes a single toolless request.
-        _turn_exit_reason = f"max_iterations_reached({api_call_count}/{agent.max_iterations})"
-        agent._emit_status(
-            f"⚠️ Iteration budget exhausted ({api_call_count}/{agent.max_iterations}) "
-            "— asking model to summarise"
-        )
-        if not agent.quiet_mode:
-            agent._safe_print(
-                f"\n⚠️  Iteration budget exhausted ({api_call_count}/{agent.max_iterations}) "
-                "— requesting summary..."
+        _cron_max_turns = getattr(agent, "_cron_max_turns", None)
+        if (
+            isinstance(_cron_max_turns, int)
+            and not isinstance(_cron_max_turns, bool)
+            and _cron_max_turns > 0
+        ):
+            # A per-job cron limit is a hard cost boundary. The generic
+            # iteration fallback makes one additional unmetered model call;
+            # return a deterministic result instead.
+            agent._cron_budget_stopped = True
+            agent._cron_budget_stop_reason = "max_turns"
+            _turn_exit_reason = (
+                f"cron_max_turns_reached({api_call_count}/{_cron_max_turns})"
             )
-        final_response = agent._handle_max_iterations(messages, api_call_count)
+            final_response = (
+                "Cron wake stopped at its configured max_turns limit "
+                f"({api_call_count}/{_cron_max_turns})."
+            )
+        else:
+            # Budget exhausted — ask the model for a summary via one extra
+            # API call with tools stripped.  _handle_max_iterations injects a
+            # user message and makes a single toolless request.
+            _turn_exit_reason = f"max_iterations_reached({api_call_count}/{agent.max_iterations})"
+            agent._emit_status(
+                f"⚠️ Iteration budget exhausted ({api_call_count}/{agent.max_iterations}) "
+                "— asking model to summarise"
+            )
+            if not agent.quiet_mode:
+                agent._safe_print(
+                    f"\n⚠️  Iteration budget exhausted ({api_call_count}/{agent.max_iterations}) "
+                    "— requesting summary..."
+                )
+            final_response = agent._handle_max_iterations(messages, api_call_count)
         iteration_limit_fallback = True
 
     if iteration_limit_fallback:
