@@ -196,6 +196,31 @@ def test_pending_response_records_kanban_timeout(monkeypatch):
     )
 
 
+def test_per_job_cron_turn_limit_never_makes_summary_call(monkeypatch):
+    """A hard scheduled-wake boundary cannot spend one hidden fallback call."""
+    monkeypatch.setattr("hermes_cli.plugins.invoke_hook", lambda *_a, **_kw: [])
+    agent = _LimitAgent(max_iterations=4)
+    agent._cron_max_turns = 4
+    agent._cron_budget_stopped = False
+    agent._cron_budget_stop_reason = None
+
+    result = _finalize(
+        agent,
+        final_response=None,
+        exit_reason="budget_exhausted",
+        api_call_count=4,
+    )
+
+    assert result["final_response"] == (
+        "Cron wake stopped at its configured max_turns limit (4/4)."
+    )
+    assert result["turn_exit_reason"] == "cron_max_turns_reached(4/4)"
+    assert result["completed"] is False
+    assert agent._handle_max_iterations_called is False
+    assert agent._cron_budget_stopped is True
+    assert agent._cron_budget_stop_reason == "max_turns"
+
+
 def test_published_pending_candidate_is_not_duplicated_by_finalizer(monkeypatch):
     """When budget exhaustion preserves a verification candidate that is
     already the tail assistant message, the finalizer must NOT append a
@@ -371,5 +396,4 @@ def test_bounded_fallback_does_not_fire_when_budget_not_exhausted(monkeypatch):
     )
 
     record.assert_not_called()
-
 

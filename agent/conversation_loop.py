@@ -24,6 +24,7 @@ import re
 import ssl
 import sys
 import time
+from contextlib import suppress
 from typing import Any, Dict, List, Optional
 
 from agent.codex_responses_adapter import _summarize_user_message_for_log
@@ -128,6 +129,54 @@ RUN_BUDGET_WRAPUP_NOTICE = (
     "now. Produce the required final deliverable (answer/JSON/summary) from "
     "the state you already have, completing only mandatory writes."
 )
+
+
+def _positive_cron_int(value: Any) -> int | None:
+    """Return a positive, non-boolean integer or ``None``."""
+    if isinstance(value, int) and not isinstance(value, bool) and value > 0:
+        return value
+    return None
+
+
+def _apply_cron_token_budget(agent: Any, request_pressure_tokens: Any) -> bool:
+    """Clamp or stop the next main-model request for a capped cron fire.
+
+    Provider usage is authoritative for prior calls. Before another call,
+    reserve its assembled-request pressure and restrict its response allowance
+    to the remaining per-fire headroom. Return ``True`` when no output token can
+    fit and the caller must break before the provider request.
+    """
+    cap = _positive_cron_int(getattr(agent, "_cron_max_tokens", None))
+    if cap is None:
+        return False
+
+    used = max(
+        _positive_cron_int(getattr(agent, "session_total_tokens", None)) or 0,
+        0,
+    )
+    pressure = max(_positive_cron_int(request_pressure_tokens) or 0, 0)
+    output_headroom = cap - used - pressure
+
+    if output_headroom <= 0:
+        agent._cron_budget_stopped = True
+        agent._cron_budget_stop_reason = "max_tokens"
+        return True
+
+    default_output = _positive_cron_int(
+        getattr(agent, "_cron_default_response_max_tokens", None)
+    )
+    agent.max_tokens = (
+        min(default_output, output_headroom) if default_output else output_headroom
+    )
+    return False
+
+
+def _mark_cron_token_budget_after_usage(agent: Any) -> None:
+    """Mark a capped cron wake once provider-reported usage reaches its ceiling."""
+    cap = _positive_cron_int(getattr(agent, "_cron_max_tokens", None))
+    if cap is not None and getattr(agent, "session_total_tokens", 0) >= cap:
+        agent._cron_budget_stopped = True
+        agent._cron_budget_stop_reason = "max_tokens"
 
 
 def _midturn_request_pressure_tokens(
@@ -2934,6 +2983,29 @@ def run_conversation(
         if callable(_note_rough):
             _note_rough(request_pressure_tokens)
 
+        if _apply_cron_token_budget(agent, request_pressure_tokens):
+            cap = _positive_cron_int(getattr(agent, "_cron_max_tokens", None)) or 0
+            used = max(
+                _positive_cron_int(getattr(agent, "session_total_tokens", None)) or 0,
+                0,
+            )
+            pressure = max(_positive_cron_int(request_pressure_tokens) or 0, 0)
+            final_response = (
+                "Cron wake stopped at its configured max_tokens budget "
+                f"({used}/{cap} provider-reported tokens used; next request "
+                f"pressure ~{pressure})."
+            )
+            failed = False
+            _turn_exit_reason = "cron_max_tokens_reached"
+            append_message(
+                messages, {"role": "assistant", "content": final_response}
+            )
+            api_call_count -= 1
+            agent._api_call_count = api_call_count
+            with suppress(Exception):
+                agent.iteration_budget.refund()
+            break
+
         _runtime_context_error = _ollama_context_limit_error(
             agent, request_pressure_tokens
         )
@@ -4789,6 +4861,10 @@ def run_conversation(
                     agent.session_cache_read_tokens += canonical_usage.cache_read_tokens
                     agent.session_cache_write_tokens += canonical_usage.cache_write_tokens
                     agent.session_reasoning_tokens += canonical_usage.reasoning_tokens
+                    # Provider usage is authoritative after the call. If it
+                    # crosses the per-fire cap, mark the wake so its audit row
+                    # records the stop and the next preflight halts.
+                    _mark_cron_token_budget_after_usage(agent)
                     # Rolling history for status-bar averages (last 10).
                     try:
                         hist = getattr(agent, "_api_latency_history", None)

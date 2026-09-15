@@ -1478,6 +1478,29 @@ def _write_usage_audit(record: dict) -> None:
         logger.warning("usage_audit write failed: %s", e)
 
 
+def _positive_job_budget(job: dict, key: str) -> Optional[int]:
+    """Return one explicitly configured positive per-job budget.
+
+    These fields are a hard safety boundary, so hand-edited booleans,
+    strings, zero, and negative values fail closed at fire time instead of
+    silently falling back to the profile-wide interactive budget.
+    """
+    value = job.get(key)
+    if value is None:
+        return None
+    if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+        raise ValueError(f"cron job {key} must be a positive integer")
+    return value
+
+
+def _usage_audit_value(result: dict, key: str, agent, attr: str):
+    """Prefer returned usage, then the live agent tally on partial failures."""
+    value = result.get(key)
+    if value is None and agent is not None:
+        value = getattr(agent, attr, None)
+    return value
+
+
 def _interpreter_shutting_down(exc: Optional[BaseException] = None) -> bool:
     """True when the Python interpreter is finalizing.
 
@@ -6311,13 +6334,16 @@ def run_job(
                     logger.warning("Job '%s': failed to parse prefill messages file '%s': %s", job_id, pfpath, e)
                     prefill_messages = None
 
-        # Max iterations — resolved through resolve_turn_limit() so that
-        # agent.max_turns: none / unlimited → sys.maxsize sentinel, and
-        # explicit 0 / null / "none" are honored instead of skipped by `or`.
+        # An explicit per-job max_turns is the scheduled wake's hard boundary.
+        # Jobs without it retain the profile-wide interactive default unchanged.
         from hermes_cli.config import resolve_turn_limit as _resolve_turn_limit
-        _mt = _cfg.get("agent", {}).get("max_turns")
+        _job_max_turns = _positive_job_budget(job, "max_turns")
+        _job_max_tokens = _positive_job_budget(job, "max_tokens")
+        _mt = _job_max_turns
         if _mt is None:
-            _mt = _cfg.get("max_turns")
+            _mt = _cfg.get("agent", {}).get("max_turns")
+            if _mt is None:
+                _mt = _cfg.get("max_turns")
         max_iterations = _resolve_turn_limit(_mt)
 
         # Provider routing
@@ -6740,6 +6766,22 @@ def run_job(
             session_id=_cron_session_id,
             session_db=_session_db,
         )
+        # Scheduler-owned attributes keep interactive runs unchanged. The
+        # conversation loop clamps each next response to the remaining
+        # per-fire token headroom, and the finalizer suppresses its otherwise
+        # unmetered summary call when the cron turn limit is reached.
+        agent._cron_max_tokens = _job_max_tokens
+        agent._cron_max_turns = _job_max_turns
+        _default_max_tokens = getattr(agent, "max_tokens", None)
+        agent._cron_default_response_max_tokens = (
+            _default_max_tokens
+            if isinstance(_default_max_tokens, int)
+            and not isinstance(_default_max_tokens, bool)
+            and _default_max_tokens > 0
+            else None
+        )
+        agent._cron_budget_stopped = False
+        agent._cron_budget_stop_reason = None
         
         # Run the agent with an *inactivity*-based timeout: the job can run
         # for hours if it's actively calling tools / receiving stream tokens,
@@ -6913,7 +6955,10 @@ def run_job(
         max_iteration_summary = (
             result.get("failed") is not True
             and result.get("completed") is False
-            and turn_exit_reason.startswith("max_iterations_reached(")
+            and (
+                turn_exit_reason.startswith("max_iterations_reached(")
+                or turn_exit_reason.startswith("cron_max_turns_reached(")
+            )
             and bool(final_response_text)
         )
         if result.get("failed") is True or (result.get("completed") is False and not max_iteration_summary):
@@ -7018,12 +7063,26 @@ def run_job(
             "ts": _utcnow_iso_ms(),
             "job_id": job_id,
             "fire_id": _audit_fire_id,
-            "prompt_tokens": result.get("prompt_tokens"),
-            "completion_tokens": result.get("completion_tokens"),
-            "total_tokens": result.get("total_tokens"),
+            "prompt_tokens": _usage_audit_value(
+                result, "prompt_tokens", agent, "session_prompt_tokens"
+            ),
+            "completion_tokens": _usage_audit_value(
+                result, "completion_tokens", agent, "session_completion_tokens"
+            ),
+            "total_tokens": _usage_audit_value(
+                result, "total_tokens", agent, "session_total_tokens"
+            ),
             "response_silent": _audit_response_silent,
             "deliver_target": job.get("deliver"),
             "model": model or None,
+            "max_tokens": job.get("max_tokens"),
+            "max_turns": job.get("max_turns"),
+            "budget_stopped": bool(
+                getattr(agent, "_cron_budget_stopped", False)
+            ),
+            "budget_stop_reason": getattr(
+                agent, "_cron_budget_stop_reason", None
+            ),
             "duration_ms": _audit_duration_ms,
             "error": None,
         })
@@ -7041,12 +7100,26 @@ def run_job(
                 "ts": _utcnow_iso_ms(),
                 "job_id": job_id,
                 "fire_id": _audit_fire_id,
-                "prompt_tokens": None,
-                "completion_tokens": None,
-                "total_tokens": None,
+                "prompt_tokens": _usage_audit_value(
+                    {}, "prompt_tokens", agent, "session_prompt_tokens"
+                ),
+                "completion_tokens": _usage_audit_value(
+                    {}, "completion_tokens", agent, "session_completion_tokens"
+                ),
+                "total_tokens": _usage_audit_value(
+                    {}, "total_tokens", agent, "session_total_tokens"
+                ),
                 "response_silent": False,
                 "deliver_target": job.get("deliver"),
                 "model": model or None,
+                "max_tokens": job.get("max_tokens"),
+                "max_turns": job.get("max_turns"),
+                "budget_stopped": bool(
+                    getattr(agent, "_cron_budget_stopped", False)
+                ),
+                "budget_stop_reason": getattr(
+                    agent, "_cron_budget_stop_reason", None
+                ),
                 "duration_ms": _audit_duration_ms,
                 "error": error_msg,
             })
