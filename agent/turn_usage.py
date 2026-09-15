@@ -31,6 +31,19 @@ class ResponseUsageOutcome:
     rearmed: bool = False
 
 
+def _mark_cron_token_budget_after_usage(agent: Any) -> None:
+    """Mark a capped cron wake once provider-reported usage reaches its ceiling."""
+    cap = getattr(agent, "_cron_max_tokens", None)
+    if (
+        isinstance(cap, int)
+        and not isinstance(cap, bool)
+        and cap > 0
+        and agent.session_total_tokens >= cap
+    ):
+        agent._cron_budget_stopped = True
+        agent._cron_budget_stop_reason = "max_tokens"
+
+
 def _loop_mod():
     """Lazy ``agent.conversation_loop`` import (avoids an import cycle)."""
     import agent.conversation_loop as _cl
@@ -171,6 +184,11 @@ def record_response_usage(
     agent.session_cache_read_tokens += canonical_usage.cache_read_tokens
     agent.session_cache_write_tokens += canonical_usage.cache_write_tokens
     agent.session_reasoning_tokens += canonical_usage.reasoning_tokens
+    # A cron token cap is enforced before every main-model call using the
+    # assembled request pressure.  Provider usage remains authoritative after
+    # the call; if its exact count reaches or crosses the cap, mark the wake so
+    # the next preflight halts and the per-fire audit records why.
+    _mark_cron_token_budget_after_usage(agent)
     # Rolling history for status-bar averages (last 10).
     with suppress(Exception):
         hist = getattr(agent, "_api_latency_history", None)

@@ -37,6 +37,40 @@ Whichever provider a job resolves to, its provider-specific request settings (e.
 **Per-job reasoning effort.** A job can pin its own thinking level, independent of the model pin: one of `none`, `minimal`, `low`, `medium`, `high`, `xhigh`, `max`, `ultra`. When set, it overrides both the global `agent.reasoning_effort` and per-model `agent.reasoning_overrides` for that job's runs (`none` disables thinking). Set it via `hermes cron create/edit --reasoning-effort high`; pass an empty string on edit to clear the pin and follow config again. (It is deliberately not exposed on the agent's `cronjob` tool — model configuration stays a user decision.) Levels a model doesn't support are clamped or omitted by the provider at request time — pinning `xhigh` on a model that caps at `high` runs at `high`. The pin has no effect on `no_agent` jobs (there is no LLM call to tune). Use it to run heavy scheduled analyses at `high` while cheap recurring jobs run at `minimal`, without touching your global default.
 :::
 
+### Per-job wake budgets
+
+Agent-backed jobs may carry two operator-owned positive integer fields in their
+record in `~/.hermes/cron/jobs.json`:
+
+```json
+{
+  "max_tokens": 50000,
+  "max_turns": 4
+}
+```
+
+- `max_turns` is the maximum number of main-model requests in one fire. At the
+  boundary Hermes returns a deterministic stop message; it does not make the
+  normal extra model call that summarizes an exhausted interactive turn.
+- `max_tokens` is the per-fire total of provider-reported prompt and completion
+  tokens for the job's main model. Before each request, Hermes reserves the
+  assembled request's estimated pressure and clamps the next output allowance
+  to the remaining headroom. Provider-reported usage remains authoritative: if
+  the provider's exact post-response count reaches or crosses the estimate,
+  Hermes records the crossing and makes no later model call in that fire.
+
+Missing fields preserve the normal profile-wide behavior. A present field that
+is a boolean, string, zero, negative, or non-integer fails closed before the
+agent runs. These fields are deliberately not exposed to the agent-facing
+`cronjob` tool, so a scheduled model cannot raise its own cost limits.
+
+Every agent-backed fire appends one JSON object to
+`~/.hermes/cron/usage_audit.jsonl`. In addition to the existing `job_id`,
+`fire_id`, `prompt_tokens`, `completion_tokens`, `total_tokens`,
+`response_silent`, `deliver_target`, `model`, `duration_ms`, and `error` fields,
+budgeted jobs record `max_tokens`, `max_turns`, `budget_stopped`, and
+`budget_stop_reason` (`max_tokens`, `max_turns`, or `null`).
+
 :::warning
 Cron-run sessions cannot recursively create more cron jobs. Hermes disables cron management tools inside cron executions to prevent runaway scheduling loops.
 :::

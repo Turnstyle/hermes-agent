@@ -141,17 +141,36 @@ def _resolve_budget_fallback(
                 agent._response_was_previewed = True
             preserved_verification_fallback = True
         else:
-            # _handle_max_iterations makes one extra toolless request for a summary.
-            agent._emit_status(
-                f"⚠️ Iteration budget exhausted ({api_call_count}/{agent.max_iterations}) "
-                "— asking model to summarise"
-            )
-            if not agent.quiet_mode:
-                agent._safe_print(
-                    f"\n⚠️  Iteration budget exhausted ({api_call_count}/{agent.max_iterations}) "
-                    "— requesting summary..."
+            _cron_max_turns = getattr(agent, "_cron_max_turns", None)
+            if (
+                isinstance(_cron_max_turns, int)
+                and not isinstance(_cron_max_turns, bool)
+                and _cron_max_turns > 0
+            ):
+                # A per-job cron limit is a hard cost boundary.  The generic
+                # iteration fallback makes one additional unmetered model call;
+                # return a deterministic result instead.
+                agent._cron_budget_stopped = True
+                agent._cron_budget_stop_reason = "max_turns"
+                _turn_exit_reason = (
+                    f"cron_max_turns_reached({api_call_count}/{_cron_max_turns})"
                 )
-            final_response = agent._handle_max_iterations(messages, api_call_count)
+                final_response = (
+                    f"Cron wake stopped at its configured max_turns limit "
+                    f"({api_call_count}/{_cron_max_turns})."
+                )
+            else:
+                # _handle_max_iterations makes one extra toolless request for a summary.
+                agent._emit_status(
+                    f"⚠️ Iteration budget exhausted ({api_call_count}/{agent.max_iterations}) "
+                    "— asking model to summarise"
+                )
+                if not agent.quiet_mode:
+                    agent._safe_print(
+                        f"\n⚠️  Iteration budget exhausted ({api_call_count}/{agent.max_iterations}) "
+                        "— requesting summary..."
+                    )
+                final_response = agent._handle_max_iterations(messages, api_call_count)
 
     # A kanban worker must record a terminal outcome whether or not a fallback path
     # was eligible, so the dispatcher learns the worker could not complete.

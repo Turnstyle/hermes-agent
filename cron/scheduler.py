@@ -2196,9 +2196,26 @@ class _CronAgentSetup:
     runtime: dict = None
     prefill_messages: Any = None
     max_iterations: Any = None
+    job_max_turns: Optional[int] = None
+    job_max_tokens: Optional[int] = None
     reasoning_config: Any = None
     fallback_model: Any = None
     credential_pool: Any = None
+
+
+def _positive_job_budget(job: dict, key: str) -> Optional[int]:
+    """Return one explicitly configured positive per-job budget.
+
+    These fields are a hard safety boundary, so hand-edited booleans, strings,
+    zero, and negative values fail closed at fire time instead of silently
+    falling back to the profile-wide interactive budget.
+    """
+    value = job.get(key)
+    if value is None:
+        return None
+    if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+        raise ValueError(f"cron job {key} must be a positive integer")
+    return value
 
 
 def _resolve_cron_agent_setup(job: dict, job_id: str, job_name: str, jc) -> _CronAgentSetup:
@@ -2208,11 +2225,16 @@ def _resolve_cron_agent_setup(job: dict, job_id: str, job_name: str, jc) -> _Cro
     setup = _CronAgentSetup(model=jc.model)
     setup.prefill_messages = _load_prefill_messages(_cfg, job_id)
 
-    # resolve_turn_limit() honors none/unlimited (sys.maxsize) and explicit 0 / null.
+    # An explicit per-job max_turns is the scheduled wake's hard boundary.
+    # Jobs without it retain the profile-wide interactive default unchanged.
     from hermes_cli.config import resolve_turn_limit as _resolve_turn_limit
-    _mt = _cfg.get("agent", {}).get("max_turns")
+    setup.job_max_turns = _positive_job_budget(job, "max_turns")
+    setup.job_max_tokens = _positive_job_budget(job, "max_tokens")
+    _mt = setup.job_max_turns
     if _mt is None:
-        _mt = _cfg.get("max_turns")
+        _mt = _cfg.get("agent", {}).get("max_turns")
+        if _mt is None:
+            _mt = _cfg.get("max_turns")
     setup.max_iterations = _resolve_turn_limit(_mt)
 
     # Runtime backstop (CWE-200/522): fail closed BEFORE resolution on a provider/base_url pair
@@ -2240,7 +2262,7 @@ def _resolve_cron_agent_setup(job: dict, job_id: str, job_name: str, jc) -> _Cro
 def _construct_cron_agent(AIAgent, job: dict, _cfg: dict, setup: _CronAgentSetup, *, workdir, session_id, session_db):
     runtime = setup.runtime
     pr = _cfg.get("provider_routing") or {}
-    return AIAgent(
+    agent = AIAgent(
         model=setup.model,
         api_key=runtime.get("api_key"),
         base_url=runtime.get("base_url"),
@@ -2272,6 +2294,22 @@ def _construct_cron_agent(AIAgent, job: dict, _cfg: dict, setup: _CronAgentSetup
         session_id=session_id,
         session_db=session_db,
     )
+    # Private, scheduler-owned attributes keep the generic interactive agent
+    # unchanged. The turn preflight uses max_tokens to shrink the next response
+    # allowance to the remaining per-wake headroom; the finalizer suppresses its
+    # otherwise-unmetered iteration-limit summary call for hard cron limits.
+    agent._cron_max_tokens = setup.job_max_tokens
+    agent._cron_max_turns = setup.job_max_turns
+    _default_max_tokens = getattr(agent, "max_tokens", None)
+    agent._cron_default_response_max_tokens = (
+        _default_max_tokens
+        if isinstance(_default_max_tokens, int) and not isinstance(_default_max_tokens, bool)
+        and _default_max_tokens > 0
+        else None
+    )
+    agent._cron_budget_stopped = False
+    agent._cron_budget_stop_reason = None
+    return agent
 
 
 class _FireAudit:
@@ -2282,17 +2320,29 @@ class _FireAudit:
         self.fire_id = uuid.uuid4().hex
         self.t_start = time.monotonic()
 
-    def write(self, result: dict, error: Optional[str]) -> None:
+    @staticmethod
+    def _usage(result: dict, key: str, agent, attr: str):
+        value = result.get(key)
+        if value is None and agent is not None:
+            value = getattr(agent, attr, None)
+        return value
+
+    def write(self, result: dict, error: Optional[str], agent=None) -> None:
         _write_usage_audit({
             "ts": _utcnow_iso_ms(),
             "job_id": self.job_id,
             "fire_id": self.fire_id,
-            "prompt_tokens": result.get("prompt_tokens"),
-            "completion_tokens": result.get("completion_tokens"),
-            "total_tokens": result.get("total_tokens"),
+            "prompt_tokens": self._usage(result, "prompt_tokens", agent, "session_prompt_tokens"),
+            "completion_tokens": self._usage(
+                result, "completion_tokens", agent, "session_completion_tokens"),
+            "total_tokens": self._usage(result, "total_tokens", agent, "session_total_tokens"),
             "response_silent": bool(result.get("response_silent")),
             "deliver_target": self.job.get("deliver"),
             "model": self.model or None,
+            "max_tokens": self.job.get("max_tokens"),
+            "max_turns": self.job.get("max_turns"),
+            "budget_stopped": bool(getattr(agent, "_cron_budget_stopped", False)),
+            "budget_stop_reason": getattr(agent, "_cron_budget_stop_reason", None),
             "duration_ms": int((time.monotonic() - self.t_start) * 1000),
             "error": error})
 
@@ -2364,15 +2414,19 @@ def run_job(
         logged_response = final_response if final_response else "(No response generated)"
         output = _run_doc_header(job, job_name, job_id, prompt) + f"## Response\n\n{logged_response}\n"
         logger.info("Job '%s' completed successfully", job_name)
-        _audit.write(dict(result, response_silent=_is_cron_silence_response(final_response or "")), None)
+        _audit.write(
+            dict(result, response_silent=_is_cron_silence_response(final_response or "")),
+            None,
+            agent,
+        )
         return True, output, final_response, None
 
     except Exception as e:
         error_msg = f"{type(e).__name__}: {str(e)}"
         logger.exception("Job '%s' failed: %s", job_name, error_msg)
-        # No audit row when we failed before the agent existed; the audit write must never raise.
+        # Audit starts only after agent construction; once present, failure logging must never raise.
         if _audit is not None:
-            _audit.write({}, error_msg)
+            _audit.write({}, error_msg, agent)
         from cron.scheduler_diagnostics import format_run_error
         output = (
             _run_doc_header(job, f"{job_name} (FAILED)", job_id, prompt)

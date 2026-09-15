@@ -17,6 +17,57 @@ from agent.turn_preflight import PreflightGateVerdict, run_preflight_compression
 logger = logging.getLogger("agent.conversation_loop")
 
 
+def _positive_int(value: Any) -> int | None:
+    """Return a positive, non-boolean int or ``None``."""
+    return value if isinstance(value, int) and not isinstance(value, bool) and value > 0 else None
+
+
+def _apply_cron_token_budget(
+    agent: Any, verdict: PreflightGateVerdict, request_pressure_tokens: Any
+) -> bool:
+    """Bound the next main-model request to one cron fire's token budget.
+
+    Provider usage is the source of truth for spend already incurred.  Before the
+    next request, reserve its assembled-request pressure and restrict the output
+    allowance to the remaining headroom.  If even one output token cannot fit,
+    stop before the provider call and refund the loop iteration consumed by
+    ``begin_iteration``.  Non-cron agents have no ``_cron_max_tokens`` attribute
+    and retain their existing behavior.
+    """
+    cap = _positive_int(getattr(agent, "_cron_max_tokens", None))
+    if cap is None:
+        return False
+
+    used = max(_positive_int(getattr(agent, "session_total_tokens", None)) or 0, 0)
+    pressure = max(_positive_int(request_pressure_tokens) or 0, 0)
+    remaining = cap - used
+    output_headroom = remaining - pressure
+
+    if output_headroom <= 0:
+        agent._cron_budget_stopped = True
+        agent._cron_budget_stop_reason = "max_tokens"
+        verdict.final_response = (
+            f"Cron wake stopped at its configured max_tokens budget "
+            f"({used}/{cap} provider-reported tokens used; next request pressure "
+            f"~{pressure})."
+        )
+        verdict.failed = False
+        verdict._turn_exit_reason = "cron_max_tokens_reached"
+        append_message(verdict.messages, {"role": "assistant", "content": verdict.final_response})
+        verdict.api_call_count -= 1
+        agent._api_call_count = verdict.api_call_count
+        with suppress(Exception):
+            agent.iteration_budget.refund()
+        verdict.action = "break"
+        return True
+
+    default_output = _positive_int(
+        getattr(agent, "_cron_default_response_max_tokens", None)
+    )
+    agent.max_tokens = min(default_output, output_headroom) if default_output else output_headroom
+    return False
+
+
 def run_preflight_gate(
     agent: Any, *, request_pressure_tokens: Any, _moa_prepared_request: Any,
     pending_moa_prepared_request: Any, messages: Any, system_message: Any, user_message: Any,
@@ -42,6 +93,9 @@ def run_preflight_gate(
         _provider_overflow_recovery_pending=_provider_overflow_recovery_pending,
         _last_preflight_pressure=None,
     )
+
+    if _apply_cron_token_budget(agent, v, request_pressure_tokens):
+        return v
 
     _runtime_context_error = _ollama_context_limit_error(agent, request_pressure_tokens)
     if _runtime_context_error:
