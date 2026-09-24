@@ -438,6 +438,37 @@ def test_plain_non_fleet_board_legacy_semantics_unchanged(kanban_home) -> None:
         conn.close()
 
 
+def test_created_blocked_stays_blocked_until_explicit_unblock(kanban_home) -> None:
+    """Sticky initial block (tb-cndr decision 2026-09-24): a card CREATED as
+    blocked stays blocked through any number of recompute_ready passes — the
+    CLI calls recompute_ready on `kanban list`/complete/archive/etc., which is
+    how live card t_6ba914d7 went blocked -> ready 3 s after creation on
+    0.21.0 (task_events 117 created{status:blocked} -> 118 promoted). Only an
+    explicit unblock_task may release it. Real create_task path, zero parents.
+    """
+    conn = kbc.connect()
+    try:
+        task_id = kb.create_task(conn, title="gated card", initial_status="blocked")
+        assert conn.execute(
+            "SELECT status FROM tasks WHERE id=?", (task_id,)
+        ).fetchone()["status"] == "blocked"
+
+        for _ in range(3):
+            assert kb.recompute_ready(conn) == 0, "created-blocked card must not auto-promote"
+        row = conn.execute("SELECT status FROM tasks WHERE id=?", (task_id,)).fetchone()
+        assert row["status"] == "blocked"
+        kinds = [r["kind"] for r in conn.execute(
+            "SELECT kind FROM task_events WHERE task_id=? ORDER BY id", (task_id,)
+        )]
+        assert "promoted" not in kinds
+
+        assert kb.unblock_task(conn, task_id) is True
+        row = conn.execute("SELECT status FROM tasks WHERE id=?", (task_id,)).fetchone()
+        assert row["status"] == "ready", "explicit unblock must still release it"
+    finally:
+        conn.close()
+
+
 if __name__ == "__main__":
     failures = 0
     for name, fn in list(globals().items()):
