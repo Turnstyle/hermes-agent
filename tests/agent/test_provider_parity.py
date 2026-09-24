@@ -312,6 +312,25 @@ class TestBuildApiKwargsChatCompletionsServiceTier:
         assert kwargs["service_tier"] == "priority"
 
 
+class TestAnthropicSpeedNeverLeaksToOtherWires:
+    """A static /fast pin on an Anthropic primary leaves ``speed`` in request_overrides; after a
+    provider fallback to xAI Grok that key reached ``Completions.create()`` as a top-level kwarg
+    (TypeError: unexpected keyword argument 'speed'). Only the Anthropic Messages wire may see it."""
+
+    def test_xai_chat_completions_drops_speed(self, monkeypatch):
+        agent = _make_agent(monkeypatch, "xai", base_url="https://api.x.ai/v1", model="grok-4.7")
+        agent.request_overrides = {"speed": "fast", "extra_body": {"keep": 1}}
+        kwargs = agent._build_api_kwargs([{"role": "user", "content": "hi"}])
+        assert "speed" not in kwargs
+        assert "speed" not in (kwargs.get("extra_body") or {})
+        assert agent.request_overrides["speed"] == "fast"  # gate never mutates the pin
+
+    def test_codex_responses_drops_speed(self, monkeypatch):
+        agent = _make_agent(monkeypatch, "openai-codex", api_mode="codex_responses",
+                            base_url="https://chatgpt.com/backend-api/codex", model="gpt-5.4")
+        agent.request_overrides = {"speed": "fast"}
+        kwargs = agent._build_api_kwargs([{"role": "user", "content": "hi"}])
+        assert "speed" not in kwargs
 
 
 class TestBuildApiKwargsKimiNoTemperatureOverride:

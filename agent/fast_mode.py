@@ -54,6 +54,12 @@ def effective_request_overrides(agent: Any) -> dict[str, Any]:
         )
     if "speed" in overrides and getattr(agent, "model", None) in (getattr(agent, "_fast_mode_unavailable_models", None) or ()):
         overrides.pop("speed", None)
+    # ``speed`` is an Anthropic Messages parameter. A static /fast pin made on an Anthropic primary
+    # survives a provider fallback in ``agent.request_overrides``; on any other wire it is merged
+    # into the SDK call as a top-level kwarg (``Completions.create() got an unexpected keyword
+    # argument 'speed'``), so it never leaves this gate for a non-Anthropic route.
+    if "speed" in overrides and getattr(agent, "api_mode", None) != "anthropic_messages":
+        overrides.pop("speed", None)
     return overrides
 
 

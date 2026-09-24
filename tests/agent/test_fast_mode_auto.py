@@ -194,3 +194,18 @@ def test_recovery_retries_at_standard_speed_before_classification():
     assert (retry, prompt) == (True, "sys")
     assert agent._fast_mode_unavailable_models == {"claude-opus-5"}
     assert any("standard speed" in line for line in printed)
+
+
+def test_speed_only_reaches_the_anthropic_messages_wire():
+    """A static Anthropic /fast pin (``speed``) survives provider fallback in request_overrides;
+    the gate strips it on every non-Anthropic wire and keeps it on anthropic_messages."""
+    pinned = {"speed": "fast", "extra_body": {"keep": 1}}
+    for api_mode in ("chat_completions", "codex_responses", "bedrock_converse"):
+        grok = _agent(service_tier="priority", model="grok-4.7", provider="xai-oauth",
+                      base_url="https://api.x.ai/v1", api_mode=api_mode, request_overrides=dict(pinned))
+        assert fast_mode.effective_request_overrides(grok) == {"extra_body": {"keep": 1}}, api_mode
+        assert grok.request_overrides == pinned  # never mutated
+    anth = _agent(service_tier="priority", model="claude-opus-5-5", provider="anthropic",
+                  base_url="https://api.anthropic.com", api_mode="anthropic_messages",
+                  request_overrides=dict(pinned))
+    assert fast_mode.effective_request_overrides(anth)["speed"] == "fast"
