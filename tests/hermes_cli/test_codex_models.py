@@ -287,9 +287,10 @@ class TestNormalizeModelForProvider:
 
 
 def test_catalog_requests_use_ungated_client_version(monkeypatch):
-    """Both catalog request sites send the backend's ungated ``0.0.0`` sentinel: the endpoint
+    """Both catalog request sites send the same high ``client_version`` sentinel: the endpoint
     hides models whose ``minimal_client_version`` is newer than ``client_version``, so a
-    made-up version silently drops future models."""
+    made-up/stale version silently drops future models (live-tested 2026-09-24: ``0.0.0`` no
+    longer returns gpt-6-sol/gpt-6-luna, which need >= 0.155.0)."""
     import sys
     from urllib.parse import parse_qs, urlparse
 
@@ -327,4 +328,4 @@ def test_catalog_requests_use_ungated_client_version(monkeypatch):
     for url in seen_urls:
         parsed = urlparse(url)
         assert parsed.netloc == "chatgpt.com" and parsed.path == "/backend-api/codex/models"
-        assert parse_qs(parsed.query)["client_version"] == ["0.0.0"]
+        assert parse_qs(parsed.query)["client_version"] == ["99.0.0"]

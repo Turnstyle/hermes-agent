@@ -17,6 +17,11 @@ logger = logging.getLogger(__name__)
 # choices (#52492). If OpenAI re-enables any, live discovery (_fetch_models_from_api) picks them
 # up automatically.
 DEFAULT_CODEX_MODELS: List[str] = [
+    # gpt-6-sol / gpt-6-luna: live-tested 2026-09-24 against the Codex OAuth catalog endpoint
+    # (chatgpt.com/backend-api/codex/models); minimal_client_version 0.155.0, returned whenever
+    # CODEX_UNGATED_CLIENT_VERSION is high enough to clear that gate (see agent/model_metadata.py).
+    "gpt-6-sol",
+    "gpt-6-luna",
     "gpt-5.6-sol",
     "gpt-5.6-terra",
     "gpt-5.6-luna",

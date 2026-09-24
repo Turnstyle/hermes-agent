@@ -335,7 +335,7 @@ _BEDROCK_PROBE_FAILURE_CACHE: Dict[tuple, float] = {}
 DEFAULT_CONTEXT_LENGTHS = {
     # Anthropic — bare ids only (prefixed ids resolve via OpenRouter/models.dev
     # and would collide: "anthropic/claude-sonnet-4" ⊂ "anthropic/claude-sonnet-4.6").
-    "claude-fable-5": 1000000, "claude-fable": 1000000, "claude-opus-5": 1000000, "claude-sonnet-5": 1000000,
+    "claude-fable-5": 1000000, "claude-fable": 1000000, "claude-opus-5-5": 1000000, "claude-opus-5": 1000000, "claude-sonnet-5": 1000000,
     "claude-opus-4-8": 1000000, "claude-opus-4.8": 1000000, "claude-opus-4-7": 1000000, "claude-opus-4.7": 1000000,
     "claude-opus-4-6": 1000000, "claude-sonnet-4-6": 1000000, "claude-opus-4.6": 1000000, "claude-sonnet-4.6": 1000000,
     "claude": 200000,  # catch-all for older Claude models
@@ -343,6 +343,7 @@ DEFAULT_CONTEXT_LENGTHS = {
     # its own branch). 5.4-nano/-mini are 400k, not 1.05M; gpt-5.3-codex-spark is
     # Codex-OAuth-only and listed so "gpt-5" (400k) doesn't win.
     "gpt-6-astra": 1050000,  # also matches -pro (verified live on OpenRouter)
+    "gpt-6-sol": 1050000, "gpt-6-luna": 1050000,
     "gpt-5.6-luna": 1050000, "gpt-5.6-terra": 1050000, "gpt-5.6-sol": 1050000, "gpt-5.5": 1050000,
     "gpt-5.4-nano": 400000, "gpt-5.4-mini": 400000, "gpt-5.4": 1050000,
     "gpt-5.3-codex-spark": 128000, "gpt-5.1-chat": 128000, "gpt-5": 400000,
@@ -1722,6 +1723,7 @@ def _query_anthropic_context_length(model: str, base_url: str, api_key: Any) -> 
 # slugs). Fallback when the live probe fails; longest-key-first. gpt-5.3-codex-spark is listed so "gpt-5.3-codex" doesn't win.
 _CODEX_OAUTH_CONTEXT_FALLBACK: Dict[str, int] = {
     "gpt-6-astra": 272_000,
+    "gpt-6-sol": 272_000, "gpt-6-luna": 272_000,
     "gpt-5.1-codex-max": 272_000, "gpt-5.1-codex-mini": 272_000, "gpt-5.3-codex": 272_000,
     "gpt-5.3-codex-spark": 128_000, "gpt-5.2-codex": 272_000, "gpt-5.4-mini": 272_000,
     "gpt-5.6-sol": 272_000, "gpt-5.6-terra": 272_000, "gpt-5.6-luna": 272_000, "gpt-daybreak-blue-latest": 272_000,
@@ -1808,10 +1810,14 @@ _codex_oauth_max_context_cache: Dict[str, Dict[str, int]] = {}
 _CODEX_OAUTH_CONTEXT_CACHE_TTL = 3600  # 1 hour
 # The Codex models endpoint reads ``client_version`` as a Codex CLI compatibility version and
 # hides models whose ``minimal_client_version`` is newer, so a made-up version (the old
-# "1.0.0") silently drops future models. "0.0.0" is the backend's ungated sentinel returning
-# the full account catalog; other out-of-sequence values return an empty catalog and omitting
-# the parameter is HTTP 400.
-CODEX_UNGATED_CLIENT_VERSION = "0.0.0"
+# "1.0.0") silently drops future models. "0.0.0" was previously believed to be the backend's
+# ungated sentinel, but live testing (2026-09-24) showed it now returns only gpt-6-astra,
+# gpt-5.6-sol/terra/luna, gpt-5.5 — hiding gpt-6-sol / gpt-6-luna (minimal_client_version
+# 0.155.0). Confirmed live that 0.155.1, 0.160.0, 0.200.0, 1.0.0, and 99.0.0 all return the
+# full catalog including gpt-6-sol/gpt-6-luna (0.144.0 hides gpt-6-astra too). A high sentinel
+# well above any shipped Codex CLI version keeps future gated models visible without pinning to
+# a specific CLI release.
+CODEX_UNGATED_CLIENT_VERSION = "99.0.0"
 CODEX_MODELS_CATALOG_URL = f"https://chatgpt.com/backend-api/codex/models?client_version={CODEX_UNGATED_CLIENT_VERSION}"
 
 
