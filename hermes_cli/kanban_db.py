@@ -2125,6 +2125,102 @@ def _resume_status_from_events(conn: sqlite3.Connection, task_id: str) -> str:
     return "ready"
 
 
+# Sentinel: Fleet adapter trigger present but its node id is unreadable.
+_FLEET_NODE_UNPARSEABLE = "\x00fleet-node-unparseable"
+
+# Tolerant of case, whitespace/newlines between tokens, and SQL-escaped
+# quotes ('') inside the node literal.
+_FLEET_TRIGGER_NODE_RE = re.compile(
+    r"INSERT\s+INTO\s+fleet_kanban_issue_map\s*\([^)]*\)\s*VALUES\s*\(\s*"
+    r"NEW\s*\.\s*id\s*,\s*.+?\s*,\s*NEW\s*\.\s*title\s*,\s*NEW\s*\.\s*body\s*,\s*"
+    r"'((?:[^']|'')+)'",
+    re.IGNORECASE | re.DOTALL,
+)
+
+
+def _fleet_adapter_installed_node_id(conn: sqlite3.Connection) -> Optional[str]:
+    """This board's own installed Fleet-adapter node identity, or ``None`` when no
+    Fleet adapter is installed at all.
+
+    Authoritative source is the ``fleet_kanban_task_insert`` AFTER-INSERT trigger
+    the external adapter installs once per board: its body literally embeds the
+    node id the board was installed with, so reading it back from
+    ``sqlite_master`` queries this board's actually-installed schema rather than
+    re-deriving it from a mutable env var. Deliberately no cross-repo import —
+    only SQL text the standard ``sqlite_master`` table already exposes.
+
+    ``None`` means no ownership filtering applies: a plain board with no adapter
+    has no concept of a "foreign-owned mirror", so every task on it is local and
+    legacy semantics are preserved exactly.
+
+    Fails CLOSED: when the trigger EXISTS but its text cannot be parsed
+    (reformatted SQL, a future adapter version) this returns
+    :data:`_FLEET_NODE_UNPARSEABLE` and logs a WARNING, so callers treat every
+    mapped Fleet row as foreign rather than as "no adapter, all local" — which
+    would silently re-open the auto-promotion incident.
+    """
+    row = conn.execute(
+        "SELECT sql FROM sqlite_master "
+        "WHERE type = 'trigger' AND name = 'fleet_kanban_task_insert'"
+    ).fetchone()
+    if row is None or not row[0]:
+        return None
+    match = _FLEET_TRIGGER_NODE_RE.search(row[0])
+    if match is None:
+        _log.warning(
+            "kanban recompute_ready: fleet_kanban_task_insert trigger exists "
+            "but its installed node id could not be parsed. Failing closed: "
+            "every Fleet-mapped task is treated as foreign (not auto-promoted) "
+            "until the trigger text is recognized again."
+        )
+        return _FLEET_NODE_UNPARSEABLE
+    return match.group(1).replace("''", "'")
+
+
+def _is_foreign_fleet_mirror(
+    conn: sqlite3.Connection,
+    task_id: str,
+    installed_node_id: Optional[str],
+) -> bool:
+    """True iff ``task_id`` is a Fleet-mirrored task this board's own installed
+    node does not currently own, per the adapter's authoritative
+    ``current_node``/``source_node`` columns.
+
+    ``installed_node_id is None`` (no Fleet adapter) always returns ``False`` —
+    legacy boards are untouched. A task with NO ``fleet_kanban_issue_map`` row is
+    also local: the AFTER-INSERT trigger fires unconditionally, so a missing row
+    means the task predates the adapter, not that it is silently foreign.
+
+    Ownership is ``COALESCE(current_node, source_node)``, matching the adapter's
+    own resolution order. When BOTH are NULL ownership is UNKNOWN: that counts as
+    foreign (safe — never auto-promote what this node cannot positively attribute
+    to itself) and logs a WARNING (visible — an operator can find and fix the
+    corrupt mapping row instead of the task silently never promoting).
+    """
+    if installed_node_id is None:
+        return False
+    row = conn.execute(
+        "SELECT current_node, source_node FROM fleet_kanban_issue_map "
+        "WHERE local_task_id = ?",
+        (task_id,),
+    ).fetchone()
+    if row is None:
+        return False
+    owner = row["current_node"] or row["source_node"]
+    if owner is None:
+        _log.warning(
+            "kanban recompute_ready: task %s has a fleet_kanban_issue_map row "
+            "with no current_node AND no source_node — ownership is UNKNOWN. "
+            "Treating as foreign (not auto-promoted) rather than risk promoting "
+            "a task this node cannot positively attribute to itself. This "
+            "indicates a corrupt/partial adapter mapping row and should be "
+            "investigated.",
+            task_id,
+        )
+        return True
+    return owner != installed_node_id
+
+
 def recompute_ready(conn: sqlite3.Connection, failure_limit: int = None) -> int:
     """Promote ``todo``/``blocked`` tasks whose parents are all done/archived;
     returns the count. Opens its own IMMEDIATE txn — call OUTSIDE any write txn.
@@ -2136,11 +2232,20 @@ def recompute_ready(conn: sqlite3.Connection, failure_limit: int = None) -> int:
 
     1. The most recent block event was a worker-initiated ``kanban_block`` — those stay blocked until an
     explicit ``kanban_unblock`` (#28712).
+
+    A Fleet-mirrored row owned by ANOTHER node is never promoted: this is
+    automatic, node-local bookkeeping and has no authority over a remote node's
+    own in-flight work, which merely mirrors here with zero local parent links.
+    See :func:`_is_foreign_fleet_mirror`; non-Fleet boards are unaffected.
     """
     if failure_limit is None:
         failure_limit = DEFAULT_FAILURE_LIMIT
     promoted = 0
     with write_txn(conn):
+        # Resolved once per call, not per row: same value for every row this
+        # tick and there is no reason to repeat the sqlite_master lookup.
+        installed_node_id = _fleet_adapter_installed_node_id(conn)
+
         todo_rows = conn.execute(
             "SELECT id, status, consecutive_failures, max_retries "
             "FROM tasks WHERE status IN ('todo', 'blocked')"
@@ -2148,6 +2253,12 @@ def recompute_ready(conn: sqlite3.Connection, failure_limit: int = None) -> int:
         for row in todo_rows:
             task_id = row["id"]
             cur_status = row["status"]
+            # Ownership FIRST, before the sticky-block check or anything else: a
+            # foreign-owned mirror is entirely out of scope for automatic
+            # promotion — no write, no event, no outbox entry — whatever its
+            # local status / blocked reason / dependency state.
+            if _is_foreign_fleet_mirror(conn, task_id, installed_node_id):
+                continue
             if cur_status == "blocked" and _has_sticky_block(conn, task_id):
                 # Explicit human-intervention block; only ``unblock_task`` may exit it.
                 continue

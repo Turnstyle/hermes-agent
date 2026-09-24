@@ -87,6 +87,51 @@ _RESPAWN_GUARD_PR_URL_RE = re.compile(
     re.IGNORECASE,
 )
 
+# ---------------------------------------------------------------------------
+# Lifecycle-guard fence recognition
+# ---------------------------------------------------------------------------
+#
+# An external adapter may install SQLite triggers on a board that
+# ``RAISE(ABORT, <exact message>)`` to protect rows this node holds no verified
+# remote lease for. Those are EXPECTED refusals, not bugs in this module, and
+# must be isolated per row rather than aborting an entire dispatcher tick.
+#
+# Deliberately an exact-string allowlist, not a blanket "catch IntegrityError":
+# an IntegrityError whose message is NOT here (a NOT NULL failure, a UNIQUE
+# collision, a foreign-key violation from real corruption) must never be
+# silently swallowed as an expected fence. Keep this in exact sync with the
+# adapter's own RAISE(ABORT, ...) literals — a message that used to match and
+# stops matching is precisely the case this allowlist protects against
+# mis-classifying.
+_KNOWN_LIFECYCLE_FENCE_MESSAGES = frozenset({
+    "verified execution lease required before running",
+    "verified run generation no longer owns lifecycle write",
+})
+
+
+def _is_known_lifecycle_fence(exc: sqlite3.IntegrityError) -> bool:
+    """True iff ``exc`` is a recognized lifecycle-guard trigger refusal.
+
+    ``RAISE(ABORT, msg)`` surfaces as ``sqlite3.IntegrityError`` whose ``str()``
+    is exactly ``msg`` on the SQLite versions this codebase targets; compare with
+    ``in`` rather than ``==`` in case a future version prefixes context.
+    """
+    text = str(exc)
+    return any(known in text for known in _KNOWN_LIFECYCLE_FENCE_MESSAGES)
+
+
+class _ReclaimAbortForLiveWorker(Exception):
+    """Internal sentinel forcing a rollback of an in-progress reclaim transaction
+    when the termination signal shows the worker survived.
+
+    Implements "commit-failure truth" for :func:`detect_stale_running`: the
+    claim-release UPDATE for a running task must never become durable unless the
+    worker is confirmed dead (or was never alive). Raised inside a ``write_txn``
+    block, it rolls back the UPDATE that already ran there — the row is left
+    exactly as if the reclaim attempt never happened. Never escapes the function
+    that raises it.
+    """
+
 
 @dataclass
 class DispatchResult:
@@ -108,6 +153,14 @@ class DispatchResult:
     reconciled_orphans: list[str] = field(default_factory=list)
     """``running`` cards requeued by :func:`reconcile_orphaned_running` (broken
     claim bookkeeping, dead/gone worker)."""
+    reclaim_errors: list[tuple[str, str]] = field(default_factory=list)
+    """``(task_id, error_text)`` for rows an installed lifecycle-guard trigger
+    refused to let a reclaim or claim write this tick. Each is left completely
+    unchanged — no partial write, no termination signal — and is NOT counted in
+    ``reconciled_orphans``/``reclaimed``/``crashed``/``spawned``. Surfaced here
+    instead of raised so the tick continues to sibling rows and later dispatch
+    steps. Purely observability: never a trigger to bypass the fence, which stays
+    enforced until the owner-side lease is reconciled elsewhere."""
     reaped_terminal_workers: list[str] = field(default_factory=list)
     """Task ids whose worker outlived its closed run and was terminated by
     :func:`reap_terminal_workers`."""
@@ -760,12 +813,35 @@ def detect_stale_running(
     ``0`` disables the check; ``signal_fn`` is a test hook. Deliberately NOT
     counted via ``_record_task_failure``: an absent heartbeat is not a worker
     failure, and counting it would let long-running tasks trip the breaker.
+
+    Only rows CLAIMED BY THIS HOST are considered — a claim_lock from another
+    node is out of scope entirely, matching :func:`detect_crashed_workers`'
+    host_prefix filter. Without it a remote-owned running row (no host-local
+    worker for this process to manage at all) could reach the guarded UPDATE
+    below and trip an installed lifecycle-fence trigger.
+
+    Lifecycle-fence isolation, same class as :func:`reconcile_orphaned_running`
+    and the claim boundary: a row this node's claim_lock legitimately owns may
+    still be protected if its generation was independently revoked (lease
+    expired/reassigned between claim and tick). That row's guarded UPDATE is
+    caught per row — no whole-tick abort, no signal, no trigger disabled, no
+    lease fabricated.
+
+    Signal ordering: the host-local termination signal is issued INSIDE the same
+    ``write_txn`` as the guarded claim-release UPDATE and strictly AFTER that
+    UPDATE is accepted, never before. A fence-refused release therefore signals
+    nothing: a same-host worker whose generation was revoked must not be killed
+    by a reclaim path that is not authorized to release its claim. If the worker
+    is signalled and survives, the whole transaction rolls back via
+    :class:`_ReclaimAbortForLiveWorker` — the release never becomes durable — and
+    a separate, non-guarded transaction records the defer.
     """
     if stale_timeout_seconds <= 0:
         return []
 
     now = int(time.time())
     reclaimed: list[str] = []
+    host_prefix = _kb._host_prefix()
 
     rows = conn.execute(
         "SELECT t.id, t.worker_pid, t.worker_started_at, t.last_heartbeat_at, t.claim_lock, "
@@ -778,6 +854,13 @@ def detect_stale_running(
     for row in rows:
         if row["active_started_at"] is None:
             continue
+
+        # Host-local claims only — another node's claim_lock is out of this
+        # process's authority to reclaim OR signal at all.
+        lock = row["claim_lock"] or ""
+        if not lock.startswith(host_prefix):
+            continue
+
         elapsed = now - int(row["active_started_at"])
         if elapsed < stale_timeout_seconds:
             continue
@@ -789,60 +872,100 @@ def detect_stale_running(
 
         pid = row["worker_pid"]
         tid = row["id"]
-        lock = row["claim_lock"] or ""
 
-        termination = _kb._terminate_reclaimed_worker(
-            pid, lock, signal_fn=signal_fn, started_at=_kb._row_get(row, "worker_started_at"))
+        # Populated by the write_txn body below, strictly AFTER the guarded
+        # UPDATE is accepted, so a fenced reclaim never signals the worker.
+        termination_holder: dict[str, Any] = {}
+        try:
+            with _kb.write_txn(conn):
+                retry_status = _kb._retry_status_for_run(conn, tid)
+                cur = conn.execute(
+                    "UPDATE tasks SET status = ?, claim_lock = NULL, "
+                    "claim_expires = NULL, worker_pid = NULL, worker_started_at = NULL, "
+                    "last_heartbeat_at = NULL "
+                    "WHERE id = ? AND status = 'running' "
+                    "  AND claim_lock IS ?",
+                    (retry_status, tid, row["claim_lock"]),
+                )
+                if cur.rowcount != 1:
+                    continue
 
-        # Never release a claim while our own worker is still alive: that would
-        # spawn a duplicate beside it. Hold the claim and retry next tick.
-        if _worker_survived_termination(termination):
+                # The lifecycle fence accepted the release (this node's claimed
+                # generation is still authorized) — only now is it safe to
+                # signal the worker.
+                termination = _kb._terminate_reclaimed_worker(
+                    pid, lock, signal_fn=signal_fn,
+                    started_at=_kb._row_get(row, "worker_started_at"),
+                )
+                termination_holder["termination"] = termination
+
+                # Never release a claim while our own worker is still alive:
+                # that would spawn a duplicate beside it. Roll the whole
+                # transaction back and defer instead — nothing counts as
+                # reclaimed unless the release actually stuck.
+                if _worker_survived_termination(termination):
+                    raise _ReclaimAbortForLiveWorker()
+
+                payload = {
+                    "elapsed_seconds": int(elapsed),
+                    "last_heartbeat_at": _kb._opt_int(last_hb),
+                    "heartbeat_age_seconds": _kb._opt_int(hb_age),
+                    "timeout_seconds": stale_timeout_seconds,
+                    "pid": int(pid) if pid else None,
+                    "retry_status": retry_status,
+                }
+                payload.update(termination)
+
+                run_id = _kb._end_run(
+                    conn, tid,
+                    outcome="stale", status="stale",
+                    error=(
+                        f"no heartbeat for {int(hb_age)}s "
+                        if hb_age is not None
+                        else "no heartbeat ever"
+                    ) + f" after {int(elapsed)}s running",
+                    metadata=payload,
+                )
+                _kb._append_event(conn, tid, "stale", payload, run_id=run_id)
+                reclaimed.append(tid)
+        except _ReclaimAbortForLiveWorker:
+            # The transaction above rolled back in full — the row is exactly as
+            # it was (still 'running', original claim_lock intact). Record the
+            # defer in a fresh, independent transaction.
             _defer_reclaim_for_live_worker(
-                conn, tid, lock, now, termination,
+                conn, tid, lock, now,
+                termination_holder.get("termination", {}),
                 reason="heartbeat_stale_worker_alive",
             )
             continue
-
-        with _kb.write_txn(conn):
-            retry_status = _kb._retry_status_for_run(conn, tid)
-            cur = conn.execute(
-                "UPDATE tasks SET status = ?, claim_lock = NULL, "
-                "claim_expires = NULL, worker_pid = NULL, worker_started_at = NULL, "
-                "last_heartbeat_at = NULL "
-                "WHERE id = ? AND status = 'running' "
-                "  AND claim_lock IS ?",
-                (retry_status, tid, row["claim_lock"]),
+        except sqlite3.IntegrityError as exc:
+            if not _is_known_lifecycle_fence(exc):
+                _kb._log.error(
+                    "kanban stale-reclaim: task %s raised an UNRECOGNIZED "
+                    "IntegrityError (not a known lifecycle fence) — aborting "
+                    "visibly rather than silently isolating: %s", tid, exc,
+                )
+                raise
+            # A KNOWN lifecycle-guard trigger refused this claim-release: the
+            # claim_lock is host-local but its generation was independently
+            # revoked since the claim. write_txn already rolled the attempted
+            # UPDATE back, so the row is untouched — and because the guard fires
+            # before the termination block above ever runs, no signal was sent
+            # either (a revoked same-host generation does not authorize a kill).
+            _kb._log.info(
+                "kanban stale-reclaim: task %s protected by known lifecycle "
+                "fence, left unchanged, no signal sent: %s", tid, exc,
             )
-            if cur.rowcount != 1:
-                continue
-
-            payload = {
-                "elapsed_seconds": int(elapsed),
-                "last_heartbeat_at": _kb._opt_int(last_hb),
-                "heartbeat_age_seconds": _kb._opt_int(hb_age),
-                "timeout_seconds": stale_timeout_seconds,
-                "pid": int(pid) if pid else None,
-                "retry_status": retry_status,
-            }
-            payload.update(termination)
-
-            run_id = _kb._end_run(
-                conn, tid,
-                outcome="stale", status="stale",
-                error=(
-                    f"no heartbeat for {int(hb_age)}s "
-                    if hb_age is not None
-                    else "no heartbeat ever"
-                ) + f" after {int(elapsed)}s running",
-                metadata=payload,
-            )
-            _kb._append_event(conn, tid, "stale", payload, run_id=run_id)
-            reclaimed.append(tid)
+            continue
 
     return reclaimed
 
 
-def reconcile_orphaned_running(conn: sqlite3.Connection) -> list[str]:
+def reconcile_orphaned_running(
+    conn: sqlite3.Connection,
+    *,
+    errors_out: Optional[list] = None,
+) -> list[str]:
     """Requeue ``running`` cards with broken claim bookkeeping; returns their ids.
 
     A task ``running`` with NULL ``claim_lock``/``claim_expires`` (crash
@@ -851,6 +974,18 @@ def reconcile_orphaned_running(conn: sqlite3.Connection) -> list[str]:
     pid, ``detect_stale_running`` is off by default. Orphans go back to ``ready``
     with a comment, leaked run closed, ``reconciled`` event; a row with a live
     host-local PID is deferred so no duplicate spawns beside it.
+
+    ``errors_out``, when given, is a caller-owned list this appends
+    ``(task_id, error_text)`` to for every row an installed lifecycle-guard
+    trigger refused. Such a per-row ``sqlite3.IntegrityError`` is rolled back to
+    that row's own transaction (leaving it completely unchanged — no partial
+    write, no termination signal), logged as an expected fence, recorded, and
+    reconciliation continues to sibling rows. No trigger is ever disabled and no
+    lease/generation row is ever fabricated to satisfy one: a protected row stays
+    protected until its owner-side lease is reconciled elsewhere.
+
+    ``sqlite3.OperationalError`` (lock contention, I/O, corruption) is NOT caught
+    — it is not an expected fence and must still abort the tick visibly.
     """
     now = int(time.time())
     reconciled: list[str] = []
@@ -869,38 +1004,68 @@ def reconcile_orphaned_running(conn: sqlite3.Connection) -> list[str]:
                 "pid %s is alive on this host — deferring", tid, pid,
             )
             continue
-        with _kb.write_txn(conn):
-            cur = conn.execute(
-                "UPDATE tasks SET status = 'ready', claim_lock = NULL, "
-                "claim_expires = NULL, worker_pid = NULL, worker_started_at = NULL, "
-                "last_heartbeat_at = NULL "
-                "WHERE id = ? AND status = 'running' "
-                "  AND claim_lock IS ? AND claim_expires IS ?",
-                (tid, row["claim_lock"], row["claim_expires"]),
+        try:
+            with _kb.write_txn(conn):
+                cur = conn.execute(
+                    "UPDATE tasks SET status = 'ready', claim_lock = NULL, "
+                    "claim_expires = NULL, worker_pid = NULL, worker_started_at = NULL, "
+                    "last_heartbeat_at = NULL "
+                    "WHERE id = ? AND status = 'running' "
+                    "  AND claim_lock IS ? AND claim_expires IS ?",
+                    (tid, row["claim_lock"], row["claim_expires"]),
+                )
+                if cur.rowcount != 1:
+                    continue
+                payload = {
+                    "reason": "orphaned_running",
+                    "claim_lock": row["claim_lock"],
+                    "claim_expires": _kb._opt_int(row["claim_expires"]),
+                    "worker_pid": int(pid) if pid else None,
+                    "now": now,
+                }
+                run_id = _kb._end_run(
+                    conn, tid,
+                    outcome="reclaimed", status="reclaimed",
+                    error="orphaned running card (broken claim bookkeeping)",
+                    metadata=payload,
+                )
+                _kb._insert_comment(
+                    conn, tid, "dispatcher",
+                    "reconciliation: card was 'running' with no valid claim "
+                    "(dead/gone worker) — requeued to ready",
+                    now,
+                )
+                _kb._append_event(conn, tid, "reconciled", payload, run_id=run_id)
+        except sqlite3.IntegrityError as exc:
+            if not _is_known_lifecycle_fence(exc):
+                # An IntegrityError we have no documented reason to expect
+                # (schema drift, a genuine constraint violation, or the adapter's
+                # message text changed upstream without this allowlist keeping
+                # up). Surface it LOUDLY rather than filing it as an expected
+                # fence alongside legitimate refusals.
+                _kb._log.error(
+                    "kanban reconcile: task %s raised an UNRECOGNIZED "
+                    "IntegrityError (not a known lifecycle fence) during "
+                    "reclaim — aborting visibly rather than silently "
+                    "isolating: %s", tid, exc,
+                )
+                raise
+            # A KNOWN lifecycle-guard trigger refused this write — an EXPECTED
+            # fence, not a bug here. write_txn already rolled its own
+            # transaction back, so this row (and only this row) is completely
+            # unchanged: no partial UPDATE, and since it never committed, no
+            # requeue/termination signal was sent for it either. Log it, record
+            # it, move on to sibling rows and the rest of the tick.
+            _kb._log.info(
+                "kanban reconcile: task %s protected by known lifecycle fence, "
+                "left unchanged: %s", tid, exc,
             )
-            if cur.rowcount != 1:
-                continue
-            payload = {
-                "reason": "orphaned_running",
-                "claim_lock": row["claim_lock"],
-                "claim_expires": _kb._opt_int(row["claim_expires"]),
-                "worker_pid": int(pid) if pid else None,
-                "now": now,
-            }
-            run_id = _kb._end_run(
-                conn, tid,
-                outcome="reclaimed", status="reclaimed",
-                error="orphaned running card (broken claim bookkeeping)",
-                metadata=payload,
-            )
-            _kb._insert_comment(
-                conn, tid, "dispatcher",
-                "reconciliation: card was 'running' with no valid claim "
-                "(dead/gone worker) — requeued to ready",
-                now,
-            )
-            _kb._append_event(conn, tid, "reconciled", payload, run_id=run_id)
-            reconciled.append(tid)
+            if errors_out is not None:
+                errors_out.append((tid, str(exc)))
+            continue
+        # Only rows whose write_txn actually committed reach here — durable
+        # counting happens strictly after commit.
+        reconciled.append(tid)
         _kb._log.info(
             "kanban reconcile: requeued orphaned running task %s "
             "(claim_lock=%r, worker_pid=%r)", tid, row["claim_lock"], pid,
@@ -2049,7 +2214,30 @@ def _dispatch_lane_task(
         _count_spawn(assignee)
         return True
     claim = _kb.claim_review_task if lane == "review" else _kb.claim_task
-    claimed = claim(conn, task_id, ttl_seconds=ttl_seconds)
+    try:
+        claimed = claim(conn, task_id, ttl_seconds=ttl_seconds)
+    except sqlite3.IntegrityError as exc:
+        if not _is_known_lifecycle_fence(exc):
+            # Unrecognized IntegrityError at the claim boundary — same rule as
+            # reconcile_orphaned_running: never file an unknown constraint
+            # failure as an expected fence. Abort visibly.
+            _kb._log.error(
+                "kanban dispatch: task %s raised an UNRECOGNIZED IntegrityError "
+                "during claim — aborting visibly: %s", task_id, exc,
+            )
+            raise
+        # A KNOWN lifecycle-guard trigger refused this claim — this node holds no
+        # verified remote lease for the task yet. write_txn already rolled the
+        # attempted UPDATE back, so the row is untouched and still queued: no
+        # partial claim, no spawn, no signal. Record it and let the REST of the
+        # lane (and later dispatch phases) run this same tick — one fenced claim
+        # must not abort spawning every other eligible task.
+        _kb._log.info(
+            "kanban dispatch: task %s claim refused by known lifecycle fence, "
+            "left in %s: %s", task_id, lane, exc,
+        )
+        result.reclaim_errors.append((task_id, str(exc)))
+        return False
     if claimed is None:
         return False
     try:
@@ -2147,7 +2335,9 @@ def _run_reclaim_phase(
     result.reaped_terminal_workers = reap_terminal_workers(conn)
     result.reclaimed = _kb.release_stale_claims(conn, failure_limit=failure_limit)
     if reconcile_orphans:
-        result.reconciled_orphans = reconcile_orphaned_running(conn)
+        result.reconciled_orphans = reconcile_orphaned_running(
+            conn, errors_out=result.reclaim_errors,
+        )
     result.stale = detect_stale_running(conn, stale_timeout_seconds=stale_timeout_seconds)
     result.crashed = detect_crashed_workers(conn, board=board)
     # Side-channel attributes (see detect_crashed_workers); rate-limited tasks
