@@ -25,7 +25,12 @@ _IS_WINDOWS = platform.system() == "Windows"
 # (not merely "not Windows") so macOS and other POSIX platforms never touch systemd.
 # See #70716.
 _IS_LINUX = platform.system() == "Linux"
-from tools.environments.local import _find_shell, _resolve_safe_cwd, _sanitize_subprocess_env
+from tools.environments.local import (
+    _find_shell,
+    _kill_process_group_posix,
+    _resolve_safe_cwd,
+    _sanitize_subprocess_env,
+)
 from hermes_cli._subprocess_compat import windows_hide_flags
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Literal, NamedTuple, Optional
@@ -1257,8 +1262,7 @@ class ProcessRegistry(ProcessCheckpointMixin):
                 self._terminate_host_pid(proc.pid, session.host_start_time)
             elif not _IS_WINDOWS:
                 try:
-                    kill_signal = getattr(signal, "SIGKILL", signal.SIGTERM)
-                    os.killpg(os.getpgid(proc.pid), kill_signal)  # windows-footgun: ok - guarded by _IS_WINDOWS above
+                    _kill_process_group_posix(proc)
                 except (ProcessLookupError, PermissionError, OSError):
                     proc.kill()
             else:

@@ -447,8 +447,17 @@ def kill_process_tree(pid: int, *, sig: Optional[int] = None) -> bool:
             pgid = None
         try:
             if pgid is not None and pgid == pid:
-                # pid leads its own group (the == check avoids signalling the caller's group).
-                os.killpg(pgid, sig)  # windows-footgun: ok — POSIX-only branch (win32 returns above)
+                # pid leads its own group (the == check avoids signalling non-leaders).
+                if pgid == os.getpgrp():
+                    # A spawner that skipped setsid leaves the child as leader of OUR group
+                    # (#107029): killpg would take down the gateway and every profile on it.
+                    logger.warning(
+                        "kill_process_tree: refusing killpg on caller process group "
+                        "(pid=%s pgid=%s); signalling pid only",
+                        pid, pgid)
+                    os.kill(pid, sig)
+                else:
+                    os.killpg(pgid, sig)  # windows-footgun: ok — POSIX-only branch (win32 returns above)
             else:
                 os.kill(pid, sig)
             signalled = True
