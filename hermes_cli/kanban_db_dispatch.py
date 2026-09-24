@@ -550,6 +550,71 @@ def _sigkill(kill, pid: int) -> bool:
         return False
 
 
+def _worker_leads_own_group(pid: int, signal_fn) -> bool:
+    """True when the (already identity-verified) worker ``pid`` leads its own process group, so
+    ``os.killpg(pid, sig)`` reaches the worker AND every child it started (an external ``claude`` /
+    ``codex`` CLI, a ``sleep``) without touching anything else. ``_default_spawn`` starts workers
+    with ``start_new_session=True``, so the group id equals the PID. Only the exact equality counts:
+    the group is NEVER derived as ``killpg(getpgid(pid))`` — a worker sharing the dispatcher's group
+    would make that kill the dispatcher itself. POSIX only (Windows keeps single-PID termination), and
+    only with real signals: a ``signal_fn`` test hook keeps the single-PID behaviour. Children that
+    start their own session (daemons, MCP servers) leave the group and are out of reach here."""
+    if signal_fn is not None or _kb._IS_WINDOWS:
+        return False
+    if not (hasattr(os, "killpg") and hasattr(os, "getpgid")):
+        return False
+    try:
+        return os.getpgid(int(pid)) == int(pid)
+    except OSError:
+        return False
+
+
+def _signal_worker_group(pid: int, sig) -> bool:
+    """``os.killpg(pid, sig)``; True when delivered. ESRCH (group already empty) / EPERM → False."""
+    try:
+        os.killpg(int(pid), sig)
+        return True
+    except (ProcessLookupError, PermissionError, OSError):
+        return False
+
+
+def _worker_group_has_members(pid: int) -> bool:
+    """``killpg(pid, 0)`` probe: True while any process (a not-yet-reaped zombie leader included)
+    is still in the worker's group."""
+    try:
+        os.killpg(int(pid), 0)
+        return True
+    except PermissionError:
+        return True
+    except OSError:
+        return False
+
+
+def _reap_exited_leader(pid: int) -> None:
+    """Reap the worker leader when it is our own exited child, recording its exit status exactly as
+    ``reap_worker_zombies`` would. An unreaped zombie leader keeps its group id "populated", which
+    would hide whether any real child is still alive. Not our child / still running → no-op."""
+    try:
+        reaped, status = os.waitpid(int(pid), os.WNOHANG)
+    except (ChildProcessError, OSError):
+        return
+    if reaped == int(pid):
+        _record_worker_exit(reaped, status)
+
+
+def _poll_worker_group_exit(pid: int, started_at=None) -> bool:
+    """Same ~5 s grace as ``_poll_worker_exit``, but ends early only when the leader AND its group
+    are gone, so children get the full grace to exit on SIGTERM. Returns whether the leader exited."""
+    for _ in range(10):
+        leader_gone = not _worker_alive(pid, started_at)
+        if leader_gone:
+            _reap_exited_leader(pid)
+            if not _worker_group_has_members(pid):
+                return True
+        time.sleep(0.5)
+    return not _worker_alive(pid, started_at)
+
+
 def _terminate_reclaimed_worker(
     pid: Optional[int],
     claim_lock: Optional[str],
@@ -562,7 +627,14 @@ def _terminate_reclaimed_worker(
     signalled — the worker is gone, which is what the reclaim wanted (``terminated`` = True). An
     UNVERIFIED spawn (fingerprint capture failed) that is still live is never signalled either, but
     it is reported as surviving (``signal_refused``) so the reclaim holds the claim instead of
-    spawning a duplicate beside it."""
+    spawning a duplicate beside it.
+
+    Process group: when the verified worker leads its own group (``getpgid(pid) == pid``, the
+    ``_default_spawn`` shape), SIGTERM and SIGKILL go to the whole group, so a CLI the worker
+    launched does not outlive a timeout / archive / reclaim. After the grace poll the group is
+    SIGKILLed even when the leader already exited (orphaned children keep the group alive). Children
+    that called ``setsid`` themselves are not in the group and are not reached (``group_signalled``
+    records whether the group path ran)."""
     info: dict[str, Any] = {
         "prev_pid": int(pid) if pid else None,
         "host_local": False,
@@ -589,9 +661,15 @@ def _terminate_reclaimed_worker(
         info["pid_recycled"] = True
         return info
 
+    # Decided while the leader is live and fingerprint-verified (checked just above).
+    group = _worker_leads_own_group(pid, signal_fn)
+    info["group_signalled"] = False
     info["termination_attempted"] = True
     try:
-        kill(int(pid), signal.SIGTERM)
+        if group and _signal_worker_group(pid, signal.SIGTERM):
+            info["group_signalled"] = True
+        else:
+            kill(int(pid), signal.SIGTERM)
     except ProcessLookupError:
         # Already gone = successful termination. Leaving terminated=False would
         # make the reclaim guard misread a dead worker as alive and defer forever.
@@ -600,7 +678,19 @@ def _terminate_reclaimed_worker(
     except OSError:
         return info
 
-    if _poll_worker_exit(pid, started_at):
+    if info["group_signalled"]:
+        exited = _poll_worker_group_exit(pid, started_at)
+        # Grace is over: SIGKILL the whole group even when the leader already exited, so orphaned
+        # children (an external CLI ignoring SIGTERM) die too. POSIX never hands a PID equal to a
+        # live group id to a new process, so while any member survives the group is still ours; a
+        # leader PID that is live again under a different fingerprint was recycled → not signalled.
+        leader_recycled = _kb._pid_alive(pid) and _pid_recycled(pid, started_at)
+        if not leader_recycled and _worker_group_has_members(pid):
+            if _signal_worker_group(pid, getattr(signal, "SIGKILL", signal.SIGTERM)):
+                info["sigkill"] = True
+    else:
+        exited = _poll_worker_exit(pid, started_at)
+    if exited:
         info["terminated"] = True
         return info
     if _worker_alive(pid, started_at):
