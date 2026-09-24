@@ -39,7 +39,10 @@ from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 DEPLOY_SCRIPTS = Path(
-    "/home/snowdrop/.hermes/fleet-kanban-deploy-5f8e0275/scripts"
+    os.environ.get(
+        "FLEET_KANBAN_DEPLOY_SCRIPTS",
+        str(Path.home() / ".hermes/fleet-kanban-deploy-5f8e0275/scripts"),
+    )
 )
 sys.path.insert(0, str(REPO_ROOT))
 sys.path.insert(0, str(DEPLOY_SCRIPTS))

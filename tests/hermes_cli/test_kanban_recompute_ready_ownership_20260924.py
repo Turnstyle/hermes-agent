@@ -27,6 +27,7 @@ for the exact frozen commit this was verified against.
 from __future__ import annotations
 
 import sqlite3
+import os
 import sys
 import time
 from pathlib import Path
@@ -35,7 +36,10 @@ import pytest
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 DEPLOY_SCRIPTS = Path(
-    "/home/snowdrop/.hermes/fleet-kanban-deploy-5f8e0275/scripts"
+    os.environ.get(
+        "FLEET_KANBAN_DEPLOY_SCRIPTS",
+        str(Path.home() / ".hermes/fleet-kanban-deploy-5f8e0275/scripts"),
+    )
 )
 sys.path.insert(0, str(REPO_ROOT))
 sys.path.insert(0, str(DEPLOY_SCRIPTS))
