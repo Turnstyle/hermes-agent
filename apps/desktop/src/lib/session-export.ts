@@ -2,6 +2,8 @@ import type { SessionInfo } from '@/hermes'
 import { getAllSessionMessages } from '@/hermes'
 import { translateNow } from '@/i18n'
 import { notify, notifyError } from '@/store/notifications'
+import { $sessions, sessionMatchesStoredId } from '@/store/session'
+import { sessionOwnerRouteFromRow } from '@/store/session-request-router'
 
 interface ExportSessionParams {
   sessionId: string
@@ -32,8 +34,14 @@ export async function exportSession(sessionId: string, params: Omit<ExportSessio
   }
 
   try {
-    const profile = params.profile ?? params.session?.profile
-    const { messages } = await getAllSessionMessages(sessionId, profile)
+    // Registry-merged rows (sheldon, max, snowdrop, ...) carry connection_id;
+    // a bare profile would read the transcript from the local/active backend
+    // and 404. Route through the row's exact owner, same as the Artifacts
+    // indexer. Callers that only pass a profile (sidebar menu) still get the
+    // owner from the cached session list.
+    const row = params.session ?? $sessions.get().find(candidate => sessionMatchesStoredId(candidate, sessionId))
+    const profile = params.profile ?? row?.profile
+    const { messages } = await getAllSessionMessages(sessionId, sessionOwnerRouteFromRow(row) ?? profile)
 
     const payload = {
       exported_at: new Date().toISOString(),
