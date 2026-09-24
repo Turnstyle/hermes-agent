@@ -18,6 +18,7 @@ up with ``assignee=None``.
 from __future__ import annotations
 
 import logging
+import os
 import re
 from dataclasses import dataclass
 from typing import Optional
@@ -336,11 +337,88 @@ def decompose_task(
     return _apply_fanout(task_id, parsed, routing, audit_author)
 
 
+def _has_local_decomposed_fence(conn, task_id: str) -> bool:
+    try:
+        row = conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='task_events'"
+        ).fetchone()
+        if row is None:
+            return False
+        return (
+            conn.execute(
+                "SELECT 1 FROM task_events WHERE task_id=? AND kind='decomposed' LIMIT 1",
+                (task_id,),
+            ).fetchone()
+            is not None
+        )
+    except Exception:
+        return False
+
+
+def _fleet_kanban_actor_node() -> str:
+    """Same identity source as fleet_kanban_sync.validate_live_configuration."""
+
+    return (os.environ.get("FLEET_KANBAN_ACTOR_NODE") or "").strip()
+
+
+def _is_protected_fleet_mirror(conn, task_id: str) -> bool:
+    """Fleet-linked tasks that must not be auto-decomposed on this node."""
+
+    if task_id.startswith("t_fk_"):
+        return True
+    if _has_local_decomposed_fence(conn, task_id):
+        return True
+    try:
+        row = conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='fleet_kanban_issue_map'"
+        ).fetchone()
+    except Exception:
+        logger.warning(
+            "fleet_kanban_issue_map schema check failed for %s; treating as protected",
+            task_id,
+        )
+        return True
+    if row is None:
+        return False
+    try:
+        mapped = conn.execute(
+            """SELECT source_node, current_node, deferred_snapshot, canonical_status
+               FROM fleet_kanban_issue_map WHERE local_task_id=?""",
+            (task_id,),
+        ).fetchone()
+    except Exception:
+        logger.warning(
+            "fleet_kanban_issue_map lookup failed for %s; treating as protected",
+            task_id,
+        )
+        return True
+    if mapped is None:
+        return False
+
+    source_node, current_node, deferred_snapshot, canonical_status = mapped
+    actor = _fleet_kanban_actor_node()
+    owner = (current_node or source_node or "").strip()
+
+    if not actor:
+        logger.warning(
+            "FLEET_KANBAN_ACTOR_NODE unset; treating mapped task %s as protected",
+            task_id,
+        )
+        return True
+    if not owner:
+        return True
+    if owner != actor:
+        return True
+    if deferred_snapshot and canonical_status and canonical_status != "triage":
+        return True
+    return False
+
+
 def list_triage_ids(*, tenant: Optional[str] = None) -> list[str]:
-    """Return task ids currently in the triage column."""
+    """Return task ids currently in the triage column (excluding protected Fleet mirrors)."""
     with kbc.connect_closing() as conn:
         rows = kb.list_tasks(conn, status="triage", tenant=tenant, limit=1000)
-    return [row.id for row in rows]
+        return [row.id for row in rows if not _is_protected_fleet_mirror(conn, row.id)]
 
 
 # ---- BEGIN PLUGIN-COMPAT (revert-scheduled; see COMPAT_MANIFEST.md) ----
