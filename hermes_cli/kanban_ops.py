@@ -101,6 +101,9 @@ def _cmd_dispatch(args: argparse.Namespace) -> int:
             ],
             "skipped_unassigned": res.skipped_unassigned,
             "skipped_nonspawnable": res.skipped_nonspawnable,
+            "owner_unavailable": [
+                {"task_id": tid, "assignee": who} for (tid, who) in res.owner_unavailable
+            ],
             "skipped_per_profile_capped": [
                 {"task_id": tid, "assignee": who, "current": current}
                 for (tid, who, current) in res.skipped_per_profile_capped
@@ -147,11 +150,15 @@ def _cmd_dispatch(args: argparse.Namespace) -> int:
         print(f"Skipped (unassigned): {', '.join(res.skipped_unassigned)}")
     for tid, who, current in res.skipped_per_profile_capped:
         print(f"Deferred ({who} at per-profile cap, {current} running): {tid}")
-    if res.skipped_nonspawnable:
+    missing = {tid for tid, _who in res.owner_unavailable}
+    quiet = [tid for tid in res.skipped_nonspawnable if tid not in missing]
+    if quiet:
         print(
             f"Skipped (non-spawnable assignee — terminal lane, OK): "
-            f"{', '.join(res.skipped_nonspawnable)}"
+            f"{', '.join(quiet)}"
         )
+    for tid, who in res.owner_unavailable:
+        print(f"Owner unavailable (no profile {who!r} on this home; reassign to recover): {tid}")
     for tid, reason in res.respawn_guarded:
         print(f"Guarded ({reason}): {tid}")
     if res.rate_limited:

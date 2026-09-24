@@ -1544,8 +1544,11 @@ def list_tasks(
     return [Task.from_row(r) for r in rows]
 
 
-def assign_task(conn: sqlite3.Connection, task_id: str, profile: Optional[str]) -> bool:
-    """Assign/reassign; raises RuntimeError while the task is running under a claim."""
+def assign_task(
+    conn: sqlite3.Connection, task_id: str, profile: Optional[str], *, reason: Optional[str] = None,
+) -> bool:
+    """Assign/reassign; raises RuntimeError while the task is running under a claim.
+    A non-empty ``reason`` is saved on the ``assigned`` event (why this claimant)."""
     profile = _canonical_assignee(profile)
     with write_txn(conn):
         row = conn.execute(
@@ -1568,9 +1571,10 @@ def assign_task(conn: sqlite3.Connection, task_id: str, profile: Optional[str]) 
             conn.execute("UPDATE tasks SET assignee = ? WHERE id = ?", (profile, task_id))
         # ``from`` lets the respawn guard tell a real handoff (dev→closer) from
         # a no-op re-assign or an unassign, which must not lift ``active_pr``.
-        _append_event(
-            conn, task_id, "assigned", {"assignee": profile, "from": row["assignee"]},
-        )
+        payload = {"assignee": profile, "from": row["assignee"]}
+        if reason and str(reason).strip():
+            payload["reason"] = str(reason).strip()
+        _append_event(conn, task_id, "assigned", payload)
     # Observer fires AFTER commit so subscribers see durable state.
     notify_task_updated(conn, task_id, ("assignee",))
     return True
@@ -2736,9 +2740,11 @@ def reassign_task(
     if reclaim_first:
         # Safe to call even if nothing to reclaim.
         reclaim_task(conn, task_id, reason=reason or "reassign")
-    # assign_task handles its own txn + the still-running guard.
+    # assign_task handles its own txn + the still-running guard. ``reason`` is
+    # kept on the ``assigned`` event either way, so a recovery hand-off records
+    # why this claimant was chosen even without a reclaim.
     try:
-        return assign_task(conn, task_id, profile)
+        return assign_task(conn, task_id, profile, reason=reason)
     except RuntimeError:
         # Task is still running and reclaim_first was False; caller
         # needs to decide whether to retry with reclaim.
