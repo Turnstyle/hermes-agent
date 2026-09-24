@@ -2191,11 +2191,15 @@ def _is_foreign_fleet_mirror(
     also local: the AFTER-INSERT trigger fires unconditionally, so a missing row
     means the task predates the adapter, not that it is silently foreign.
 
-    Ownership is ``COALESCE(current_node, source_node)``, matching the adapter's
-    own resolution order. When BOTH are NULL ownership is UNKNOWN: that counts as
-    foreign (safe — never auto-promote what this node cannot positively attribute
-    to itself) and logs a WARNING (visible — an operator can find and fix the
-    corrupt mapping row instead of the task silently never promoting).
+    Ownership is SQL ``COALESCE(current_node, source_node)``, matching the
+    adapter's own resolution order: ``source_node`` applies only when
+    ``current_node`` IS NULL — a present-but-blank ``current_node`` is the
+    owner, not a cue to fall back to historical source ownership. An owner that
+    is not a non-blank string (both NULL, empty, whitespace) is UNKNOWN: that
+    counts as foreign (safe — never auto-promote what this node cannot
+    positively attribute to itself) and logs a WARNING (visible — an operator
+    can find and fix the corrupt mapping row instead of the task silently never
+    promoting).
     """
     if installed_node_id is None:
         return False
@@ -2206,16 +2210,18 @@ def _is_foreign_fleet_mirror(
     ).fetchone()
     if row is None:
         return False
-    owner = row["current_node"] or row["source_node"]
-    if owner is None:
+    current_node, source_node = row["current_node"], row["source_node"]
+    owner = source_node if current_node is None else current_node
+    if not isinstance(owner, str) or not owner.strip():
         _log.warning(
             "kanban recompute_ready: task %s has a fleet_kanban_issue_map row "
-            "with no current_node AND no source_node — ownership is UNKNOWN. "
+            "whose owner COALESCE(current_node, source_node) is not a node id "
+            "(current_node=%r, source_node=%r) — ownership is UNKNOWN. "
             "Treating as foreign (not auto-promoted) rather than risk promoting "
             "a task this node cannot positively attribute to itself. This "
             "indicates a corrupt/partial adapter mapping row and should be "
             "investigated.",
-            task_id,
+            task_id, current_node, source_node,
         )
         return True
     return owner != installed_node_id
@@ -2519,6 +2525,7 @@ def _extend_run_claim(conn: sqlite3.Connection, task_id: str, expires: int) -> O
 
 def release_stale_claims(
     conn: sqlite3.Connection, *, signal_fn=None, failure_limit: Optional[int] = None,
+    errors_out: Optional[list] = None,
 ) -> int:
     """Reclaim ``running`` tasks whose claim expired; returns the count reclaimed.
 
@@ -2545,6 +2552,10 @@ def release_stale_claims(
     so any genuinely active worker keeps its heartbeat fresh as a side effect of normal API traffic.
     ``enforce_max_runtime`` and ``detect_crashed_workers`` remain the upper bounds for genuinely wedged or
     dead workers.
+
+    The worker is signalled inside the release transaction, only after the lifecycle fence accepted the
+    release UPDATE: a refused row is never killed and is recorded in ``errors_out`` (see
+    ``_isolate_fenced_row``). A worker that survives termination rolls the release back and keeps its claim.
     """
     now = int(time.time())
     reclaimed = 0
@@ -2568,42 +2579,51 @@ def release_stale_claims(
             _extend_live_stale_claim(conn, row, now)
             continue
 
-        termination = _terminate_reclaimed_worker(
-            row["worker_pid"], row["claim_lock"], signal_fn=signal_fn, started_at=started_at,
-        )
-        # A live worker of ours must keep its claim (else a duplicate spawns beside it).
-        if _worker_survived_termination(termination):
+        termination: dict = {}
+        try:
+            with write_txn(conn):
+                retry_status = _retry_status_for_run(conn, row["id"])
+                cur = conn.execute(
+                    "UPDATE tasks SET status = ?, claim_lock = NULL, "
+                    "claim_expires = NULL, worker_pid = NULL, worker_started_at = NULL "
+                    "WHERE id = ? AND status = 'running' AND claim_lock IS ? "
+                    "AND claim_expires IS NOT NULL AND claim_expires < ?",
+                    (retry_status, row["id"], row["claim_lock"], now),
+                )
+                if cur.rowcount != 1:
+                    continue
+                # The fence accepted the release; only now may the worker be signalled.
+                termination = _terminate_reclaimed_worker(
+                    row["worker_pid"], row["claim_lock"], signal_fn=signal_fn, started_at=started_at,
+                )
+                # A live worker of ours must keep its claim (else a duplicate spawns beside it).
+                if _worker_survived_termination(termination):
+                    raise _ReclaimAbortForLiveWorker()
+                run_id = _record_reclaim(
+                    conn, row["id"], termination,
+                    error=f"stale_lock={row['claim_lock']}",
+                    payload={
+                        "stale_lock": row["claim_lock"],
+                        "worker_pid": _opt_int(row["worker_pid"]),
+                        "claim_expires": int(row["claim_expires"]),
+                        "last_heartbeat_at": _opt_int(row["last_heartbeat_at"]),
+                        "now": now,
+                        "host_local": host_local,
+                        "heartbeat_stale": bool(heartbeat_stale),
+                        "retry_status": retry_status,
+                    },
+                )
+        except _ReclaimAbortForLiveWorker:
             _defer_reclaim_for_live_worker(
                 conn, row["id"], row["claim_lock"], now, termination,
                 reason="ttl_expired_worker_alive",
             )
             continue
-        with write_txn(conn):
-            retry_status = _retry_status_for_run(conn, row["id"])
-            cur = conn.execute(
-                "UPDATE tasks SET status = ?, claim_lock = NULL, "
-                "claim_expires = NULL, worker_pid = NULL, worker_started_at = NULL "
-                "WHERE id = ? AND status = 'running' AND claim_lock IS ? "
-                "AND claim_expires IS NOT NULL AND claim_expires < ?",
-                (retry_status, row["id"], row["claim_lock"], now),
-            )
-            if cur.rowcount != 1:
-                continue
-            run_id = _record_reclaim(
-                conn, row["id"], termination,
-                error=f"stale_lock={row['claim_lock']}",
-                payload={
-                    "stale_lock": row["claim_lock"],
-                    "worker_pid": _opt_int(row["worker_pid"]),
-                    "claim_expires": int(row["claim_expires"]),
-                    "last_heartbeat_at": _opt_int(row["last_heartbeat_at"]),
-                    "now": now,
-                    "host_local": host_local,
-                    "heartbeat_stale": bool(heartbeat_stale),
-                    "retry_status": retry_status,
-                },
-            )
-            reclaimed += 1
+        except sqlite3.Error as exc:
+            if not _isolate_fenced_row(errors_out, "release_stale_claims", row["id"], exc, termination):
+                raise
+            continue
+        reclaimed += 1
         # Own txn, after the reclaim commit (same shape as ``enforce_max_runtime``):
         # the run ended without a verdict, so it counts toward the breaker and a
         # trip flips the task to ``blocked`` + ``gave_up`` on top of ``reclaimed``.
@@ -2670,7 +2690,12 @@ def reclaim_task(
     conn: sqlite3.Connection, task_id: str, *, reason: Optional[str] = None, signal_fn=None,
 ) -> bool:
     """Operator reclaim regardless of TTL: release the claim, restore the source
-    phase, reset the failure counter. False when not running."""
+    phase, reset the failure counter. False when not running.
+
+    The worker is signalled only after the release UPDATE was accepted, inside
+    the same transaction: a lifecycle-fence refusal raises to the operator with
+    the worker untouched. Operator override: the claim is released even if the
+    worker survives termination."""
     row = conn.execute(
         "SELECT status, claim_lock, worker_pid, worker_started_at FROM tasks WHERE id = ?", (task_id,),
     ).fetchone()
@@ -2680,8 +2705,6 @@ def reclaim_task(
         # Nothing to reclaim — already ready / blocked / done.
         return False
     prev_lock = row["claim_lock"]
-    termination = _terminate_reclaimed_worker(
-        row["worker_pid"], prev_lock, signal_fn=signal_fn, started_at=row["worker_started_at"])
     with write_txn(conn):
         retry_status = _retry_status_for_run(conn, task_id)
         cur = conn.execute(
@@ -2692,6 +2715,8 @@ def reclaim_task(
         )
         if cur.rowcount != 1:
             return False
+        termination = _terminate_reclaimed_worker(
+            row["worker_pid"], prev_lock, signal_fn=signal_fn, started_at=row["worker_started_at"])
         _record_reclaim(
             conn, task_id, termination,
             error=f"manual_reclaim: {reason}" if reason else f"manual_reclaim lock={prev_lock}",
@@ -4589,8 +4614,10 @@ from hermes_cli.kanban_db_dispatch import (  # noqa: E402
     DEFAULT_FAILURE_LIMIT,
     DEFAULT_RATE_LIMIT_COOLDOWN_SECONDS,
     DispatchResult,
+    _ReclaimAbortForLiveWorker,
     _clear_failure_counter,
     _defer_reclaim_for_live_worker,
+    _isolate_fenced_row,
     _pid_alive,
     _record_task_failure,
     _terminate_reclaimed_worker,

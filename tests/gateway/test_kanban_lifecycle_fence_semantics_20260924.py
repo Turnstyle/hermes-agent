@@ -31,11 +31,14 @@ against the candidate fix (must PASS).
 """
 from __future__ import annotations
 
+import signal
 import sqlite3
 import sys
 import time
 import os
 from pathlib import Path
+
+import pytest
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 DEPLOY_SCRIPTS = Path(
@@ -712,6 +715,302 @@ def test_stale_reclaim_whole_tick_matrix_with_remote_and_revoked_siblings(monkey
         "SELECT status FROM tasks WHERE id='t_local_stale_eligible'"
     ).fetchone()
     assert local_row["status"] == "ready", "eligible local stale row must have been reclaimed to ready"
+
+
+# ---------------------------------------------------------------------------
+# Fix round 1 — checker VERDICT findings 1 (every reclaim sibling), 3 (stale
+# refusals in the tick result) and 4 (exact fence recognition).
+# ---------------------------------------------------------------------------
+
+_GENERATION_FENCE = "verified run generation no longer owns lifecycle write"
+
+# Fake worker PIDs: liveness comes from the ``alive`` set patched over
+# ``kb._pid_alive`` and every signal goes to a spy, so no real process is touched.
+_FENCED_PID = 910_001
+_ELIGIBLE_PID = 910_002
+
+
+def _set_task_cols(conn: sqlite3.Connection, task_id: str, **cols) -> None:
+    assignments = ", ".join(f"{col} = ?" for col in cols)
+    conn.execute(f"UPDATE tasks SET {assignments} WHERE id = ?", (*cols.values(), task_id))
+    conn.commit()
+
+
+def _fenced_running(conn: sqlite3.Connection, task_id: str, run_id: int, **cols) -> None:
+    """Same-host claim whose lease generation was revoked: the fence refuses any release."""
+    _insert_same_host_protected_generation(conn, task_id, run_id)
+    _set_task_cols(conn, task_id, **cols)
+
+
+def _leased_running(conn: sqlite3.Connection, task_id: str, run_id: int, **cols) -> None:
+    """Same-host claim under a live lease: the fence authorizes the release."""
+    now = int(time.time())
+    # consecutive_failures is fenced once running; the minimal schema has no DEFAULT 0.
+    conn.execute(
+        "INSERT INTO tasks (id, title, status, assignee, tenant, consecutive_failures) "
+        "VALUES (?, 'leased', 'ready', 'snow-cndr', 'snowdrop', 0)", (task_id,),
+    )
+    issue_id = conn.execute(
+        "SELECT issue_id FROM fleet_kanban_issue_map WHERE local_task_id=?", (task_id,),
+    ).fetchone()[0]
+    conn.execute(
+        "INSERT INTO fleet_kanban_verified_leases "
+        "(issue_id, holder_profile, holder_node, generation, lease_revision, "
+        " expires_at, verified_at) VALUES (?, 'snow-cndr', 'snowdrop', 3, 1, ?, ?)",
+        (issue_id, now + 3600, now),
+    )
+    conn.execute(
+        "UPDATE tasks SET status='running', claim_lock=?, current_run_id=? WHERE id=?",
+        (kb._claimer_id(), run_id, task_id),
+    )
+    conn.execute(
+        "INSERT INTO task_runs (id, task_id, status, started_at) "
+        "VALUES (?, ?, 'running', ?)", (run_id, task_id, now - 10_000),
+    )
+    conn.commit()
+    _set_task_cols(conn, task_id, **cols)
+
+
+def _snapshot(conn: sqlite3.Connection, task_id: str) -> tuple:
+    """Task row, its runs and its events — a refused reclaim must leave all three as-is."""
+    return (
+        dict(conn.execute("SELECT * FROM tasks WHERE id=?", (task_id,)).fetchone()),
+        [dict(r) for r in conn.execute("SELECT * FROM task_runs WHERE task_id=? ORDER BY id", (task_id,))],
+        [dict(r) for r in conn.execute("SELECT * FROM task_events WHERE task_id=? ORDER BY id", (task_id,))],
+    )
+
+
+def _fake_workers(monkeypatch, alive: set[int]) -> list[tuple[int, int]]:
+    """Patch liveness to ``alive``; returns the list a signal spy appends to. A
+    signalled worker dies (leaves ``alive``) unless the test says otherwise."""
+    monkeypatch.setattr(kb, "_pid_alive", lambda pid: pid in alive)
+    return []
+
+
+def _spy(sent: list, alive: set[int], *, kills: bool = True):
+    def _signal(pid, sig):
+        sent.append((pid, sig))
+        if kills:
+            alive.discard(pid)
+    return _signal
+
+
+@pytest.mark.parametrize(
+    "sibling",
+    ["release_stale_claims", "detect_stale_running", "detect_crashed_workers", "enforce_max_runtime"],
+)
+def test_reclaim_sibling_isolates_fenced_row_without_signal(sibling, monkeypatch) -> None:
+    """Finding 1: every reclaim sibling, called on its own, leaves a fence-refused
+    row byte-for-byte unchanged (task, run, events), never signals its worker,
+    does not raise, and still reclaims an authorized sibling row in the same pass."""
+    now = int(time.time())
+    scope, workers_alive, sweep = {
+        "release_stale_claims": (
+            {"claim_expires": now - 60}, False,
+            lambda conn, spy: kb.release_stale_claims(conn, signal_fn=spy),
+        ),
+        "detect_stale_running": (
+            {"claim_expires": now + 3600}, True,
+            lambda conn, spy: kbd.detect_stale_running(conn, stale_timeout_seconds=1, signal_fn=spy),
+        ),
+        "detect_crashed_workers": (
+            {"claim_expires": now + 3600, "last_heartbeat_at": now}, False,
+            lambda conn, spy: kbd.detect_crashed_workers(conn),
+        ),
+        "enforce_max_runtime": (
+            {"claim_expires": now + 3600, "last_heartbeat_at": now, "max_runtime_seconds": 1}, True,
+            lambda conn, spy: kbd.enforce_max_runtime(conn, signal_fn=spy),
+        ),
+    }[sibling]
+    alive = {_FENCED_PID, _ELIGIBLE_PID} if workers_alive else set()
+    sent = _fake_workers(monkeypatch, alive)
+
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    _make_board(conn)
+    _fenced_running(conn, "t_fenced", 1, worker_pid=_FENCED_PID, **scope)
+    _leased_running(conn, "t_eligible", 2, worker_pid=_ELIGIBLE_PID, **scope)
+    before = _snapshot(conn, "t_fenced")
+
+    reclaimed = sweep(conn, _spy(sent, alive))
+
+    assert _snapshot(conn, "t_fenced") == before, "fence-refused row must be completely unchanged"
+    assert [pid for pid, _sig in sent if pid == _FENCED_PID] == [], (
+        f"a row whose release the fence refused must never be signalled, got {sent!r}"
+    )
+    assert reclaimed == (1 if sibling == "release_stale_claims" else ["t_eligible"])
+    assert conn.execute(
+        "SELECT status FROM tasks WHERE id='t_eligible'"
+    ).fetchone()["status"] == "ready", "authorized sibling must still be reclaimed this pass"
+
+
+def test_whole_tick_isolates_fenced_rows_in_every_reclaim_sibling(monkeypatch) -> None:
+    """Finding 1 + 3 through the real dispatcher tick: one fence-refused row per
+    reclaim sibling, each reported in ``reclaim_errors`` under the step that was
+    refused, none signalled or changed — while an authorized crashed sibling is
+    reclaimed and a leased ready task still spawns in the SAME tick."""
+    now = int(time.time())
+    alive = {910_010, 910_011}
+    sent = _fake_workers(monkeypatch, alive)
+    monkeypatch.setattr(kbd, "_kill_fn", lambda signal_fn: _spy(sent, alive))
+    monkeypatch.setattr("hermes_cli.profiles.profile_exists", lambda name: name == "snow-cndr")
+
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    _make_board(conn)
+    # Each fenced row is in scope for exactly one sweep.
+    _insert_stale_remote_protected(conn, "t_fenced_expired", 1)
+    _set_task_cols(conn, "t_fenced_expired", claim_expires=now - 60)
+    _fenced_running(conn, "t_fenced_stale", 2, worker_pid=910_010, claim_expires=now + 3600)
+    _fenced_running(conn, "t_fenced_crashed", 3, worker_pid=910_012,
+                    claim_expires=now + 3600, last_heartbeat_at=now)
+    _fenced_running(conn, "t_fenced_runtime", 4, worker_pid=910_011,
+                    claim_expires=now + 3600, last_heartbeat_at=now, max_runtime_seconds=1)
+    _leased_running(conn, "t_crashed_ok", 5, worker_pid=910_013,
+                    claim_expires=now + 3600, last_heartbeat_at=now)
+    conn.execute(
+        "INSERT INTO tasks (id, title, status, assignee, tenant) "
+        "VALUES ('t_ready_ok', 'plain', 'ready', 'snow-cndr', 'snowdrop')"
+    )
+    issue_id = conn.execute(
+        "SELECT issue_id FROM fleet_kanban_issue_map WHERE local_task_id='t_ready_ok'"
+    ).fetchone()[0]
+    conn.execute(
+        "INSERT INTO fleet_kanban_verified_leases "
+        "(issue_id, holder_profile, holder_node, generation, lease_revision, "
+        " expires_at, verified_at) VALUES (?, 'snow-cndr', 'snowdrop', 1, 1, ?, ?)",
+        (issue_id, now + 3600, now),
+    )
+    conn.commit()
+    fenced = ("t_fenced_expired", "t_fenced_stale", "t_fenced_crashed", "t_fenced_runtime")
+    before = {tid: _snapshot(conn, tid) for tid in fenced}
+    spawned: list[str] = []
+
+    def _stub_spawn(task, workspace, board=None):
+        spawned.append(task.id)
+        return 999_999
+
+    result = kbd._dispatch_once_locked(conn, spawn_fn=_stub_spawn, stale_timeout_seconds=1)
+
+    refused = {(tid, msg.split(": ", 1)[0]) for tid, msg in result.reclaim_errors}
+    assert refused == {
+        ("t_fenced_expired", "release_stale_claims"),
+        ("t_fenced_stale", "detect_stale_running"),
+        ("t_fenced_crashed", "detect_crashed_workers"),
+        ("t_fenced_runtime", "enforce_max_runtime"),
+    }, result.reclaim_errors
+    assert all(_GENERATION_FENCE in msg for _tid, msg in result.reclaim_errors)
+    for tid in fenced:
+        assert _snapshot(conn, tid) == before[tid], f"{tid} must be completely unchanged"
+    assert sent == [], f"no fenced worker may be signalled, got {sent!r}"
+    assert result.reclaimed == 0 and result.stale == [] and result.timed_out == []
+    assert result.crashed == ["t_crashed_ok"]
+    # The spawn phase ran: the leased ready task and the just-released crash
+    # sibling (lease still valid) spawn; no fenced row does.
+    assert sorted(spawned) == ["t_crashed_ok", "t_ready_ok"]
+
+
+def test_stale_fence_refusal_reported_in_tick_result(monkeypatch) -> None:
+    """Finding 3: a heartbeat-stale row the fence refuses is visible in the tick
+    result, not only in a log line — callers can tell a refusal from no work."""
+    now = int(time.time())
+    alive = {_FENCED_PID}
+    sent = _fake_workers(monkeypatch, alive)
+    monkeypatch.setattr(kbd, "_kill_fn", lambda signal_fn: _spy(sent, alive))
+
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    _make_board(conn)
+    _fenced_running(conn, "t_fenced_stale", 1, worker_pid=_FENCED_PID, claim_expires=now + 3600)
+
+    result = kbd._dispatch_once_locked(conn, spawn_fn=lambda *a, **k: None, stale_timeout_seconds=1)
+
+    assert result.stale == []
+    assert result.reclaim_errors == [
+        ("t_fenced_stale", f"detect_stale_running: {_GENERATION_FENCE}"),
+    ]
+    assert sent == []
+
+
+def test_manual_reclaim_refused_by_fence_sends_no_signal(monkeypatch) -> None:
+    """Finding 1 (manual reclaim): the operator still sees the fence refusal,
+    but the worker is not killed first and the row is left exactly as it was."""
+    alive = {_FENCED_PID}
+    sent = _fake_workers(monkeypatch, alive)
+
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    _make_board(conn)
+    _fenced_running(conn, "t_fenced", 1, worker_pid=_FENCED_PID)
+    before = _snapshot(conn, "t_fenced")
+
+    with pytest.raises(sqlite3.IntegrityError, match=_GENERATION_FENCE):
+        kb.reclaim_task(conn, "t_fenced", reason="operator", signal_fn=_spy(sent, alive))
+
+    assert sent == [], f"a refused manual reclaim must not signal the worker, got {sent!r}"
+    assert _snapshot(conn, "t_fenced") == before
+    assert _FENCED_PID in alive
+
+
+def test_max_runtime_survivor_keeps_its_claim(monkeypatch) -> None:
+    """Finding 1 (retain claim): a worker that survives SIGTERM and SIGKILL keeps
+    its claim — releasing it would spawn a duplicate beside a live process. The
+    timeout is deferred, not counted, and retried next tick."""
+    now = int(time.time())
+    alive = {_ELIGIBLE_PID}
+    sent = _fake_workers(monkeypatch, alive)
+    monkeypatch.setattr(kbd, "_poll_worker_exit", lambda pid, started_at=None: False)
+
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    _make_board(conn)
+    claim_lock = kb._claimer_id()
+    _leased_running(conn, "t_survivor", 1, worker_pid=_ELIGIBLE_PID,
+                    claim_expires=now + 60, last_heartbeat_at=now, max_runtime_seconds=1)
+
+    timed_out = kbd.enforce_max_runtime(conn, signal_fn=_spy(sent, alive, kills=False))
+
+    assert timed_out == []
+    row = conn.execute(
+        "SELECT status, claim_lock, worker_pid FROM tasks WHERE id='t_survivor'"
+    ).fetchone()
+    assert (row["status"], row["claim_lock"], row["worker_pid"]) == ("running", claim_lock, _ELIGIBLE_PID)
+    kinds = [r["kind"] for r in conn.execute(
+        "SELECT kind FROM task_events WHERE task_id='t_survivor' ORDER BY id")]
+    assert "timed_out" not in kinds and "reclaim_deferred" in kinds
+    assert [sig for _pid, sig in sent][:1] == [signal.SIGTERM]
+
+
+def test_unrelated_check_constraint_with_fence_text_is_not_swallowed() -> None:
+    """Finding 4: an unrelated CHECK constraint that merely NAMES a fence phrase
+    fails as ``CHECK constraint failed: <phrase>`` (SQLITE_CONSTRAINT_CHECK). It
+    is not the adapter's RAISE(ABORT) fence and must abort loudly, not be
+    filed as an expected refusal."""
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    _make_board(conn)
+    _insert_eligible_local_zombie(conn, "t_leased_orphan", 1)
+    conn.executescript(
+        """
+        CREATE TABLE unrelated_audit (
+            value INTEGER,
+            CONSTRAINT "verified execution lease required before running" CHECK (value > 0)
+        );
+        CREATE TRIGGER unrelated_audit_on_task_update AFTER UPDATE ON tasks
+        BEGIN
+            INSERT INTO unrelated_audit (value) VALUES (-1);
+        END;
+        """
+    )
+    errors: list = []
+
+    with pytest.raises(sqlite3.IntegrityError, match="CHECK constraint failed"):
+        kbd.reconcile_orphaned_running(conn, errors_out=errors)
+
+    assert errors == []
+    assert conn.execute(
+        "SELECT status FROM tasks WHERE id='t_leased_orphan'"
+    ).fetchone()["status"] == "running"
 
 
 if __name__ == "__main__":

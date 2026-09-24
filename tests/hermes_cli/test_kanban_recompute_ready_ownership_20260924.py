@@ -333,6 +333,44 @@ def test_unknown_owner_safe_and_visible(caplog) -> None:
     ), "an unknown-owner row must log a visible WARNING naming the task"
 
 
+@pytest.mark.parametrize("blank", ["", "   "])
+def test_blank_current_node_is_unknown_owner_not_local(blank, caplog) -> None:
+    """Checker finding 2: a PRESENT but blank current_node is not affirmative
+    local authority. The adapter resolves ownership with SQL
+    COALESCE(current_node, source_node), which keeps the blank value — so
+    falling back to a local source_node would promote a row this node cannot
+    attribute to itself. Unknown owner: no promotion, no task/event/outbox
+    write, and a visible WARNING naming the task."""
+    import logging
+
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    _make_fleet_board(conn, node_id="snowdrop")
+    conn.execute(
+        "INSERT INTO tasks (id, title, status, assignee, tenant) "
+        "VALUES ('t_blank_owner', 'blank owner', 'todo', 'snow-cndr', 'snowdrop')"
+    )
+    conn.execute(
+        "UPDATE fleet_kanban_issue_map SET current_node=?, source_node='snowdrop' "
+        "WHERE local_task_id='t_blank_owner'", (blank,),
+    )
+    conn.commit()
+    outbox_before = conn.execute("SELECT COUNT(*) FROM fleet_kanban_outbox").fetchone()[0]
+
+    with caplog.at_level(logging.WARNING, logger="hermes_cli.kanban_db"):
+        promoted = kb.recompute_ready(conn)
+
+    assert promoted == 0
+    assert conn.execute(
+        "SELECT status FROM tasks WHERE id='t_blank_owner'"
+    ).fetchone()["status"] == "todo"
+    assert _events(conn, "t_blank_owner") == []
+    assert conn.execute("SELECT COUNT(*) FROM fleet_kanban_outbox").fetchone()[0] == outbox_before
+    assert any(
+        "UNKNOWN" in rec.message and "t_blank_owner" in rec.message for rec in caplog.records
+    ), "a blank current owner must log a visible WARNING naming the task"
+
+
 def _replace_insert_trigger_with_reformatted_sql(conn, *, parseable: bool) -> None:
     """Recreate fleet_kanban_task_insert with the SAME behavior but
     different formatting. parseable=True: newlines, lowercase keywords,
