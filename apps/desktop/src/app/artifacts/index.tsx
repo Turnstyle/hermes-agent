@@ -18,7 +18,7 @@ import {
 } from '@/components/ui/pagination'
 import { RowButton } from '@/components/ui/row-button'
 import { Tip } from '@/components/ui/tooltip'
-import { getAllSessionMessages, listAllProfileSessions } from '@/hermes'
+import { getSessionMessages, listAllProfileSessions } from '@/hermes'
 import { type Translations, useI18n } from '@/i18n'
 import { resolveBrandIcon } from '@/lib/brand-icon'
 import {
@@ -42,12 +42,15 @@ import { openSession } from '../open-session'
 import { PageSearchShell } from '../page-search-shell'
 import type { SetStatusbarItemGroup } from '../shell/statusbar-controls'
 
+import { sessionOwnerRouteFromRow } from '@/store/session-request-router'
+
 import {
   ARTIFACT_FILTERS,
   type ArtifactFilter,
   artifactImageSrc,
   type ArtifactRecord,
-  loadArtifactsForSessions
+  loadArtifactsForSessions,
+  summarizeArtifactLoadFailures
 } from './artifact-utils'
 
 function formatArtifactTime(timestamp: number): string {
@@ -138,31 +141,31 @@ export function ArtifactsView({ setStatusbarItemGroup: _setStatusbarItemGroup, .
     try {
       const sessions = (await listAllProfileSessions(30, 1)).sessions
 
-      const { artifacts: nextArtifacts, failures } = await loadArtifactsForSessions(
-        sessions,
-        async session => (await getAllSessionMessages(session.id, session.profile)).messages
+      const { artifacts: nextArtifacts, failures } = await loadArtifactsForSessions(sessions, (session, page) =>
+        getSessionMessages(session.id, sessionOwnerRouteFromRow(session) ?? session.profile, {
+          ...page,
+          includeCompacted: true,
+          order: 'oldest'
+        })
       )
 
       if (failures.length > 0) {
-        const safeLimitFailures = failures.filter(({ error }) =>
-          String(error instanceof Error ? error.message : error).includes('safe-load limit')
-        ).length
-
+        const { detail, safeLimitFailures } = summarizeArtifactLoadFailures(failures)
         const otherFailures = failures.length - safeLimitFailures
-
-        const detail = [
-          safeLimitFailures ? `${safeLimitFailures} exceeded the safe transcript load limit.` : '',
-          otherFailures ? `${otherFailures} could not be read.` : ''
-        ]
-          .filter(Boolean)
-          .join(' ')
 
         notify({
           id: 'artifacts-partial-load',
           kind: 'warning',
           title: a.failedLoad,
           message: `Skipped ${failures.length} of ${sessions.length} recent sessions while indexing artifacts.`,
-          detail,
+          detail:
+            detail ||
+            [
+              safeLimitFailures ? `${safeLimitFailures} exceeded the safe transcript load limit.` : '',
+              otherFailures ? `${otherFailures} session transcripts could not be read.` : ''
+            ]
+              .filter(Boolean)
+              .join(' '),
           durationMs: 10_000
         })
       }

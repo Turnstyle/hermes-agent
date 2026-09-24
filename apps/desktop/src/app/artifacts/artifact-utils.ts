@@ -1,6 +1,6 @@
 import { mediaTagValues } from '@/lib/chat-messages/parts'
 import { isArtifactFilePath, mediaExternalUrl, resolveMediaDisplaySrc } from '@/lib/media'
-import type { SessionInfo, SessionMessage } from '@/types/hermes'
+import type { SessionInfo, SessionMessage, SessionMessagesResponse } from '@/types/hermes'
 
 export type ArtifactKind = 'image' | 'file' | 'link'
 export type ArtifactFilter = 'all' | ArtifactKind
@@ -27,6 +27,11 @@ export interface ArtifactLoadResult {
   artifacts: ArtifactRecord[]
   failures: ArtifactLoadFailure[]
 }
+
+export type ArtifactLoadFailureKind = 'missing' | 'other' | 'permission' | 'remote' | 'safe-limit'
+
+const ARTIFACT_MESSAGE_PAGE_SIZE = 100
+const MAX_ARTIFACT_MESSAGE_PAGE_JSON_CHARS = 32_000_000
 
 const MARKDOWN_IMAGE_RE = /!\[([^\]]*)\]\(([^)\s]+)\)/g
 const MARKDOWN_LINK_RE = /\[([^\]]+)\]\(([^)\s]+)\)/g
@@ -419,20 +424,142 @@ export function collectArtifactsForSession(session: SessionInfo, messages: Sessi
   return Array.from(found.values())
 }
 
+function artifactLoadFailureMessage(error: unknown): string {
+  if (error instanceof Error) {
+    return error.message.trim()
+  }
+
+  return String(error ?? 'Unknown error').trim()
+}
+
+export function classifyArtifactLoadFailure(error: unknown): ArtifactLoadFailureKind {
+  const message = artifactLoadFailureMessage(error).toLowerCase()
+
+  if (message.includes('safe-load limit') || message.includes('safe load limit')) {
+    return 'safe-limit'
+  }
+
+  if (
+    /\b404\b/.test(message) ||
+    message.includes('not found') ||
+    message.includes('no such session') ||
+    message.includes('unknown session')
+  ) {
+    return 'missing'
+  }
+
+  if (
+    message.includes('eacces') ||
+    message.includes('permission denied') ||
+    message.includes('not permitted') ||
+    message.includes('operation not permitted')
+  ) {
+    return 'permission'
+  }
+
+  if (
+    message.includes('remote') ||
+    message.includes('unreachable') ||
+    message.includes('econnrefused') ||
+    message.includes('etimedout') ||
+    message.includes('enotfound') ||
+    message.includes('network') ||
+    message.includes('gateway') ||
+    message.includes('ssh')
+  ) {
+    return 'remote'
+  }
+
+  return 'other'
+}
+
+function artifactSessionLabel(session: SessionInfo): string {
+  const title = session.title?.trim() || session.preview?.trim() || 'Untitled session'
+  const profile = session.profile?.trim() || 'default'
+  const connection = session.connection_id?.trim()
+  const owner = connection && connection !== 'local' ? `${connection}/${profile}` : profile
+
+  return `${title} (${session.id} · ${owner})`
+}
+
+export function describeArtifactLoadFailure(failure: ArtifactLoadFailure): string {
+  const kind = classifyArtifactLoadFailure(failure.error)
+  const label = artifactSessionLabel(failure.session)
+  const detail = artifactLoadFailureMessage(failure.error)
+
+  switch (kind) {
+    case 'safe-limit':
+      return `${label}: transcript page exceeds the Desktop safe-load limit (${detail})`
+    case 'missing':
+      return `${label}: session transcript missing on this backend (${detail})`
+    case 'permission':
+      return `${label}: transcript not readable (${detail})`
+    case 'remote':
+      return `${label}: remote gateway transcript unavailable (${detail})`
+    default:
+      return `${label}: ${detail || 'transcript could not be read'}`
+  }
+}
+
+export function summarizeArtifactLoadFailures(failures: ArtifactLoadFailure[]): {
+  detail: string
+  safeLimitFailures: number
+} {
+  const safeLimitFailures = failures.filter(
+    failure => classifyArtifactLoadFailure(failure.error) === 'safe-limit'
+  ).length
+
+  const lines = failures.map(describeArtifactLoadFailure)
+  const detail = lines.join('\n')
+
+  return { detail, safeLimitFailures }
+}
+
 export async function loadArtifactsForSessions(
   sessions: SessionInfo[],
-  loadMessages: (session: SessionInfo) => Promise<SessionMessage[]>
+  loadPage: (
+    session: SessionInfo,
+    page: { limit: number; offset: number }
+  ) => Promise<Pick<SessionMessagesResponse, 'messages' | 'pagination'>>,
+  options: { maxPageJsonChars?: number } = {}
 ): Promise<ArtifactLoadResult> {
   const artifacts: ArtifactRecord[] = []
   const failures: ArtifactLoadFailure[] = []
+  const maxPageJsonChars = options.maxPageJsonChars ?? MAX_ARTIFACT_MESSAGE_PAGE_JSON_CHARS
 
-  // Keep only one transcript resident at a time. Recent sessions can each be
-  // tens of megabytes, so loading the whole page concurrently can exhaust both
-  // the Desktop renderer and a remote dashboard backend.
+  // Keep only one transcript page resident at a time. Recent sessions can each
+  // be tens of megabytes, so retaining complete transcripts exhausts the
+  // Desktop renderer even when transport requests are paginated.
   for (const session of sessions) {
     try {
-      const messages = await loadMessages(session)
-      artifacts.push(...collectArtifactsForSession(session, messages))
+      const sessionArtifacts = new Map<string, ArtifactRecord>()
+      let offset = 0
+
+      while (true) {
+        const page = await loadPage(session, { limit: ARTIFACT_MESSAGE_PAGE_SIZE, offset })
+        const pageJsonChars = (JSON.stringify(page.messages) ?? '').length
+
+        if (pageJsonChars > maxPageJsonChars) {
+          throw new Error(
+            'Session transcript page exceeds the Desktop safe-load limit; use the Web Dashboard export for this session.'
+          )
+        }
+
+        for (const artifact of collectArtifactsForSession(session, page.messages)) {
+          if (!sessionArtifacts.has(artifact.id)) {
+            sessionArtifacts.set(artifact.id, artifact)
+          }
+        }
+
+        // Legacy backends ignore pagination and return the full transcript.
+        if (!page.pagination || page.messages.length === 0 || page.messages.length < page.pagination.limit) {
+          break
+        }
+
+        offset += page.messages.length
+      }
+
+      artifacts.push(...sessionArtifacts.values())
     } catch (error) {
       failures.push({ error, session })
     }
