@@ -5,6 +5,7 @@ import { getHermesConfig, getHermesConfigDefaults } from '@/hermes'
 import { BUILTIN_PERSONALITIES, normalizePersonalityValue, personalityNamesFromConfig } from '@/lib/chat-runtime'
 import { normalize } from '@/lib/text'
 import { setDisplayTimestampsFromConfig } from '@/store/display-timestamps'
+import { setCollapseInterAgentRepliesFromConfig } from '@/store/inter-agent-collapse'
 import { setShowReasoningFromConfig } from '@/store/reasoning-disclosure'
 import {
   getComposerSelectionGeneration,
@@ -142,6 +143,7 @@ export function useHermesConfig({ activeSessionIdRef }: HermesConfigOptions) {
 
         setDisplayTimestampsFromConfig(config.display?.timestamps)
         setShowReasoningFromConfig(config.display?.show_reasoning)
+        setCollapseInterAgentRepliesFromConfig(config.display?.collapse_inter_agent_replies)
         setTerminalFontFamilyFromConfig(config.terminal?.font_family)
         setChatFontFamilyFromConfig(config.desktop?.font_family)
 

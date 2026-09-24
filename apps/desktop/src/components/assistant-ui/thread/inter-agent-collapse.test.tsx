@@ -16,6 +16,8 @@ import { AssistantRuntimeProvider, type ThreadMessage, useExternalStoreRuntime }
 import { cleanup, render, screen } from '@testing-library/react'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 
+import { setCollapseInterAgentRepliesFromConfig } from '@/store/inter-agent-collapse'
+
 import { Thread } from '.'
 
 const createdAt = new Date('2026-05-01T00:00:00.000Z')
@@ -190,5 +192,38 @@ describe('inter-agent collapse gate', () => {
     expect(
       container.querySelector('[data-slot="aui_assistant-message-root"] [data-slot="aui_message-streaming-marker"]')
     ).toBeTruthy()
+  })
+})
+
+// `display.collapse_inter_agent_replies` (default on). A Conductor's reply to a
+// bot report is usually a report to the human; profiles where that is the norm
+// turn the fold off so the reply stays readable once it settles.
+describe('inter-agent collapse setting', () => {
+  afterEach(() => {
+    setCollapseInterAgentRepliesFromConfig(undefined)
+  })
+
+  it('keeps a settled reply to an unsolicited delivery expanded when the setting is off', async () => {
+    setCollapseInterAgentRepliesFromConfig(false)
+    render(<Harness messages={[user('u1', DELIVERY), assistant('a1', 'report for Turner: build is green', false)]} />)
+
+    await screen.findByText('report for Turner: build is green')
+    expect(screen.queryByText(/Replied to/)).toBeNull()
+    expect(screen.queryByText('show reply')).toBeNull()
+  })
+
+  it('treats a quoted "false" in config.yaml as off', async () => {
+    setCollapseInterAgentRepliesFromConfig('false')
+    render(<Harness messages={[user('u1', DELIVERY), assistant('a1', 'still visible', false)]} />)
+
+    await screen.findByText('still visible')
+    expect(screen.queryByText('show reply')).toBeNull()
+  })
+
+  it('keeps the default fold when the key is missing', async () => {
+    setCollapseInterAgentRepliesFromConfig(undefined)
+    render(<Harness messages={[user('u1', DELIVERY), assistant('a1', 'build is green', false)]} />)
+
+    expect(await screen.findByText(/Replied to/)).toBeTruthy()
   })
 })

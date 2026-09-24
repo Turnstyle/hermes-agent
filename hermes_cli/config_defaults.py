@@ -829,6 +829,9 @@ DEFAULT_CONFIG = {
         "background_process_notifications": "concise",
         "streaming": False,
         "timestamps": False,      # message timestamps (CLI labels, TUI rows, desktop transcript)
+        # Desktop: fold a settled reply to an inbound "Message from <bot>" row into "Replied to <bot>".
+        # Set false on profiles whose replies to bot reports are really reports to the human.
+        "collapse_inter_agent_replies": True,
         "timestamp_format": "%H:%M",  # strftime format, e.g. "%b-%d %H:%M"
         "final_response_markdown": "strip",  # render | strip | raw
         # Preserve recent classic-CLI output across Ctrl+L, /redraw and resize clears; disable if an

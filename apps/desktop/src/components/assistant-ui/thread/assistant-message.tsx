@@ -65,6 +65,7 @@ import { useEnterAnimation } from '@/lib/use-enter-animation'
 import { cn } from '@/lib/utils'
 import { playSpeechText, stopVoicePlayback } from '@/lib/voice-playback'
 import { openFreeTierSignIn } from '@/store/free-tier-sign-in'
+import { $collapseInterAgentReplies } from '@/store/inter-agent-collapse'
 import { notifyError } from '@/store/notifications'
 import { startManualProviderOAuth } from '@/store/onboarding'
 import { $activeGatewayProfile, normalizeProfileKey, requestFreshSession } from '@/store/profile'
@@ -195,11 +196,12 @@ const InterAgentCollapsedNotice: FC<{ sender: string }> = ({ sender }) => (
  */
 const InterAgentAssistantMessage: FC<AssistantMessageProps & { sender: string }> = ({ sender, ...props }) => {
   const isRunning = useAuiState(s => s.message.status?.type === 'running')
+  const collapse = useStore($collapseInterAgentReplies)
 
   return (
     <AssistantMessageBody
       {...props}
-      collapsedNotice={isRunning ? null : <InterAgentCollapsedNotice sender={sender} />}
+      collapsedNotice={collapse && !isRunning ? <InterAgentCollapsedNotice sender={sender} /> : null}
     />
   )
 }
