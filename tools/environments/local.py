@@ -788,6 +788,14 @@ def _sweep_escaped_descendants(descendants: list, pgid: int) -> None:
             continue
 
 
+def _cached_hermes_pgid(proc) -> int | None:
+    """Return a stamped process-group id only when it is a positive int (never MagicMock)."""
+    cached = getattr(proc, "_hermes_pgid", None)
+    if isinstance(cached, int) and cached > 0:
+        return cached
+    return None
+
+
 def _kill_process_group_posix(proc) -> None:
     """TERM the group, wait, KILL, then sweep setsid escapees. Descendants are
     snapshotted BEFORE the first signal — once the wrapper dies they reparent to
@@ -796,7 +804,7 @@ def _kill_process_group_posix(proc) -> None:
     try:
         pgid = os.getpgid(proc.pid)
     except ProcessLookupError:
-        if (pgid := getattr(proc, "_hermes_pgid", None)) is None:
+        if (pgid := _cached_hermes_pgid(proc)) is None:
             raise
     try:  # psutil children snapshot; empty on any failure (must never break the kill)
         import psutil
@@ -968,7 +976,9 @@ class LocalEnvironment(BaseEnvironment):
         if _IS_WINDOWS:  # already a forced tree kill
             return self._kill_process(proc)
         with contextlib.suppress(OSError):
-            pgid = getattr(proc, "_hermes_pgid", None) or os.getpgid(proc.pid)
+            pgid = _cached_hermes_pgid(proc)
+            if pgid is None:
+                pgid = os.getpgid(proc.pid)
             if pgid != os.getpgrp():  # never our own group (see _kill_process_group_posix)
                 os.killpg(pgid, signal.SIGKILL)  # windows-footgun: ok — POSIX only (_IS_WINDOWS returned above)
         with contextlib.suppress(OSError):

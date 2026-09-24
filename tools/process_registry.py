@@ -1238,6 +1238,9 @@ class ProcessRegistry(ProcessCheckpointMixin):
             spawn_argv, text=True, cwd=session.cwd, env=spawn_env, encoding="utf-8",
             errors="replace", stdout=subprocess.PIPE, stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL,
             start_new_session=True, **_popen_kwargs)
+        if not _IS_WINDOWS:
+            with suppress(ProcessLookupError):
+                proc._hermes_pgid = os.getpgid(proc.pid)
         session.process = proc
         session.pid = proc.pid
         session.host_start_time = self._safe_host_start_time(session.pid)
@@ -1263,7 +1266,7 @@ class ProcessRegistry(ProcessCheckpointMixin):
             elif not _IS_WINDOWS:
                 try:
                     _kill_process_group_posix(proc)
-                except (ProcessLookupError, PermissionError, OSError):
+                except Exception:
                     proc.kill()
             else:
                 proc.kill()
@@ -2162,7 +2165,7 @@ class ProcessRegistry(ProcessCheckpointMixin):
                 session._pty.terminate(force=True)
             except Exception:
                 if session.pid:
-                    os.kill(session.pid, signal.SIGTERM)
+                    self._terminate_host_pid(session.pid, session.host_start_time)
         elif session.process:
             # Tree kill: on Windows Popen.terminate() only kills the shell wrapper and
             # leaves Git Bash descendants behind.

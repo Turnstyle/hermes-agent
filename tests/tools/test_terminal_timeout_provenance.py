@@ -1,5 +1,8 @@
 """Terminal timeout teardown must kill only task-owned trees (#107029 / fk_e4eaf333).
 
+Red-on-base (2): kill_process_tree refuses caller pid/pgid; _reap_untracked never killpg
+shared PGID. Green scenario tests: LocalEnvironment timeout/interrupt, registry wait/fingerprint.
+
 Synthetic fixtures only: no gateway, profile service, or foreign CLI signalling.
 """
 
@@ -12,11 +15,12 @@ import sys
 import time
 from contextlib import contextmanager
 from types import SimpleNamespace
+from unittest.mock import MagicMock
 
 import pytest
 
 from agent.deadline import kill_process_tree
-from tools.environments.local import LocalEnvironment, _kill_process_group_posix
+from tools.environments.local import LocalEnvironment
 from tools.process_registry import ProcessRegistry
 
 
@@ -63,21 +67,22 @@ def _fake_process_tree_snapshot(_pid, hard_kill=False):
 
 
 @pytest.mark.skipif(sys.platform == "win32", reason="POSIX process-group provenance")
-def test_kill_process_tree_refuses_killpg_on_callers_own_group_leader(monkeypatch):
-    """Group leader in the gateway PGID: killpg is refused; only the owned pid is signalled."""
+def test_kill_process_tree_refuses_teardown_when_target_is_caller_pgid(monkeypatch):
+    """#107029: target pid equals caller PGID — refuse all signals (no killpg, no os.kill)."""
     killpg_calls = []
     kill_calls = []
 
-    owned_pid = 67890
-    monkeypatch.setattr(os, "getpgid", lambda _pid: owned_pid)
-    monkeypatch.setattr(os, "getpgrp", lambda: owned_pid)
+    caller_pgid = 67890
+    monkeypatch.setattr(os, "getpgid", lambda _pid: caller_pgid)
+    monkeypatch.setattr(os, "getpgrp", lambda: caller_pgid)
+    monkeypatch.setattr(os, "getpid", lambda: 11111)
     monkeypatch.setattr(os, "killpg", lambda pgid, sig: killpg_calls.append((pgid, sig)))
     monkeypatch.setattr(os, "kill", lambda pid, sig: kill_calls.append((pid, sig)))
     monkeypatch.setattr("agent.deadline._process_tree_snapshot", _fake_process_tree_snapshot)
 
-    assert kill_process_tree(owned_pid, sig=signal.SIGKILL) is True
-    assert killpg_calls == [], "killpg on caller PGID would take down gateway/multiplex profiles"
-    assert kill_calls == [(owned_pid, signal.SIGKILL)]
+    assert kill_process_tree(caller_pgid, sig=signal.SIGKILL) is False
+    assert killpg_calls == []
+    assert kill_calls == []
 
 
 @pytest.mark.skipif(sys.platform == "win32", reason="POSIX process-group provenance")
@@ -96,7 +101,6 @@ def test_reap_untracked_uses_pid_kill_when_child_shares_caller_group(registry, m
     assert killpg_calls == []
 
 
-@pytest.mark.live_system_guard_bypass
 @pytest.mark.skipif(sys.platform == "win32", reason="POSIX live process tree")
 def test_foreground_timeout_kills_owned_command_not_foreign_sleeper(tmp_path):
     """Owned foreground command times out; unrelated long-lived process keeps running."""
@@ -122,7 +126,6 @@ def test_foreground_timeout_kills_owned_command_not_foreign_sleeper(tmp_path):
             pass
 
 
-@pytest.mark.live_system_guard_bypass
 @pytest.mark.skipif(sys.platform == "win32", reason="POSIX live process tree")
 def test_foreground_timeout_kills_nested_owned_child(tmp_path):
     """Nested grandchild under the timed-out command must not outlive the timeout path."""
@@ -170,6 +173,23 @@ def test_foreground_timeout_kills_nested_owned_child(tmp_path):
             pass
 
 
+def test_signal_kill_pty_fallback_routes_through_terminate_host_pid(registry):
+    """PTY terminate failure must use fingerprint-aware host teardown, not bare os.kill."""
+    session = registry._new_session("codex", "t1", "t1", "", "/tmp")
+    session._pty = MagicMock()
+    session._pty.terminate.side_effect = RuntimeError("pty gone")
+    session.pid = 12345
+    session.host_start_time = 424242
+    calls: list[tuple[int, int]] = []
+
+    def _capture(pid, expected_start):
+        calls.append((pid, expected_start))
+
+    registry._terminate_host_pid = _capture
+    assert registry._signal_kill(session, session.id, consume_output=True) is None
+    assert calls == [(12345, 424242)]
+
+
 def test_tracked_background_kill_refuses_wrong_host_start_fingerprint(registry):
     """Background tracked kill path refuses a recycled-PID fingerprint (fail-closed)."""
     proc = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)"])
@@ -200,33 +220,12 @@ def test_background_wait_timeout_leaves_process_running(registry):
         registry.kill_process(session.id, source="test_cleanup")
 
 
-@pytest.mark.skipif(sys.platform == "win32", reason="POSIX process-group provenance")
-def test_kill_process_group_posix_never_killpgs_own_group(monkeypatch):
-    """Direct helper mirrors LocalEnvironment timeout kill guard."""
-    killed = []
-    proc = SimpleNamespace(
-        pid=12345,
-        poll=lambda: 0,
-        wait=lambda timeout=None: 0,
-        kill=lambda: killed.append(12345),
-    )
-    killpg_calls = []
-    monkeypatch.setattr(os, "getpgid", lambda _pid: 67890)
-    monkeypatch.setattr(os, "getpgrp", lambda: 67890)
-    monkeypatch.setattr(os, "killpg", lambda pgid, sig: killpg_calls.append((pgid, sig)))
-    pytest.importorskip("psutil")
-    _kill_process_group_posix(proc)
-    assert killpg_calls == []
-    assert killed == [12345]
-
-
 def test_kill_process_tree_on_already_exited_child():
     proc = subprocess.Popen([sys.executable, "-c", "pass"], start_new_session=True)
     proc.wait(timeout=10)
     assert kill_process_tree(proc.pid) is False
 
 
-@pytest.mark.live_system_guard_bypass
 def test_interrupt_path_kills_owned_foreground_not_foreign(tmp_path, monkeypatch):
     """Cancellation (/stop) kills the in-flight owned command; foreign sleeper survives."""
     from tools.interrupt import set_interrupt

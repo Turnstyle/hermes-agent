@@ -428,7 +428,19 @@ def kill_process_tree(pid: int, *, sig: Optional[int] = None) -> bool:
     if sig is None:
         sig = _signal.SIGKILL
 
-    with _process_tree_snapshot(int(pid), hard_kill=sig == _signal.SIGKILL) as descendants:
+    pid = int(pid)
+    caller_pid = os.getpid()
+    caller_pgid = os.getpgrp()
+    if pid == caller_pid or pid == caller_pgid:
+        # #107029: the target is the gateway interpreter or its process-group leader id;
+        # any signal here hits the multiplex host, not an isolated tool child.
+        logger.warning(
+            "kill_process_tree: refusing teardown of caller pid/pgid (%s); "
+            "pid=%s pgid=%s",
+            pid, caller_pid, caller_pgid)
+        return False
+
+    with _process_tree_snapshot(pid, hard_kill=sig == _signal.SIGKILL) as descendants:
         signalled = False
         # Signal descendants while their ownership ancestry is still observable.
         # Frozen hard-kill targets cannot fork during this bottom-up teardown.
@@ -448,16 +460,7 @@ def kill_process_tree(pid: int, *, sig: Optional[int] = None) -> bool:
         try:
             if pgid is not None and pgid == pid:
                 # pid leads its own group (the == check avoids signalling non-leaders).
-                if pgid == os.getpgrp():
-                    # A spawner that skipped setsid leaves the child as leader of OUR group
-                    # (#107029): killpg would take down the gateway and every profile on it.
-                    logger.warning(
-                        "kill_process_tree: refusing killpg on caller process group "
-                        "(pid=%s pgid=%s); signalling pid only",
-                        pid, pgid)
-                    os.kill(pid, sig)
-                else:
-                    os.killpg(pgid, sig)  # windows-footgun: ok — POSIX-only branch (win32 returns above)
+                os.killpg(pgid, sig)  # windows-footgun: ok — POSIX-only branch (win32 returns above)
             else:
                 os.kill(pid, sig)
             signalled = True
