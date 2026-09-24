@@ -11,6 +11,7 @@ import contextlib
 import os
 import re
 import signal
+import socket as _socket
 import sqlite3
 import subprocess
 import sys
@@ -1942,9 +1943,9 @@ def _control_plane_lane_patterns() -> tuple[str, ...]:
     board. Their ready cards are expected to wait quietly.
 
     Accepts a list or a comma-separated string. Absent, empty or unreadable
-    config yields ``()`` — every non-spawnable assignee outside
-    ``dispatch_profiles`` is then treated as a missing owner (fail loud, never
-    silently idle).
+    config yields ``()``: no assignee is exempted as a lane. (An unreadable
+    config also makes ``dispatch_profiles`` fail closed, so this home claims
+    nothing and every skipped card reads as ``foreign`` until it is fixed.)
     """
     try:
         from hermes_cli.config_effective import load_user_config_effective
@@ -1952,7 +1953,7 @@ def _control_plane_lane_patterns() -> tuple[str, ...]:
     except Exception as exc:
         _kb._log.warning(
             "kanban: could not read kanban.control_plane_lanes (%s: %s) — "
-            "treating every non-profile assignee as an unavailable owner",
+            "no assignee is exempted as a control-plane lane",
             type(exc).__name__, exc,
         )
         return ()
@@ -2003,6 +2004,17 @@ def _record_owner_unavailable(conn: sqlite3.Connection, task_id: str, assignee: 
     lock); the check is repeated inside the write transaction. A write refused
     by a board fence is logged and skipped — it must never abort the tick.
     """
+    def _still_waiting() -> bool:
+        # The row list was read at tick start; a reassign/claim may have
+        # landed since. Only flag a card still queued for this assignee.
+        row = conn.execute(
+            "SELECT status, assignee, claim_lock FROM tasks WHERE id = ?", (task_id,),
+        ).fetchone()
+        return (
+            row is not None and row["status"] in ("ready", "review")
+            and row["assignee"] == assignee and row["claim_lock"] is None
+        )
+
     def _already_recorded() -> bool:
         last = conn.execute(
             "SELECT kind, payload FROM task_events WHERE task_id = ? "
@@ -2018,13 +2030,14 @@ def _record_owner_unavailable(conn: sqlite3.Connection, task_id: str, assignee: 
         if _already_recorded():
             return False
         with _kb.write_txn(conn):
-            if _already_recorded():
+            if _already_recorded() or not _still_waiting():
                 return False
             _kb._append_event(
                 conn, task_id, OWNER_UNAVAILABLE_EVENT,
                 {
                     "assignee": assignee,
                     "reason": "profile_not_found",
+                    "node": _socket.gethostname(),
                     "detail": (
                         f"assignee {assignee!r} is not a runnable profile on this home and "
                         "is not a configured kanban.control_plane_lanes entry; recover with "

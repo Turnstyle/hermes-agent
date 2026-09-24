@@ -139,3 +139,62 @@ def test_assign_without_reason_payload_unchanged(kanban_home, only_worker_exists
         assert kb.reassign_task(conn, tid, "owner-down") is True
         assigned = _events(conn, tid, "assigned")
     assert assigned[-1][1] == {"assignee": "owner-down", "from": "worker"}
+
+
+def test_claim_starts_new_episode(kanban_home, only_worker_exists):
+    """A ``claimed`` event after the first flag ends that episode, so a later
+    skip for the same missing assignee is recorded again (once)."""
+    with kbc.connect() as conn:
+        tid = kb.create_task(conn, title="owner down", assignee="owner-down")
+        _tick(conn)
+        with kb.write_txn(conn):
+            kb._append_event(conn, tid, "claimed", {"lock": "test"})
+        _tick(conn)
+        _tick(conn)
+        ev = _events(conn, tid, "owner_unavailable")
+    assert [e[1]["assignee"] for e in ev] == ["owner-down", "owner-down"]
+    assert ev[0][1]["node"]
+
+
+def test_stale_row_is_not_flagged(kanban_home, only_worker_exists):
+    """The tick reads rows once; if the card was reassigned since, the write
+    re-check refuses to flag the old assignee."""
+    with kbc.connect() as conn:
+        tid = kb.create_task(conn, title="owner down", assignee="owner-down")
+        assert kb.reassign_task(conn, tid, "worker", reason="moved") is True
+        assert kbd._record_owner_unavailable(conn, tid, "owner-down") is False
+        assert _events(conn, tid, "owner_unavailable") == []
+
+
+def test_refused_write_does_not_abort_tick(kanban_home, only_worker_exists, monkeypatch):
+    """A board fence refusing the owner_unavailable write is logged and
+    skipped; the same tick still dispatches the runnable card."""
+    import sqlite3
+
+    real_append = kb._append_event
+
+    def _append(conn, task_id, kind, payload=None, **kw):
+        if kind == "owner_unavailable":
+            raise sqlite3.IntegrityError("verified execution lease required before running")
+        return real_append(conn, task_id, kind, payload, **kw)
+
+    monkeypatch.setattr(kbd._kb, "_append_event", _append)
+    spawned = []
+    with kbc.connect() as conn:
+        tid = kb.create_task(conn, title="owner down", assignee="owner-down")
+        ok = kb.create_task(conn, title="runnable", assignee="worker")
+        res = kbd.dispatch_once(
+            conn, dry_run=False, spawn_fn=lambda t, _w: spawned.append(t.id) or 4242,
+        )
+        ev = _events(conn, tid, "owner_unavailable")
+    assert res.owner_unavailable == [(tid, "owner-down")]
+    assert spawned == [ok]
+    assert ev == []
+
+
+def test_reassign_with_reclaim_first_keeps_reason(kanban_home, only_worker_exists):
+    with kbc.connect() as conn:
+        tid = kb.create_task(conn, title="t", assignee="owner-down")
+        assert kb.reassign_task(conn, tid, "worker", reclaim_first=True, reason="recover") is True
+        assigned = _events(conn, tid, "assigned")
+    assert assigned[-1][1] == {"assignee": "worker", "from": "owner-down", "reason": "recover"}
