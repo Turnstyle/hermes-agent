@@ -200,13 +200,17 @@ class DispatchResult:
     lifecycle-guard trigger refused this tick; ``step`` names the sweep
     (``release_stale_claims``, ``reconcile_orphaned_running``,
     ``detect_stale_running``, ``detect_crashed_workers``,
-    ``enforce_max_runtime``) or ``claim``. Each row is left completely
+    ``enforce_max_runtime``). Each row is left completely
     unchanged — no partial write, no termination signal — and is NOT counted in
-    ``reclaimed``/``reconciled_orphans``/``stale``/``crashed``/``timed_out``/
-    ``spawned``. Surfaced here instead of raised so the tick continues to sibling
+    ``reclaimed``/``reconciled_orphans``/``stale``/``crashed``/``timed_out``.
+    Surfaced here instead of raised so the tick continues to sibling
     rows and later dispatch steps. Purely observability: never a trigger to
     bypass the fence, which stays enforced until the owner-side lease is
     reconciled elsewhere."""
+    claim_errors: list[tuple[str, str]] = field(default_factory=list)
+    """``(task_id, "claim: <fence message>")`` for each ready/review row whose
+    CLAIM write a lifecycle-guard trigger refused this tick. The row stayed
+    unclaimed and is not counted in ``spawned``; later rows still ran."""
     reaped_terminal_workers: list[str] = field(default_factory=list)
     """Task ids whose worker outlived its closed run and was terminated by
     :func:`reap_terminal_workers`."""
@@ -2273,7 +2277,7 @@ def _dispatch_lane_task(
         # A known fence means this node holds no verified lease for the task
         # yet: the claim rolled back, the row stays queued, and the rest of the
         # lane (and later phases) still run this tick. Anything else aborts.
-        if not _isolate_fenced_row(result.reclaim_errors, "claim", task_id, exc):
+        if not _isolate_fenced_row(result.claim_errors, "claim", task_id, exc):
             raise
         return False
     if claimed is None:

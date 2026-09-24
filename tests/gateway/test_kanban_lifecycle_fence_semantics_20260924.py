@@ -299,7 +299,7 @@ def test_claim_boundary_fenced_ready_task_leaves_siblings_dispatchable() -> None
     ('verified execution lease required before running') was aborting the
     NEXT dispatch phase entirely. This proves the claim boundary itself
     (not just reconcile_orphaned_running) isolates a fenced ready task —
-    left untouched in 'ready', refusal recorded in reclaim_errors — while
+    left untouched in 'ready', refusal recorded in claim_errors — while
     a sibling ready task with no fence at all still claims successfully
     in the SAME call.
     """
@@ -908,6 +908,53 @@ def test_whole_tick_isolates_fenced_rows_in_every_reclaim_sibling(monkeypatch) -
     # The spawn phase ran: the leased ready task and the just-released crash
     # sibling (lease still valid) spawn; no fenced row does.
     assert sorted(spawned) == ["t_crashed_ok", "t_ready_ok"]
+
+
+def test_fenced_claim_reported_in_claim_errors_and_tick_continues(monkeypatch) -> None:
+    """A ready row whose CLAIM the fence refuses (no verified lease) is reported
+    in ``claim_errors`` — the bucket the CLI and gateway read for claim refusals —
+    not in ``reclaim_errors``, stays unclaimed, and a leased ready row later in
+    the same lane still spawns this tick."""
+    now = int(time.time())
+    monkeypatch.setattr("hermes_cli.profiles.profile_exists", lambda name: name == "snow-cndr")
+
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    _make_board(conn)
+    # Higher priority, so the lane attempts the fenced row first.
+    conn.execute(
+        "INSERT INTO tasks (id, title, status, assignee, tenant, priority) "
+        "VALUES ('t_claim_fenced', 'no lease', 'ready', 'snow-cndr', 'snowdrop', '9')"
+    )
+    conn.execute(
+        "INSERT INTO tasks (id, title, status, assignee, tenant, priority) "
+        "VALUES ('t_claim_ok', 'leased', 'ready', 'snow-cndr', 'snowdrop', '1')"
+    )
+    issue_id = conn.execute(
+        "SELECT issue_id FROM fleet_kanban_issue_map WHERE local_task_id='t_claim_ok'"
+    ).fetchone()[0]
+    conn.execute(
+        "INSERT INTO fleet_kanban_verified_leases "
+        "(issue_id, holder_profile, holder_node, generation, lease_revision, "
+        " expires_at, verified_at) VALUES (?, 'snow-cndr', 'snowdrop', 1, 1, ?, ?)",
+        (issue_id, now + 3600, now),
+    )
+    conn.commit()
+    before = _snapshot(conn, "t_claim_fenced")
+    spawned: list[str] = []
+
+    def _stub_spawn(task, workspace, board=None):
+        spawned.append(task.id)
+        return 999_999
+
+    result = kbd._dispatch_once_locked(conn, spawn_fn=_stub_spawn)
+
+    assert result.reclaim_errors == []
+    assert result.claim_errors == [
+        ("t_claim_fenced", "claim: verified execution lease required before running"),
+    ]
+    assert _snapshot(conn, "t_claim_fenced") == before, "fenced row must stay unclaimed"
+    assert spawned == ["t_claim_ok"]
 
 
 def test_stale_fence_refusal_reported_in_tick_result(monkeypatch) -> None:
