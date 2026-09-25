@@ -64,6 +64,43 @@ def test_unrelated_tool_and_bad_args_untouched():
     assert te._effective_tool_deadline(420.0, "terminal", {"command": "x", "timeout": "nan"}) == 420.0
 
 
+# Round 2 (Codex checker finding on bb339893d7): non-finite / oversized values must never disarm the guard.
+
+@pytest.mark.parametrize("raw", [float("inf"), float("-inf"), float("nan"), "inf", "nan", 10 ** 400, True])
+def test_non_finite_or_oversized_timeout_never_extends(raw):
+    assert te._positive_seconds(raw) is None
+    assert te._effective_tool_deadline(420.0, "terminal", {"command": "x", "timeout": raw}) == 420.0
+    assert te._effective_tool_deadline(420.0, "process", {"action": "wait", "timeout": raw}) == 420.0
+
+
+def test_infinite_terminal_timeout_env_keeps_generic_deadline(monkeypatch):
+    monkeypatch.setenv("TERMINAL_TIMEOUT", "inf")
+    # process wait mirrors process_registry.wait: unparseable int -> 180s ceiling.
+    assert te._effective_tool_deadline(420.0, "process", {"action": "wait"}) == 420.0
+    assert te._effective_tool_deadline(420.0, "terminal", {"command": "x"}) == 420.0
+
+
+def test_concurrent_batch_deadline_stays_finite_with_infinite_env(monkeypatch):
+    monkeypatch.setenv("TERMINAL_TIMEOUT", "inf")
+    deadline = 420.0
+    for name, args in (("process", {"action": "wait"}), ("web_search", {"query": "x"})):
+        deadline = te._effective_tool_deadline(deadline, name, args)
+    assert deadline == 420.0
+
+
+def test_terminal_default_is_scope_aware(monkeypatch):
+    """Under gateway multiplexing the profile's terminal.timeout arrives via the terminal scope,
+    not os.environ; the self-bound must read the same source the terminal tool reads."""
+    from tools.terminal_scope import reset_terminal_scope, set_terminal_scope
+
+    monkeypatch.setenv("TERMINAL_TIMEOUT", "180")
+    token = set_terminal_scope({"TERMINAL_TIMEOUT": "1800"})
+    try:
+        assert te._effective_tool_deadline(420.0, "terminal", {"command": "codex exec x"}) == 1800 + GRACE
+    finally:
+        reset_terminal_scope(token)
+
+
 class _Agent:
     def __init__(self):
         self._tool_worker_threads = set()

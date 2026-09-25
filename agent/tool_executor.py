@@ -13,6 +13,7 @@ import contextlib
 import json
 from pathlib import Path
 import logging
+import math
 import os
 import random
 import threading
@@ -846,15 +847,36 @@ _SELF_BOUNDED_TOOL_GRACE_S = 60.0
 
 
 def _positive_seconds(raw: Any) -> float | None:
+    """A finite, positive number of seconds, else ``None``. Non-finite values (inf/nan) and
+    oversized integers are rejected: extending a deadline by them would disarm the guard."""
+    if isinstance(raw, bool):
+        return None
     try:
         value = float(raw)
-    except (TypeError, ValueError):
+    except (TypeError, ValueError, OverflowError):
         return None
-    return value if value > 0 and value == value else None
+    return value if value > 0 and math.isfinite(value) else None
 
 
 def _terminal_default_timeout_s() -> float | None:
-    return _positive_seconds(os.getenv("TERMINAL_TIMEOUT", "180"))
+    """``terminal.timeout`` as the terminal tool reads it: scope-aware (per-profile policy under
+    gateway multiplexing) and integer-parsed. Unreadable/refused -> ``None`` (generic applies)."""
+    try:
+        from tools.terminal_scope import terminal_env
+        raw = terminal_env("TERMINAL_TIMEOUT", "180")
+        return _positive_seconds(int(raw))
+    except Exception:
+        return None
+
+
+def _process_wait_ceiling_s() -> float | None:
+    """``process(action="wait")`` clamps to ambient ``TERMINAL_TIMEOUT`` with an int parse and a
+    180s fallback (tools/process_registry.py ``wait``); mirror that exactly."""
+    try:
+        ceiling = int(os.getenv("TERMINAL_TIMEOUT", "180"))
+    except (TypeError, ValueError):
+        ceiling = 180
+    return _positive_seconds(ceiling)
 
 
 def _terminal_foreground_cap_s() -> float | None:
@@ -885,7 +907,7 @@ def _tool_self_bound_s(function_name: str, function_args: Any) -> float | None:
             return None if cap is not None and explicit > cap else explicit
         return _terminal_default_timeout_s()
     if function_name == "process" and function_args.get("action") == "wait":
-        ceiling = _terminal_default_timeout_s()
+        ceiling = _process_wait_ceiling_s()
         requested = _positive_seconds(function_args.get("timeout"))
         if requested is None or ceiling is None:
             return ceiling
