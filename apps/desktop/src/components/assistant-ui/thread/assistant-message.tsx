@@ -27,6 +27,7 @@ import { ReactionPicker } from '@/components/assistant-ui/thread/message-reactio
 import { ResponseMessageIds } from '@/components/assistant-ui/thread/response-group'
 import { ResponseLoadingIndicator, TurnActivityIndicator } from '@/components/assistant-ui/thread/status'
 import { MessageTimelineTimestamp } from '@/components/assistant-ui/thread/timeline-timestamp'
+import { useCollapseInterAgentReplies } from '@/components/assistant-ui/thread/use-collapse-inter-agent-replies'
 import { useMessageReactions, useTapbackDoubleClick } from '@/components/assistant-ui/thread/use-message-reactions'
 import { AGENT_MESSAGE_RE } from '@/components/assistant-ui/thread/user-message'
 import { isApprovalActivity, isCurrentTurnMessage } from '@/components/assistant-ui/tool/approval-activity'
@@ -65,7 +66,6 @@ import { useEnterAnimation } from '@/lib/use-enter-animation'
 import { cn } from '@/lib/utils'
 import { playSpeechText, stopVoicePlayback } from '@/lib/voice-playback'
 import { openFreeTierSignIn } from '@/store/free-tier-sign-in'
-import { $collapseInterAgentReplies } from '@/store/inter-agent-collapse'
 import { notifyError } from '@/store/notifications'
 import { startManualProviderOAuth } from '@/store/onboarding'
 import { $activeGatewayProfile, normalizeProfileKey, requestFreshSession } from '@/store/profile'
@@ -196,7 +196,8 @@ const InterAgentCollapsedNotice: FC<{ sender: string }> = ({ sender }) => (
  */
 const InterAgentAssistantMessage: FC<AssistantMessageProps & { sender: string }> = ({ sender, ...props }) => {
   const isRunning = useAuiState(s => s.message.status?.type === 'running')
-  const collapse = useStore($collapseInterAgentReplies)
+  // Per chat owner, not per window: a Bot Chat keeps the window's profile.
+  const collapse = useCollapseInterAgentReplies()
 
   return (
     <AssistantMessageBody
