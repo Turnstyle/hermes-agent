@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 
+import { graftRefreshedTailOntoBackfill } from '@/app/chat/transcript-backfill'
 import { textWithoutReferenceLines, WIRE_REFERENCE_KINDS } from '@/components/assistant-ui/reference-kinds'
 import { type ChatMessage, type ChatMessagePart, chatMessageText } from '@/lib/chat-messages'
 import { $approvalModes, approvalModeForProfile } from '@/store/approval-mode'
@@ -1796,5 +1797,103 @@ describe('preserveEquivalentTranscript', () => {
     const next = [msg('u-1', 'user', 'hello', { pending: true })]
 
     expect(preserveEquivalentTranscript(current, next)).toBe(next)
+  })
+})
+
+describe('preserveLocalPendingTurnMessages — prompt.receipt client ids (t_edb5b1dd)', () => {
+  // Two sends typed while a turn ran: the gateway queue merges them into ONE durable
+  // row ("one\n\ntwo"), so neither bubble's text matches the stored row.
+  const previous = [
+    msg('s-u1', 'user', 'q1', { rowId: 10 }),
+    msg('s-a1', 'assistant', 'r1', { rowId: 11 }),
+    msg('user-A', 'user', 'one'),
+    msg('user-B', 'user', 'two')
+  ]
+
+  it('retires queued bubbles the durable merged row names, with no text match', () => {
+    const next = [
+      msg('s-u1', 'user', 'q1', { rowId: 10 }),
+      msg('s-a1', 'assistant', 'r1', { rowId: 11 }),
+      msg('s-u2', 'user', 'one\n\ntwo', { rowId: 12, clientMessageIds: ['user-A', 'user-B'] }),
+      msg('s-a2', 'assistant', 'r2', { rowId: 13 })
+    ]
+
+    expect(preserveLocalPendingTurnMessages(next, previous).map(message => message.id)).toEqual([
+      's-u1',
+      's-a1',
+      's-u2',
+      's-a2'
+    ])
+  })
+
+  // Checker finding 1: text is not identity. An earlier identical prompt that answered a
+  // DIFFERENT send must not retire this one.
+  it('keeps the second of two identical sends while only the first has a saved row', () => {
+    const prev = [
+      msg('s-u1', 'user', 'q1', { rowId: 10 }),
+      msg('s-a1', 'assistant', 'r1', { rowId: 11 }),
+      msg('user-A', 'user', 'run tests'),
+      msg('user-B', 'user', 'run tests')
+    ]
+
+    const next = [
+      msg('s-u1', 'user', 'q1', { rowId: 10 }),
+      msg('s-a1', 'assistant', 'r1', { rowId: 11 }),
+      msg('s-u2', 'user', 'run tests', { rowId: 12, clientMessageIds: ['user-A'] })
+    ]
+
+    const ids = preserveLocalPendingTurnMessages(next, prev).map(message => message.id)
+
+    expect(ids).not.toContain('user-A')
+    expect(ids).toContain('user-B')
+  })
+
+  // Checker finding 3: the saved row aged out of the fetched page. The receipt bound rowId,
+  // so absence from a newer page is pagination, not loss.
+  it('retires a receipted send whose row is older than the fetched page', () => {
+    const prev = [
+      msg('s-u1', 'user', 'q1', { rowId: 10 }),
+      msg('s-a1', 'assistant', 'r1', { rowId: 11 }),
+      msg('user-A', 'user', 'one', { rowId: 12, clientMessageIds: ['user-A'] })
+    ]
+
+    const next = [msg('s-u9', 'user', 'later', { rowId: 200 }), msg('s-a9', 'assistant', 'r9', { rowId: 201 })]
+
+    expect(preserveLocalPendingTurnMessages(next, prev).map(message => message.id)).not.toContain('user-A')
+  })
+
+  // Stack scenario end to end: grafted refresh + reconcile, as use-background-sync composes them.
+  it('graft + reconcile leaves no stacked queued bubbles below the replies', () => {
+    const prev = [
+      msg('s-u0', 'user', 'older', { rowId: 5 }),
+      msg('user-A', 'user', 'one'),
+      msg('s-u1', 'user', 'q1', { rowId: 10 }),
+      msg('s-a1', 'assistant', 'r1', { rowId: 11 }),
+      msg('user-B', 'user', 'two')
+    ]
+
+    const refreshed = [
+      msg('s-u1', 'user', 'q1', { rowId: 10 }),
+      msg('s-a1', 'assistant', 'r1', { rowId: 11 }),
+      msg('s-u2', 'user', 'one\n\ntwo', { rowId: 12, clientMessageIds: ['user-A', 'user-B'] }),
+      msg('s-a2', 'assistant', 'r2', { rowId: 13 })
+    ]
+
+    const out = preserveLocalPendingTurnMessages(graftRefreshedTailOntoBackfill(refreshed, prev), prev)
+
+    expect(out.map(message => message.id)).toEqual(['s-u0', 's-u1', 's-a1', 's-u2', 's-a2'])
+  })
+
+  it('keeps a bubble no durable row names yet', () => {
+    const next = [
+      msg('s-u1', 'user', 'q1', { rowId: 10 }),
+      msg('s-a1', 'assistant', 'r1', { rowId: 11 }),
+      msg('s-u2', 'user', 'one', { rowId: 12, clientMessageIds: ['user-A'] })
+    ]
+
+    const ids = preserveLocalPendingTurnMessages(next, previous).map(message => message.id)
+
+    expect(ids).not.toContain('user-A')
+    expect(ids).toContain('user-B')
   })
 })

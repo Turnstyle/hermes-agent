@@ -173,6 +173,12 @@ function messageReactions(metadata: SessionMessage['display_metadata']): Message
   )
 }
 
+function messageClientIds(metadata: SessionMessage['display_metadata']): string[] {
+  const ids = parseDisplayMetadata(metadata)?.client_message_ids
+
+  return Array.isArray(ids) ? ids.filter((id): id is string => typeof id === 'string' && id.length > 0) : []
+}
+
 // Only parse producer-owned boundaries, never render the model's task preamble.
 // Older backends can persist an unwrapped result rather than an envelope.
 function asyncResultBody(content: string): string | undefined {
@@ -428,6 +434,7 @@ export function toChatMessages(messages: SessionMessage[]): ChatMessage[] {
     }
 
     const reactions = messageReactions(message.display_metadata)
+    const clientMessageIds = displayRole === 'user' ? messageClientIds(message.display_metadata) : []
     // Gateway resume names the durable row id `row_id`; the REST transcript
     // prefetch ships the same messages.id as a numeric `id`. Either one lets
     // reactions address this exact row later.
@@ -444,6 +451,7 @@ export function toChatMessages(messages: SessionMessage[]): ChatMessage[] {
       timestamp: earliestTimestamp(message.timestamp, ...parts.map(part => part.timestamp)),
       ...(rowId !== undefined ? { rowId } : {}),
       ...(reactions.length ? { reactions } : {}),
+      ...(clientMessageIds.length ? { clientMessageIds } : {}),
       ...(extractedAttachmentRefs ? { attachmentRefs: extractedAttachmentRefs } : {})
     })
 

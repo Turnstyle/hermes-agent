@@ -133,7 +133,9 @@ export function useSubmitPrompt(deps: SubmitPromptDeps) {
         Boolean(a)
       )
 
-      const titlePreview = attachments.find(a => typeof a.titlePreview === 'string' && a.titlePreview.trim())?.titlePreview
+      const titlePreview = attachments.find(
+        a => typeof a.titlePreview === 'string' && a.titlePreview.trim()
+      )?.titlePreview
 
       const terminalContextBlocks = terminalContextBlocksFromDraft(rawText).join('\n\n')
       const hasImage = attachments.some(a => a.kind === 'image')
@@ -777,7 +779,11 @@ export function useSubmitPrompt(deps: SubmitPromptDeps) {
           // (client saw idle, server still unwinding) redirects or interrupts
           // the live turn with text the user explicitly queued.
           ...(options?.fromQueue && { queued: true }),
-          ...(titlePreview && { title_preview: titlePreview })
+          ...(titlePreview && { title_preview: titlePreview }),
+          // This send occurrence's bubble id: the gateway stores it on the user
+          // row and echoes it in `prompt.receipt`, so a send that waited in the
+          // busy queue still retires its bubble (older gateways ignore it).
+          client_message_id: optimisticId
         })
 
         // On sleep/wake the gateway's in-memory session may have been cleared

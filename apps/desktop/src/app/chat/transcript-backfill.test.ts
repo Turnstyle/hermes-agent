@@ -157,6 +157,35 @@ describe('graftRefreshedTailOntoBackfill', () => {
 
     expect(graftRefreshedTailOntoBackfill(refreshed, previous)).toBe(refreshed)
   })
+
+  // Checker finding 2 (t_edb5b1dd): a stale optimistic send kept in the retained prefix.
+  it('drops a prefix optimistic send the refreshed tail answers by receipt or bound row', () => {
+    const optimistic = { ...chat('user-X'), parts: [{ type: 'text' as const, text: 'queued' }] }
+    const bound = { ...chat('user-Y'), rowId: 5 }
+    const previous = [chat('older', 1), optimistic, bound, chat('anchor', 3)]
+
+    const refreshed = [
+      chat('anchor', 3),
+      { ...chat('stored-copy', 4), clientMessageIds: ['user-X'] },
+      chat('stored-y', 5),
+      { ...chat('bot-dm', 6), role: 'assistant' as const }
+    ]
+
+    expect(graftRefreshedTailOntoBackfill(refreshed, previous).map(m => m.id)).toEqual([
+      'older',
+      'anchor',
+      'stored-copy',
+      'stored-y',
+      'bot-dm'
+    ])
+  })
+
+  it('keeps a prefix optimistic send no refreshed row answers', () => {
+    const previous = [chat('older', 1), chat('user-Z'), chat('anchor', 3)]
+    const refreshed = [chat('anchor', 3), { ...chat('other', 4), clientMessageIds: ['user-other'] }]
+
+    expect(graftRefreshedTailOntoBackfill(refreshed, previous).map(m => m.id)).toContain('user-Z')
+  })
 })
 
 describe('backfillOlderTranscriptPage', () => {

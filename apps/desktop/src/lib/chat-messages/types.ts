@@ -48,6 +48,10 @@ export type ChatMessage = {
   attachmentRefs?: string[]
   /** Durable backend `messages.id`. Absent until the row is persisted. */
   rowId?: number
+  /** User rows: the optimistic bubble ids (`prompt.submit` `client_message_id`) this durable
+   *  row answers — several when queued sends merged. Lets reconcile retire exactly those
+   *  bubbles regardless of text, clocks or which transcript page the row lands on. */
+  clientMessageIds?: string[]
   /** Emoji reactions on this message — one per author (see MessageReaction). */
   reactions?: MessageReaction[]
 }

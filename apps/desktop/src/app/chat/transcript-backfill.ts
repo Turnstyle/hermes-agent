@@ -89,7 +89,25 @@ export function graftRefreshedTailOntoBackfill(refreshedTail: ChatMessage[], pre
     return refreshedTail
   }
 
-  return [...previous.slice(0, anchor), ...refreshedTail]
+  // The retained prefix is durable history plus whatever local rows sat in it. An optimistic
+  // send that a refreshed row now answers — by receipt (`clientMessageIds`) or a bound
+  // `rowId` — is the same occurrence twice: drop the local copy. Unproven rows stay; the
+  // pending-turn reconcile decides those.
+  const answeredIds = new Set(refreshedTail.flatMap(message => message.clientMessageIds ?? []))
+  const tailRowIds = new Set(refreshedTail.flatMap(message => (message.rowId === undefined ? [] : [message.rowId])))
+
+  const prefix = previous
+    .slice(0, anchor)
+    .filter(
+      message =>
+        !(
+          message.role === 'user' &&
+          message.id.startsWith('user-') &&
+          (answeredIds.has(message.id) || (message.rowId !== undefined && tailRowIds.has(message.rowId)))
+        )
+    )
+
+  return [...prefix, ...refreshedTail]
 }
 
 export interface BackfillRequest {

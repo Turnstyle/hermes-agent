@@ -177,7 +177,8 @@ const COMPARED_FIELDS = [
   'durationS'
 ] as const
 
-const IGNORED_FIELDS = ['attachmentRefs', 'parts', 'rowId'] as const
+// clientMessageIds — reconcile identity only (retires optimistic bubbles); never painted
+const IGNORED_FIELDS = ['attachmentRefs', 'clientMessageIds', 'parts', 'rowId'] as const
 
 // Compile-time check: every ChatMessagePart discriminant must be handled by
 // chatPartsEquivalent. If @assistant-ui adds a new part type, this fails tsc.
@@ -371,8 +372,7 @@ export function reconcileResumeMessages(nextMessages: ChatMessage[], previousMes
     // empty/tool-only hydrated row can share a role ordinal while being
     // different turns, and plain `'' === ''` would pair them (#114543),
     // grafting the cached reasoning/tool parts onto the unrelated row.
-    const sameText =
-      nextText.length > 0 && (nextText === previousVisibleText || nextText === previousText.trim())
+    const sameText = nextText.length > 0 && (nextText === previousVisibleText || nextText === previousText.trim())
 
     // Mid-turn, the authoritative text has advanced past the cached copy by one
     // or more deltas. That is still the same turn, and the cached row holds the
@@ -389,9 +389,7 @@ export function reconcileResumeMessages(nextMessages: ChatMessage[], previousMes
     // inherit its reasoning/tool parts (#76444 review / salvage).
     const sameTurn =
       sameText ||
-      (nextText.length > 0 &&
-        previousTrimmed.length > 0 &&
-        isStrictAnswerTextExtension(nextText, previousTrimmed)) ||
+      (nextText.length > 0 && previousTrimmed.length > 0 && isStrictAnswerTextExtension(nextText, previousTrimmed)) ||
       (message.role === 'assistant' &&
         previous.role === 'assistant' &&
         hasStructuralParts(previous) &&
@@ -557,6 +555,10 @@ export function preserveLocalPendingTurnMessages(
   }
 
   const nextIds = new Set(nextMessages.map(message => message.id))
+  // Optimistic bubbles a durable user row names (display_metadata.client_message_ids): that row IS
+  // the bubble, wherever it landed — including a queued send merged into one row.
+  const answeredClientIds = new Set(nextMessages.flatMap(message => message.clientMessageIds ?? []))
+  const lastStoredRowId = nextMessages.reduce((last, message) => Math.max(last, message.rowId ?? 0), 0)
   const previousRoleCounts = new Map<ChatMessage['role'], number>()
 
   const newestOptimisticUser = [...previousMessages]
@@ -634,9 +636,22 @@ export function preserveLocalPendingTurnMessages(
       continue
     }
 
+    if (isOptimisticUser && answeredClientIds.has(message.id)) {
+      continue
+    }
+
+    // `prompt.receipt` bound this send to its saved row. If the newest page has
+    // advanced beyond it, its absence is pagination, not unsent input.
+    if (isOptimisticUser && message.rowId !== undefined && message.rowId <= lastStoredRowId) {
+      continue
+    }
+
+    // Text fallback for gateways that send no receipts. A row that carries client ids is a
+    // specific occurrence: same text from another send (an earlier identical prompt) is not this one.
     if (
       isOptimisticUser &&
       latestAuthoritativeUser &&
+      !latestAuthoritativeUser.clientMessageIds?.length &&
       textWithoutReferenceLines(chatMessageText(latestAuthoritativeUser)) ===
         textWithoutReferenceLines(chatMessageText(message))
     ) {
