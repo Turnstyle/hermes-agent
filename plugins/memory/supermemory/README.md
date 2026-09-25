@@ -58,8 +58,7 @@ Config file: `$HERMES_HOME/supermemory.json`
 | `api_timeout` | `5.0` | Timeout for SDK requests |
 | `containers` | unset | Per-container operation permissions (see [Container Permissions](#container-permissions)) |
 | `require_availability_proof` | `false` | Require a per-process proof from a key helper, not just a key (see [Availability Proof](#availability-proof)) |
-| `tunnel` | unset | `{"ssh_host", "forward"}` of the SSH local forward that `base_url` goes through; its listener is checked at start and while running (see [Availability Proof](#availability-proof)) |
-| `availability_recheck_seconds` | `10` | How long a passed live tunnel check is trusted before the next client use re-runs it (1 to 300) |
+| `tunnel` | unset | `{"ssh_host", "forward"}` of an SSH forward to a local Unix socket; every request then goes only to that socket, checked before each use and each request. `base_url` must be unset (see [SSH tunnel](#ssh-tunnel)) |
 
 ### Environment Variables
 
@@ -169,19 +168,64 @@ By default the provider is available whenever `SUPERMEMORY_API_KEY` is set. When
 - If the proof fails in a single-profile process, `SUPERMEMORY_API_KEY` is removed from the process environment, so child processes that copy it do not inherit the key. Under a multiplexed gateway the shared environment is left alone and the provider simply refuses the key.
 - The provider never edits a bound secret scope. TUI and Desktop bodies bind one even in a single-profile process, and multiplexed gateways bind one per profile. A key held there stays in that process until it exits, although the provider refuses it. Restart the process to remove it.
 
-The check is not only made at start. With `require_availability_proof` or `tunnel` set, every client use (tools, prefetch, capture, mirroring) re-checks the proof and the key in the current scope. With a `tunnel` block it also re-checks the tunnel's listener, at most every `availability_recheck_seconds`. When a re-check fails, the provider drops its client and its in-memory key, logs a warning, and tool calls return `Supermemory is disabled for this session: <reason>`. That provider instance stays off; a new session runs the start-up gate again.
+The check is not only made at start. With `require_availability_proof` or `tunnel` set, every client use (tools, prefetch, capture, mirroring) re-checks the proof and the key in the current scope, and the tunnel when there is one. Nothing is cached between uses. When a re-check fails, the provider drops its client and its in-memory key, logs a warning, and tool calls return `Supermemory is disabled for this session: <reason>`. That provider instance stays off; a new session runs the start-up gate again.
 
-`tunnel_key_helper.py` (stdlib only) is a helper for a proxy behind an SSH local forward. **The key never crosses the local forward port.** The helper reads the key and makes the authenticated `/health` request in one `ssh <host>` session, against the forward's remote end on that host. SSH authenticates the host, so a process that takes over the local port can't receive the key. Before that, it runs checks that carry no credential: the port is open; its only listener is this user's process whose exact argv is an ssh forward to the expected host (parsed the way ssh parses it; options that could redirect the connection or weaken host-key checks fail closed, and so does a remote command); and unauthenticated `/health` answers like the expected proxy. See its docstring for a `secrets.command` example; use `override_existing: true` there so the fresh key and proof beat inherited values. Pair it with a matching `tunnel` block:
+## SSH tunnel
+
+For a proxy that is reachable only through SSH, forward a **Unix socket**, never a TCP port. Another local user
+can bind a TCP port the moment ssh lets go of it; nobody else can create a socket inside a directory that only
+you can enter. Create the directory once, then run the tunnel (launchd, systemd, or by hand):
+
+```sh
+install -d -m 0700 ~/.hermes/supermemory-tunnel      # yours, mode 0700; check `ls -lde` shows no ACL
+ssh -N -o ExitOnForwardFailure=yes -o StreamLocalBindMask=0177 -o StreamLocalBindUnlink=yes \
+    -L "$HOME/.hermes/supermemory-tunnel/rosie.sock:127.0.0.1:6768" rosie
+```
+
+Then point the provider at the socket. `forward` is exactly the `-L` value, with an absolute, symlink-free path;
+`base_url` (and `SUPERMEMORY_BASE_URL`) must be unset:
 
 ```json
 {
-  "base_url": "http://127.0.0.1:16768",
   "require_availability_proof": true,
-  "tunnel": {"ssh_host": "rosie", "forward": "127.0.0.1:16768:127.0.0.1:6768"}
+  "tunnel": {"ssh_host": "rosie", "forward": "/Users/me/.hermes/supermemory-tunnel/rosie.sock:127.0.0.1:6768"}
 }
 ```
 
-`base_url` must be the local end of `tunnel.forward`, otherwise the provider stays unavailable. Between two live checks (up to `availability_recheck_seconds`), the provider's own requests still go to the local TCP port. A listener that replaces the tunnel inside that window could receive the key. Shorten the interval to narrow that window.
+With a `tunnel` block:
+
+- **The socket is the only route.** The SDK's HTTP client has a single transport, `httpx.HTTPTransport(uds=<socket>)`.
+  There is no TCP URL (the SDK sees the placeholder `http://supermemory-tunnel.invalid`), no environment proxy, no
+  keep-alive connection and no fallback. A TCP `forward`, or any `base_url`, makes the provider unavailable.
+- **Before every request** (inside the transport, so every caller is covered): every directory above the socket is a
+  real directory owned by root or you and not writable by others (unless sticky, like `/tmp`); the socket's own
+  directory is yours with mode 0700; the socket is a socket owned by you with no group/other permissions; and it is
+  the same socket (inode) that was verified when the client was built. Otherwise the request is refused before a byte
+  is sent.
+- **Before every use:** the same checks, plus the listener: an empty connection's peer credentials must name a
+  process of yours whose exact argv is an ssh forward of `forward` to `ssh_host` (parsed the way ssh parses it;
+  options that could redirect the connection or weaken host-key checks fail closed, and so does a remote command).
+  A refused connection (a stale socket file) counts as down. So does a different socket at the same path, even a
+  working one after a tunnel restart: that session stays off and the next session verifies the new socket.
+
+`tunnel_key_helper.py` (stdlib only) is the matching `secrets.command` helper. It runs the same socket and listener
+checks, then an unauthenticated `/health` through the socket that must answer like the expected proxy. **The key never
+crosses the local socket:** the helper reads the key and makes the authenticated `/health` request in one `ssh <host>`
+session, against the forward's remote end on that host. See its docstring for a `secrets.command` example; use
+`override_existing: true` there so the fresh key and proof beat inherited values.
+
+What this does not protect against:
+
+- **This same user, or root.** Either can replace the socket, read the helper's output, or read the key from the
+  Hermes process. The checks catch accidents from them, not attacks.
+- **A compromised ssh host, or other accounts on it.** The forward's far end is the proxy's loopback TCP port on that
+  host. If the proxy is down, another account there could bind that port and receive forwarded requests with the key.
+- **What the key can do on the server.** The `containers` permissions limit what this provider sends; they do not limit
+  another holder of the key. Scope the key on the server side (read-only, per container, short-lived) if you need that.
+- **ACLs.** The directory checks read POSIX mode bits only; an ACL that grants another user access is not seen.
+- **Lifetime.** The checks run when the provider is used. An idle process keeps its key until it is used (and refuses)
+  or exits, and a key in a bound secret scope stays until the process exits. To remove a key from memory, stop the
+  process; to invalidate a key that may have been copied, rotate it on the server.
 
 ## Support
 
