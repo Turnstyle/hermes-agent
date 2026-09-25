@@ -9,10 +9,11 @@ import logging
 import os
 import re
 import threading
-import time
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional, Tuple
+
+import httpx
 
 from agent.memory_provider import MemoryProvider, spawn_context_thread
 from agent.secret_scope import get_secret, is_multiplex_active, serves_routed_profile
@@ -21,11 +22,13 @@ from tools.registry import tool_error
 from . import tunnel_key_helper as _tunnel
 
 logger = logging.getLogger(__name__)
-_monotonic = time.monotonic  # re-check clock (a seam for tests)
 
 _DEFAULT_CONTAINER_TAG = "hermes"
 _VALID_SEARCH_MODES = ("hybrid", "memories", "documents")
 _DEFAULT_BASE_URL = "https://api.supermemory.ai"
+# With a tunnel the SDK's transport connects only to the tunnel's Unix socket, so this URL supplies just the Host
+# header and the path. ".invalid" never resolves (RFC 6761): nothing could reach it over TCP even if tried.
+_TUNNEL_BASE_URL = "http://supermemory-tunnel.invalid"
 _API_KEY_URL = "http://app.supermemory.ai/integrations?connect=hermes"
 # Strips injected <supermemory-context> / <supermemory-containers> blocks before capture.
 _INJECTED_BLOCK_RE = re.compile(r"<supermemory-(context|containers)>[\s\S]*?</supermemory-\1>\s*", re.DOTALL)
@@ -102,7 +105,8 @@ def _normalize_permissions(value: Any) -> Optional[Dict[str, Dict[str, bool]]]:
 
 
 def _normalize_tunnel(value: Any) -> Optional[Dict[str, str]]:
-    """``tunnel`` block -> {"ssh_host", "forward"}; None = no block; {} = malformed (the gate then fails closed)."""
+    """``tunnel`` block -> {"ssh_host", "forward"}; None = no block; {} = malformed, a TCP forward included (the gate
+    then fails closed)."""
     if value is None:
         return None
     if not isinstance(value, dict) or not str(value.get("ssh_host") or "").strip():
@@ -133,11 +137,10 @@ _CONFIG_SPEC: Dict[str, tuple] = {
     "containers": (None, _normalize_permissions),
     # Require a fresh per-process proof from the key helper (_PROOF_ENV) instead of mere key presence.
     "require_availability_proof": (False, lambda v: _as_bool(v, False)),
-    # The SSH forward base_url goes through, e.g. {"ssh_host": "rosie", "forward": "127.0.0.1:16768:127.0.0.1:6768"}:
-    # its listener is verified at start and again while the provider runs (tunnel_key_helper.tunnel_down_reason).
+    # The SSH forward to a local Unix socket that every request goes through, e.g. {"ssh_host": "rosie", "forward":
+    # "/Users/me/.hermes/supermemory-tunnel/rosie.sock:127.0.0.1:6768"}; base_url must then be unset. The socket and
+    # its listener are verified before every client use, the socket file before every request (_TunnelTransport).
     "tunnel": (None, _normalize_tunnel),
-    # With a guard configured (the proof or a tunnel), a passed live tunnel check is trusted this long.
-    "availability_recheck_seconds": (10.0, lambda v: _clamp_number(v, 10.0, 1.0, 300.0, float)),
 }
 
 
@@ -218,18 +221,49 @@ def _memory_fields(item: Any, *keys: str) -> dict:
             for k in keys}
 
 
+class _TunnelTransport(httpx.BaseTransport):
+    """The SDK's only transport when supermemory.json has a ``tunnel``: every request goes to the tunnel's Unix socket
+    on a new connection, and only after the socket file passes ``check_socket`` against the one verified when this
+    client was built (a replaced, stale-path or loosened socket is refused before a byte is sent). There is no TCP
+    route: no TCP URL, no environment proxies, nothing to fall back to."""
+
+    def __init__(self, tunnel: Dict[str, str]):
+        if not tunnel:
+            raise ValueError("supermemory.json tunnel settings are malformed")
+        self._socket_path = _tunnel.split_forward(tunnel["forward"])[0]
+        reason, self._pinned = _tunnel.verify_tunnel(tunnel["forward"], tunnel["ssh_host"])
+        if reason:
+            raise ConnectionError(f"Supermemory tunnel check failed ({reason})")
+        self._inner = httpx.HTTPTransport(uds=self._socket_path, retries=0,
+                                          limits=httpx.Limits(max_keepalive_connections=0))
+
+    def handle_request(self, request: httpx.Request) -> httpx.Response:
+        reason, _ = _tunnel.check_socket(self._socket_path, _tunnel.current_uid(), self._pinned)
+        if reason:
+            raise httpx.ConnectError(f"Supermemory tunnel socket refused ({reason})", request=request)
+        return self._inner.handle_request(request)
+
+    def close(self) -> None:
+        self._inner.close()
+
+
 class _SupermemoryClient:
     def __init__(self, api_key: str, timeout: float, container_tag: str,
-                 search_mode: str = "hybrid", base_url: str = ""):
-        # Lazy-install the SDK on demand (honors security.allow_lazy_installs and sealed Docker
-        # venvs). On failure fall through so the raw import produces the canonical ImportError.
-        _quietly(lambda: importlib.import_module("tools.lazy_deps").ensure("memory.supermemory", prompt=False))
+                 search_mode: str = "hybrid", base_url: str = "", tunnel: Optional[Dict[str, str]] = None):
+        # Make the pinned extra importable; on failure fall through so the raw
+        # import below produces the canonical ImportError message.
+        with contextlib.suppress(Exception):
+            from pm import ensure_import as _lazy_ensure
+            _lazy_ensure("supermemory")
         from supermemory import Supermemory
         self._api_key, self._container_tag, self._timeout = api_key, container_tag, timeout
         self._search_mode = search_mode if search_mode in _VALID_SEARCH_MODES else "hybrid"
-        self._base_url = _resolve_base_url(base_url)
+        self._base_url = _resolve_base_url(base_url) if tunnel is None else _TUNNEL_BASE_URL
+        http_client = None if tunnel is None else httpx.Client(transport=_TunnelTransport(tunnel), trust_env=False,
+                                                               timeout=timeout, follow_redirects=False)
         self._client = Supermemory(api_key=api_key, base_url=self._base_url, timeout=timeout, max_retries=0,
-                                   default_headers={"x-sm-source": "hermes"})
+                                   default_headers={"x-sm-source": "hermes"},
+                                   **({"http_client": http_client} if http_client else {}))
 
     def _merge_metadata(self, metadata: Optional[dict]) -> dict:
         # sm_source routes Hermes writes into the "Hermes" Space in the Supermemory app so the user
@@ -291,8 +325,10 @@ def _capture_custom_id(session_id: str, now: Optional[datetime] = None) -> str:
 
 
 def _build_client(api_key: str, config: dict, container_tag: str) -> _SupermemoryClient:
+    tunnel = config["tunnel"]
     return _SupermemoryClient(api_key=api_key, timeout=config["api_timeout"], container_tag=container_tag,
-                              search_mode=config["search_mode"], base_url=_resolve_base_url(config["base_url"]))
+                              search_mode=config["search_mode"], base_url=_resolve_base_url(config["base_url"]),
+                              **({"tunnel": tunnel} if tunnel is not None else {}))
 
 
 def _resolve_container_tag(config_tag: str, identity: str) -> str:
@@ -334,19 +370,22 @@ def _guarded(config: dict) -> bool:
     return bool(config["require_availability_proof"] or config["tunnel"] is not None)
 
 
-def _tunnel_error(config: dict) -> str:
-    """"" when there is no ``tunnel`` block or base_url is still served by that ssh forward; else a reason. Live and
-    credential-free (a TCP connect, lsof, the listener's exact argv), so it may run before every client use."""
+def _tunnel_check(config: dict, pinned: Optional[Tuple[int, int]] = None) -> Tuple[str, Optional[Tuple[int, int]]]:
+    """("", socket id) when there is no ``tunnel`` block or its socket is still this user's ssh forward (and the socket
+    ``pinned`` by an earlier check, when given); else (reason, None). Live and credential-free (lstat, an empty
+    connection, the listener's peer credentials and exact argv), so it runs before every client use."""
     tunnel = config["tunnel"]
     if tunnel is None:
-        return ""
+        return "", None
     if not tunnel:
-        return "supermemory.json tunnel settings are malformed (need ssh_host and forward bind:port:host:port)"
-    bind_host, port, _, _ = _tunnel.split_forward(tunnel["forward"])
-    if _resolve_base_url(config["base_url"]) != f"http://{bind_host}:{port}":
-        return "supermemory.json base_url is not the local end of tunnel.forward"
-    reason = _tunnel.tunnel_down_reason(tunnel["forward"], tunnel["ssh_host"])
-    return f"tunnel check failed ({reason})" if reason else ""
+        return ("supermemory.json tunnel settings are malformed (need ssh_host and forward "
+                "<absolute socket path>:<remote host>:<remote port>)"), None
+    if str(config["base_url"] or "").strip() or (get_secret("SUPERMEMORY_BASE_URL", "") or "").strip():
+        return "base_url (supermemory.json or SUPERMEMORY_BASE_URL) must be unset with a tunnel: requests go only to its socket", None
+    reason, socket_id = _tunnel.verify_tunnel(tunnel["forward"], tunnel["ssh_host"])
+    if not reason and pinned is not None and socket_id != pinned:
+        reason = "socket_replaced"
+    return (f"tunnel check failed ({reason})", None) if reason else ("", socket_id)
 
 
 def _drop_inherited_key(reason: str) -> None:
@@ -360,6 +399,23 @@ def _drop_inherited_key(reason: str) -> None:
     if os.environ.pop("SUPERMEMORY_API_KEY", None) is not None:
         _dropped_key_reason = reason
         logger.warning("Supermemory: removed SUPERMEMORY_API_KEY from the process environment (%s)", reason)
+
+
+def _gate(config: Optional[dict] = None) -> Tuple[str, Optional[Tuple[int, int]]]:
+    """(availability reason, "" = usable; the tunnel socket it verified) for the active profile. A guarded failure
+    drops an unproven inherited key (_drop_inherited_key)."""
+    if config is None:
+        from hermes_constants import get_hermes_home
+        config = _load_supermemory_config(str(get_hermes_home()))
+    key = get_secret("SUPERMEMORY_API_KEY", "") or ""
+    if not key and _dropped_key_reason and _guarded(config):
+        return _dropped_key_reason, None
+    error, socket_id = _availability_error(key, config), None
+    if not error:
+        error, socket_id = _tunnel_check(config)
+    if error and _guarded(config):
+        _drop_inherited_key(error)
+    return error, socket_id
 
 
 def _probe_supermemory_connection(api_key: str, hermes_home: str, *, identity: str = "default", gate_error: str = "") -> dict:
@@ -425,7 +481,8 @@ class SupermemoryMemoryProvider(MemoryProvider):
         self._prefetch_thread = self._sync_thread = self._write_thread = None  # only _write_thread is ever started
         self._pending_turns: List[Dict[str, str]] = []  # failed writes, each tagged with its session_id; retried on next write/end/switch/shutdown
         self._capture_lock = threading.Lock()  # sync_turn (worker) vs on_session_switch/shutdown (caller thread) both touch _pending_turns
-        self._checked_at, self._disabled = 0.0, ""  # last passed live tunnel check; why a re-check dropped the client
+        self._socket_pin: Optional[Tuple[int, int]] = None  # the tunnel socket the start-up gate verified
+        self._disabled = ""  # why a re-check dropped the client
         self._apply_config(_load_supermemory_config())
         self._base_url, self._allowed_containers = _DEFAULT_BASE_URL, []  # env var is only consulted in initialize()
 
@@ -434,7 +491,8 @@ class SupermemoryMemoryProvider(MemoryProvider):
         for key in ("auto_recall", "auto_capture", "max_recall_results", "profile_frequency", "capture_mode",
                     "search_mode", "entity_context", "api_timeout", "custom_containers", "custom_container_instructions"):
             setattr(self, f"_{key}", config[key])
-        self._base_url, self._enable_custom_containers = _resolve_base_url(config["base_url"]), config["enable_custom_container_tags"]
+        self._base_url = _resolve_base_url(config["base_url"]) if config["tunnel"] is None else _TUNNEL_BASE_URL
+        self._enable_custom_containers = config["enable_custom_container_tags"]
         self._allowed_containers: List[str] = [self._container_tag] + list(self._custom_containers)
         perms = config["containers"]
         self._container_permissions: Optional[Dict[str, Dict[str, bool]]] = None if perms is None else {
@@ -446,26 +504,14 @@ class SupermemoryMemoryProvider(MemoryProvider):
             return True
         return self._container_permissions.get(tag, {}).get(op, False)
 
-    def _gate_error(self, config: Optional[dict] = None) -> str:
-        """Availability reason ("" = usable) for the active profile; drops an unproven key (see _drop_inherited_key)."""
-        if config is None:
-            from hermes_constants import get_hermes_home
-            config = _load_supermemory_config(str(get_hermes_home()))
-        key = get_secret("SUPERMEMORY_API_KEY", "") or ""
-        if not key and _dropped_key_reason and _guarded(config):
-            return _dropped_key_reason
-        error = _availability_error(key, config) or _tunnel_error(config)
-        if error and _guarded(config):
-            _drop_inherited_key(error)
-        return error
-
     def _live_client(self) -> Optional[_SupermemoryClient]:
         """The client when it may be used right now, else None. Every client use goes through here.
 
-        With a guard configured, each use re-checks the proof and key in the current scope (dict lookups), and the
-        live tunnel once ``availability_recheck_seconds`` have passed since it last passed. A failed re-check is never
-        cached: it drops the client and the key for the rest of this provider's life (_disable). A new session
-        re-runs is_available()/initialize() and comes back only if the gate passes again."""
+        With a guard configured, each use re-checks the proof and key in the current scope and the live tunnel: the
+        socket the start-up gate verified must still be there, safe, and served by this user's ssh forward. Nothing is
+        cached. A failed re-check drops the client and the key for the rest of this provider's life (_disable). A new
+        session re-runs is_available()/initialize() and comes back only if the gate passes again. Independently, the
+        client's transport re-checks the socket file before every request."""
         if not (self._active and self._client):
             return None
         if not _guarded(self._config):
@@ -474,9 +520,8 @@ class SupermemoryMemoryProvider(MemoryProvider):
         error = _availability_error(key, self._config)
         if not error and key != self._api_key:
             error = "SUPERMEMORY_API_KEY in scope is not the key this session was started with"
-        if not error and _monotonic() - self._checked_at >= self._config["availability_recheck_seconds"]:
-            error = _tunnel_error(self._config)
-            self._checked_at = _monotonic()
+        if not error:
+            error, _ = _tunnel_check(self._config, self._socket_pin)
         if error:
             self._disable(error)
             return None
@@ -496,10 +541,10 @@ class SupermemoryMemoryProvider(MemoryProvider):
         # No SDK import check: the SDK is lazy-installed in initialize(), so gating on importability here is a
         # chicken-and-egg trap on sealed venvs. Key presence, plus the helper's proof and the live tunnel check when
         # configured (a failure there also drops an unproven inherited key).
-        return not self._gate_error()
+        return not _gate()[0]
 
     def unavailable_reason(self) -> str:
-        return self._gate_error()
+        return _gate()[0]
 
     def get_config_schema(self):
         # Only the API key is prompted during `hermes memory setup`; other options live in supermemory.json / env.
@@ -515,7 +560,7 @@ class SupermemoryMemoryProvider(MemoryProvider):
     def get_status_config(self, provider_config: dict) -> dict:
         from hermes_constants import get_hermes_home
         hermes_home = str(get_hermes_home())
-        gate_error = self._gate_error(_load_supermemory_config(hermes_home))
+        gate_error = _gate(_load_supermemory_config(hermes_home))[0]
         return {"summary": _format_connection_summary(_probe_supermemory_connection(
             get_secret("SUPERMEMORY_API_KEY", "") or "", hermes_home, gate_error=gate_error))}
 
@@ -549,7 +594,8 @@ class SupermemoryMemoryProvider(MemoryProvider):
         config = _load_supermemory_config(self._hermes_home)
         # Re-checked here: a host may initialize without consulting is_available().
         self._disabled = ""
-        if (gate_error := self._gate_error(config)) and _guarded(config):
+        gate_error, self._socket_pin = _gate(config)
+        if gate_error and _guarded(config):
             logger.info("Supermemory inactive: %s", gate_error)
         self._api_key = "" if gate_error else (get_secret("SUPERMEMORY_API_KEY", "") or "")
         self._identity = kwargs.get("agent_identity", "default")
@@ -559,7 +605,6 @@ class SupermemoryMemoryProvider(MemoryProvider):
         self._client = _quietly(lambda: _build_client(self._api_key, config, self._container_tag),
                                 "Supermemory initialization failed", level=logging.WARNING) if self._api_key else None
         self._active = self._client is not None
-        self._checked_at = _monotonic()  # the gate above ran the live tunnel check
 
     def on_turn_start(self, turn_number: int, message: str, **kwargs) -> None:
         self._turn_count = max(turn_number, 0)
