@@ -12,6 +12,7 @@ import http.server
 import json
 import os
 import shutil
+import signal
 import socket
 import stat
 import subprocess
@@ -491,3 +492,43 @@ def test_system_ops_exact_argv_keeps_arguments_with_spaces():
         proc.kill()
         proc.wait(timeout=5)
 
+
+@pytest.mark.skipif(shutil.which("lsof", path=f"{os.environ.get('PATH', '')}{os.pathsep}/usr/sbin") is None, reason="needs lsof")
+def test_running_provider_drops_client_and_key_when_the_real_tunnel_dies(tunnel, monkeypatch, tmp_path):
+    """The provider's re-check with the real probes (no fake ops): kill the listener, and the next client use after
+    availability_recheck_seconds is refused with the client and key dropped."""
+    import plugins.memory.supermemory as sm
+
+    searches = []
+
+    class Client:
+        def __init__(self, **kwargs):
+            pass
+
+        def search_memories(self, query, **kwargs):
+            searches.append(query)
+            return []
+
+    now = [1000.0]
+    monkeypatch.setattr(sm, "_SupermemoryClient", Client)
+    monkeypatch.setattr(sm, "_monotonic", lambda: now[0])
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+    monkeypatch.setenv("SUPERMEMORY_API_KEY", KEY)
+    monkeypatch.setenv("SUPERMEMORY_AVAILABILITY_PROOF", f"v1:{os.getpid()}:{_key_fingerprint(KEY)}")
+    bind_host, port, _, _ = helper.split_forward(tunnel["forward"])
+    (tmp_path / "supermemory.json").write_text(json.dumps({
+        "require_availability_proof": True, "base_url": f"http://{bind_host}:{port}",
+        "tunnel": {"ssh_host": "rosie", "forward": tunnel["forward"]}, "availability_recheck_seconds": 5}), encoding="utf-8")
+    p = SupermemoryMemoryProvider()
+    assert p.is_available() is True
+    p.initialize("session-1", hermes_home=str(tmp_path), platform="cli")
+    assert "error" not in json.loads(p.handle_tool_call("supermemory_search", {"query": "one"}))
+
+    os.kill(tunnel["pid"], signal.SIGKILL)
+    deadline = time.monotonic() + 10
+    while helper.SystemOps().port_open(bind_host, port, 0.5) and time.monotonic() < deadline:
+        time.sleep(0.05)
+    now[0] += 6
+    out = json.loads(p.handle_tool_call("supermemory_search", {"query": "two"}))
+    assert "disabled" in out["error"] and "port_closed" in out["error"]
+    assert searches == ["one"] and p._client is None and p._api_key == ""
