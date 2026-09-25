@@ -39,7 +39,8 @@ _TERM_IGNORING_SLEEPER = (
     "open(sys.argv[1], 'w').write(str(os.getpid()))\ntime.sleep(120)\n"
 )
 # A real orphan helper started while the worker ran: older than the reap by more than the margin.
-_HELPER_AGE = kbd._ORPHAN_GROUP_REAP_MARGIN_SECONDS + 0.5
+# (getattr: the file must import on the pre-fix base so its RED run shows the real survivor.)
+_HELPER_AGE = getattr(kbd, "_ORPHAN_GROUP_REAP_MARGIN_SECONDS", 2.0) + 0.5
 
 
 @pytest.fixture
