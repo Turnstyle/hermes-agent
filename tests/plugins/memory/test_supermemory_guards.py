@@ -126,6 +126,16 @@ def test_turn_capture_skipped_when_primary_container_not_write_approved(home):
     assert p._client.add_calls == []
 
 
+def test_retry_flush_uses_the_same_capture_gate(home):
+    """Defence in depth: even a pending turn (normally impossible here) is not flushed to an unapproved container."""
+    p = _provider(home, {**PILOT, "auto_capture": True,
+                         "containers": {"hermes_{identity}": {"read": True, "write": False}}})
+    p._pending_turns = [{"user": "synthetic", "assistant": "synthetic", "session_id": "session-1"}]
+    p.on_session_end([])
+    p.shutdown()
+    assert p._client.add_calls == []
+
+
 # ---- Finding 2: per-container operation permissions --------------------------------------------
 
 

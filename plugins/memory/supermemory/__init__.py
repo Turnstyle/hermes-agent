@@ -548,7 +548,7 @@ class SupermemoryMemoryProvider(MemoryProvider):
             self._bound_pending_turns()
 
     def _flush_pending(self, mode: str) -> None:
-        if self._can_write():
+        if self._may_capture():  # retries are capture writes too: same switch, same approval
             self._write_turns(mode)
             self._bound_pending_turns()
 
