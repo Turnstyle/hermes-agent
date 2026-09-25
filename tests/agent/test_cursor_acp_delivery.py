@@ -25,6 +25,7 @@ def test_delivery_marks_failures_but_not_setup(tmp_path, scenario, stream):
                 list(result)
         delivered = scenario != "stall-setup"
         assert bool(getattr(caught.value, "cursor_prompt_delivered", False)) == delivered
+        assert bool(getattr(caught.value, "no_auto_replay", False)) == delivered
         verdict = classify_api_error(caught.value, provider="cursor-acp", approx_tokens=150000, num_messages=100)
         assert verdict.retryable is not delivered
         assert not verdict.should_fallback and not verdict.should_compress and not verdict.should_rotate_credential
@@ -70,6 +71,8 @@ def test_hermes_delivers_only_once_and_allows_next_explicit_turn(tmp_path, monke
             result = agent.run_conversation("ping")
             assert len(calls) == 1, "Hermes attempted automatic replay"
             assert result["failed"] and result["failure_retryable"] is False
+            assert "not resent" in result["final_response"] and "/retry" in result["final_response"]
+            assert "retrying won't help" not in result["final_response"]
             receipts = [json.loads(line) for line in journal.read_text().splitlines()]
             assert sum(row.get("method") == "session/prompt" for row in receipts) == turn
     finally:

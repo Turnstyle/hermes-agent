@@ -3525,6 +3525,11 @@ class _StreamingCall(StreamingWaitMonitor):
         if self._request_cancelled["value"]:
             logger.debug("Streaming worker caught %s after request cancellation — exiting without retry.", type(e).__name__)
             return False
+        # A provider may already have performed native effects, even when no
+        # visible delta reached Hermes. Every automatic re-issue is unsafe.
+        if getattr(e, "no_auto_replay", False):
+            self.result["error"] = e
+            return False
         _is_timeout = isinstance(e, (_httpx.ReadTimeout, _httpx.ConnectTimeout, _httpx.PoolTimeout))
         # ReadError: abort/reset mid-body (stale-kill shutdown under a parked reader,
         # ECONNRESET) — the retry loop owns recovery.
@@ -3918,9 +3923,18 @@ class _StreamingCall(StreamingWaitMonitor):
         if self.agent._interrupt_requested:  # worker returned early before the monitor saw the flag
             raise InterruptedError("Agent interrupted during streaming API call (post-worker)")
         if self.result["error"] is not None:
+            error = self.result["error"]
+            if getattr(error, "no_auto_replay", False):
+                # Explicit user stops were handled above. A watchdog may also
+                # cancel the transport; report that as a failure, not a user stop.
+                if isinstance(error, InterruptedError):
+                    stopped = RuntimeError(str(error))
+                    stopped.__dict__.update(error.__dict__)
+                    raise stopped from error
+                raise error
             if self.deltas_were_sent["yes"]:
                 return self._partial_stream_stub()
-            raise self.result["error"]
+            raise error
         if self.result["response"] is not None:
             _reset_stale_streak(self.agent)  # provider proved responsive: clear the breaker
         # Propagate first-chunk timing for the ``post_api_request`` hook.

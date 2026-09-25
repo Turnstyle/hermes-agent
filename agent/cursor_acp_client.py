@@ -131,12 +131,25 @@ class CursorStream:
             if not has_text:
                 # Hermes retries empty answers outside the error classifier. Native
                 # effects may already have run, even without visible tool events.
-                raise RuntimeError("Cursor ACP returned no answer after prompt delivery; use /retry to resend manually.")
+                stop = self.cursor_stop_reason if self.cursor_stop_reason in (
+                    "end_turn", "max_tokens", "max_turn_requests", "refusal", "cancelled",
+                ) else "unknown"
+                raise RuntimeError(
+                    f"Cursor ACP returned no answer after prompt delivery "
+                    f"(stop reason: {stop}; native tool events: {len(self.cursor_native_tool_events)})."
+                )
             yield _chunk(model, finish="stop", usage=self.usage, stop_reason=self.cursor_stop_reason)
         except Exception as exc:
             primary_error = exc
             if session.prompt_delivered:
-                exc.cursor_prompt_delivered = True
+                # Native effects may already have run. Transport-shaped failures
+                # must not invite a caller to reconnect and repeat the prompt.
+                if isinstance(exc, ConnectionError):
+                    primary_error = RuntimeError("Cursor ACP connection closed after prompt delivery.")
+                primary_error.cursor_prompt_delivered = True
+                primary_error.no_auto_replay = True
+                if primary_error is not exc:
+                    raise primary_error from exc
             raise
         finally:
             self._session = None

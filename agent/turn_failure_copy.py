@@ -211,6 +211,7 @@ _NONRETRYABLE_DEFAULT_COPY = (
     "{label} rejected the request and retrying won't help. Pick another model with /model, "
     "or check the details in `{home}/logs/agent.log`."
 )
+
 _AUTH_COPY: Dict[str, str] = {
     "oauth": "{label} rejected your sign-in, so the model can't be reached. Sign in again: `{relogin}`.",
     "api_key": (
@@ -400,6 +401,16 @@ def relogin_command_hint(provider: Any) -> str:
     if auth_kind(slug) == "oauth":
         return oauth_relogin_command(slug)
     return f"hermes {profile_cli_selector()}auth add {slug}"
+
+
+def no_auto_replay_copy(*, label: str, summary: str) -> str:
+    """A delivered request may have executed native effects before it failed."""
+    return (
+        f"{label} received the request and may have run tools. "
+        "The request stopped and was not resent automatically. "
+        "Use /retry to resend manually; this may repeat those effects. "
+        f"Details: {summary}"
+    )
 
 
 def nonretryable_copy(

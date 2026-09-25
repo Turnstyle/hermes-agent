@@ -46,6 +46,20 @@ for line in sys.stdin:
             while True:
                 time.sleep(1)
     elif method == "session/prompt":
+        if scenario.startswith("chunk-"):
+            print(json.dumps({"method": "session/update", "params": {"sessionId": "local", "update": {
+                "sessionUpdate": "agent_message_chunk", "content": {"type": "text", "text": "partial answer "}}}}), flush=True)
+            if scenario == "chunk-exit":
+                sys.exit(1)
+            if scenario == "chunk-rpc-error":
+                print(json.dumps({"id": msg["id"], "error": {"code": -32000}}), flush=True)
+            continue
+        if scenario == "perm-closestdin":
+            os.close(0)
+            print(json.dumps({"id": 900, "method": "session/request_permission", "params": {
+                "sessionId": "local", "toolCall": {"toolCallId": "native-1"}, "options": []}}), flush=True)
+            while True:
+                time.sleep(1)
         if scenario in ("success-ignore-eof", "success"):
             print(json.dumps({"method": "session/update", "params": {"sessionId": "local", "update": {
                 "sessionUpdate": "agent_message_chunk", "content": {"type": "text", "text": "pong"}}}}), flush=True)

@@ -989,7 +989,9 @@ def nonretryable_client_error_result(
     # collapsed here or they leak verbatim via the ``error`` field.
     _nonretryable_summary = agent._summarize_api_error(api_error)
     _plabel = provider_label_for(provider)
-    _label = _NONRETRYABLE_LABELS.get(classified.reason, f"{_plabel} rejected the request and retrying won't help")
+    _no_replay = bool(getattr(api_error, "no_auto_replay", False))
+    _label = (f"{_plabel} request stopped; it was not resent automatically" if _no_replay else
+              _NONRETRYABLE_LABELS.get(classified.reason, f"{_plabel} rejected the request and retrying won't help"))
     agent._emit_diagnostic_status(f"❌ {_label}: {_nonretryable_summary}")
     # The endpoint/status trace is developer detail: verbose only (the log has it always).
     if getattr(agent, "verbose_logging", False):
@@ -1012,7 +1014,7 @@ def nonretryable_client_error_result(
         _vlines(agent, f"   💡 Model '{model}' isn't available on {_plabel}. Pick another with /model.")
         if _prefix_suggestion:
             _vlines(agent, f"      Did you mean '{_prefix_suggestion}'? It looks like the vendor prefix is missing.")
-    elif classified.reason not in _NONRETRYABLE_LABELS:
+    elif not _no_replay and classified.reason not in _NONRETRYABLE_LABELS:
         _vlines(agent, f"   💡 Fix: pick another model (/model), or check `{display_hermes_home()}/logs/agent.log`.")
     # A WAF/CDN block (#53099, #70566): the key never reached the provider; the usual cause
     # is the SDK User-Agent, which the per-provider extra_headers override.
@@ -1067,7 +1069,10 @@ def nonretryable_client_error_result(
             classified=classified, summary=_nonretryable_summary, messages=messages,
             api_call_count=api_call_count, provider=provider, base_url=base_url, model=model,
         )
-    if _welcome_hint:
+    if _no_replay:
+        from agent.turn_failure_copy import no_auto_replay_copy
+        _final_response = no_auto_replay_copy(label=_plabel, summary=_nonretryable_summary)
+    elif _welcome_hint:
         # A free-tier refusal is fully explained by its own sentence; the raw provider summary
         # (status codes, JSON) is for the log, not for a first-time user's chat.
         _final_response = _welcome_tier_guidance(classified, model=model, in_chat=True)
