@@ -337,23 +337,31 @@ def _handle_busy_submit(rid, sid: str, session: dict, text: Any, transport: Any,
     return _ok(rid, {"status": "queued"})
 
 
-def _persist_queued_user_row(sid: str, session: dict, text: Any, client_ids: list[str], generation: int) -> None:
-    """Write a drained queued prompt's user row before its turn runs (the ``prompt.submit`` shape: the turn
-    adopts the staged row, so no second row is written), carrying the send occurrences it answers, and
-    acknowledge them with ``prompt.receipt``. A failed write leaves the turn's own persist in charge and
-    acknowledges nothing: an unproven row must never retire a client's bubble."""
-    with session["history_lock"]:
-        if int(session.get("_queued_prompt_generation", 0)) != generation or session.get("_closing"):
-            return  # Stop/re-anchor cancelled the claim: the turn won't run, so no row and no receipt
+def _persist_queued_user_row(sid: str, session: dict, text: Any, client_ids: list[str],
+                             generation: int | None, display_kind: str | None = None) -> None:
+    """Write a receipted send's user row before its turn runs (the ``prompt.submit`` shape: the turn adopts
+    the staged row, so no second row is written), carrying the send occurrences it answers, and acknowledge
+    them with ``prompt.receipt``. Used by the inline queue drain and by the compute host (immediate and
+    drained sends). ``generation``: the queue claim this dispatch holds (None = not a queued claim).
+
+    The claim check and the row write share ``history_lock`` with Stop's generation bump, so a cancel either
+    lands first (no row, no receipt) or after the row exists (the row stays as the send, like a live submit
+    whose turn never ran). A failed write leaves the turn's own persist in charge and acknowledges nothing:
+    an unproven row must never retire a client's bubble."""
     try:
         if _ensure_session_db_row(session) is False:
             return
-        _persist_submit_user_row(session, text, None, client_ids)
+        with session["history_lock"]:
+            if session.get("_closing") or (
+                    generation is not None and int(session.get("_queued_prompt_generation", 0)) != generation):
+                session.pop("_submit_user_row", None)
+                return  # Stop/re-anchor cancelled the claim: the turn won't run, so no row and no receipt
+            _persist_submit_user_row(session, text, display_kind, client_ids)
+            row_id = (session.get("_submit_user_row") or {}).get("_row_id")
     except Exception:
-        logger.warning("queued prompt: submit-time user row persist failed", exc_info=True)
+        logger.warning("receipted send: submit-time user row persist failed", exc_info=True)
         session.pop("_submit_user_row", None)
         return
-    row_id = (session.get("_submit_user_row") or {}).get("_row_id")
     _emit_prompt_receipt(sid, client_ids, user_row_id=row_id)
 
 

@@ -93,19 +93,25 @@ export function graftRefreshedTailOntoBackfill(refreshedTail: ChatMessage[], pre
   // send that a refreshed row now answers — by receipt (`clientMessageIds`) or a bound
   // `rowId` — is the same occurrence twice: drop the local copy. Unproven rows stay; the
   // pending-turn reconcile decides those.
-  const answeredIds = new Set(refreshedTail.flatMap(message => message.clientMessageIds ?? []))
-  const tailRowIds = new Set(refreshedTail.flatMap(message => (message.rowId === undefined ? [] : [message.rowId])))
+  // Proof comes from every DURABLE row that survives the graft — the retained prefix as well as
+  // the refreshed tail — never from another optimistic copy.
+  const isOptimisticUser = (message: ChatMessage) => message.role === 'user' && message.id.startsWith('user-')
+  const retained = previous.slice(0, anchor)
+  const durable = [...retained, ...refreshedTail].filter(message => !isOptimisticUser(message))
 
-  const prefix = previous
-    .slice(0, anchor)
-    .filter(
-      message =>
-        !(
-          message.role === 'user' &&
-          message.id.startsWith('user-') &&
-          (answeredIds.has(message.id) || (message.rowId !== undefined && tailRowIds.has(message.rowId)))
-        )
-    )
+  const answeredIds = new Set(
+    durable.flatMap(message => (message.role === 'user' ? (message.clientMessageIds ?? []) : []))
+  )
+
+  const durableRowIds = new Set(durable.flatMap(message => (message.rowId === undefined ? [] : [message.rowId])))
+
+  const prefix = retained.filter(
+    message =>
+      !(
+        isOptimisticUser(message) &&
+        (answeredIds.has(message.id) || (message.rowId !== undefined && durableRowIds.has(message.rowId)))
+      )
+  )
 
   return [...prefix, ...refreshedTail]
 }

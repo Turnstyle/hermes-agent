@@ -555,9 +555,17 @@ export function preserveLocalPendingTurnMessages(
   }
 
   const nextIds = new Set(nextMessages.map(message => message.id))
+
   // Optimistic bubbles a durable user row names (display_metadata.client_message_ids): that row IS
-  // the bubble, wherever it landed — including a queued send merged into one row.
-  const answeredClientIds = new Set(nextMessages.flatMap(message => message.clientMessageIds ?? []))
+  // the bubble, wherever it landed — including a queued send merged into one row. Durable rows
+  // cached from earlier pages count too: a refresh that no longer overlaps them (or a missed
+  // prompt.receipt) must not turn an already-saved send back into a pending one.
+  const answeredClientIds = new Set(
+    [...nextMessages, ...previousMessages.filter(message => !message.id.startsWith('user-'))].flatMap(message =>
+      message.role === 'user' ? (message.clientMessageIds ?? []) : []
+    )
+  )
+
   const lastStoredRowId = nextMessages.reduce((last, message) => Math.max(last, message.rowId ?? 0), 0)
   const previousRoleCounts = new Map<ChatMessage['role'], number>()
 
@@ -658,7 +666,16 @@ export function preserveLocalPendingTurnMessages(
       continue
     }
 
-    const authoritative = nextByRoleOrdinal.get(`${message.role}:${ordinal}`)
+    const ordinalMatch = nextByRoleOrdinal.get(`${message.role}:${ordinal}`)
+
+    // A durable user row that names its send occurrences never pairs with a different one.
+    const authoritative =
+      ordinalMatch &&
+      isOptimisticUser &&
+      ordinalMatch.clientMessageIds?.length &&
+      !ordinalMatch.clientMessageIds.includes(message.id)
+        ? undefined
+        : ordinalMatch
 
     // A settled stream row (`pending: false` after message.complete) whose reply
     // the authoritative transcript already carries under its committed id is
@@ -866,6 +883,7 @@ export function appendLiveSessionProjection(messages: ChatMessage[], projection:
     // timeline projection history uses instead of as a user bubble (#112144).
     // `toChatMessages` yields nothing for `hidden`, so the prompt is omitted.
     const displayKind = projection.inflight?.display_kind
+
     const typed = displayKind
       ? toChatMessages([
           {

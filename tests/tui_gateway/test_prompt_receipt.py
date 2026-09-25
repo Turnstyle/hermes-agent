@@ -142,3 +142,55 @@ def test_cancelled_drain_claim_writes_no_row_and_no_receipt(monkeypatch, tmp_pat
     finally:
         server._sessions.pop(sid, None)
         db.close()
+
+
+def test_cancel_between_claim_and_row_write_leaves_no_row_and_no_receipt(monkeypatch, tmp_path):
+    """Checker B6: Stop bumps the generation after the drain claimed the envelope but before the row write."""
+    db = SessionDB(db_path=tmp_path / "state.db")
+    sid, key = _desktop_session(monkeypatch, db)
+    session = server._sessions[sid]
+    events = _capture_events(monkeypatch)
+    ensure = server._ensure_session_db_row
+
+    def cancel_then_ensure(s):
+        with s["history_lock"]:
+            s["_queued_prompt_generation"] = int(s.get("_queued_prompt_generation", 0)) + 1
+        return ensure(s)
+
+    monkeypatch.setattr(server, "_ensure_session_db_row", cancel_then_ensure)
+    try:
+        server._persist_queued_user_row(sid, session, "cancelled", ["user-cancelled"], 0)
+        assert db.get_messages_as_conversation(key) == []
+        assert _receipts(events) == []
+        assert "_submit_user_row" not in session
+    finally:
+        server._sessions.pop(sid, None)
+        db.close()
+
+
+def test_new_client_param_is_part_of_the_strict_contract(monkeypatch, tmp_path):
+    """Checker B4 (gateway side): the param passes strict dispatch validation on THIS gateway; an
+    old strict gateway refuses it with 4000, which the desktop resends without (submit-compat.test.ts)."""
+    db = SessionDB(db_path=tmp_path / "state.db")
+    sid, _key = _desktop_session(monkeypatch, db)
+    monkeypatch.setattr(server, "_start_agent_build", lambda *args: None)
+    monkeypatch.setattr(server, "_restart_completed_failed_agent_build", lambda *args: False)
+
+    class NoThread:
+        def __init__(self, *a, **kw):
+            pass
+
+        def start(self):
+            pass
+
+    monkeypatch.setattr(server.threading, "Thread", NoThread)
+    try:
+        reply = server.handle_request({"id": "p", "method": "prompt.submit", "params": {
+            "session_id": sid, "text": "hi", "client_message_id": "user-1"}})
+        assert "result" in reply, reply
+        bad = server.handle_request({"id": "q", "method": "prompt.submit", "params": {
+            "session_id": sid, "text": "hi", "client_message_idx": "user-1"}})
+        assert bad["error"]["code"] == 4000
+    finally:
+        server._sessions.pop(sid, None)
+        db.close()

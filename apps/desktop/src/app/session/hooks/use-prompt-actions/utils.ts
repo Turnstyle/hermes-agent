@@ -278,6 +278,41 @@ export function isGatewayTimeoutError(error: unknown): boolean {
 export const SESSION_BUSY_RETRY_TIMEOUT_MS = 6_000
 export const SESSION_BUSY_RETRY_INTERVAL_MS = 150
 
+/**
+ * A gateway older than `prompt.submit` `client_message_id` validates params strictly and refuses the
+ * unknown key (JSON-RPC 4000 naming the field) before the handler runs, so nothing was sent. Only that
+ * exact refusal qualifies: any other 4000 is a real bad request.
+ */
+export function isUnsupportedClientMessageIdError(error: unknown): boolean {
+  return (
+    error instanceof JsonRpcGatewayError &&
+    error.code === 4000 &&
+    /\bclient_message_id\b/.test(error.message) &&
+    /extra inputs are not permitted|unknown|not permitted/i.test(error.message)
+  )
+}
+
+/**
+ * Send `prompt.submit`; when the gateway predates occurrence receipts, resend once without
+ * `client_message_id`. The legacy text reconcile then covers that gateway's sends.
+ */
+export async function requestPromptSubmit<T>(
+  request: (params: Record<string, unknown>) => Promise<T>,
+  params: Record<string, unknown>
+): Promise<T> {
+  try {
+    return await request(params)
+  } catch (error) {
+    if (!('client_message_id' in params) || !isUnsupportedClientMessageIdError(error)) {
+      throw error
+    }
+
+    const { client_message_id: _unsupported, ...legacy } = params
+
+    return request(legacy)
+  }
+}
+
 export function isSessionBusyError(error: unknown): boolean {
   return /session busy/i.test(error instanceof Error ? error.message : String(error))
 }

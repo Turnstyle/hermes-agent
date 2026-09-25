@@ -247,6 +247,13 @@ class ComputeHost:
                 hermes_undo.on_user_message_appended(session["session_key"])
             with contextlib.suppress(Exception):
                 server._persist_branch_seed(session)
+            frame_metadata = frame.get("display_metadata") if isinstance(frame.get("display_metadata"), dict) else {}
+            if client_ids := server._ac_queued_client_ids(frame_metadata):
+                # The parent routed this send here without writing its row: write it now, carrying the send
+                # occurrences, and receipt them (relayed like any event) so the sender's bubbles bind by id.
+                server._persist_queued_user_row(
+                    sid, session, text, client_ids, frame.get("queued_prompt_generation"),
+                    display_kind=frame.get("display_kind") or None)
             server._run_prompt_submit(
                 request_id, sid, session, text, display_kind=frame.get("display_kind") or None,
                 display_metadata=(frame.get("display_metadata")

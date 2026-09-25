@@ -48,6 +48,7 @@ import {
   isSessionNotOwnedError,
   isTargetSessionBusy,
   releaseSubmitInFlight,
+  requestPromptSubmit,
   SessionRecoveryAborted,
   type SubmitTextOptions,
   withSessionBusyRetry,
@@ -801,7 +802,10 @@ export function useSubmitPrompt(deps: SubmitPromptDeps) {
             recoverStoredSessionId,
             liveId =>
               withSessionBusyRetry(() =>
-                requestGateway('prompt.submit', submitParams(liveId), PROMPT_SUBMIT_REQUEST_TIMEOUT_MS)
+                requestPromptSubmit(
+                  params => requestGateway('prompt.submit', params, PROMPT_SUBMIT_REQUEST_TIMEOUT_MS),
+                  submitParams(liveId)
+                )
               ),
             {
               requestGateway,
