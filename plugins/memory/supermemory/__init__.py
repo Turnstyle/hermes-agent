@@ -350,9 +350,10 @@ def _tunnel_error(config: dict) -> str:
 
 
 def _drop_inherited_key(reason: str) -> None:
-    """Remove an unproven SUPERMEMORY_API_KEY from this process's environ so it can't reach child processes.
-    Never under multiplexing or for a routed profile: os.environ is shared there and belongs to no one profile
-    (the provider still refuses to use the key)."""
+    """Remove an unproven SUPERMEMORY_API_KEY from this process's environ, so children that copy os.environ don't
+    inherit it. Never under multiplexing or for a routed profile: os.environ is shared there and belongs to no one
+    profile. A copy held in a bound secret scope (TUI/Desktop bodies bind one even single-profile) is not touched and
+    stays until the process exits; the provider refuses it either way, and a restart removes it."""
     global _dropped_key_reason
     if is_multiplex_active() or serves_routed_profile():
         return

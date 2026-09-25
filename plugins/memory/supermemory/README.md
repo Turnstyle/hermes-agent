@@ -166,7 +166,8 @@ By default the provider is available whenever `SUPERMEMORY_API_KEY` is set. When
 
 - A proof inherited from a parent process (different pid) or minted for another key is rejected.
 - `down:<pid>:<reason>` means the helper found the path down. The reason shows in `hermes memory status`.
-- If the proof fails in a single-profile process, `SUPERMEMORY_API_KEY` is removed from the process environment so child processes do not inherit it. Under a multiplexed gateway the shared environment is left alone and the provider simply refuses the key.
+- If the proof fails in a single-profile process, `SUPERMEMORY_API_KEY` is removed from the process environment, so child processes that copy it do not inherit the key. Under a multiplexed gateway the shared environment is left alone and the provider simply refuses the key.
+- The provider never edits a bound secret scope. TUI and Desktop bodies bind one even in a single-profile process, and multiplexed gateways bind one per profile. A key held there stays in that process until it exits, although the provider refuses it. Restart the process to remove it.
 
 The check is not only made at start. With `require_availability_proof` or `tunnel` set, every client use (tools, prefetch, capture, mirroring) re-checks the proof and the key in the current scope. With a `tunnel` block it also re-checks the tunnel's listener, at most every `availability_recheck_seconds`. When a re-check fails, the provider drops its client and its in-memory key, logs a warning, and tool calls return `Supermemory is disabled for this session: <reason>`. That provider instance stays off; a new session runs the start-up gate again.
 

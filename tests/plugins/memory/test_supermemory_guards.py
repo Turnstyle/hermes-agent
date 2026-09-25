@@ -452,3 +452,24 @@ def test_reason_survives_the_key_drop_across_calls_and_instances(home, monkeypat
     assert "SUPERMEMORY_API_KEY" not in os.environ
     assert "port_closed" in SupermemoryMemoryProvider().unavailable_reason()
     assert "port_closed" in SupermemoryMemoryProvider().get_status_config({})["summary"]
+
+
+def test_recheck_reads_a_real_bound_secret_scope(home, monkeypatch):
+    """TUI/Desktop bodies bind a secret scope even in a single-profile process, and get_secret serves the scope before
+    os.environ. The re-check must see a down proof there (no patched get_secret)."""
+    from agent import secret_scope
+    monkeypatch.delenv("SUPERMEMORY_API_KEY")
+    token = secret_scope.set_secret_scope({"SUPERMEMORY_API_KEY": KEY, PROOF_ENV: _valid_proof()})
+    try:
+        p = _provider(home, LIVE)
+    finally:
+        secret_scope.reset_secret_scope(token)
+    client = p._client
+    assert p._active and client is not None
+    token = secret_scope.set_secret_scope({"SUPERMEMORY_API_KEY": KEY, PROOF_ENV: f"down:{os.getpid()}:port_closed"})
+    try:
+        out = json.loads(p.handle_tool_call("supermemory-search", {"query": "synthetic"}))
+    finally:
+        secret_scope.reset_secret_scope(token)
+    assert "disabled" in out["error"] and "port_closed" in out["error"]
+    assert _client_calls(client) == [] and p._client is None and p._api_key == ""
