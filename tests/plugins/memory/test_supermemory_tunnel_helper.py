@@ -1,11 +1,12 @@
 """Key helper for an SSH-tunnelled Supermemory proxy.
 
-Contracts: the credential never crosses the local forward port (it travels only inside the helper's own
-ssh session), and the local listener is accepted only when its exact argv is an ssh forward to the
-expected destination. Unit tests drive ``resolve()`` with fake system operations; the subprocess tests
-run the real script against loopback-only fakes: a real process posing as the tunnel (argv
-``ssh rosie -N -L <forward>``), a local HTTP server posing as the proxy's remote end, and a PATH stub
-for ``ssh`` that runs the remote program locally. No real key, host or tunnel is touched.
+Contracts: the credential never crosses the local forward (it travels only inside the helper's own ssh session);
+the forward's local end is a Unix socket in a 0700 directory of this user, never a TCP port; and its listener is
+accepted only when its exact argv is an ssh forward to the expected destination. Unit tests drive ``resolve()``
+with fake system operations; the subprocess tests run the real script against local-only fakes: a real process
+posing as the tunnel (argv ``ssh rosie -N -L <forward>``) serving the socket, a loopback HTTP server posing as the
+proxy's remote end, and a PATH stub for ``ssh`` that runs the remote program locally. No real key, host or tunnel
+is touched.
 """
 
 import http.server
@@ -14,9 +15,11 @@ import os
 import shutil
 import signal
 import socket
+import socketserver
 import stat
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 from pathlib import Path
@@ -27,10 +30,11 @@ from plugins.memory.supermemory import _key_fingerprint, SupermemoryMemoryProvid
 from plugins.memory.supermemory import tunnel_key_helper as helper
 
 HELPER = Path(helper.__file__)
-FORWARD = "127.0.0.1:16768:127.0.0.1:6768"
+FORWARD = "/tunnel-dir/rosie.sock:127.0.0.1:6768"
 KEY = "synthetic-proxy-key-0002"
 PLIST_ARGV = ["/usr/bin/ssh", "-N", "-o", "BatchMode=yes", "-o", "ExitOnForwardFailure=yes", "-o", "ServerAliveInterval=30",
-              "-o", "ServerAliveCountMax=3", "-L", FORWARD, "rosie"]
+              "-o", "ServerAliveCountMax=3", "-o", "StreamLocalBindMask=0177", "-o", "StreamLocalBindUnlink=yes",
+              "-L", FORWARD, "rosie"]
 PROXY_401 = (401, {"server": "RosieAuthProxy/1.0 Python/3.12.3"}, b'{"error": "Unauthorized", "message": "Invalid or missing Bearer token"}')
 REMOTE_200 = (KEY, 200, b'{"status": "healthy", "service": "supermemory-fleet-pilot"}')
 
@@ -38,8 +42,8 @@ REMOTE_200 = (KEY, 200, b'{"status": "healthy", "service": "supermemory-fleet-pi
 class FakeOps:
     def __init__(self, **overrides):
         self.calls = []
-        self.port_is_open = True
-        self.listener_entries = [(4242, os.getuid())]
+        self.socket = ("", (1, 100))
+        self.peer = (4242, os.getuid())
         self.argv = list(PLIST_ARGV)
         self.unauth = PROXY_401
         self.remote = REMOTE_200
@@ -48,20 +52,20 @@ class FakeOps:
     def uid(self):
         return os.getuid()
 
-    def port_open(self, host, port, timeout):
-        self.calls.append("port_open")
-        return self.port_is_open
+    def check_socket(self, socket_path):
+        self.calls.append("check_socket")
+        return self.socket
 
-    def listeners(self, port, timeout):
-        self.calls.append("listeners")
-        return self.listener_entries
+    def socket_peer(self, socket_path, timeout):
+        self.calls.append("socket_peer")
+        return self.peer
 
     def command_argv(self, pid, timeout):
         self.calls.append("command_argv")
         return self.argv
 
-    def get_health(self, host, port, timeout, **credentials):
-        assert not credentials, "a credential was offered to the local port"
+    def get_health(self, socket_path, timeout, **credentials):
+        assert not credentials, "a credential was offered to the local socket"
         self.calls.append("local_health")
         return self.unauth
 
@@ -85,24 +89,35 @@ def test_success_fetches_key_and_authenticated_health_in_one_ssh_session_after_b
     ops = FakeOps()
     assert _run(ops) == [f"SUPERMEMORY_API_KEY={KEY}", f"SUPERMEMORY_AVAILABILITY_PROOF=v1:777:{_key_fingerprint(KEY)}"]
     # The authenticated request targets the forward's REMOTE end, over ssh; locally only bearer-free probes run.
-    assert ops.calls == ["port_open", "listeners", "command_argv", "local_health",
+    assert ops.calls == ["check_socket", "socket_peer", "command_argv", "local_health",
                          ("fetch", "rosie", "~/pilot/data/api-key", "127.0.0.1", 6768)]
 
 
-def test_port_closed_is_down_without_any_other_probe():
-    ops = FakeOps(port_is_open=False)
-    assert _run(ops) == _down("port_closed")
-    assert ops.calls == ["port_open"]
+@pytest.mark.parametrize("reason", ["socket_missing", "socket_dir_wrong_mode", "socket_dir_wrong_owner",
+                                    "socket_wrong_owner", "socket_path_invalid"])
+def test_unsafe_or_missing_socket_is_down_without_any_other_probe(reason):
+    ops = FakeOps(socket=(reason, None))
+    assert _run(ops) == _down(reason)
+    assert ops.calls == ["check_socket"]
+
+
+@pytest.mark.parametrize("forward", ["127.0.0.1:16768:127.0.0.1:6768", "16768:127.0.0.1:6768",
+                                     "relative/rosie.sock:127.0.0.1:6768", "/a/../rosie.sock:127.0.0.1:6768",
+                                     "/tunnel-dir/rosie.sock:127.0.0.1:0", f"/{'x' * 120}.sock:127.0.0.1:6768"])
+def test_forward_must_be_a_canonical_absolute_socket_path(forward):
+    with pytest.raises(ValueError):
+        helper.split_forward(forward)
+    with pytest.raises(SystemExit):
+        helper.parse_args(["--forward", forward, "--ssh-host", "rosie", "--remote-key-file", "k"])
 
 
 @pytest.mark.parametrize("overrides", [
-    {"argv": ["/usr/bin/python3", "-m", "http.server", "16768"]},                       # not ssh
-    {"argv": ["/usr/bin/ssh", "-N", "-L", "127.0.0.1:16768:127.0.0.1:9999", "rosie"]},  # wrong forward
+    {"argv": ["/usr/bin/python3", "-m", "http.server"]},                                 # not ssh
+    {"argv": ["/usr/bin/ssh", "-N", "-L", "/tunnel-dir/other.sock:127.0.0.1:6768", "rosie"]},  # another forward
     {"argv": ["/usr/bin/ssh", "-N", "-L", FORWARD, "otherhost"]},                        # wrong host
     {"argv": None},                                                                      # argv unreadable
-    {"listener_entries": [(4242, os.getuid() + 1)]},                                    # another user's process
-    {"listener_entries": [(4242, os.getuid()), (4243, os.getuid())]},                   # two owners
-    {"listener_entries": []},                                                           # vanished
+    {"peer": (4242, os.getuid() + 1)},                                                  # another user's process
+    {"peer": None},                                                                      # no peer credentials
 ])
 def test_unverified_listener_never_fetches_the_key(overrides):
     ops = FakeOps(**overrides)
@@ -138,10 +153,15 @@ def test_failed_authenticated_health_withholds_the_key(remote):
 
 
 def test_probe_exception_is_down_not_a_crash():
-    class Boom(FakeOps):
-        def listeners(self, port, timeout):
-            raise OSError("lsof missing")
-    assert _run(Boom()) == _down("listener_unverified")
+    class Refused(FakeOps):
+        def socket_peer(self, socket_path, timeout):
+            raise ConnectionRefusedError("stale socket")
+
+    class NoArgv(FakeOps):
+        def command_argv(self, pid, timeout):
+            raise OSError("sysctl failed")
+    assert _run(Refused()) == _down("socket_stale")
+    assert _run(NoArgv()) == _down("listener_unverified")
 
 
 def test_spent_budget_is_down():
@@ -163,7 +183,8 @@ def test_helper_output_satisfies_the_provider_gate(monkeypatch, tmp_path):
         monkeypatch.setenv(name, value)
     assert SupermemoryMemoryProvider().is_available() is True
 
-    monkeypatch.setenv("SUPERMEMORY_AVAILABILITY_PROOF", helper.resolve(helper.parse_args(args), FakeOps(port_is_open=False))[0].partition("=")[2])
+    down = helper.resolve(helper.parse_args(args), FakeOps(socket=("socket_missing", None)))
+    monkeypatch.setenv("SUPERMEMORY_AVAILABILITY_PROOF", down[0].partition("=")[2])
     assert SupermemoryMemoryProvider().is_available() is False
     assert "SUPERMEMORY_API_KEY" not in os.environ
 
@@ -185,11 +206,11 @@ class CheckerOps:
     def uid(self):
         return os.getuid()
 
-    def port_open(self, *args):
-        return True
+    def check_socket(self, *args):
+        return "", (1, 100)
 
-    def listeners(self, *args):
-        return [(101, os.getuid())]
+    def socket_peer(self, *args):
+        return 101, os.getuid()
 
     def command_line(self, *args):
         return self.command
@@ -208,7 +229,7 @@ class CheckerOps:
     def get_health(self, *args, bearer=None):
         if bearer is None:
             return 401, {"server": "RosieAuthProxy/1"}, b'{"error":"Unauthorized"}'
-        if self.swap:  # the verified tunnel vanished and a replacement now owns the local port
+        if self.swap:  # the verified tunnel vanished and a replacement now owns the local end
             self.bearer_delivered_to_replacement = bool(bearer)
             return 503, {}, b"{}"
         return 200, {}, b'{"service":"supermemory-fleet-pilot"}'
@@ -230,7 +251,7 @@ def test_helper_rejects_expected_host_only_in_remote_command():
 def test_helper_never_sends_bearer_to_replacement_listener():
     ops = CheckerOps(KEY, swap=True)
     _checker_resolve(ops)
-    assert not ops.bearer_delivered_to_replacement, "Helper sent the bearer to whatever owned the local port"
+    assert not ops.bearer_delivered_to_replacement, "Helper sent the bearer to whatever owned the local end"
 
 
 # ---- ssh argv: destination = first non-option argument, parsed the way ssh parses it ----------------
@@ -275,7 +296,8 @@ def test_tunnel_argv_accepted(argv):
     ["ssh", "-p", "2222", "-N", "-L", FORWARD, "rosie"],
     ["ssh", "-g", "-N", "-L", FORWARD, "rosie"],
     ["ssh", "-W", "x:1", "rosie"],
-    ["ssh", "-N", "-L", "127.0.0.1:16768:127.0.0.1:9999", "rosie"],
+    ["ssh", "-N", "-L", "/tunnel-dir/rosie.sock:127.0.0.1:9999", "rosie"],              # another remote end
+    ["ssh", "-N", "-L", "127.0.0.1:16768:127.0.0.1:6768", "rosie"],                     # round 3's TCP forward
     ["/usr/bin/autossh", "-N", "-L", FORWARD, "rosie"],
     [],
 ])
@@ -283,13 +305,63 @@ def test_tunnel_argv_rejected(argv):
     assert helper.is_tunnel_argv(argv, FORWARD, "rosie") is False
 
 
-# ---- real script and real processes, loopback only ------------------------------------------------
+# ---- check_socket: the directory and the socket, lstat only ----------------------------------------
 
 
-def _free_port() -> int:
-    with socket.socket() as s:
-        s.bind(("127.0.0.1", 0))
-        return s.getsockname()[1]
+@pytest.fixture
+def sock_dir():
+    # Short and canonical: sun_path holds 104 bytes on macOS, and the socket path may not pass through a symlink.
+    path = os.path.realpath(tempfile.mkdtemp(prefix="smh-", dir="/tmp"))
+    os.chmod(path, 0o700)
+    yield path
+    shutil.rmtree(path, ignore_errors=True)
+
+
+def _bound_socket(path: str, mode: int = 0o600) -> socket.socket:
+    sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    sock.bind(path)
+    sock.listen(1)
+    os.chmod(path, mode)
+    return sock
+
+
+def test_check_socket_accepts_this_users_socket_in_a_0700_directory_and_pins_it(sock_dir):
+    path = f"{sock_dir}/rosie.sock"
+    with _bound_socket(path):
+        reason, socket_id = helper.check_socket(path, os.getuid())
+        assert reason == "" and socket_id == (os.lstat(path).st_dev, os.lstat(path).st_ino)
+        assert helper.check_socket(path, os.getuid(), socket_id) == ("", socket_id)
+        assert helper.check_socket(path, os.getuid(), (socket_id[0], socket_id[1] + 1)) == ("socket_replaced", None)
+        assert helper.check_socket(path, os.getuid() + 1)[0] == "socket_dir_wrong_owner"
+
+
+@pytest.mark.parametrize("setup,reason", [
+    (lambda d: None, "socket_missing"),
+    (lambda d: Path(f"{d}/rosie.sock").write_text("x"), "socket_not_a_socket"),
+    (lambda d: os.chmod(d, 0o750), "socket_dir_wrong_mode"),
+    (lambda d: os.chmod(d, 0o701), "socket_dir_wrong_mode"),
+])
+def test_check_socket_refusals(sock_dir, setup, reason):
+    setup(sock_dir)
+    assert helper.check_socket(f"{sock_dir}/rosie.sock", os.getuid()) == (reason, None)
+
+
+def test_check_socket_refuses_group_or_other_access_to_the_socket(sock_dir):
+    path = f"{sock_dir}/rosie.sock"
+    with _bound_socket(path, 0o660):
+        assert helper.check_socket(path, os.getuid()) == ("socket_wrong_mode", None)
+
+
+def test_check_socket_refuses_an_ancestor_others_can_write(sock_dir):
+    inner = f"{sock_dir}/open/inner"
+    os.makedirs(inner, mode=0o700)
+    os.chmod(f"{sock_dir}/open", 0o777)  # not sticky: anyone could rename inner and put their own there
+    assert helper.check_socket(f"{inner}/rosie.sock", os.getuid()) == ("socket_dir_unsafe", None)
+    os.chmod(f"{sock_dir}/open", 0o1777)  # sticky, like /tmp: only the owner may rename inner
+    assert helper.check_socket(f"{inner}/rosie.sock", os.getuid()) == ("socket_missing", None)
+
+
+# ---- real script and real processes, local only -----------------------------------------------------
 
 
 def _script(args, env=None, timeout=20):
@@ -299,12 +371,11 @@ def _script(args, env=None, timeout=20):
     return proc, time.monotonic() - started
 
 
-def test_script_with_closed_port_prints_only_the_down_proof_quickly():
-    port = _free_port()
-    proc, elapsed = _script(["--hermes-pid", "4321", "--forward", f"127.0.0.1:{port}:127.0.0.1:6768",
+def test_script_with_no_socket_prints_only_the_down_proof_quickly(sock_dir):
+    proc, elapsed = _script(["--hermes-pid", "4321", "--forward", f"{sock_dir}/rosie.sock:127.0.0.1:6768",
                              "--ssh-host", "rosie", "--remote-key-file", "k"])
     assert proc.returncode == 0
-    assert proc.stdout == "SUPERMEMORY_AVAILABILITY_PROOF=down:4321:port_closed\n"
+    assert proc.stdout == "SUPERMEMORY_AVAILABILITY_PROOF=down:4321:socket_missing\n"
     assert proc.stderr == ""
     assert elapsed < 5
 
@@ -338,11 +409,12 @@ def remote_proxy():
     server.server_close()
 
 
-# Poses as the local end of the tunnel: listens on the forward's bind port, answers like the proxy does
-# without a credential, and records any credential it is offered.
+# Poses as the ssh client's end of the tunnel: serves the forward's local socket (mode 0600, as
+# StreamLocalBindMask=0177 makes it), answers like the proxy does without a credential, and records any
+# credential it is offered.
 _TUNNEL_PROGRAM = '''
-import http.server, pathlib, sys
-spec = sys.argv[sys.argv.index("-L") + 1].split(":")
+import http.server, os, pathlib, socketserver, sys
+path = sys.argv[sys.argv.index("-L") + 1].split(":")[0]
 class Handler(http.server.BaseHTTPRequestHandler):
     server_version = "RosieAuthProxy/1.0"
     def do_GET(self):
@@ -354,16 +426,19 @@ class Handler(http.server.BaseHTTPRequestHandler):
         self.send_header("Content-Length", str(len(body)))
         self.end_headers()
         self.wfile.write(body)
+    def address_string(self):
+        return "local"
     def log_message(self, *args):
         pass
-server = http.server.HTTPServer((spec[0], int(spec[1])), Handler)
+os.umask(0o177)
+server = socketserver.UnixStreamServer(path, Handler)
 pathlib.Path("ready").write_text("1")
 server.serve_forever()
 '''
 
 
 @pytest.fixture
-def tunnel(tmp_path, remote_proxy):
+def tunnel(tmp_path, sock_dir, remote_proxy):
     """A real process whose exact argv is ``<dir>/ssh rosie -N -L <forward>``: a python symlinked as ``ssh``
     that runs the program file named ``rosie`` (ssh parses options after the destination, so this is a valid
     tunnel command line)."""
@@ -374,7 +449,7 @@ def tunnel(tmp_path, remote_proxy):
     # The base interpreter, not a venv binary: a copied venv python finds its stdlib through a pyvenv.cfg
     # next to it, which a symlink elsewhere does not have. The program needs only the stdlib.
     (bin_dir / "ssh").symlink_to(os.path.realpath(getattr(sys, "_base_executable", sys.executable)))
-    forward = f"127.0.0.1:{_free_port()}:127.0.0.1:{remote_proxy.server_address[1]}"
+    forward = f"{sock_dir}/rosie.sock:127.0.0.1:{remote_proxy.server_address[1]}"
     with open(work / "stderr", "wb") as err:
         proc = subprocess.Popen([str(bin_dir / "ssh"), "rosie", "-N", "-L", forward], cwd=work,
                                 stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=err)
@@ -382,7 +457,8 @@ def tunnel(tmp_path, remote_proxy):
     while not (work / "ready").exists() and proc.poll() is None and time.monotonic() < deadline:
         time.sleep(0.05)
     assert (work / "ready").exists(), f"fake tunnel did not start: {(work / 'stderr').read_text()[-800:]}"
-    yield {"forward": forward, "pid": proc.pid, "credential_log": work / "credential-received"}
+    yield {"forward": forward, "socket": f"{sock_dir}/rosie.sock", "pid": proc.pid,
+           "credential_log": work / "credential-received"}
     proc.kill()
     proc.wait(timeout=5)
 
@@ -394,13 +470,13 @@ def _stub(bin_dir: Path, name: str, body: str) -> None:
 
 
 def _env_with(bin_dir: Path) -> dict:
-    return {**os.environ, "PATH": f"{bin_dir}{os.pathsep}{os.environ.get('PATH', '')}{os.pathsep}/usr/sbin"}
+    return {**os.environ, "PATH": f"{bin_dir}{os.pathsep}{os.environ.get('PATH', '')}"}
 
 
-@pytest.mark.skipif(shutil.which("lsof", path=f"{os.environ.get('PATH', '')}{os.pathsep}/usr/sbin") is None, reason="needs lsof")
 def test_script_end_to_end_credential_travels_only_inside_ssh(tunnel, remote_proxy, tmp_path):
-    """Real lsof and argv checks against a real listener; the ssh stub runs the remote program locally, so the
-    authenticated request really happens, against the forward's remote end. The local listener sees no credential."""
+    """Real socket, peer-credential and argv checks against a real listener; the ssh stub runs the remote program
+    locally, so the authenticated request really happens, against the forward's remote end. The local socket sees
+    no credential."""
     bin_dir, ssh_log, key_file = tmp_path / "bin", tmp_path / "ssh.log", tmp_path / "api-key"
     bin_dir.mkdir()
     key_file.write_text(KEY + "\n", encoding="utf-8")
@@ -411,13 +487,12 @@ def test_script_end_to_end_credential_travels_only_inside_ssh(tunnel, remote_pro
     assert proc.stdout.splitlines() == [f"SUPERMEMORY_API_KEY={KEY}",
                                         f"SUPERMEMORY_AVAILABILITY_PROOF=v1:55:{_key_fingerprint(KEY)}"]
     assert remote_proxy.authorized == 1
-    assert not tunnel["credential_log"].exists(), "the local forward port received a credential"
+    assert not tunnel["credential_log"].exists(), "the local forward received a credential"
     ssh_args = ssh_log.read_text().splitlines()
     assert "BatchMode=yes" in ssh_args and "ClearAllForwardings=yes" in ssh_args
     assert ssh_args[-2] == "rosie" and KEY not in ssh_log.read_text()
 
 
-@pytest.mark.skipif(shutil.which("lsof", path=f"{os.environ.get('PATH', '')}{os.pathsep}/usr/sbin") is None, reason="needs lsof")
 def test_script_missing_key_file_is_down(tunnel, remote_proxy, tmp_path):
     bin_dir = tmp_path / "bin"
     bin_dir.mkdir()
@@ -436,7 +511,6 @@ def _alive(pid: int) -> bool:
     return True
 
 
-@pytest.mark.skipif(shutil.which("lsof", path=f"{os.environ.get('PATH', '')}{os.pathsep}/usr/sbin") is None, reason="needs lsof")
 def test_script_hanging_ssh_is_bounded_and_leaves_no_orphan(tunnel, tmp_path):
     """ssh that never returns, with a child of its own (like a ProxyCommand): the helper must return within
     --budget AND kill the whole group, not leave the child running after every hung start."""
@@ -455,25 +529,51 @@ def test_script_hanging_ssh_is_bounded_and_leaves_no_orphan(tunnel, tmp_path):
     assert not _alive(child), "ssh's child outlived the helper"  # (a leaked `sleep 30` exits on its own)
 
 
-@pytest.mark.skipif(shutil.which("lsof", path=f"{os.environ.get('PATH', '')}{os.pathsep}/usr/sbin") is None, reason="needs lsof")
-def test_script_refuses_a_real_non_ssh_listener_and_never_runs_ssh(remote_proxy, tmp_path):
-    """A look-alike proxy served by THIS python process (not ssh): real lsof/argv must reject it before any key fetch."""
-    forward = f"127.0.0.1:{remote_proxy.server_address[1]}:127.0.0.1:6768"
-    bin_dir, ssh_log = tmp_path / "bin", tmp_path / "ssh.log"
-    bin_dir.mkdir()
-    _stub(bin_dir, "ssh", f'echo called >> "{ssh_log}"\necho "{KEY}"\n')
-    proc, _ = _script(["--hermes-pid", "66", "--forward", forward, "--ssh-host", "rosie", "--remote-key-file", "k"],
-                      env=_env_with(bin_dir))
-    assert proc.stdout == "SUPERMEMORY_AVAILABILITY_PROOF=down:66:listener_unverified\n"
-    assert not ssh_log.exists()
+class _LookAlike(http.server.BaseHTTPRequestHandler):
+    server_version = "RosieAuthProxy/1.0"
+
+    def do_GET(self):
+        body = b'{"error": "Unauthorized"}'
+        self.send_response(401)
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def address_string(self):
+        return "local"
+
+    def log_message(self, *args):
+        pass
 
 
-@pytest.mark.skipif(shutil.which("lsof", path=f"{os.environ.get('PATH', '')}{os.pathsep}/usr/sbin") is None, reason="needs lsof")
+def test_script_refuses_a_real_non_ssh_listener_and_never_runs_ssh(sock_dir, tmp_path):
+    """A look-alike proxy on a safe socket, served by THIS python process (not ssh): the real peer credentials and
+    argv must reject it before any key fetch."""
+    path = f"{sock_dir}/rosie.sock"
+    old_umask = os.umask(0o177)
+    try:
+        server = socketserver.ThreadingUnixStreamServer(path, _LookAlike)
+    finally:
+        os.umask(old_umask)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    try:
+        bin_dir, ssh_log = tmp_path / "bin", tmp_path / "ssh.log"
+        bin_dir.mkdir()
+        _stub(bin_dir, "ssh", f'echo called >> "{ssh_log}"\necho "{KEY}"\n')
+        proc, _ = _script(["--hermes-pid", "66", "--forward", f"{path}:127.0.0.1:6768", "--ssh-host", "rosie",
+                           "--remote-key-file", "k"], env=_env_with(bin_dir))
+        assert proc.stdout == "SUPERMEMORY_AVAILABILITY_PROOF=down:66:listener_unverified\n"
+        assert not ssh_log.exists()
+    finally:
+        server.shutdown()
+        server.server_close()
+
+
 def test_system_ops_reads_the_listener_and_its_exact_argv(tunnel):
-    """``ps`` joins argv with spaces, which is ambiguous; the exact argv must come back element by element."""
+    """The listener comes from the socket's peer credentials; ``ps`` joins argv with spaces, which is ambiguous, so the
+    exact argv must come back element by element."""
     ops = helper.SystemOps()
-    port = int(tunnel["forward"].split(":")[1])
-    assert ops.listeners(port, 5) == [(tunnel["pid"], os.getuid())]
+    assert ops.socket_peer(tunnel["socket"], 5) == (tunnel["pid"], os.getuid())
     argv = ops.command_argv(tunnel["pid"], 5)
     assert Path(argv[0]).name == "ssh" and argv[1:] == ["rosie", "-N", "-L", tunnel["forward"]]
 
@@ -493,10 +593,9 @@ def test_system_ops_exact_argv_keeps_arguments_with_spaces():
         proc.wait(timeout=5)
 
 
-@pytest.mark.skipif(shutil.which("lsof", path=f"{os.environ.get('PATH', '')}{os.pathsep}/usr/sbin") is None, reason="needs lsof")
 def test_running_provider_drops_client_and_key_when_the_real_tunnel_dies(tunnel, monkeypatch, tmp_path):
-    """The provider's re-check with the real probes (no fake ops): kill the listener, and the next client use after
-    availability_recheck_seconds is refused with the client and key dropped."""
+    """The provider's re-check with the real probes (no fake ops): kill the listener, and the very next client use is
+    refused with the client and key dropped."""
     import plugins.memory.supermemory as sm
 
     searches = []
@@ -509,16 +608,13 @@ def test_running_provider_drops_client_and_key_when_the_real_tunnel_dies(tunnel,
             searches.append(query)
             return []
 
-    now = [1000.0]
     monkeypatch.setattr(sm, "_SupermemoryClient", Client)
-    monkeypatch.setattr(sm, "_monotonic", lambda: now[0])
     monkeypatch.setenv("HERMES_HOME", str(tmp_path))
     monkeypatch.setenv("SUPERMEMORY_API_KEY", KEY)
     monkeypatch.setenv("SUPERMEMORY_AVAILABILITY_PROOF", f"v1:{os.getpid()}:{_key_fingerprint(KEY)}")
-    bind_host, port, _, _ = helper.split_forward(tunnel["forward"])
     (tmp_path / "supermemory.json").write_text(json.dumps({
-        "require_availability_proof": True, "base_url": f"http://{bind_host}:{port}",
-        "tunnel": {"ssh_host": "rosie", "forward": tunnel["forward"]}, "availability_recheck_seconds": 5}), encoding="utf-8")
+        "require_availability_proof": True, "tunnel": {"ssh_host": "rosie", "forward": tunnel["forward"]}}),
+        encoding="utf-8")
     p = SupermemoryMemoryProvider()
     assert p.is_available() is True
     p.initialize("session-1", hermes_home=str(tmp_path), platform="cli")
@@ -526,9 +622,12 @@ def test_running_provider_drops_client_and_key_when_the_real_tunnel_dies(tunnel,
 
     os.kill(tunnel["pid"], signal.SIGKILL)
     deadline = time.monotonic() + 10
-    while helper.SystemOps().port_open(bind_host, port, 0.5) and time.monotonic() < deadline:
+    while time.monotonic() < deadline:  # the socket file stays behind; wait until nothing accepts on it
+        try:
+            helper.SystemOps().socket_peer(tunnel["socket"], 0.5)
+        except OSError:
+            break
         time.sleep(0.05)
-    now[0] += 6
     out = json.loads(p.handle_tool_call("supermemory_search", {"query": "two"}))
-    assert "disabled" in out["error"] and "port_closed" in out["error"]
+    assert "disabled" in out["error"] and "socket_stale" in out["error"]
     assert searches == ["one"] and p._client is None and p._api_key == ""
