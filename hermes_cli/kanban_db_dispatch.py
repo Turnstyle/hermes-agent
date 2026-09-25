@@ -322,7 +322,12 @@ _worker_reaped_at: "dict[int, float]" = {}
 
 
 def _track_worker_proc(proc: "subprocess.Popen") -> None:
-    """Keep a spawned worker's ``Popen`` until the dispatcher reaps it (see ``_live_worker_procs``)."""
+    """Keep a spawned worker's ``Popen`` until the dispatcher reaps it (see ``_live_worker_procs``).
+    A leftover handle for the same pid (its worker was reaped by another thread before it was
+    tracked) is marked finished first, so its ``__del__`` never polls the new worker's pid."""
+    stale = _live_worker_procs.get(int(proc.pid))
+    if stale is not None and stale is not proc and stale.returncode is None:
+        stale.returncode = -1
     _worker_reaped_at.pop(int(proc.pid), None)
     _live_worker_procs[int(proc.pid)] = proc
 

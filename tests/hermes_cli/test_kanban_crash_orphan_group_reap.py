@@ -144,30 +144,25 @@ def test_crash_sweep_ends_the_dead_workers_orphaned_group(board, tmp_path):
         _cleanup(child, group=proc.pid)
 
 
-def test_default_spawn_shape_survives_an_unrelated_subprocess_before_the_reap(board, tmp_path):
-    """Live gateway shape (review 2): ``_default_spawn`` returns only the pid. A dropped ``Popen``
-    of a running child lands in ``subprocess._active`` and the next ``Popen()`` anywhere in the
-    process (here ``subprocess.run(['true'])``) reaped the worker silently, so the dispatcher never
-    saw the exit and the orphans were left alone. RED before the worker handle was kept."""
+def test_default_spawn_shape_survives_an_unrelated_subprocess_before_the_reap(board, tmp_path,
+                                                                            monkeypatch):
+    """Live gateway shape (review 2): the REAL ``_default_spawn`` returns only the pid. A dropped
+    ``Popen`` of a running child lands in ``subprocess._active`` and the next ``Popen()`` anywhere
+    in the process (here ``subprocess.run(['true'])``) reaped the worker silently, so the dispatcher
+    never saw the exit and the orphans were left alone. RED before ``_default_spawn`` kept the
+    worker handle."""
     conn = board
     script = tmp_path / "leader.py"
     script.write_text(_LEADER_EXITS_ALONE)
     pid_file, go = tmp_path / "child.pid", tmp_path / "go"
+    workspace = tmp_path / "ws"
+    workspace.mkdir()
+    monkeypatch.setattr(kbd, "_worker_argv", lambda task, profile, home: [
+        sys.executable, str(script), str(pid_file), _SLEEPER, str(go), "1"])
+    monkeypatch.setattr(kbd, "_restart_safe_worker_argv", lambda task, cmd: cmd)
     tid = kb.create_task(conn, title="spawn-shape", assignee="fx", max_retries=3)
     kb.claim_task(conn, tid)
-
-    def spawn_like_default_spawn() -> int:
-        proc = subprocess.Popen(
-            [sys.executable, str(script), str(pid_file), _SLEEPER, str(go), "1"],
-            start_new_session=True, stdin=subprocess.DEVNULL,
-            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-        )
-        track = getattr(kbd, "_track_worker_proc", None)
-        if track is not None:
-            track(proc)
-        return proc.pid  # the Popen object is dropped here, exactly as in _default_spawn
-
-    pid = spawn_like_default_spawn()
+    pid = kbd._default_spawn(kb.get_task(conn, tid), str(workspace))
     child = 0
     try:
         kbd._set_worker_pid(conn, tid, pid)
@@ -192,6 +187,7 @@ def test_reap_time_is_recorded_only_for_tracked_workers(monkeypatch):
     """A reap of any other child that reuses a number never becomes a group-reap anchor."""
     monkeypatch.setattr(kbd, "_live_worker_procs", {})
     monkeypatch.setattr(kbd, "_worker_reaped_at", {})
+    monkeypatch.setattr(kbd, "_recent_worker_exits", {})
     kbd._note_worker_reaped(424242, 0)
     assert kbd._worker_exit_reaped_at(424242) is None
 
@@ -203,6 +199,12 @@ def test_reap_time_is_recorded_only_for_tracked_workers(monkeypatch):
     kbd._note_worker_reaped(424243, 1 << 8)
     assert kbd._worker_exit_reaped_at(424243) is not None
     assert 424243 not in kbd._live_worker_procs and fake.returncode == 1
+
+    # A leftover handle for a reused pid is marked finished before it is replaced.
+    stale, fresh = FakeProc(), FakeProc()
+    kbd._track_worker_proc(stale)
+    kbd._track_worker_proc(fresh)
+    assert stale.returncode == -1 and kbd._live_worker_procs[424243] is fresh
 
 
 def test_crash_sweep_sigkills_a_term_ignoring_orphan(board, tmp_path):
