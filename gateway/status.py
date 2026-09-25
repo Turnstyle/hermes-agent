@@ -458,9 +458,13 @@ def _get_scope_lock_path(scope: str, identity: str) -> Path:
 def _get_process_start_time(pid: int) -> Optional[int]:
     """Per-process start-time fingerprint (PID-reuse guard), or None: ``/proc/<pid>/stat`` field 22
     on Linux, else psutil ``create_time()`` in centiseconds. Units differ per platform; the guard
-    only compares same-host values."""
+    only compares same-host values. The ``stat`` line is split after the LAST ``)``: the process
+    name (field 2) may itself contain spaces and parentheses (npm sets its title to
+    ``npm exec <pkg>``), which would shift a plain whitespace split onto the wrong field."""
     with contextlib.suppress(IndexError, ValueError, OSError):
-        return int(Path(f"/proc/{pid}/stat").read_text(encoding="utf-8").split()[21])
+        raw = Path(f"/proc/{pid}/stat").read_text(encoding="utf-8")
+        # After "pid (comm)" the remaining fields start at field 3 (state), so field 22 is index 19.
+        return int(raw.rpartition(")")[2].split()[19])
     try:
         import psutil  # type: ignore
         return int(round(psutil.Process(pid).create_time() * 100))

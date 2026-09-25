@@ -646,28 +646,40 @@ def _poll_worker_group_exit(pid: int, started_at=None) -> bool:
     return not _worker_alive(pid, started_at)
 
 
-def _reap_orphaned_worker_group(pid: int, started_at) -> dict[str, Any]:
-    """End what is left of a worker's process group after the worker (the group leader) exited ON
-    ITS OWN — the crash-sweep twin of the group path in ``_terminate_reclaimed_worker`` (t_590dc20c).
-    An external CLI that exits nonzero leaves the helpers it started (``npm exec @playwright/mcp``,
-    other MCP servers that did not ``setsid``) in its group, adopted by init; nothing else ever
-    signals them.
+def _worker_exit_reaped_at(pid: int) -> Optional[float]:
+    """Wall-clock time THIS process reaped worker ``pid`` (``waitpid``), or None when it never did
+    (per-tick CLI dispatcher, gateway restarted since the spawn, entry expired). Until that reap the
+    PID stays pinned by the zombie, so no other process can hold it; it is the last moment the PID
+    (and so the process group id) is known to have been the worker's."""
+    entry = _recent_worker_exits.get(int(pid))
+    return None if entry is None else float(entry[1])
+
+
+# A reused group id belongs to a process created AFTER the reap; its members start later still. A
+# genuine orphan group keeps at least one helper started while the worker ran, so the oldest member
+# must predate the reap by this margin (absorbs the ~1 s macOS create_time drift, fails toward
+# refusal).
+_ORPHAN_GROUP_REAP_MARGIN_SECONDS = 2.0
+
+
+def _vet_orphaned_worker_group(pid: int, started_at) -> dict[str, Any]:
+    """Decide whether the dead worker ``pid``'s process group may be signalled (t_590dc20c).
 
     The group id is the dead leader's PID (``_default_spawn`` uses ``start_new_session=True``). POSIX
-    never hands out a PID equal to a live group id, so while a member survives, that id still names
-    the worker's group. Every guard refuses rather than signal a stranger:
-      * the row must carry a real same-boot spawn fingerprint (legacy ``None``, integer and
-        UNVERIFIED rows are refused; another boot's fingerprint is refused);
-      * the leader PID must be dead now (a live holder means the group id may have been reused);
-      * never the caller's own process group;
-      * ``ps`` must be readable, and every live member must have started at or after the worker
-        did (a member older than the worker cannot be its descendant).
-    Then SIGTERM the group, wait the same ~5 s grace, and SIGKILL any member that is left.
-    Returns ``{"members", "signalled", "sigkill", "survivors", "refused"}``; ``refused`` is None
-    when the guards passed (``members`` empty = nothing to do)."""
-    info: dict[str, Any] = {
-        "members": [], "signalled": False, "sigkill": False, "survivors": [], "refused": None,
-    }
+    never hands out a PID equal to an existing group id, so while one of the worker's helpers
+    survives, the id still names the worker's group. Once the group fully empties the PID can be
+    reused, and a new process that leads group P and exits leaves a look-alike orphaned group whose
+    members all started after the reap. So every guard refuses rather than signal a stranger:
+      * the row carries a real same-boot spawn fingerprint (legacy ``None``, integer and UNVERIFIED
+        rows are refused; another boot's fingerprint is refused);
+      * the leader PID is dead now (a live holder means the PID was reused);
+      * never the caller's own process group; ``ps`` must be readable;
+      * every member's start time is readable and not before the worker's start;
+      * THIS process reaped the worker (``_worker_exit_reaped_at``) and the oldest member started
+        at least ``_ORPHAN_GROUP_REAP_MARGIN_SECONDS`` before that reap. Without an observed reap
+        there is no upper bound, so the group is left alone (``leader_exit_unobserved``).
+    Returns ``{"pgid", "members", "refused"}``; ``refused`` None with members = safe to signal."""
+    info: dict[str, Any] = {"pgid": None, "members": [], "refused": None}
     if _kb._IS_WINDOWS or not (hasattr(os, "killpg") and hasattr(os, "getpgrp")):
         info["refused"] = "platform"
         return info
@@ -689,6 +701,7 @@ def _reap_orphaned_worker_group(pid: int, started_at) -> dict[str, Any]:
         info["refused"] = "no_fingerprint"
         return info
     pgid = int(pid)
+    info["pgid"] = pgid
     if _kb._pid_alive(pgid):
         info["refused"] = "leader_pid_live"
         return info
@@ -707,39 +720,103 @@ def _reap_orphaned_worker_group(pid: int, started_at) -> dict[str, Any]:
     if not members:
         return info
     from gateway.status import get_process_start_time
+    try:
+        import psutil  # type: ignore
+    except ImportError:  # pragma: no cover - core dependency
+        info["refused"] = "no_psutil"
+        return info
+    created: list[float] = []
     for member in members:
         member_start = get_process_start_time(int(member))
-        if member_start is not None and int(member_start) < worker_start:
+        if member_start is None:
+            info["refused"] = "member_start_unreadable"
+            return info
+        if int(member_start) < worker_start:
             info["refused"] = "member_predates_worker"
             return info
-    if not _signal_worker_group(pgid, signal.SIGTERM):
-        info["survivors"] = sorted(_live_group_members(pgid) or [])
+        try:
+            created.append(float(psutil.Process(int(member)).create_time()))
+        except Exception:
+            info["refused"] = "member_start_unreadable"
+            return info
+    reaped_at = _worker_exit_reaped_at(pgid)
+    if reaped_at is None:
+        info["refused"] = "leader_exit_unobserved"
         return info
-    info["signalled"] = True
-    for _ in range(10):
-        if not _worker_group_has_live_members(pgid):
-            break
-        time.sleep(0.5)
-    if _worker_group_has_live_members(pgid) and not _kb._pid_alive(pgid):
-        if _signal_worker_group(pgid, getattr(signal, "SIGKILL", signal.SIGTERM)):
-            info["sigkill"] = True
-        time.sleep(0.2)
-    info["survivors"] = sorted(_live_group_members(pgid) or [])
+    if min(created) > reaped_at - _ORPHAN_GROUP_REAP_MARGIN_SECONDS:
+        info["refused"] = "members_postdate_leader_exit"
+        return info
     return info
 
 
+# Refusals worth a durable event even though nothing was signalled: something unexpected is
+# holding the dead worker's group id, or the orphans could not be checked.
+_ORPHAN_GROUP_EVENT_REFUSALS = frozenset({
+    "leader_pid_live", "own_group", "ps_unreadable", "member_start_unreadable",
+    "member_predates_worker", "leader_exit_unobserved", "members_postdate_leader_exit",
+})
+
+
+def _reap_orphaned_worker_groups(targets: list[tuple[int, Any]]) -> dict[int, dict[str, Any]]:
+    """End what is left of each dead worker's process group, all groups together: vet every group
+    (``_vet_orphaned_worker_group``), SIGTERM the approved ones, ONE shared ~5 s grace, then SIGKILL
+    any approved group that still has members. ``targets`` = ``[(pid, spawn fingerprint)]``.
+    Returns ``{pid: {"members", "signalled", "sigkill", "survivors", "refused"}}``."""
+    results: dict[int, dict[str, Any]] = {}
+    approved: list[int] = []
+    for pid, started_at in targets:
+        vet = _vet_orphaned_worker_group(pid, started_at)
+        results[int(pid)] = {
+            "members": vet["members"], "signalled": False, "sigkill": False, "survivors": [],
+            "refused": vet["refused"],
+        }
+        if vet["refused"] is None and vet["members"]:
+            if _signal_worker_group(vet["pgid"], signal.SIGTERM):
+                results[int(pid)]["signalled"] = True
+                approved.append(vet["pgid"])
+            else:
+                results[int(pid)]["survivors"] = sorted(_live_group_members(vet["pgid"]) or [])
+    if not approved:
+        return results
+    for _ in range(10):
+        if not any(_worker_group_has_live_members(g) for g in approved):
+            break
+        time.sleep(0.5)
+    killed = False
+    for pgid in approved:
+        # Still dead leader + members left after the grace → the id still names the same group.
+        if _worker_group_has_live_members(pgid) and not _kb._pid_alive(pgid):
+            if _signal_worker_group(pgid, getattr(signal, "SIGKILL", signal.SIGTERM)):
+                results[pgid]["sigkill"] = True
+                killed = True
+    if killed:
+        time.sleep(0.2)
+    for pgid in approved:
+        results[pgid]["survivors"] = sorted(_live_group_members(pgid) or [])
+    return results
+
+
 def _reap_crashed_worker_groups(conn: sqlite3.Connection, dead_groups: list) -> None:
-    """Crash-sweep follow-up, run OUTSIDE the reclaim txn (signals and the grace poll never hold the
-    write lock): end each released worker's orphaned group and record one ``worker_group_reaped``
-    event per card that actually had members left. Best-effort: a failure here never un-releases a
-    card or breaks the tick."""
-    for task_id, pid, started_at, run_id in dead_groups:
-        try:
-            info = _reap_orphaned_worker_group(pid, started_at)
-        except Exception as exc:  # pragma: no cover - defensive
-            info = {"members": [], "refused": f"error: {type(exc).__name__}"}
-        if not info.get("members"):
+    """Crash-sweep follow-up, run LAST in ``detect_crashed_workers`` (after crash accounting and the
+    worker-exited hook, outside every txn): end the released workers' orphaned groups and record one
+    ``worker_group_reaped`` event per card whose group had members or hit a notable refusal.
+    Best-effort: a failure here never un-releases a card or breaks the tick."""
+    try:
+        results = _reap_orphaned_worker_groups([(pid, fp) for (_t, pid, fp, _r) in dead_groups])
+    except Exception as exc:  # pragma: no cover - defensive
+        _kb._log.warning("kanban: orphaned worker group reap failed: %s", exc)
+        return
+    for task_id, pid, _fp, run_id in dead_groups:
+        info = results.get(int(pid))
+        if not info:
             continue
+        if not info["members"] and info["refused"] not in _ORPHAN_GROUP_EVENT_REFUSALS:
+            continue
+        if info["refused"] in _ORPHAN_GROUP_EVENT_REFUSALS:
+            _kb._log.warning(
+                "kanban: left worker group %s of task %s alone (%s); members=%s",
+                pid, task_id, info["refused"], info["members"],
+            )
         try:
             with _kb.write_txn(conn):
                 _kb._append_event(
@@ -1755,9 +1832,6 @@ def detect_crashed_workers(
     Lifecycle-fence refusals are isolated per row into ``errors_out``.
     """
     sweep = _reclaim_dead_workers(conn, board=board, errors_out=errors_out)
-    # Outside the main txn: end what the dead workers left in their own process groups (t_590dc20c).
-    if sweep.dead_groups:
-        _reap_crashed_worker_groups(conn, sweep.dead_groups)
     # Outside the main txn: account each crash and maybe trip the breaker.
     auto_blocked = _account_crashes(conn, sweep.crash_details) if sweep.crash_details else []
     # Side-channel attributes keep the public ``list[str]`` return stable;
@@ -1793,6 +1867,10 @@ def detect_crashed_workers(
                 board=_board,
                 **hook_fields,
             )
+    # Last: end what the dead workers left in their own process groups (t_590dc20c). After the
+    # accounting and the hook, so a grace wait here can never delay or lose a crash count.
+    if sweep.dead_groups:
+        _reap_crashed_worker_groups(conn, sweep.dead_groups)
     return sweep.crashed
 
 
