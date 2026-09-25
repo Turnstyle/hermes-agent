@@ -223,17 +223,19 @@ def _memory_fields(item: Any, *keys: str) -> dict:
 
 class _TunnelTransport(httpx.BaseTransport):
     """The SDK's only transport when supermemory.json has a ``tunnel``: every request goes to the tunnel's Unix socket
-    on a new connection, and only after the socket file passes ``check_socket`` against the one verified when this
-    client was built (a replaced, stale-path or loosened socket is refused before a byte is sent). There is no TCP
-    route: no TCP URL, no environment proxies, nothing to fall back to."""
+    on a new connection, and only after the socket file passes ``check_socket`` against ``pinned``: the socket the
+    start-up gate verified, or else one verified here (a replaced, stale-path or loosened socket is refused before a
+    byte is sent). There is no TCP route: no TCP URL, no environment proxies, nothing to fall back to."""
 
-    def __init__(self, tunnel: Dict[str, str]):
+    def __init__(self, tunnel: Dict[str, str], pinned: Optional[Tuple[int, int]] = None):
         if not tunnel:
             raise ValueError("supermemory.json tunnel settings are malformed")
         self._socket_path = _tunnel.split_forward(tunnel["forward"])[0]
-        reason, self._pinned = _tunnel.verify_tunnel(tunnel["forward"], tunnel["ssh_host"])
-        if reason:
-            raise ConnectionError(f"Supermemory tunnel check failed ({reason})")
+        if pinned is None:
+            reason, pinned = _tunnel.verify_tunnel(tunnel["forward"], tunnel["ssh_host"])
+            if reason:
+                raise ConnectionError(f"Supermemory tunnel check failed ({reason})")
+        self._pinned = pinned
         self._inner = httpx.HTTPTransport(uds=self._socket_path, retries=0,
                                           limits=httpx.Limits(max_keepalive_connections=0))
 
@@ -249,7 +251,8 @@ class _TunnelTransport(httpx.BaseTransport):
 
 class _SupermemoryClient:
     def __init__(self, api_key: str, timeout: float, container_tag: str,
-                 search_mode: str = "hybrid", base_url: str = "", tunnel: Optional[Dict[str, str]] = None):
+                 search_mode: str = "hybrid", base_url: str = "", tunnel: Optional[Dict[str, str]] = None,
+                 socket_pin: Optional[Tuple[int, int]] = None):
         # Make the pinned extra importable; on failure fall through so the raw
         # import below produces the canonical ImportError message.
         with contextlib.suppress(Exception):
@@ -259,8 +262,8 @@ class _SupermemoryClient:
         self._api_key, self._container_tag, self._timeout = api_key, container_tag, timeout
         self._search_mode = search_mode if search_mode in _VALID_SEARCH_MODES else "hybrid"
         self._base_url = _resolve_base_url(base_url) if tunnel is None else _TUNNEL_BASE_URL
-        http_client = None if tunnel is None else httpx.Client(transport=_TunnelTransport(tunnel), trust_env=False,
-                                                               timeout=timeout, follow_redirects=False)
+        http_client = None if tunnel is None else httpx.Client(transport=_TunnelTransport(tunnel, socket_pin),
+                                                               trust_env=False, timeout=timeout, follow_redirects=False)
         self._client = Supermemory(api_key=api_key, base_url=self._base_url, timeout=timeout, max_retries=0,
                                    default_headers={"x-sm-source": "hermes"},
                                    **({"http_client": http_client} if http_client else {}))
@@ -324,11 +327,13 @@ def _capture_custom_id(session_id: str, now: Optional[datetime] = None) -> str:
     return f"{_sanitize_tag(session_id)}_{now:%Y-%m-%d}_b{now.hour // _CAPTURE_BUCKET_HOURS}"
 
 
-def _build_client(api_key: str, config: dict, container_tag: str) -> _SupermemoryClient:
+def _build_client(api_key: str, config: dict, container_tag: str,
+                  socket_pin: Optional[Tuple[int, int]] = None) -> _SupermemoryClient:
+    """``socket_pin``: the tunnel socket a gate just verified, so the client enforces that very socket."""
     tunnel = config["tunnel"]
     return _SupermemoryClient(api_key=api_key, timeout=config["api_timeout"], container_tag=container_tag,
                               search_mode=config["search_mode"], base_url=_resolve_base_url(config["base_url"]),
-                              **({"tunnel": tunnel} if tunnel is not None else {}))
+                              **({"tunnel": tunnel, "socket_pin": socket_pin} if tunnel is not None else {}))
 
 
 def _resolve_container_tag(config_tag: str, identity: str) -> str:
@@ -418,7 +423,8 @@ def _gate(config: Optional[dict] = None) -> Tuple[str, Optional[Tuple[int, int]]
     return error, socket_id
 
 
-def _probe_supermemory_connection(api_key: str, hermes_home: str, *, identity: str = "default", gate_error: str = "") -> dict:
+def _probe_supermemory_connection(api_key: str, hermes_home: str, *, identity: str = "default", gate_error: str = "",
+                                  socket_pin: Optional[Tuple[int, int]] = None) -> dict:
     config = _load_supermemory_config(hermes_home)
     status = {"ok": False, "error": "", "profile_facts": 0, "container_tag": _resolve_container_tag(config["container_tag"], identity),
               "auto_recall": bool(config["auto_recall"]), "auto_capture": bool(config["auto_capture"])}
@@ -431,7 +437,7 @@ def _probe_supermemory_connection(api_key: str, hermes_home: str, *, identity: s
     except ImportError:
         return {**status, "error": "supermemory package not installed"}
     try:
-        profile = _build_client(api_key.strip(), config, status["container_tag"]).get_profile()
+        profile = _build_client(api_key.strip(), config, status["container_tag"], socket_pin).get_profile()
     except Exception as exc:
         return {**status, "error": str(exc).strip()[:160] or "connection failed"}
     facts = sum(1 for f in (profile.get("static") or []) + (profile.get("dynamic") or []) if f and str(f).strip())
@@ -560,9 +566,9 @@ class SupermemoryMemoryProvider(MemoryProvider):
     def get_status_config(self, provider_config: dict) -> dict:
         from hermes_constants import get_hermes_home
         hermes_home = str(get_hermes_home())
-        gate_error = _gate(_load_supermemory_config(hermes_home))[0]
+        gate_error, socket_pin = _gate(_load_supermemory_config(hermes_home))
         return {"summary": _format_connection_summary(_probe_supermemory_connection(
-            get_secret("SUPERMEMORY_API_KEY", "") or "", hermes_home, gate_error=gate_error))}
+            get_secret("SUPERMEMORY_API_KEY", "") or "", hermes_home, gate_error=gate_error, socket_pin=socket_pin))}
 
     def post_setup(self, hermes_home: str, config: dict) -> None:
         from hermes_cli.config import save_config
@@ -581,7 +587,11 @@ class SupermemoryMemoryProvider(MemoryProvider):
         # gateway, writing to the process-global environ would leak the key to sibling profiles and their subprocesses.
         if api_key and not is_multiplex_active() and os.environ.get("SUPERMEMORY_API_KEY") != api_key:
             os.environ["SUPERMEMORY_API_KEY"] = api_key
-        status = _probe_supermemory_connection(api_key, hermes_home)
+        # A guarded config gets the same gate as a session start, so setup never reports "Connected" for a config the
+        # next session refuses. Unguarded configs keep the plain key probe.
+        setup_config = _load_supermemory_config(hermes_home)
+        gate_error, socket_pin = _gate(setup_config) if _guarded(setup_config) else ("", None)
+        status = _probe_supermemory_connection(api_key, hermes_home, gate_error=gate_error, socket_pin=socket_pin)
         print(f"\n  {_format_connection_summary(status)}\n\n  Memory provider: supermemory\n  Activation saved to config.yaml")
         if val:
             print("  API keys saved to .env")
@@ -602,7 +612,7 @@ class SupermemoryMemoryProvider(MemoryProvider):
         self._container_tag = _resolve_container_tag(config["container_tag"], self._identity)
         self._apply_config(config)
         self._write_enabled = kwargs.get("agent_context", "") not in {"cron", "flush", "subagent"}
-        self._client = _quietly(lambda: _build_client(self._api_key, config, self._container_tag),
+        self._client = _quietly(lambda: _build_client(self._api_key, config, self._container_tag, self._socket_pin),
                                 "Supermemory initialization failed", level=logging.WARNING) if self._api_key else None
         self._active = self._client is not None
 

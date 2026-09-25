@@ -22,7 +22,7 @@ KEY = "synthetic-test-key-0001"
 
 
 class FakeClient:
-    def __init__(self, api_key, timeout, container_tag, search_mode="hybrid", base_url="", tunnel=None):
+    def __init__(self, api_key, timeout, container_tag, search_mode="hybrid", base_url="", tunnel=None, socket_pin=None):
         self.api_key, self.container_tag = api_key, container_tag
         self.add_calls, self.search_calls, self.profile_calls = [], [], []
         self.forgotten_ids, self.forget_queries = [], []
