@@ -3291,6 +3291,10 @@ def edit_task(
                 f"cannot rehome {task_id}: status {row['status']!r}; "
                 "--tenant requires ready, todo, triage, or blocked"
             )
+        if tenant is not None and _fleet_adapter_installed_node_id(conn) is not None:
+            from hermes_cli.kanban_db_tenant import refuse_active_fleet_lease
+
+            refuse_active_fleet_lease(conn, task_id)
         if result is not None and row["status"] != "done":
             return False
         tenant_changed = tenant is not None and tenant != row["tenant"]
