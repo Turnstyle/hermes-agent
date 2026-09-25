@@ -995,7 +995,12 @@ function normalizeOwnerRoute(route: SessionOwnerRoute): SessionOwnerRoute {
   }
 }
 
+/** Bumped on every owner-hint change so views can re-resolve a chat's owner
+ *  reactively (the hint map itself is a plain Map). */
+export const $sessionOwnerHintsVersion = atom(0)
+
 function persistSessionOwnerHints(): void {
+  $sessionOwnerHintsVersion.set($sessionOwnerHintsVersion.get() + 1)
   writeJson(
     SESSION_OWNER_HINTS_KEY,
     sessionOwnerHints.size === 0 ? null : [...sessionOwnerHints.values()].map(entry => [entry.id, entry.route])
@@ -1139,6 +1144,7 @@ export function sessionOwnerRouteFromRow(
 /** @internal Tests: forget every in-memory hint (storage untouched unless asked). */
 export function _resetSessionOwnerHintsForTests({ storage = false }: { storage?: boolean } = {}): void {
   sessionOwnerHints.clear()
+  $sessionOwnerHintsVersion.set($sessionOwnerHintsVersion.get() + 1)
 
   if (storage) {
     writeJson(SESSION_OWNER_HINTS_KEY, null)

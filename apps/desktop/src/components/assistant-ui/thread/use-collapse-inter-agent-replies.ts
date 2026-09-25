@@ -1,4 +1,5 @@
 import { useStore } from '@nanostores/react'
+import { computed } from 'nanostores'
 import { useEffect, useMemo } from 'react'
 
 import { profileScopeKey } from '@/api/client'
@@ -6,14 +7,27 @@ import { useSessionView } from '@/app/chat/session-view'
 import {
   $collapseInterAgentReplies,
   $ownerCollapseSettings,
+  type CollapseOwnerScope,
   ensureOwnerCollapseSetting
 } from '@/store/inter-agent-collapse'
-import { knownOwnerForSession } from '@/store/session-states'
+import {
+  $connection,
+  $cronSessions,
+  $messagingSessions,
+  $sessionOwnerHintsVersion,
+  $sessions,
+  $unlistedSessionOwnerRows
+} from '@/store/session'
+import { $sessionTiles, knownOwnerForSession } from '@/store/session-states'
 
-type OwnerScope = { connectionId?: string; profile: string } | string
-
-/** The (connection, profile) whose config governs this chat, or undefined. */
-function chatOwnerScope(storedId: null | string): OwnerScope | undefined {
+/**
+ * The exact (connection, profile) whose config governs this chat, or
+ * undefined when unknown. A bare-profile owner is pinned to the connection
+ * serving the window right now — the backend a bare-profile read would dial
+ * anyway — so its cached value can never be reused for another machine's
+ * same-named profile.
+ */
+function chatOwnerScope(storedId: null | string): CollapseOwnerScope | undefined {
   const owner = storedId ? knownOwnerForSession(storedId) : undefined
 
   if (!owner) {
@@ -21,12 +35,17 @@ function chatOwnerScope(storedId: null | string): OwnerScope | undefined {
   }
 
   if (typeof owner === 'string') {
-    return owner.trim() || undefined
+    const profile = owner.trim()
+    const connection = $connection.get()
+    const connectionId = (connection?.connectionId || (connection?.mode === 'local' ? 'local' : '')).trim()
+
+    return profile && connectionId ? { connectionId, profile } : undefined
   }
 
   const profile = (owner.targetProfile || owner.profile || '').trim()
+  const connectionId = (owner.connectionId || '').trim()
 
-  return profile ? { connectionId: owner.connectionId || undefined, profile } : undefined
+  return profile && connectionId ? { connectionId, profile } : undefined
 }
 
 /**
@@ -37,24 +56,51 @@ function chatOwnerScope(storedId: null | string): OwnerScope | undefined {
  * profile: a Bot Chat is opened without switching the window's profile, so
  * the window value belongs to another profile (t_e15febb6). Until the owner's
  * own value arrives — or when the owner is unknown — the window value stands.
+ *
+ * The owner is re-resolved whenever an input of that ladder changes (an owner
+ * hint recorded after mount, a tile route, a session-list refresh, a
+ * connection switch). The derived value is a string, so a row re-renders only
+ * when its resolved owner actually changes — never per streamed token.
  */
 export function useCollapseInterAgentReplies(): boolean {
   const storedId = useStore(useSessionView().$storedId)
   const ambient = useStore($collapseInterAgentReplies)
   const settings = useStore($ownerCollapseSettings)
-  const scope = useMemo(() => chatOwnerScope(storedId), [storedId])
-  const scopeJson = scope ? JSON.stringify(scope) : ''
 
-  const key = scope ? profileScopeKey(scope) : ''
+  const $ownerJson = useMemo(
+    () =>
+      computed(
+        [
+          $sessionTiles,
+          $sessionOwnerHintsVersion,
+          $sessions,
+          $cronSessions,
+          $messagingSessions,
+          $unlistedSessionOwnerRows,
+          $connection
+        ],
+        () => {
+          const scope = chatOwnerScope(storedId)
+
+          return scope ? JSON.stringify(scope) : ''
+        }
+      ),
+    [storedId]
+  )
+
+  const ownerJson = useStore($ownerJson)
+  const scope = useMemo(() => (ownerJson ? (JSON.parse(ownerJson) as CollapseOwnerScope) : undefined), [ownerJson])
 
   // Idempotent and freshness-gated: every row of one chat shares one read.
   useEffect(() => {
-    if (scopeJson) {
-      ensureOwnerCollapseSetting(JSON.parse(scopeJson) as OwnerScope)
+    if (scope) {
+      ensureOwnerCollapseSetting(scope)
     }
-  }, [scopeJson])
+  }, [scope])
 
-  const owned = key ? settings[key] : undefined
+  // Only the CURRENT owner's value counts: after an owner change the previous
+  // owner's cached value is keyed elsewhere and cannot leak in.
+  const owned = scope ? settings[profileScopeKey(scope)] : undefined
 
   return owned ?? ambient
 }
