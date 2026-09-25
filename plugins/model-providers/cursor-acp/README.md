@@ -54,6 +54,17 @@ the owned group with TERM and, after a bounded grace, KILL, including descendant
 left after the leader exits. The reader owns stdout closure. Cancellation fences
 new RPC requests during setup and bounds an unacknowledged prompt cancellation.
 Closed/cancelled clients cannot open another session; construct a new client.
+The leader is reaped before group signaling, and a failed signal is checked
+against the retained group so a zombie leader is not mistaken for a live tree.
+Stdin writes are non-blocking and observe the request deadline and cancellation;
+an interrupted partial JSON frame is never followed by another frame.
+
+Cleanup errors preserve the original completion, timeout, or cancellation. They
+are logged without request data and retained as `client.cleanup_error`; explicit
+`client.close()` reports `CursorCleanupError` after attempting every owned session.
+A client with a cleanup failure refuses new sessions. The provider classifies
+cleanup failures (including a primary error accompanied by failed cleanup) as
+terminal, without automatic retry or fallback, to avoid replaying native effects.
 Platforms without POSIX process-group signaling fail before spawn. A descendant
 that deliberately detaches into a different session is outside this group cleanup
 contract; this mechanism is process cleanup, not a security sandbox.

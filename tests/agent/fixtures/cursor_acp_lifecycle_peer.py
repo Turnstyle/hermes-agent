@@ -38,7 +38,20 @@ for line in sys.stdin:
         if scenario == "stall-setup":
             continue
         result = {"configOptions": options}
+        if scenario == "stopped-reader" and msg["params"]["configId"] == "mode":
+            print(json.dumps({"id": msg["id"], "result": result}), flush=True)
+            # Prove the prompt writer has started before the test cancels/closes.
+            sys.stdin.read(1)
+            record(ready=True)
+            while True:
+                time.sleep(1)
     elif method == "session/prompt":
+        if scenario == "success-ignore-eof":
+            print(json.dumps({"method": "session/update", "params": {"sessionId": "local", "update": {
+                "sessionUpdate": "agent_message_chunk", "content": {"type": "text", "text": "pong"}}}}), flush=True)
+            result = {"stopReason": "end_turn"}
+            print(json.dumps({"id": msg["id"], "result": result}), flush=True)
+            continue
         if scenario in ("tree-exit", "tree-stall"):
             subprocess.Popen([sys.executable, __file__, "child", journal])
         if scenario == "tree-exit":
@@ -49,6 +62,6 @@ for line in sys.stdin:
     elif method == "session/cancel":
         continue  # No acknowledgment: cancellation must still be bounded.
     print(json.dumps({"id": msg["id"], "result": result}), flush=True)
-if scenario == "stall-setup":
+if scenario in ("stall-setup", "success-ignore-eof", "timeout-ignore-eof"):
     while True:
         time.sleep(1)

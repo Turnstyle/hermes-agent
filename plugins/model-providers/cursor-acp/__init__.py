@@ -6,7 +6,8 @@ from providers.base import ProviderProfile
 
 
 def _classify_error(error, **kwargs):
-    if getattr(error, "code", None) == "native_tool_safety_unavailable":
+    if (getattr(error, "code", None) in ("native_tool_safety_unavailable", "cursor_cleanup_failed")
+            or getattr(error, "cursor_cleanup_failed", False)):
         return {"reason": "format_error", "retryable": False, "should_fallback": False}
     return None
 

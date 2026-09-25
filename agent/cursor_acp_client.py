@@ -7,6 +7,8 @@ explicit acknowledgment of native tool effects; Hermes tool requests fail closed
 from __future__ import annotations
 
 import os
+import logging
+import sys
 import threading
 from pathlib import Path
 from types import SimpleNamespace
@@ -16,7 +18,9 @@ import httpx
 from openai import BadRequestError
 
 from agent.copilot_acp_client import _effective_timeout, _render_message_content
-from agent.cursor_acp_transport import CursorSession
+from agent.cursor_acp_transport import CursorCleanupError, CursorSession
+
+logger = logging.getLogger(__name__)
 
 
 def _unsupported(code, param, message=None):
@@ -124,7 +128,7 @@ class CursorStream:
             yield _chunk(model, finish="stop", usage=self.usage, stop_reason=self.cursor_stop_reason)
         finally:
             self._session = None
-            client._release(session)
+            client._release(session, primary_error=sys.exc_info()[1])
 
 
 class CursorACPClient:
@@ -143,29 +147,43 @@ class CursorACPClient:
         self._sessions = set()
         self._lock = threading.Lock()
         self._cancelled = False
+        self.cleanup_error = None
         self.is_closed = False
         self.chat = SimpleNamespace(completions=SimpleNamespace(create=self._create))
 
     def _open(self, timeout):
         with self._lock:
+            if self.cleanup_error:
+                raise self.cleanup_error
             if self.is_closed or self._cancelled:
                 raise InterruptedError("Cursor ACP client was cancelled or closed.")
             session = CursorSession(self._command, self._args, self._cwd, timeout)
             self._sessions.add(session)
             return session
 
-    def _release(self, session):
-        with self._lock:
-            self._sessions.discard(session)
-        session.close()
+    def _release(self, session, primary_error=None):
+        try:
+            session.close()
+        except Exception:
+            # A finally-block failure must not erase end_turn, timeout or cancel.
+            # Keep custody of the session so explicit close can try cleanup again.
+            with self._lock:
+                self.cleanup_error = CursorCleanupError()
+            if primary_error is not None:
+                primary_error.cursor_cleanup_failed = True
+            logger.warning("Cursor ACP cleanup failed; original outcome retained and replay disabled.")
+        else:
+            with self._lock:
+                self._sessions.discard(session)
 
     def close(self):
         with self._lock:
             sessions = list(self._sessions)
-            self._sessions.clear()
             self.is_closed = True
         for session in sessions:
-            session.close()
+            self._release(session)
+        if self.cleanup_error:
+            raise self.cleanup_error
 
     def cancel(self):
         with self._lock:
@@ -189,7 +207,7 @@ class CursorACPClient:
         try:
             return _model_ids(self._initialize(session))
         finally:
-            self._release(session)
+            self._release(session, primary_error=sys.exc_info()[1])
 
     def _create(self, *, model=None, messages=None, timeout=None, tools=None, functions=None,
                 tool_choice=None, function_call=None, response_format=None, json_schema=None,
