@@ -8,7 +8,6 @@ from __future__ import annotations
 
 import os
 import logging
-import sys
 import threading
 from pathlib import Path
 from types import SimpleNamespace
@@ -94,6 +93,8 @@ class CursorStream:
     def _run(self, client, model, messages, timeout):
         session = client._open(timeout)
         self._session = session
+        primary_error = None
+        has_text = False
         try:
             advertised = client._initialize(session)
             # Never resolve a plain name, absent name or invalid id to the session default.
@@ -121,14 +122,25 @@ class CursorStream:
                     content = update.get("content") or {}
                     if content.get("type") == "text" and isinstance(content.get("text"), str):
                         field = "text" if kind == "agent_message_chunk" else "reasoning"
+                        if field == "text" and content["text"].strip():
+                            has_text = True
                         yield _chunk(model, **{field: content["text"]})
             self.cursor_stop_reason = result.get("stopReason")
             self.cursor_usage = result.get("usage", self.cursor_usage)
             self.usage = _usage(self.cursor_usage)
+            if not has_text:
+                # Hermes retries empty answers outside the error classifier. Native
+                # effects may already have run, even without visible tool events.
+                raise RuntimeError("Cursor ACP returned no answer after prompt delivery; use /retry to resend manually.")
             yield _chunk(model, finish="stop", usage=self.usage, stop_reason=self.cursor_stop_reason)
+        except Exception as exc:
+            primary_error = exc
+            if session.prompt_delivered:
+                exc.cursor_prompt_delivered = True
+            raise
         finally:
             self._session = None
-            client._release(session, primary_error=sys.exc_info()[1])
+            client._release(session, primary_error=primary_error)
 
 
 class CursorACPClient:
@@ -153,8 +165,6 @@ class CursorACPClient:
 
     def _open(self, timeout):
         with self._lock:
-            if self.cleanup_error:
-                raise self.cleanup_error
             if self.is_closed or self._cancelled:
                 raise InterruptedError("Cursor ACP client was cancelled or closed.")
             session = CursorSession(self._command, self._args, self._cwd, timeout)
@@ -175,6 +185,8 @@ class CursorACPClient:
         else:
             with self._lock:
                 self._sessions.discard(session)
+                if not self._sessions:
+                    self.cleanup_error = None
 
     def close(self):
         with self._lock:
@@ -204,10 +216,14 @@ class CursorACPClient:
 
     def list_models(self, *, timeout_seconds=15):
         session = self._open(timeout_seconds)
+        primary_error = None
         try:
             return _model_ids(self._initialize(session))
+        except Exception as exc:
+            primary_error = exc
+            raise
         finally:
-            self._release(session, primary_error=sys.exc_info()[1])
+            self._release(session, primary_error=primary_error)
 
     def _create(self, *, model=None, messages=None, timeout=None, tools=None, functions=None,
                 tool_choice=None, function_call=None, response_format=None, json_schema=None,

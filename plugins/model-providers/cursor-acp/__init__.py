@@ -1,4 +1,5 @@
 """Official Cursor ACP route using the CLI's existing subscription login."""
+from contextlib import suppress
 from typing import Any
 
 from providers import register_provider
@@ -6,8 +7,11 @@ from providers.base import ProviderProfile
 
 
 def _classify_error(error, **kwargs):
-    if (getattr(error, "code", None) in ("native_tool_safety_unavailable", "cursor_cleanup_failed")
+    if (getattr(error, "cursor_prompt_delivered", False)
+            or getattr(error, "code", None) == "cursor_cleanup_failed"
             or getattr(error, "cursor_cleanup_failed", False)):
+        return {"reason": "incomplete_response", "retryable": False, "should_fallback": False}
+    if getattr(error, "code", None) == "native_tool_safety_unavailable":
         return {"reason": "format_error", "retryable": False, "should_fallback": False}
     return None
 
@@ -20,6 +24,7 @@ class CursorACPProfile(ProviderProfile):
 
     def fetch_models(self, *, api_key=None, base_url=None, timeout=15.0):
         from hermes_cli.auth import resolve_external_process_provider_credentials
+        from agent.cursor_acp_transport import CursorCleanupError
 
         try:
             credentials = resolve_external_process_provider_credentials(self.name)
@@ -27,7 +32,9 @@ class CursorACPProfile(ProviderProfile):
             try:
                 return client.list_models(timeout_seconds=timeout) or None
             finally:
-                client.close()
+                # Cleanup already logs its receipt; it must not erase fetched models.
+                with suppress(CursorCleanupError):
+                    client.close()
         except (OSError, RuntimeError, ValueError):
             return None
 

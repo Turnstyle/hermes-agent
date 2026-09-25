@@ -46,15 +46,31 @@ for line in sys.stdin:
             while True:
                 time.sleep(1)
     elif method == "session/prompt":
-        if scenario == "success-ignore-eof":
+        if scenario in ("success-ignore-eof", "success"):
             print(json.dumps({"method": "session/update", "params": {"sessionId": "local", "update": {
                 "sessionUpdate": "agent_message_chunk", "content": {"type": "text", "text": "pong"}}}}), flush=True)
             result = {"stopReason": "end_turn"}
             print(json.dumps({"id": msg["id"], "result": result}), flush=True)
             continue
+        if scenario == "exit-mid":
+            sys.exit(1)
+        if scenario == "rpc-error":
+            print(json.dumps({"id": msg["id"], "error": {"code": -32000}}), flush=True)
+            continue
+        if scenario in ("empty", "native-empty", "malformed-update"):
+            if scenario != "empty":
+                update = {"sessionUpdate": "tool_call", "toolCallId": "native-1"}
+                if scenario == "malformed-update":
+                    update = ["invalid"]
+                print(json.dumps({"method": "session/update", "params": {
+                    "sessionId": "local", "update": update}}), flush=True)
+            print(json.dumps({"id": msg["id"], "result": {"stopReason": "end_turn"}}), flush=True)
+            continue
         if scenario in ("tree-exit", "tree-stall"):
             subprocess.Popen([sys.executable, __file__, "child", journal])
         if scenario == "tree-exit":
+            print(json.dumps({"method": "session/update", "params": {"sessionId": "local", "update": {
+                "sessionUpdate": "agent_message_chunk", "content": {"type": "text", "text": "pong"}}}}), flush=True)
             # Exit before close; descendants still own stdout and the process group.
             print(json.dumps({"id": msg["id"], "result": {"stopReason": "end_turn"}}), flush=True)
             break

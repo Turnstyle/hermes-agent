@@ -63,6 +63,8 @@ def test_close_reaps_descendants_even_after_leader_exit(tmp_path, scenario):
             closed.set()
     try:
         assert wait_for(lambda: len([r for r in rows(journal) if "pid" in r]) == 3)
+        if scenario == "tree-exit":
+            session.process.wait(timeout=5)  # Establish leader exit before exercising cleanup.
         worker = threading.Thread(target=close, daemon=True)
         worker.start()
         assert closed.wait(10), "close blocked on a descendant's inherited stdout"
@@ -213,3 +215,35 @@ def test_group_signal_error_requires_descendant_reprobe(tmp_path, monkeypatch, e
         for proc in reversed(live_pids(journal)):
             proc.kill()
         session.close()
+
+
+@pytest.mark.parametrize("reaped", [False, True])
+@pytest.mark.parametrize("latency", [.001, .3, 1.9, 2.1])
+def test_group_probe_bounds_transient_permission_errors(monkeypatch, reaped, latency):
+    from types import SimpleNamespace
+    import agent.cursor_acp_transport as transport
+
+    clock = [0.0]
+    def sleep(seconds):
+        clock[0] += seconds
+    monkeypatch.setattr(transport, "time", SimpleNamespace(monotonic=lambda: clock[0], sleep=sleep))
+    session = transport.CursorSession.__new__(transport.CursorSession)
+    session._pgid = 123
+    session._group_gone = False
+    session.process = SimpleNamespace(poll=lambda: 0 if reaped else None, wait=lambda **kw: 0)
+    probes = []
+    def probe(pgid, sig):
+        assert pgid == session._pgid and sig == 0
+        probes.append(clock[0])
+        if clock[0] < latency:
+            raise PermissionError("fixture reaping delay")
+        raise ProcessLookupError("fixture group reaped")
+    monkeypatch.setattr(transport.os, "killpg", probe)
+    if latency > 2:
+        with pytest.raises(PermissionError):
+            session._group_exists()
+        assert 2 <= clock[0] <= 2.02
+    else:
+        assert session._group_exists() is False
+        assert latency <= clock[0] <= latency + .02
+    assert len(probes) >= 2

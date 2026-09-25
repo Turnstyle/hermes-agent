@@ -54,17 +54,26 @@ the owned group with TERM and, after a bounded grace, KILL, including descendant
 left after the leader exits. The reader owns stdout closure. Cancellation fences
 new RPC requests during setup and bounds an unacknowledged prompt cancellation.
 Closed/cancelled clients cannot open another session; construct a new client.
-The leader is reaped before group signaling, and a failed signal is checked
-against the retained group so a zombie leader is not mistaken for a live tree.
+The leader is reaped before group signaling. Permission errors while probing the
+retained group are rechecked for up to two seconds, even after the leader has been
+reaped, to allow macOS to reap orphaned zombies. Persistent permission errors
+remain cleanup failures. A group observed gone is never signaled again.
 Stdin writes are non-blocking and observe the request deadline and cancellation;
 an interrupted partial JSON frame is never followed by another frame.
 
 Cleanup errors preserve the original completion, timeout, or cancellation. They
 are logged without request data and retained as `client.cleanup_error`; explicit
 `client.close()` reports `CursorCleanupError` after attempting every owned session.
-A client with a cleanup failure refuses new sessions. The provider classifies
-cleanup failures (including a primary error accompanied by failed cleanup) as
-terminal, without automatic retry or fallback, to avoid replaying native effects.
+A stored cleanup error does not fail the next explicit request, and model discovery
+preserves a fetched list even if cleanup fails. Successfully cleaning all retained
+sessions clears the cleanup error.
+
+Once the complete `session/prompt` frame is written, every subsequent request
+failure is terminal: no automatic retry, recovery ladder, fallback, or empty-answer
+retry. This includes timeout, peer exit, JSON-RPC error, and an empty answer with
+or without native tool events. Setup failures before delivery may remain retryable.
+The user explicitly resends with `/retry`; resending can repeat native tool effects.
+Cleanup failures also preserve the original outcome and disable automatic replay.
 Platforms without POSIX process-group signaling fail before spawn. A descendant
 that deliberately detaches into a different session is outside this group cleanup
 contract; this mechanism is process cleanup, not a security sandbox.

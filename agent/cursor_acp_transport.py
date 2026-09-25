@@ -39,6 +39,7 @@ class CursorSession:
         self._cancel_timer = None
         self.cleanup_error = None
         self.session_id = None
+        self.prompt_delivered = False
         self.prompt_pending = False
         self._cancel_sent = False
         self._next_id = 0
@@ -51,6 +52,7 @@ class CursorSession:
         )
         # Retain the group identity even after the leader has exited/reparented children.
         self._pgid = self.process.pid
+        self._group_gone = False
         # TextIOWrapper is used only for stdout decoding; stdin is written with
         # os.write so neither flushing nor closing can wait on a full pipe.
         os.set_blocking(self.process.stdin.fileno(), False)
@@ -94,6 +96,9 @@ class CursorSession:
                     except BlockingIOError:
                         continue
             finally:
+                if sent == len(data) and message.get("method") == "session/prompt":
+                    # Delivery is irreversible even if the peer exits before replying.
+                    self.prompt_delivered = True
                 if 0 < sent < len(data):
                     # A cancel frame must never be appended to a partial prompt.
                     self._write_broken = True
@@ -204,6 +209,7 @@ class CursorSession:
                 self.cleanup_error = CursorCleanupError()
                 logger.warning("Cursor ACP cleanup failed (%s); replay disabled.", ", ".join(failures))
                 raise self.cleanup_error from None
+            self.cleanup_error = None
             self._closed = True
 
     def _close_input(self):
@@ -238,7 +244,9 @@ class CursorSession:
             raise CursorCleanupError()
 
     def _signal_group(self, sig):
-        # Darwin may report EPERM for a group containing only our unreaped leader.
+        if self._group_gone:
+            return
+        # Darwin may report EPERM for a group containing only unreaped descendants.
         self.process.poll()
         try:
             os.killpg(self._pgid, sig)
@@ -249,17 +257,22 @@ class CursorSession:
                 raise
 
     def _group_exists(self):
-        self.process.poll()
-        try:
-            os.killpg(self._pgid, 0)
-            return True
-        except (PermissionError, ProcessLookupError):
-            # Exit and waitpid visibility can race too: poll may still return
-            # None just before Darwin starts reporting a zombie-only group.
-            with contextlib.suppress(subprocess.TimeoutExpired):
-                self.process.wait(timeout=.1)
+        if self._group_gone:
+            return False
+        until = time.monotonic() + 2
+        while True:
+            self.process.poll()
             try:
                 os.killpg(self._pgid, 0)
                 return True
             except ProcessLookupError:
+                # Once gone, never signal this stored pgid again (it can be reused).
+                self._group_gone = True
                 return False
+            except PermissionError:
+                # On Darwin a zombie-only group can persist after our leader was
+                # reaped. waitpid on that leader cannot wait for launchd's reaping.
+                remaining = until - time.monotonic()
+                if remaining <= 0:
+                    raise
+                time.sleep(min(.02, remaining))

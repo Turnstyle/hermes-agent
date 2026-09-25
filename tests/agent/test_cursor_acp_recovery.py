@@ -39,10 +39,15 @@ def test_cleanup_failure_preserves_outcome_and_is_terminal(tmp_path, monkeypatch
             verdict = classify_api_error(caught.value, provider="cursor-acp")
             assert not verdict.retryable and not verdict.should_fallback and not verdict.should_compress
         assert client.cleanup_error.code == "cursor_cleanup_failed"
-        with pytest.raises(RuntimeError) as caught:
-            client.chat.completions.create(**kwargs)
-        verdict = classify_api_error(caught.value, provider="cursor-acp")
-        assert not verdict.retryable and not verdict.should_fallback and not verdict.should_compress
+        # A cleanup receipt belongs to the prior request; it must not poison setup
+        # for the next explicit user request or a successfully fetched model list.
+        assert client.list_models() == ["default[]"]
+        import hermes_cli.auth as auth
+        from providers import get_provider_profile
+        monkeypatch.setattr(auth, "resolve_external_process_provider_credentials", lambda name: {
+            "command": sys.executable, "args": [str(PEER), "success", str(journal)],
+        })
+        assert get_provider_profile("cursor-acp").fetch_models() == ["default[]"]
         # A failed session must not short-circuit cleanup of the other owned sessions.
         sessions = list(client._sessions)
         with pytest.raises(RuntimeError) as caught:
