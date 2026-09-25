@@ -142,6 +142,24 @@ _TERMINAL_PROVIDER_REASONS = frozenset({
 })
 
 
+def _session_refusal_exit_code(cli) -> int:
+    """Exit code for a one-shot run refused an active-session slot.
+
+    A Kanban worker refused only by the ``max_concurrent_sessions`` CAP never started its turn:
+    the profile was busy, the task did not fail. It exits ``KANBAN_RATE_LIMIT_EXIT_CODE``
+    (EX_TEMPFAIL) so the dispatcher books the run ``rate_limited`` and requeues after the
+    cooldown WITHOUT counting a failure (a burst of cap refusals otherwise trips the systemic
+    breaker and parks every card). A per-session ownership refusal (another live writer owns
+    the session) or an unprovable registry stays 1: those are not capacity waits.
+    """
+    if os.environ.get("HERMES_KANBAN_TASK"):
+        from hermes_cli.active_sessions import MAX_CONCURRENT_SESSIONS
+        if getattr(cli, "_active_session_refusal_reason", "") == MAX_CONCURRENT_SESSIONS:
+            from hermes_cli.kanban_db import KANBAN_RATE_LIMIT_EXIT_CODE
+            return KANBAN_RATE_LIMIT_EXIT_CODE
+    return 1
+
+
 def _single_query_exit_code(result, *, credentials_rate_limited: bool = False) -> int:
     """Map a one-shot turn result onto a process exit code, for both `-q` and `-Q`.
 
@@ -458,7 +476,7 @@ def _run_single_query_mode(cli, query, image, quiet, oneshot, stream_json: bool 
     os.environ["HERMES_SINGLE_QUERY_SESSION"] = "1"
     from hermes_cli.quiet_single_query import exit_single_query
     if not cli._claim_active_session("cli", stderr=bool(quiet)):
-        exit_single_query(1)
+        exit_single_query(_session_refusal_exit_code(cli))
     try:
         query, single_query_images = _collect_query_images(query, image)
         single_query_image_urls = _collect_kanban_task_images(single_query_images)
