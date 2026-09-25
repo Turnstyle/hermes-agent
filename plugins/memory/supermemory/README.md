@@ -58,6 +58,8 @@ Config file: `$HERMES_HOME/supermemory.json`
 | `api_timeout` | `5.0` | Timeout for SDK requests |
 | `containers` | unset | Per-container operation permissions (see [Container Permissions](#container-permissions)) |
 | `require_availability_proof` | `false` | Require a per-process proof from a key helper, not just a key (see [Availability Proof](#availability-proof)) |
+| `tunnel` | unset | `{"ssh_host", "forward"}` of the SSH local forward that `base_url` goes through; its listener is checked at start and while running (see [Availability Proof](#availability-proof)) |
+| `availability_recheck_seconds` | `10` | How long a passed live tunnel check is trusted before the next client use re-runs it (1 to 300) |
 
 ### Environment Variables
 
@@ -166,7 +168,19 @@ By default the provider is available whenever `SUPERMEMORY_API_KEY` is set. When
 - `down:<pid>:<reason>` means the helper found the path down. The reason shows in `hermes memory status`.
 - If the proof fails in a single-profile process, `SUPERMEMORY_API_KEY` is removed from the process environment so child processes do not inherit it. Under a multiplexed gateway the shared environment is left alone and the provider simply refuses the key.
 
-`tunnel_key_helper.py` (stdlib only) is a helper for a proxy behind an SSH local forward. Before it reads any key, it checks three things: the port is open, the listener is this user's `ssh -L <forward> <host>` process, and unauthenticated `/health` answers like the expected proxy. It then reads the key over SSH and confirms authenticated `/health`. See its docstring for a `secrets.command` example; use `override_existing: true` there so the fresh key and proof beat inherited values.
+The check is not only made at start. With `require_availability_proof` or `tunnel` set, every client use (tools, prefetch, capture, mirroring) re-checks the proof and the key in the current scope. With a `tunnel` block it also re-checks the tunnel's listener, at most every `availability_recheck_seconds`. When a re-check fails, the provider drops its client and its in-memory key, logs a warning, and tool calls return `Supermemory is disabled for this session: <reason>`. That provider instance stays off; a new session runs the start-up gate again.
+
+`tunnel_key_helper.py` (stdlib only) is a helper for a proxy behind an SSH local forward. **The key never crosses the local forward port.** The helper reads the key and makes the authenticated `/health` request in one `ssh <host>` session, against the forward's remote end on that host. SSH authenticates the host, so a process that takes over the local port can't receive the key. Before that, it runs checks that carry no credential: the port is open; its only listener is this user's process whose exact argv is an ssh forward to the expected host (parsed the way ssh parses it; options that could redirect the connection or weaken host-key checks fail closed, and so does a remote command); and unauthenticated `/health` answers like the expected proxy. See its docstring for a `secrets.command` example; use `override_existing: true` there so the fresh key and proof beat inherited values. Pair it with a matching `tunnel` block:
+
+```json
+{
+  "base_url": "http://127.0.0.1:16768",
+  "require_availability_proof": true,
+  "tunnel": {"ssh_host": "rosie", "forward": "127.0.0.1:16768:127.0.0.1:6768"}
+}
+```
+
+`base_url` must be the local end of `tunnel.forward`, otherwise the provider stays unavailable. Between two live checks (up to `availability_recheck_seconds`), the provider's own requests still go to the local TCP port. A listener that replaces the tunnel inside that window could receive the key. Shorten the interval to narrow that window.
 
 ## Support
 
