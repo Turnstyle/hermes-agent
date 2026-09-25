@@ -11,7 +11,6 @@ import contextlib
 import os
 import re
 import signal
-import socket as _socket
 import sqlite3
 import subprocess
 import sys
@@ -26,6 +25,7 @@ from typing import Mapping
 from typing import Optional
 from typing import TYPE_CHECKING
 
+from hermes_cli import kanban_dispatch_owners as owners
 from hermes_cli.quiet_single_query import KANBAN_WORKER_EXIT_TRAILER
 
 if TYPE_CHECKING:
@@ -1859,221 +1859,6 @@ def _is_handoff_event(kind: str, payload: Optional[str]) -> bool:
     return bool(to) and "from" in data and data["from"] != to
 
 
-def _profile_exists_fn() -> Optional[Callable[[str], bool]]:
-    """``hermes_cli.profiles.profile_exists``, or ``None`` when it cannot be
-    imported (local import avoids a cycle; callers fall back to trusting the
-    assignee).
-
-    When ``kanban.dispatch_profiles`` is set (#110995) the returned predicate
-    additionally requires the assignee to be listed, fail-closed — so a card
-    assigned to ``default`` is only claimable by homes that opted into it.
-    Foreign assignees land in the existing ``skipped_nonspawnable`` bucket.
-    """
-    try:
-        from hermes_cli.profiles import normalize_profile_name, profile_exists
-    except Exception:
-        return None
-    allowlist = _dispatch_profile_allowlist(normalize_profile_name)
-    if allowlist is None:
-        return profile_exists
-
-    def _gated(name: str) -> bool:
-        try:
-            canon = normalize_profile_name(name)
-        except ValueError:
-            return False
-        return canon in allowlist and bool(profile_exists(name))
-
-    return _gated
-
-
-def _dispatch_profile_allowlist(normalize_profile_name) -> Optional[frozenset]:
-    """Per-home claim allowlist ``kanban.dispatch_profiles`` (#110995).
-
-    On a shared board (one ``kanban.db`` mounted across several Hermes homes),
-    every home's ``profile_exists`` returns True for ``default`` — the root
-    profile every home has — so a card assigned to ``default`` is claimable by
-    every home's dispatcher. A home opts out of foreign claims by declaring
-    which assignees it may claim::
-
-        kanban:
-          dispatch_profiles: ["sage", "researcher"]   # or "sage,researcher"
-
-    Returns ``None`` only when the key is absent from the user config (upstream
-    behavior: any existing profile is claimable). A present value is
-    fail-closed: an empty list, ``null`` or a bare ``dispatch_profiles:`` claims
-    nothing. The user layer is read without the ``DEFAULT_CONFIG`` merge (whose
-    ``None`` placeholder would make the key look present in every home), and a
-    config read that raises also claims nothing — a corrupt config on a shared
-    board must never widen this home's claim scope silently (#113620).
-    """
-    try:
-        from hermes_cli.config_effective import load_user_config_effective
-        kanban = (load_user_config_effective(fail_closed=True) or {}).get("kanban", {})
-    except Exception as exc:
-        _kb._log.warning(
-            "kanban: could not read kanban.dispatch_profiles (%s: %s) — "
-            "this home claims no cards until the config is readable",
-            type(exc).__name__, exc,
-        )
-        return frozenset()
-    if not isinstance(kanban, Mapping) or "dispatch_profiles" not in kanban:
-        return None
-    raw = kanban["dispatch_profiles"]
-    if raw is None or (isinstance(raw, str) and not raw.strip()):
-        _kb._log.warning(
-            "kanban: kanban.dispatch_profiles is present but empty — this home "
-            "claims no cards; omit the key to allow any existing profile"
-        )
-        return frozenset()
-    names = [str(n) for n in raw] if isinstance(raw, (list, tuple)) else str(raw).split(",")
-    allowed = set()
-    for n in names:
-        try:
-            allowed.add(normalize_profile_name(n))
-        except ValueError:
-            continue
-    return frozenset(allowed)
-
-
-def _control_plane_lane_patterns() -> tuple[str, ...]:
-    """``kanban.control_plane_lanes``: assignee names/``fnmatch`` patterns that
-    are served by something other than this home's dispatcher — terminal lanes
-    that pull via ``claim_task``, or profiles another home owns on a shared
-    board. Their ready cards are expected to wait quietly.
-
-    Accepts a list or a comma-separated string. Absent, empty or unreadable
-    config yields ``()``: no assignee is exempted as a lane. (An unreadable
-    config also makes ``dispatch_profiles`` fail closed, so this home claims
-    nothing and every skipped card reads as ``foreign`` until it is fixed.)
-    """
-    try:
-        from hermes_cli.config_effective import load_user_config_effective
-        kanban = (load_user_config_effective(fail_closed=True) or {}).get("kanban", {})
-    except Exception as exc:
-        _kb._log.warning(
-            "kanban: could not read kanban.control_plane_lanes (%s: %s) — "
-            "no assignee is exempted as a control-plane lane",
-            type(exc).__name__, exc,
-        )
-        return ()
-    if not isinstance(kanban, Mapping):
-        return ()
-    raw = kanban.get("control_plane_lanes")
-    if not raw:
-        return ()
-    names = [str(n) for n in raw] if isinstance(raw, (list, tuple)) else str(raw).split(",")
-    return tuple(n.strip().lower() for n in names if n and n.strip())
-
-
-def _nonspawnable_kind(assignee: str) -> str:
-    """Why ``assignee`` failed the spawn gate: ``"lane"`` (configured
-    control-plane lane), ``"foreign"`` (this home's ``dispatch_profiles`` does
-    not list it — another home owns it) or ``"missing"`` (this home should run
-    it but has no such profile)."""
-    import fnmatch
-
-    name = (assignee or "").strip().lower()
-    if any(fnmatch.fnmatchcase(name, pat) for pat in _control_plane_lane_patterns()):
-        return "lane"
-    try:
-        from hermes_cli.profiles import normalize_profile_name
-    except Exception:
-        return "missing"
-    allowlist = _dispatch_profile_allowlist(normalize_profile_name)
-    if allowlist is not None:
-        try:
-            canon = normalize_profile_name(assignee)
-        except ValueError:
-            return "missing"
-        if canon not in allowlist:
-            return "foreign"
-    return "missing"
-
-
-OWNER_UNAVAILABLE_EVENT = "owner_unavailable"
-
-
-def _record_owner_unavailable(conn: sqlite3.Connection, task_id: str, assignee: str) -> bool:
-    """Append ONE ``owner_unavailable`` event per unavailability episode.
-
-    Deduped against the task's latest ``owner_unavailable`` / ``assigned`` /
-    ``claimed`` event: repeat ticks for the same assignee write nothing; a
-    reassignment or a later claim starts a new episode. Returns True when a
-    row was written. The common repeat-tick case is a plain read (no write
-    lock); the check is repeated inside the write transaction. A write refused
-    by a board fence is logged and skipped — it must never abort the tick.
-    """
-    def _still_waiting() -> bool:
-        # The row list was read at tick start; a reassign/claim may have
-        # landed since. Only flag a card still queued for this assignee.
-        row = conn.execute(
-            "SELECT status, assignee, claim_lock FROM tasks WHERE id = ?", (task_id,),
-        ).fetchone()
-        return (
-            row is not None and row["status"] in ("ready", "review")
-            and row["assignee"] == assignee and row["claim_lock"] is None
-        )
-
-    def _already_recorded() -> bool:
-        last = conn.execute(
-            "SELECT kind, payload FROM task_events WHERE task_id = ? "
-            "AND kind IN (?, 'assigned', 'claimed') ORDER BY id DESC LIMIT 1",
-            (task_id, OWNER_UNAVAILABLE_EVENT),
-        ).fetchone()
-        if last is None or last["kind"] != OWNER_UNAVAILABLE_EVENT:
-            return False
-        prev = _kb._json_or(last["payload"], {})
-        return isinstance(prev, dict) and prev.get("assignee") == assignee
-
-    try:
-        if _already_recorded():
-            return False
-        with _kb.write_txn(conn):
-            if _already_recorded() or not _still_waiting():
-                return False
-            _kb._append_event(
-                conn, task_id, OWNER_UNAVAILABLE_EVENT,
-                {
-                    "assignee": assignee,
-                    "reason": "profile_not_found",
-                    "node": _socket.gethostname(),
-                    "detail": (
-                        f"assignee {assignee!r} is not a runnable profile on this home and "
-                        "is not a configured kanban.control_plane_lanes entry; recover with "
-                        "one explicit reassign_task(..., reason=...)"
-                    ),
-                },
-            )
-        return True
-    except sqlite3.Error as exc:
-        _kb._log.warning(
-            "kanban: could not record owner_unavailable on %s (%s: %s)",
-            task_id, type(exc).__name__, exc,
-        )
-        return False
-
-
-def dispatch_profile_allowlist_summary() -> str:
-    """Human-readable resolution of ``kanban.dispatch_profiles`` for this home.
-
-    Surfaced by ``hermes kanban diagnostics`` so an operator on a shared board
-    can see what a home believes it may claim (#113620): ``any`` (key absent),
-    the sorted allowed names, or ``none (fail-closed: ...)``.
-    """
-    try:
-        from hermes_cli.profiles import normalize_profile_name
-    except Exception as exc:
-        return f"none (fail-closed: profiles unavailable: {exc})"
-    allowlist = _dispatch_profile_allowlist(normalize_profile_name)
-    if allowlist is None:
-        return "any"
-    if allowlist:
-        return ", ".join(sorted(allowlist))
-    return ("none (fail-closed: kanban.dispatch_profiles is present but names no valid "
-            "profile, or the config could not be read — omit the key to allow any)")
-
-
 def _has_spawnable(conn: sqlite3.Connection, status: str) -> bool:
     rows = conn.execute(
         "SELECT DISTINCT assignee FROM tasks "
@@ -2082,11 +1867,8 @@ def _has_spawnable(conn: sqlite3.Connection, status: str) -> bool:
     ).fetchall()
     if not rows:
         return False
-    profile_exists = _profile_exists_fn()
-    if profile_exists is None:
-        # Can't introspect — assume spawnable, preserve legacy behavior.
-        return True
-    return any(profile_exists(row["assignee"]) for row in rows)
+    policy = owners.load_owner_policy()
+    return any(policy.can_spawn(row["assignee"]) for row in rows)
 
 
 def has_spawnable_ready(conn: sqlite3.Connection) -> bool:
@@ -2350,27 +2132,11 @@ def _dispatch_lane_task(
     per_profile_cap: Optional[int],
     per_profile_running: dict[str, int],
 ) -> bool:
-    """Guard, claim, resolve the workspace and spawn one ready/review row.
+    """Guard, claim and spawn one owner-classified ready/review row.
     Returns True when a spawn slot was consumed (real or ``dry_run``); every
     skip is recorded on ``result``.
     """
     task_id = row["id"]
-    # Non-profile assignees (control-plane lanes that pull via ``claim_task``)
-    # would fail ``hermes -p <assignee>`` at startup and loop ready→crash→ready
-    # forever. Bucketed apart from skipped_unassigned: the operator cannot fix
-    # it by assigning a profile, and health telemetry suppresses "stuck" for it.
-    profile_exists = _profile_exists_fn()
-    if profile_exists is not None and not profile_exists(assignee):
-        result.skipped_nonspawnable.append(task_id)
-        # A control-plane lane (or a profile another home owns) is expected to
-        # sit here quietly. A missing/unavailable local profile is not: leave
-        # ONE durable, deduped event so the card reads as an exception an
-        # operator can recover (explicit ``reassign_task``), not as idle.
-        if _nonspawnable_kind(assignee) == "missing":
-            result.owner_unavailable.append((task_id, assignee))
-            if not dry_run:
-                _record_owner_unavailable(conn, task_id, assignee)
-        return False
     # Per-profile cap: one profile's local model / API quota / browser pool
     # must not be overwhelmed by a fan-out even with global headroom.
     if per_profile_cap is not None:
@@ -2609,21 +2375,18 @@ def _any_spawnable_review(
 ) -> bool:
     """Mirror review dispatch gates before reserving ready-lane capacity.
 
-    Unavailable profile metadata retains the historic fail-open behavior. A
-    review row that :func:`_dispatch_lane_task` would refuse this tick — its
+    Rows already passed the tick's owner classification. A review row that
+    :func:`_dispatch_lane_task` would refuse this tick — its
     assignee already at the per-profile cap, or respawn-guarded — cannot
     consume the reservation, so it must not withhold capacity from an
     otherwise ready task (one such row would pin ``ready_budget`` to 0).
     """
     if not review_rows:
         return False
-    profile_exists = _profile_exists_fn()
     running = per_profile_running or {}
     for row in review_rows:
         assignee = row["assignee"]
         if not assignee:
-            continue
-        if profile_exists is not None and not profile_exists(assignee):
             continue
         if per_profile_cap is not None and running.get(assignee, 0) >= per_profile_cap:
             continue
@@ -2632,18 +2395,15 @@ def _any_spawnable_review(
     return False
 
 
-def _resolve_default_assignee(default_assignee: Optional[str]) -> Optional[str]:
+def _resolve_default_assignee(default_assignee: Optional[str], policy: owners.OwnerPolicy) -> Optional[str]:
     """``kanban.default_assignee`` when it names a real profile this home may
     claim (``kanban.dispatch_profiles`` gated, same predicate as the spawn
     gate). Otherwise ``None`` so an unassigned shared-board card is never
-    written to. When the profiles module isn't importable trust the
-    operator's config: the downstream check still buckets a missing profile
-    as nonspawnable."""
+    written to. When the profiles module isn't importable, preserve the
+    historic fallback of trusting the operator's config."""
     name = (default_assignee or "").strip() or None
-    if name:
-        profile_exists = _profile_exists_fn()
-        if profile_exists is not None and not profile_exists(name):
-            return None
+    if name and not policy.can_spawn(name):
+        return None
     return name
 
 
@@ -2675,16 +2435,20 @@ def _dispatch_once_locked(
         conn, result, stale_timeout_seconds=stale_timeout_seconds,
         failure_limit=failure_limit, reconcile_orphans=reconcile_orphans, board=board,
     )
+    policy = owners.load_owner_policy()
+    ready_rows = owners.classify_owner_rows(
+        conn, _lane_rows(conn, "ready"), result, policy, dry_run=dry_run,
+    )
+    review_rows = owners.classify_owner_rows(
+        conn, _lane_rows(conn, "review") if policy.review_enabled else [],
+        result, policy, dry_run=dry_run,
+    )
     may_spawn, spawn_budget = _tick_spawn_budget(
         conn, result, max_spawn=max_spawn, max_in_progress=max_in_progress, board=board,
     )
     if not may_spawn:
         return result
 
-    ready_rows = _lane_rows(conn, "ready")
-    # Review rows are enumerated up front so the budget split can see whether
-    # review work exists at all.
-    review_rows = _lane_rows(conn, "review") if review_dispatch_enabled() else []
     # Per-profile cap. Deferred tasks go to skipped_per_profile_capped, not
     # skipped_unassigned — "busy, retry later" differs from "needs routing".
     # Resolved BEFORE the review reservation so the reservation can see which
@@ -2720,7 +2484,7 @@ def _dispatch_once_locked(
         failure_limit=failure_limit, spawn_fn=spawn_fn,
         per_profile_cap=per_profile_cap, per_profile_running=per_profile_running,
     )
-    default_assignee = _resolve_default_assignee(default_assignee)
+    default_assignee = _resolve_default_assignee(default_assignee, policy)
     spawned = 0
     for row in ready_rows:
         if ready_budget is not None and spawned >= ready_budget:

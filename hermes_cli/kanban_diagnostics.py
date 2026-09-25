@@ -722,17 +722,41 @@ def _rule_stranded_in_ready(task, events, runs, now, cfg) -> list[Diagnostic]:
                          payload={"current_assignee": assignee}),
         _cli_hint("Check dispatcher status", "hermes kanban diagnostics"),
     ]
+    # Match the dispatcher's episode boundary, using event order rather than
+    # timestamps: a claim/reassignment can land in the same second as the flag.
+    owner_unavailable = None
+    for event in reversed(events):
+        kind = _event_kind(event)
+        if kind in {"assigned", "claimed"}:
+            break
+        if kind == "owner_unavailable":
+            payload = _parse_payload(event)
+            if isinstance(payload, dict) and payload.get("assignee") == assignee:
+                owner_unavailable = payload
+            break
+    detail = (
+        f"This task has been ready for {age_str} but nothing has claimed it. Common causes: "
+        f"assignee {assignee!r} is misspelled, the profile was deleted, or the external worker "
+        "pool for this lane is down. Confirm the assignee is correct and that a worker is "
+        "actually polling for it."
+    )
+    data = {"ready_since": last_ready_ts, "age_seconds": int(age_seconds),
+            "assignee": assignee, "threshold_seconds": int(threshold_seconds)}
+    if owner_unavailable is not None:
+        detail = (
+            f"This task has been ready for {age_str}. The dispatcher recorded "
+            f"owner_unavailable for {assignee!r} on node {owner_unavailable.get('node', 'unknown')!r}: "
+            f"{owner_unavailable.get('reason', 'profile_not_found')}. "
+            "Recover with an explicit reassignment and record the reason."
+        )
+        data["owner_unavailable"] = owner_unavailable
     return [Diagnostic(
         kind="stranded_in_ready", severity=severity,
         title=f"Ready for {age_str} with no worker",
-        detail=f"This task has been ready for {age_str} but nothing has claimed it. Common causes: "
-               f"assignee {assignee!r} is misspelled, the profile was deleted, or the external worker "
-               f"pool for this lane is down. Confirm the assignee is correct and that a worker is "
-               f"actually polling for it.",
+        detail=detail,
         actions=actions,
         first_seen_at=last_ready_ts, last_seen_at=last_ready_ts, count=1,
-        data={"ready_since": last_ready_ts, "age_seconds": int(age_seconds),
-              "assignee": assignee, "threshold_seconds": int(threshold_seconds)},
+        data=data,
     )]
 
 

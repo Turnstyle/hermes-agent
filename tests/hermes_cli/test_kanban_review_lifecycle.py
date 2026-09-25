@@ -387,7 +387,6 @@ def test_review_dispatch_gate_prevents_phantom_reviewer(
     task parked in ``review`` (this deployment explicitly waits for a human).
     Flipping the knob back on proves the gate, not
     something else, is what suppressed the claim."""
-    import hermes_cli.config as cfgmod
     import hermes_cli.profiles as profmod
 
     with kbc.connect() as conn:
@@ -404,20 +403,14 @@ def test_review_dispatch_gate_prevents_phantom_reviewer(
         monkeypatch.setattr(profmod, "profile_exists", lambda name: True)
 
         # Gate OFF -> review task is left alone.
-        monkeypatch.setattr(
-            cfgmod, "load_config",
-            lambda *a, **k: {"kanban": {"review_dispatch": False}},
-        )
+        (kanban_home / "config.yaml").write_text("kanban:\n  review_dispatch: false\n")
         res_off = kbd.dispatch_once(conn, dry_run=True)
         assert tid not in [s[0] for s in res_off.spawned]
         assert kb.get_task(conn, tid).status == "review"
 
         # Gate ON (the default; sdlc-review is bundled) -> the review task is
         # picked up by the dispatcher.
-        monkeypatch.setattr(
-            cfgmod, "load_config",
-            lambda *a, **k: {"kanban": {"review_dispatch": True}},
-        )
+        (kanban_home / "config.yaml").write_text("kanban:\n  review_dispatch: true\n")
         res_on = kbd.dispatch_once(conn, dry_run=True)
         assert tid in [s[0] for s in res_on.spawned]
 

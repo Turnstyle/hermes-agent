@@ -14,6 +14,7 @@ import pytest
 from hermes_cli import kanban_db as kb
 from hermes_cli import kanban_db_connect as kbc
 from hermes_cli import kanban_db_dispatch as kbd
+from hermes_cli import kanban_dispatch_owners as owners
 
 TICKS = 6
 
@@ -162,7 +163,7 @@ def test_stale_row_is_not_flagged(kanban_home, only_worker_exists):
     with kbc.connect() as conn:
         tid = kb.create_task(conn, title="owner down", assignee="owner-down")
         assert kb.reassign_task(conn, tid, "worker", reason="moved") is True
-        assert kbd._record_owner_unavailable(conn, tid, "owner-down") is False
+        assert owners._record_owner_unavailable(conn, tid, "owner-down") is False
         assert _events(conn, tid, "owner_unavailable") == []
 
 

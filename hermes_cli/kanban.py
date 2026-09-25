@@ -677,7 +677,8 @@ def _cmd_diagnostics(args: argparse.Namespace) -> int:
                 meta[r["id"]] = {k: r[k] for k in ("title", "status", "assignee")}
 
     # What this home believes it may claim on a shared board (#113620).
-    allowlist = kbd.dispatch_profile_allowlist_summary()
+    from hermes_cli.kanban_dispatch_owners import dispatch_profile_allowlist_summary
+    allowlist = dispatch_profile_allowlist_summary()
 
     if getattr(args, "json", False):
         # Per-task rows unchanged; the home-scope allowlist rides as a trailing row

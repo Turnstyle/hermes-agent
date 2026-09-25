@@ -11,13 +11,10 @@ import uuid
 from pathlib import Path
 from unittest import mock
 
-HERMETIC_SCRATCH = Path(
-    os.environ.get(
-        "DECOMP_HERMETIC_SCRATCH",
-        "/Users/turner/.hermes/profiles/tb-cndr/cache/scratch/"
-        "decomposition-repair-20260924/hermetic_homes",
-    )
-).resolve()
+# The runner assigns a disposable TMPDIR for each file. Keep every home
+# beneath it so the write guard never sees a live profile path.
+_SCRATCH = tempfile.TemporaryDirectory(prefix="kanban-hermetic-")
+HERMETIC_SCRATCH = Path(_SCRATCH.name).resolve()
 LIVE_FLEET_BOARD_DB = Path(
     "/Users/turner/.hermes/kanban/boards/fleet/kanban.db"
 ).resolve()
