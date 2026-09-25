@@ -169,8 +169,8 @@ def _peer_credentials(sock: socket.socket) -> Tuple[int, int]:
         if version != 0:  # XUCRED_VERSION
             raise OSError("unexpected xucred version")
         return pid, uid
-    pid, uid, _ = struct.unpack("3i", sock.getsockopt(socket.SOL_SOCKET, socket.SO_PEERCRED, struct.calcsize("3i")))
-    return pid, uid
+    pid, uid, _ = struct.unpack("iII", sock.getsockopt(socket.SOL_SOCKET, socket.SO_PEERCRED, struct.calcsize("iII")))
+    return pid, uid  # struct ucred: pid_t pid, uid_t uid, gid_t gid
 
 
 class _UnixHTTPConnection(http.client.HTTPConnection):

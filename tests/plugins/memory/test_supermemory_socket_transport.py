@@ -250,6 +250,31 @@ def test_every_request_rechecks_the_socket_inside_the_sdk_transport(env, sock_di
     assert first.requests() == ["B"] and second.requests() == []
 
 
+def test_start_up_verifies_the_tunnel_once_for_the_gate_and_the_client(env, sock_dir, tunnels, monkeypatch):
+    """The socket the start-up gate verified is the one the SDK transport pins: one check, one pin, no second
+    verification that could land on a different socket."""
+    calls = []
+    real = helper.verify_tunnel
+    monkeypatch.setattr(helper, "verify_tunnel", lambda *a, **k: calls.append(a) or real(*a, **k))
+    tunnel = tunnels(f"{sock_dir}/rosie.sock:127.0.0.1:6768")
+    p = _provider(env, _tunnel_config(tunnel.forward))
+    assert p._active and len(calls) == 1
+    assert "error" not in _search(p) and len(calls) == 2  # then once per use
+
+
+def test_setup_probe_applies_the_same_gate(env, sock_dir, tunnels, tcp_listener, monkeypatch, capsys):
+    """`hermes memory setup` must not print "Connected" for a config the next session refuses (a base_url next to a
+    tunnel), and must send nothing while saying so."""
+    monkeypatch.setattr("hermes_cli.memory_setup._prompt", lambda *a, **k: "")
+    monkeypatch.setattr("hermes_cli.config.save_config", lambda cfg: None)
+    tunnel = tunnels(f"{sock_dir}/rosie.sock:127.0.0.1:6768")
+    (env / "supermemory.json").write_text(json.dumps({**_tunnel_config(tunnel.forward), "base_url": _url(tcp_listener)}))
+    SupermemoryMemoryProvider().post_setup(str(env), {"memory": {}})
+    out = capsys.readouterr().out
+    assert "✓ Connected" not in out and "base_url" in out
+    assert tunnel.requests() == [] and tcp_listener.seen == []
+
+
 def _chmod_dir(sock_dir, monkeypatch):
     os.chmod(sock_dir, 0o755)
 
