@@ -62,6 +62,7 @@ def home(monkeypatch, tmp_path):
     monkeypatch.delenv(PROOF_ENV, raising=False)
     monkeypatch.delenv("SUPERMEMORY_CONTAINER_TAG", raising=False)
     monkeypatch.setattr("plugins.memory.supermemory._SupermemoryClient", FakeClient)
+    monkeypatch.setattr(sm, "_dropped_key_reason", "", raising=False)  # process-level record of a key drop
     return tmp_path
 
 
@@ -439,3 +440,15 @@ def test_inconsistent_tunnel_settings_fail_closed(home, monkeypatch, tunnel_ops,
     (home / "supermemory.json").write_text(json.dumps(config), encoding="utf-8")
     p = SupermemoryMemoryProvider()
     assert p.is_available() is False and "tunnel" in p.unavailable_reason()
+
+
+def test_reason_survives_the_key_drop_across_calls_and_instances(home, monkeypatch, tunnel_ops):
+    """`hermes memory status` asks several provider instances in one process. The first failed gate drops the key; the
+    later ones must still name the real cause, not the missing key that drop left behind."""
+    monkeypatch.setenv(PROOF_ENV, _valid_proof())
+    tunnel_ops.up = False
+    (home / "supermemory.json").write_text(json.dumps(LIVE_TUNNEL), encoding="utf-8")
+    assert SupermemoryMemoryProvider().is_available() is False
+    assert "SUPERMEMORY_API_KEY" not in os.environ
+    assert "port_closed" in SupermemoryMemoryProvider().unavailable_reason()
+    assert "port_closed" in SupermemoryMemoryProvider().get_status_config({})["summary"]
