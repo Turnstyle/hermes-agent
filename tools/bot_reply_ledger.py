@@ -230,8 +230,64 @@ def _is_orphaned(entry: dict) -> bool:
 
 
 def _adopter_alive(entry: dict) -> bool:
-    adopter = entry.get("adopted_by") or {}
+    adopter = entry.get("adopted_by")
+    if not isinstance(adopter, dict):
+        return False
     return _same_process(adopter.get("pid"), adopter.get("start_time"))
+
+
+def _as_int(value: Any) -> Optional[int]:
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, int):
+        return value
+    if isinstance(value, float) and value.is_integer():
+        return int(value)
+    return None
+
+
+def _as_seconds(value: Any) -> Optional[float]:
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    value = float(value)
+    return value if value == value and value not in (float("inf"), float("-inf")) and value >= 0 else None
+
+
+def normalize_entry(raw: dict) -> tuple[dict, list[str]]:
+    """Type-checked copy of a ledger row plus the names of fields that were malformed.
+
+    A malformed field is replaced by a value that can only make the sweep MORE careful:
+    no pid/start time means "not our waiter" (never signalled), no age means "never killed
+    for age", a malformed ``adopted_by`` means "not adopted"."""
+    entry = dict(raw)
+    bad: list[str] = []
+    pid = _as_int(raw.get("pid"))
+    if pid is None or pid <= 0:
+        bad.append("pid")
+        pid = None
+    entry["pid"] = pid
+    for key in ("pid_start_time", "owner_pid", "owner_start_time"):
+        if raw.get(key) is not None and _as_int(raw.get(key)) is None:
+            bad.append(key)
+        entry[key] = _as_int(raw.get(key))
+    for key in ("spawned_at", "timeout_s"):
+        entry[key] = _as_seconds(raw.get(key))
+        if entry[key] is None:
+            bad.append(key)
+    adopter = raw.get("adopted_by")
+    if adopter is not None and not (isinstance(adopter, dict) and _as_int(adopter.get("pid"))
+                                    and _as_int(adopter.get("start_time")) is not None):
+        bad.append("adopted_by")
+        adopter = None
+    entry["adopted_by"] = adopter
+    for key, default in (("profile", "default"), ("parent_session_id", ""), ("session_key", ""),
+                         ("target", "?"), ("reply_file", "")):
+        value = raw.get(key)
+        if value is not None and not isinstance(value, str):
+            bad.append(key)
+            value = None
+        entry[key] = value or default
+    return entry, bad
 
 
 def _grace_seconds() -> float:
@@ -271,12 +327,13 @@ def _track_in_registry(registry: Any, entry: dict, cmdline: str) -> None:
             return
     import uuid
 
+    # The ledger's recorded start time is the identity the registry re-validates on every later
+    # kill/refresh; a fresh read here could describe a process that reused the PID.
     session = ProcessSession(
-        id=f"proc_{uuid.uuid4().hex[:12]}", command=cmdline or f"--wait-reply {entry.get('reply_file', '')}",
-        pid=pid, pid_scope="host", host_start_time=registry._safe_host_start_time(pid), detached=True,
-        started_at=float(entry.get("spawned_at") or time.time()),
-        parent_session_id=str(entry.get("parent_session_id") or ""),
-        session_key=str(entry.get("session_key") or ""))
+        id=f"proc_{uuid.uuid4().hex[:12]}", command=cmdline or f"--wait-reply {entry['reply_file']}",
+        pid=pid, pid_scope="host", host_start_time=entry["pid_start_time"], detached=True,
+        started_at=entry["spawned_at"] if entry["spawned_at"] is not None else time.time(),
+        parent_session_id=entry["parent_session_id"], session_key=entry["session_key"])
     with registry._lock:
         registry._running[session.id] = session
     registry._write_checkpoint()
@@ -332,64 +389,98 @@ def _sweep_lock(directory: Path) -> Iterator[bool]:
 def _sweep_locked(root: Path, directory: Path, registry: Any, summary: dict, now: float, grace: float) -> None:
     if registry is None:
         from tools.process_registry import process_registry as registry
-    groups: dict[tuple[str, str], dict] = {}
-    for path, entry in read_entries(directory):
-        if entry is None:
+    outcomes: list[tuple[dict, str]] = []
+    for path, raw in read_entries(directory):
+        if raw is None:
             logger.warning("reply-waiter ledger: unreadable entry %s removed", path.name)
             with contextlib.suppress(OSError):
                 path.unlink()
             summary["removed"] += 1
             continue
-        pid = entry.get("pid")
-        if _adopter_alive(entry):
-            summary["skipped"] += 1  # already adopted by a live gateway / serve (maybe this one)
+        # One bad row must never abandon the rows after it or the notices still to be posted.
+        try:
+            outcome = _sweep_entry(path, raw, registry, summary, now, grace)
+        except Exception:
+            logger.warning("reply-waiter ledger: entry %s skipped after an error", path.name, exc_info=True)
+            summary["skipped"] += 1
             continue
-        state = None
-        if isinstance(pid, int) and _identity_matches(entry):
-            if not _is_orphaned(entry):
-                summary["skipped"] += 1  # its spawner is alive
-                continue
-            try:
-                timeout_s = float(entry.get("timeout_s") or 0)
-            except (TypeError, ValueError):
-                timeout_s = 0.0
-            age = now - float(entry.get("spawned_at") or 0)
-            # Within budget: adopt. Past budget but inside the grace window: its own deadline
-            # exit is due, so it is adopted too rather than killed mid-write of its last line.
-            if age < timeout_s + grace:
-                _track_in_registry(registry, entry, _read_cmdline(pid))
-                entry["adopted_by"] = {"pid": os.getpid(), "start_time": process_start_time(os.getpid())}
-                with contextlib.suppress(OSError):
-                    _atomic_write(path, entry)
-                summary["adopted"] += 1
-                state = "waiting"
-            else:
-                registry._terminate_host_pid(pid, registry._safe_host_start_time(pid))
-                logger.info("reply-waiter ledger: killed orphaned waiter pid %s (age %ds)", pid, int(age))
-                summary["killed"] += 1
-                state = "stopped"
-        else:
-            if _pid_alive(pid):
-                logger.info("reply-waiter ledger: pid %s no longer a reply waiter (PID reused); not killing", pid)
-            state = "stopped"
-        if state == "stopped":
-            with contextlib.suppress(OSError):
-                path.unlink()
-            summary["removed"] += 1
-        key = (str(entry.get("profile") or "default"), str(entry.get("parent_session_id") or ""))
-        group = groups.setdefault(key, {"targets": [], "waiting": 0, "stopped": 0})
-        target = str(entry.get("target") or "?")
-        if target not in group["targets"]:
-            group["targets"].append(target)
-        group["waiting" if state == "waiting" else "stopped"] += 1
-    for (profile, session_id), group in groups.items():
+        if outcome is not None:
+            outcomes.append(outcome)
+    for (profile, session_id, tip), group in _group_by_destination(root, outcomes).items():
         total = group["waiting"] + group["stopped"]
         line = (f"{total} replies were pending when the app restarted: {', '.join(group['targets'])}; "
                 f"{group['waiting']} still waiting, {group['stopped']} stopped.")
-        if _post_notice(root, profile, session_id, line):
+        if tip and _post_notice(root, profile, tip, line):
             summary["notices"] += 1
         else:
             _append_undeliverable(directory, profile, session_id, line)
+
+
+def _sweep_entry(path: Path, raw: dict, registry: Any, summary: dict, now: float,
+                 grace: float) -> Optional[tuple[dict, str]]:
+    """Adopt, kill or drop one ledger row. Returns ``(entry, "waiting"|"stopped")`` for the
+    restart notice, or None when the row is left alone (spawner or adopter still running)."""
+    entry, bad = normalize_entry(raw)
+    if bad:
+        logger.warning("reply-waiter ledger: entry %s has malformed field(s) %s", path.name, ", ".join(bad))
+    pid = entry["pid"]
+    # Waiter liveness first: an adopter being alive says nothing about the waiter it adopted.
+    if pid is None or not _identity_matches(entry):
+        if _pid_alive(pid):
+            logger.info("reply-waiter ledger: pid %s no longer a reply waiter (PID reused); not killing", pid)
+        with contextlib.suppress(OSError):
+            path.unlink()
+        summary["removed"] += 1
+        return entry, "stopped"
+    if _adopter_alive(entry) or not _is_orphaned(entry):
+        summary["skipped"] += 1  # a live gateway / serve (maybe this one) or its own spawner owns it
+        return None
+    age = None if entry["spawned_at"] is None else now - entry["spawned_at"]
+    # Within budget: adopt. Past budget but inside the grace window: its own deadline exit is due,
+    # so it is adopted too rather than killed mid-write of its last line. An unreadable spawn time
+    # cannot prove the budget is spent, so that waiter is adopted, never killed for age.
+    if age is None or age < (entry["timeout_s"] or 0.0) + grace:
+        _track_in_registry(registry, entry, _read_cmdline(pid))
+        stamped = dict(raw, adopted_by={"pid": os.getpid(), "start_time": process_start_time(os.getpid())})
+        with contextlib.suppress(OSError):
+            _atomic_write(path, stamped)
+        summary["adopted"] += 1
+        return entry, "waiting"
+    # The recorded identity, never a fresh read: the PID may have changed owners since the check.
+    registry._terminate_host_pid(pid, entry["pid_start_time"])
+    if _identity_matches(entry):
+        # The registry refused (its identity check is exact) or the waiter outlived the signal:
+        # keep the row so the waiter stays visible and the next sweep tries again.
+        logger.warning("reply-waiter ledger: orphaned waiter pid %s survived termination; row kept", pid)
+        summary["skipped"] += 1
+        return None
+    logger.info("reply-waiter ledger: killed orphaned waiter pid %s (age %ds)", pid, int(age))
+    summary["killed"] += 1
+    with contextlib.suppress(OSError):
+        path.unlink()
+    summary["removed"] += 1
+    return entry, "stopped"
+
+
+def _group_by_destination(root: Path, outcomes: list[tuple[dict, str]]) -> dict[tuple[str, str, Optional[str]], dict]:
+    """Group notice rows by the conversation that will RECEIVE them: waiters recorded under
+    successive compaction ids of one conversation share one live tip and so one notice.
+    Key: ``(profile, session_id, tip)``; ``tip`` None (unresolvable) keeps the recorded id."""
+    tips: dict[tuple[str, str], Optional[str]] = {}
+    for entry, _state in outcomes:
+        tips.setdefault((entry["profile"], entry["parent_session_id"]), None)
+    for profile in {profile for profile, _sid in tips}:
+        tips.update(_resolve_tips(root, profile, [sid for p, sid in tips if p == profile]))
+    groups: dict[tuple[str, str, Optional[str]], dict] = {}
+    for entry, state in outcomes:
+        profile, session_id = entry["profile"], entry["parent_session_id"]
+        tip = tips.get((profile, session_id))
+        key = (profile, tip, tip) if tip else (profile, session_id, None)
+        group = groups.setdefault(key, {"targets": [], "waiting": 0, "stopped": 0})
+        if entry["target"] not in group["targets"]:
+            group["targets"].append(entry["target"])
+        group[state] += 1
+    return groups
 
 
 def _profile_db_path(root: Path, profile: str) -> Path:
@@ -397,26 +488,45 @@ def _profile_db_path(root: Path, profile: str) -> Path:
     return home / "state.db"
 
 
-def _post_notice(root: Path, profile: str, session_id: str, line: str) -> bool:
-    """Append ``line`` to the session's live compression tip as a transcript row. No model call."""
-    if not session_id:
-        return False
+def _resolve_tips(root: Path, profile: str, session_ids: list[str]) -> dict[tuple[str, str], Optional[str]]:
+    """``(profile, session_id) -> live compression tip`` (None when no such session exists)."""
+    out: dict[tuple[str, str], Optional[str]] = {(profile, sid): None for sid in session_ids}
     db_path = _profile_db_path(root, profile)
-    if not db_path.exists():
-        return False
+    wanted = [sid for sid in session_ids if sid]
+    if not wanted or not db_path.exists():
+        return out
     db = None
     try:
         from hermes_state import SessionDB
 
         db = SessionDB(db_path=db_path)
-        tip = db.get_compression_tip(session_id) or session_id
-        if not db.get_session(tip):
-            return False
+        for sid in wanted:
+            try:
+                tip = db.get_compression_tip(sid) or sid
+                out[(profile, sid)] = tip if db.get_session(tip) else None
+            except Exception:
+                logger.info("reply-waiter notice: session %s did not resolve", sid, exc_info=True)
+    except Exception:
+        logger.info("reply-waiter notice: session store for profile %s unavailable", profile, exc_info=True)
+    finally:
+        if db is not None:
+            with contextlib.suppress(Exception):
+                db.close()
+    return out
+
+
+def _post_notice(root: Path, profile: str, tip: str, line: str) -> bool:
+    """Append ``line`` to the already-resolved live session ``tip`` as a transcript row. No model call."""
+    db = None
+    try:
+        from hermes_state import SessionDB
+
+        db = SessionDB(db_path=_profile_db_path(root, profile))
         db.append_message(tip, "user", content=f"[System notice] {line}", display_kind="process_complete",
                           display_metadata={"display_text": line})
         return True
     except Exception:
-        logger.info("reply-waiter restart notice not delivered to %s", session_id, exc_info=True)
+        logger.info("reply-waiter restart notice not delivered to %s", tip, exc_info=True)
         return False
     finally:
         if db is not None:
@@ -468,8 +578,9 @@ def consume_turn_note(session_id: Optional[str], session_db: Any = None,
             from tools.bot_mode_probe import _default_home, _hermes_root
 
             root = _hermes_root(Path(_default_home()))
-        targets = [str(entry.get("target") or "?") for _path, entry in read_entries(pending_dir(root))
-                   if entry and str(entry.get("parent_session_id") or "") in lineage and _identity_matches(entry)]
+        rows = [normalize_entry(raw)[0] for _path, raw in read_entries(pending_dir(root)) if raw]
+        targets = [row["target"] for row in rows
+                   if row["parent_session_id"] in lineage and row["pid"] is not None and _identity_matches(row)]
     except Exception:
         logger.debug("pending reply-waiter note failed", exc_info=True)
         return ""

@@ -284,21 +284,208 @@ class TestStartupSweep:
             proc.kill()
             proc.wait()
 
-    def test_gateway_startup_runs_the_sweep_after_checkpoint_recovery(self):
-        source = (REPO / "gateway" / "run_startup.py").read_text(encoding="utf-8")
-        recover = source.index("process_registry.recover_from_checkpoint()")
-        sweep = source.index("sweep_pending_waiters(registry=process_registry)")
-        assert recover < sweep
+    def test_gateway_startup_runs_the_sweep_after_checkpoint_recovery(self, root, monkeypatch):
+        import asyncio
 
-    def test_serve_startup_runs_the_sweep(self):
-        source = (REPO / "hermes_cli" / "web_server.py").read_text(encoding="utf-8")
-        assert "sweep_pending_waiters(registry=process_registry)" in source
-        assert "target=_sweep_reply_waiters" in source[source.index("async def _lifespan"):]
+        import gateway.run as gateway_run
+        import tools.bot_reply_ledger as ledger
+        from gateway.run_startup import GatewayStartupMixin
+        from tools.process_registry import process_registry
+
+        calls = []
+        monkeypatch.setattr(process_registry, "recover_from_checkpoint", lambda: calls.append("recover") or 0)
+        monkeypatch.setattr(ledger, "sweep_pending_waiters",
+                            lambda **kw: calls.append(("sweep", kw.get("registry") is process_registry)))
+        monkeypatch.setattr(gateway_run, "_hermes_home", root)
+        (root / ".clean_shutdown").write_text("", encoding="utf-8")
+
+        class _Runner(GatewayStartupMixin):
+            hooks = SimpleNamespace(discover_and_load=lambda: None)
+            _start_register_plugins_relay_hooks = staticmethod(lambda: None)
+            _subscribe_plugin_rewire = lambda self, *a, **k: None
+            _suspend_stuck_loop_sessions = lambda self: 0
+
+            def _recover_secondary_process_checkpoints(self, process_registry) -> int:
+                calls.append("secondary")
+                return 0
+
+            async def _consume_clean_shutdown_marker(self, marker_path) -> int:
+                calls.append("clean-marker")
+                return 0
+
+        asyncio.run(_Runner()._start_recover_previous_run())
+        assert calls == ["recover", "secondary", ("sweep", True), "clean-marker"]
+
+    def test_gateway_startup_survives_a_failing_sweep(self, root, monkeypatch):
+        import asyncio
+
+        import gateway.run as gateway_run
+        import tools.bot_reply_ledger as ledger
+        from gateway.run_startup import GatewayStartupMixin
+        from tools.process_registry import process_registry
+
+        def _boom(**_kw):
+            raise RuntimeError("sweep exploded")
+
+        reached = []
+        monkeypatch.setattr(process_registry, "recover_from_checkpoint", lambda: 0)
+        monkeypatch.setattr(ledger, "sweep_pending_waiters", _boom)
+        monkeypatch.setattr(gateway_run, "_hermes_home", root)
+        (root / ".clean_shutdown").write_text("", encoding="utf-8")
+
+        class _Runner(GatewayStartupMixin):
+            hooks = SimpleNamespace(discover_and_load=lambda: None)
+            _start_register_plugins_relay_hooks = staticmethod(lambda: None)
+            _subscribe_plugin_rewire = lambda self, *a, **k: None
+            _suspend_stuck_loop_sessions = lambda self: 0
+
+            def _recover_secondary_process_checkpoints(self, process_registry) -> int:
+                return 0
+
+            async def _consume_clean_shutdown_marker(self, marker_path) -> int:
+                reached.append("clean-marker")
+                return 0
+
+        asyncio.run(_Runner()._start_recover_previous_run())
+        assert reached == ["clean-marker"], "a sweep failure must not stop the rest of startup recovery"
+
+    def test_serve_startup_runs_the_sweep(self, monkeypatch):
+        try:
+            from starlette.testclient import TestClient
+        except ImportError:
+            pytest.skip("fastapi/starlette not installed")
+        import hermes_cli.web_server as ws
+        import tools.bot_reply_ledger as ledger
+        from tools.process_registry import process_registry
+
+        swept = threading.Event()
+        seen = {}
+
+        def _fake_sweep(**kw):
+            seen.update(kw, thread=threading.current_thread().name)
+            swept.set()
+
+        monkeypatch.setattr(ws, "_warm_gateway_module", lambda: None)
+        monkeypatch.setattr(ledger, "sweep_pending_waiters", _fake_sweep)
+        with TestClient(ws.app):
+            assert swept.wait(10), "serve lifespan never ran the reply-waiter sweep"
+        assert seen["registry"] is process_registry
+        assert seen["thread"] == "reply-waiter-sweep", "the sweep must run off the ready-probe path"
 
     def test_grace_config_key_defaults_to_300(self):
         from hermes_cli.config_defaults import DEFAULT_CONFIG
 
         assert DEFAULT_CONFIG["bot_mode"]["waiter_orphan_grace_seconds"] == 300
+
+
+class TestSweepHardening:
+    def test_kill_revalidates_against_the_recorded_start_time(self, root, registry, monkeypatch):
+        """The PID may change owners between the identity check and the signal: the kill must be
+        re-validated against the ledger's start time, never a fresh reading of the (new) PID."""
+        from unittest.mock import Mock
+
+        import tools.bot_reply_ledger as ledger
+
+        _write_entry(root, "race", pid=123456, pid_start_time=1000, spawned_at=time.time() - 1000)
+        alive = iter([True, False])  # matches before the signal, gone after it
+        monkeypatch.setattr(ledger, "_identity_matches", lambda entry: next(alive))
+        monkeypatch.setattr(ledger, "_is_orphaned", lambda entry: True)
+        monkeypatch.setattr(registry, "_safe_host_start_time", lambda pid: 900000)
+        terminate = Mock()
+        monkeypatch.setattr(registry, "_terminate_host_pid", terminate)
+        summary = ledger.sweep_pending_waiters(root, registry=registry, grace=0)
+        terminate.assert_called_once_with(123456, 1000)
+        assert summary["killed"] == 1 and not (_pending(root) / "race.json").exists()
+
+    def test_row_is_kept_when_the_waiter_survives_termination(self, root, registry, monkeypatch):
+        import tools.bot_reply_ledger as ledger
+
+        _write_entry(root, "stuck", pid=123456, pid_start_time=1000, spawned_at=time.time() - 1000)
+        monkeypatch.setattr(ledger, "_identity_matches", lambda entry: True)
+        monkeypatch.setattr(ledger, "_is_orphaned", lambda entry: True)
+        monkeypatch.setattr(registry, "_terminate_host_pid", lambda pid, start: None)  # refused
+        summary = ledger.sweep_pending_waiters(root, registry=registry, grace=0)
+        assert summary["killed"] == 0 and summary["skipped"] == 1
+        assert (_pending(root) / "stuck.json").exists()
+
+    def test_adoption_tracks_the_recorded_start_time(self, root, registry, monkeypatch):
+        import tools.bot_reply_ledger as ledger
+
+        _write_entry(root, "adopt", pid=123456, pid_start_time=1000)
+        monkeypatch.setattr(ledger, "_identity_matches", lambda entry: True)
+        monkeypatch.setattr(ledger, "_is_orphaned", lambda entry: True)
+        monkeypatch.setattr(registry, "_safe_host_start_time", lambda pid: 900000)
+        monkeypatch.setattr(registry, "_write_checkpoint", lambda: None)
+        assert ledger.sweep_pending_waiters(root, registry=registry, grace=0)["adopted"] == 1
+        tracked = [s for s in registry._running.values() if s.pid == 123456]
+        assert len(tracked) == 1 and tracked[0].host_start_time == 1000
+        assert _entry(root, "adopt")["pid_start_time"] == 1000
+
+    @pytest.mark.parametrize("fields", [
+        {"adopted_by": "broken"},
+        {"adopted_by": {"pid": "x", "start_time": None}},
+        {"spawned_at": "not-a-number"},
+        {"timeout_s": [60]},
+        {"pid": "123"},
+        {"pid_start_time": "soon"},
+        {"target": 7, "parent_session_id": ["sess-a"], "profile": {"p": 1}},
+    ], ids=["adopter-str", "adopter-junk", "spawned-str", "timeout-list", "pid-str", "start-str", "strings"])
+    def test_malformed_row_does_not_abort_later_rows_or_notices(self, root, registry, session_db, fields):
+        from tools.bot_reply_ledger import sweep_pending_waiters
+
+        session_db.create_session("sess-a", source="cli")
+        _write_entry(root, "a", **{"pid": _dead_pid(), **fields})
+        good = _write_entry(root, "z", pid=_dead_pid(), target="@scribe")
+        summary = sweep_pending_waiters(root, registry=registry, grace=0)
+        assert not good.exists(), summary
+        assert any("@scribe" in m["content"] for m in _notices(session_db, "sess-a"))
+
+    def test_unexpected_row_error_is_isolated_to_that_row(self, root, registry, monkeypatch):
+        import tools.bot_reply_ledger as ledger
+
+        real = ledger._sweep_entry
+
+        def _flaky(path, *args):
+            if path.name == "a.json":
+                raise RuntimeError("boom")
+            return real(path, *args)
+
+        monkeypatch.setattr(ledger, "_sweep_entry", _flaky)
+        _write_entry(root, "a", pid=_dead_pid())
+        good = _write_entry(root, "z", pid=_dead_pid())
+        summary = ledger.sweep_pending_waiters(root, registry=registry, grace=0)
+        assert summary["skipped"] == 1 and summary["removed"] == 1 and not good.exists()
+
+    @pytest.mark.live_system_guard_bypass  # the orphan is reparented to init: signalling it is the point
+    def test_malformed_spawn_time_on_a_live_orphan_adopts_it_never_kills(self, root, registry):
+        from tools.bot_reply_ledger import sweep_pending_waiters
+
+        pid = _spawn_orphan_waiter(root, "st" * 16)
+        try:
+            entry = _entry(root, "st" * 16)
+            entry["spawned_at"] = "not-a-number"
+            (_pending(root) / f"{'st' * 16}.json").write_text(json.dumps(entry), encoding="utf-8")
+            good = _write_entry(root, "z", pid=_dead_pid())
+            summary = sweep_pending_waiters(root, registry=registry, grace=0)
+            assert summary["killed"] == 0 and summary["adopted"] == 1 and _alive(pid)
+            assert not good.exists()
+        finally:
+            _kill(pid)
+
+    @pytest.mark.live_system_guard_bypass  # the orphan is reparented to init: signalling it is the point
+    def test_adopted_waiter_killed_later_is_removed_by_the_next_sweep(self, root, registry):
+        from tools.bot_reply_ledger import sweep_pending_waiters
+
+        pid = _spawn_orphan_waiter(root, "ad" * 16)
+        try:
+            assert sweep_pending_waiters(root, registry=registry, grace=0)["adopted"] == 1
+            _kill(pid)
+            assert _wait_for(lambda: not _alive(pid))
+            summary = sweep_pending_waiters(root, registry=registry, grace=0)
+            assert summary["removed"] == 1 and summary["skipped"] == 0
+            assert not (_pending(root) / f"{'ad' * 16}.json").exists()
+        finally:
+            _kill(pid)
 
 
 # ---------------------------------------------------------------------------
@@ -347,6 +534,22 @@ class TestRestartNotice:
         sweep_pending_waiters(root, registry=registry, grace=0)
         assert _notices(session_db, "sess-a") == [] and _notices(session_db, "sess-a2") == []
         assert len(_notices(session_db, "sess-a3")) == 1
+
+    def test_waiters_across_one_compaction_lineage_share_one_notice(self, root, registry, session_db):
+        from tools.bot_reply_ledger import sweep_pending_waiters
+
+        session_db.create_session("old", source="cli")
+        session_db.end_session("old", "compression")
+        session_db.create_session("middle", source="cli", parent_session_id="old")
+        session_db.end_session("middle", "compression")
+        session_db.create_session("new", source="cli", parent_session_id="middle")
+        for i, sid in enumerate(["old", "middle", "new"]):
+            _write_entry(root, f"l{i}", pid=_dead_pid(), parent_session_id=sid, target=f"@t{i}")
+        summary = sweep_pending_waiters(root, registry=registry, grace=0)
+        notices = _notices(session_db, "new")
+        assert summary["notices"] == 1 and len(notices) == 1
+        assert ("3 replies were pending when the app restarted: @t0, @t1, @t2; 0 still waiting, 3 stopped."
+                in notices[0]["content"])
 
     def test_undeliverable_notice_goes_to_the_fallback_log(self, root, registry, session_db):
         from tools.bot_reply_ledger import sweep_pending_waiters
