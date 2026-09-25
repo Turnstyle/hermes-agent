@@ -307,8 +307,45 @@ _recent_worker_exits: "dict[int, tuple[int, float]]" = {}
 
 # Windows has no ``waitpid(-1)``: a child's exit code is only recoverable
 # through a live handle, so ``_default_spawn`` parks each worker's ``Popen``
-# here (Windows only) and ``reap_worker_zombies`` polls it. Entry: ``pid -> Popen``.
+# here and ``reap_worker_zombies`` polls it. POSIX parks it too (t_590dc20c):
+# a dropped ``Popen`` of a still-running child lands in ``subprocess._active``,
+# and CPython's ``_cleanup`` (run by EVERY later ``Popen()`` in this process —
+# a ``ps`` probe, a git call, a chat terminal command) would reap the worker
+# silently, losing its exit status and its reap time. Entry: ``pid -> Popen``,
+# removed when the dispatcher reaps that pid (``_note_worker_reaped``).
 _live_worker_procs: "dict[int, subprocess.Popen]" = {}
+# Wall-clock time the dispatcher reaped each worker IT spawned (a pid present in
+# ``_live_worker_procs`` at reap time). Other children of this process (terminal
+# commands, git, ps) never enter it. Upper bound for the crash-path orphan
+# group reap (``_vet_orphaned_worker_group``).
+_worker_reaped_at: "dict[int, float]" = {}
+
+
+def _track_worker_proc(proc: "subprocess.Popen") -> None:
+    """Keep a spawned worker's ``Popen`` until the dispatcher reaps it (see ``_live_worker_procs``)."""
+    _worker_reaped_at.pop(int(proc.pid), None)
+    _live_worker_procs[int(proc.pid)] = proc
+
+
+def _note_worker_reaped(pid: int, raw_status: int) -> None:
+    """The dispatcher reaped ``pid``: record its exit status and, when it is a worker this process
+    spawned, the reap time. Marks the parked ``Popen`` finished so its ``__del__`` never waits on a
+    PID that may already belong to another process."""
+    _record_worker_exit(pid, raw_status)
+    proc = _live_worker_procs.pop(int(pid), None)
+    if proc is None:
+        return
+    if proc.returncode is None:
+        try:
+            proc.returncode = os.waitstatus_to_exitcode(int(raw_status))
+        except (AttributeError, ValueError):
+            proc.returncode = -1
+    now = time.time()
+    _worker_reaped_at[int(pid)] = now
+    if len(_worker_reaped_at) > _RECENT_WORKER_EXITS_MAX // 2:
+        cutoff = now - _RECENT_WORKER_EXIT_TTL_SECONDS
+        for _pid in [p for p, t in _worker_reaped_at.items() if t < cutoff]:
+            _worker_reaped_at.pop(_pid, None)
 
 
 def _wait_status_from_returncode(returncode: int) -> int:
@@ -399,8 +436,7 @@ def reap_worker_zombies() -> "list[int]":
             returncode = proc.poll()
             if returncode is None:
                 continue
-            _record_worker_exit(pid, _wait_status_from_returncode(returncode))
-            _live_worker_procs.pop(pid, None)
+            _note_worker_reaped(pid, _wait_status_from_returncode(returncode))
             reaped.append(pid)
         return reaped
     try:
@@ -411,7 +447,7 @@ def reap_worker_zombies() -> "list[int]":
                 break
             if pid == 0:
                 break
-            _record_worker_exit(pid, status)
+            _note_worker_reaped(pid, status)
             reaped.append(pid)
     except Exception:
         pass
@@ -630,7 +666,7 @@ def _reap_exited_leader(pid: int) -> None:
     except (ChildProcessError, OSError):
         return
     if reaped == int(pid):
-        _record_worker_exit(reaped, status)
+        _note_worker_reaped(reaped, status)
 
 
 def _poll_worker_group_exit(pid: int, started_at=None) -> bool:
@@ -647,12 +683,15 @@ def _poll_worker_group_exit(pid: int, started_at=None) -> bool:
 
 
 def _worker_exit_reaped_at(pid: int) -> Optional[float]:
-    """Wall-clock time THIS process reaped worker ``pid`` (``waitpid``), or None when it never did
-    (per-tick CLI dispatcher, gateway restarted since the spawn, entry expired). Until that reap the
-    PID stays pinned by the zombie, so no other process can hold it; it is the last moment the PID
-    (and so the process group id) is known to have been the worker's."""
-    entry = _recent_worker_exits.get(int(pid))
-    return None if entry is None else float(entry[1])
+    """Wall-clock time the dispatcher in THIS process reaped worker ``pid`` that it had itself
+    spawned and tracked (``_worker_reaped_at``), or None: another process spawned it (per-tick CLI
+    dispatcher, gateway restarted since the spawn), a test spawn_fn that bypasses
+    ``_track_worker_proc``, or the entry expired. Until that reap the PID stays pinned by the zombie,
+    so no other process can hold it; it is the last moment the PID (and so the process group id) is
+    known to have been the worker's. A reap of any other child that happens to reuse the number
+    never writes here."""
+    reaped = _worker_reaped_at.get(int(pid))
+    return None if reaped is None else float(reaped)
 
 
 # A reused group id belongs to a process created AFTER the reap; its members start later still. A
@@ -675,9 +714,10 @@ def _vet_orphaned_worker_group(pid: int, started_at) -> dict[str, Any]:
       * the leader PID is dead now (a live holder means the PID was reused);
       * never the caller's own process group; ``ps`` must be readable;
       * every member's start time is readable and not before the worker's start;
-      * THIS process reaped the worker (``_worker_exit_reaped_at``) and the oldest member started
-        at least ``_ORPHAN_GROUP_REAP_MARGIN_SECONDS`` before that reap. Without an observed reap
-        there is no upper bound, so the group is left alone (``leader_exit_unobserved``).
+      * the dispatcher in THIS process spawned the worker and reaped it (``_worker_exit_reaped_at``)
+        and the oldest member started at least ``_ORPHAN_GROUP_REAP_MARGIN_SECONDS`` before that
+        reap. Without an observed reap there is no upper bound, so the group is left alone
+        (``leader_exit_unobserved``).
     Returns ``{"pgid", "members", "refused"}``; ``refused`` None with members = safe to signal."""
     info: dict[str, Any] = {"pgid": None, "members": [], "refused": None}
     if _kb._IS_WINDOWS or not (hasattr(os, "killpg") and hasattr(os, "getpgrp")):
@@ -3581,8 +3621,7 @@ def _default_spawn(task: Task, workspace: str, *, board: Optional[str] = None) -
         )
     # Intentionally NOT closing log_f: the child keeps writing after return;
     # the OS-level FD stays open in the child until it exits.
-    if _kb._IS_WINDOWS:
-        _live_worker_procs[proc.pid] = proc
+    _track_worker_proc(proc)
     return proc.pid
 
 

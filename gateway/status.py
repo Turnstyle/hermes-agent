@@ -869,8 +869,9 @@ def _pid_exists(pid: int) -> bool:
 def _posix_is_zombie(pid: int) -> bool:
     """Zombie via ``/proc/<pid>/stat`` field 3, or ``ps -o state=`` without /proc (macOS/BSD)."""
     try:
-        stat_fields = Path(f"/proc/{pid}/stat").read_text(encoding="utf-8").split()
-        return len(stat_fields) > 2 and stat_fields[2] == "Z"
+        # Split after the last ")": the process name (field 2) may contain spaces.
+        stat_fields = Path(f"/proc/{pid}/stat").read_text(encoding="utf-8").rpartition(")")[2].split()
+        return len(stat_fields) > 0 and stat_fields[0] == "Z"
     except FileNotFoundError:
         with contextlib.suppress(Exception):
             # --compile-bytecode: uv does NOT write __pycache__ by default (pip does), so without it the

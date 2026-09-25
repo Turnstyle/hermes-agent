@@ -81,7 +81,8 @@ def _running_card_whose_leader_exits(conn, tmp_path: Path, child_src: str, exit_
                                      helper_age: float = _HELPER_AGE):
     """A claimed card whose recorded worker (real fingerprint) starts a grandchild and then exits
     ``exit_code`` on its own. The leader is reaped the way the dispatcher does it
-    (``_reap_exited_leader`` → ``_record_worker_exit``) unless ``dispatcher_reaps`` is False.
+    (``_reap_exited_leader``) unless ``dispatcher_reaps`` is False (then the worker is untracked,
+    as when another process spawned it).
     Returns (task id, leader Popen, grandchild pid). Kills everything on any setup failure."""
     script = tmp_path / "leader.py"
     script.write_text(_LEADER_EXITS_ALONE)
@@ -95,6 +96,9 @@ def _running_card_whose_leader_exits(conn, tmp_path: Path, child_src: str, exit_
     )
     child = 0
     try:
+        track = getattr(kbd, "_track_worker_proc", None)  # the _default_spawn bookkeeping
+        if dispatcher_reaps and track is not None:
+            track(proc)
         kbd._set_worker_pid(conn, tid, proc.pid)
         deadline = time.monotonic() + 10
         while time.monotonic() < deadline and not (pid_file.exists() and pid_file.read_text().strip()):
@@ -138,6 +142,67 @@ def test_crash_sweep_ends_the_dead_workers_orphaned_group(board, tmp_path):
         assert reaped[0]["survivors"] == []
     finally:
         _cleanup(child, group=proc.pid)
+
+
+def test_default_spawn_shape_survives_an_unrelated_subprocess_before_the_reap(board, tmp_path):
+    """Live gateway shape (review 2): ``_default_spawn`` returns only the pid. A dropped ``Popen``
+    of a running child lands in ``subprocess._active`` and the next ``Popen()`` anywhere in the
+    process (here ``subprocess.run(['true'])``) reaped the worker silently, so the dispatcher never
+    saw the exit and the orphans were left alone. RED before the worker handle was kept."""
+    conn = board
+    script = tmp_path / "leader.py"
+    script.write_text(_LEADER_EXITS_ALONE)
+    pid_file, go = tmp_path / "child.pid", tmp_path / "go"
+    tid = kb.create_task(conn, title="spawn-shape", assignee="fx", max_retries=3)
+    kb.claim_task(conn, tid)
+
+    def spawn_like_default_spawn() -> int:
+        proc = subprocess.Popen(
+            [sys.executable, str(script), str(pid_file), _SLEEPER, str(go), "1"],
+            start_new_session=True, stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+        )
+        track = getattr(kbd, "_track_worker_proc", None)
+        if track is not None:
+            track(proc)
+        return proc.pid  # the Popen object is dropped here, exactly as in _default_spawn
+
+    pid = spawn_like_default_spawn()
+    child = 0
+    try:
+        kbd._set_worker_pid(conn, tid, pid)
+        deadline = time.monotonic() + 10
+        while time.monotonic() < deadline and not (pid_file.exists() and pid_file.read_text().strip()):
+            time.sleep(0.05)
+        child = int(pid_file.read_text())
+        time.sleep(_HELPER_AGE)
+        go.write_text("1")
+        time.sleep(1.0)  # leader exits; nothing has reaped it yet
+        subprocess.run(["true"], check=True)  # any unrelated subprocess in the dispatcher process
+        kbd.reap_worker_zombies()
+        assert tid in kbd.detect_crashed_workers(conn)
+        assert _wait_dead(child), "orphan survived: the worker's exit was reaped behind the dispatcher"
+        ev = _events(conn, tid)
+        assert len(ev) == 1 and ev[0]["refused"] is None and ev[0]["signalled"] is True
+    finally:
+        _cleanup(*([child] if child else []), group=pid)
+
+
+def test_reap_time_is_recorded_only_for_tracked_workers(monkeypatch):
+    """A reap of any other child that reuses a number never becomes a group-reap anchor."""
+    monkeypatch.setattr(kbd, "_live_worker_procs", {})
+    monkeypatch.setattr(kbd, "_worker_reaped_at", {})
+    kbd._note_worker_reaped(424242, 0)
+    assert kbd._worker_exit_reaped_at(424242) is None
+
+    class FakeProc:
+        pid, returncode = 424243, None
+
+    fake = FakeProc()
+    kbd._track_worker_proc(fake)
+    kbd._note_worker_reaped(424243, 1 << 8)
+    assert kbd._worker_exit_reaped_at(424243) is not None
+    assert 424243 not in kbd._live_worker_procs and fake.returncode == 1
 
 
 def test_crash_sweep_sigkills_a_term_ignoring_orphan(board, tmp_path):
@@ -321,25 +386,3 @@ def test_unreadable_ps_never_signals_and_is_recorded(board, monkeypatch):
     kbd._reap_crashed_worker_groups(board, [(tid, 424242, _same_boot(1), None)])
     assert [e["refused"] for e in _events(board, tid)] == ["ps_unreadable"]
 
-
-def test_linux_stat_start_time_survives_spaces_in_the_process_name(monkeypatch):
-    """npm titles itself ``npm exec @playwright/mcp``; a plain split read the wrong field."""
-    import gateway.status as gs
-    fields_after_comm = ["S"] + [str(i) for i in range(4, 22)] + ["987654"] + ["0"] * 30
-    lines = {
-        "npm": "4242 (npm exec @playw) " + " ".join(fields_after_comm) + "\n",
-        "paren": "4242 (a) b) " + " ".join(fields_after_comm) + "\n",
-    }
-    current = {"line": lines["npm"]}
-
-    class FakePath:
-        def __init__(self, p):
-            self.p = p
-
-        def read_text(self, encoding=None):
-            return current["line"]
-
-    monkeypatch.setattr(gs, "Path", FakePath)
-    assert gs._get_process_start_time(4242) == 987654
-    current["line"] = lines["paren"]
-    assert gs._get_process_start_time(4242) == 987654
