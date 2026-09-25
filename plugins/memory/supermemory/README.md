@@ -200,8 +200,8 @@ With a `tunnel` block:
 - **Before every request** (inside the transport, so every caller is covered): every directory above the socket is a
   real directory owned by root or you and not writable by others (unless sticky, like `/tmp`); the socket's own
   directory is yours with mode 0700; the socket is a socket owned by you with no group/other permissions; and it is
-  the same socket (inode) that was verified when the client was built. Otherwise the request is refused before a byte
-  is sent.
+  the same socket (inode) the session's start-up check verified. Otherwise the request is refused before a byte is
+  sent.
 - **Before every use:** the same checks, plus the listener: an empty connection's peer credentials must name a
   process of yours whose exact argv is an ssh forward of `forward` to `ssh_host` (parsed the way ssh parses it;
   options that could redirect the connection or weaken host-key checks fail closed, and so does a remote command).
