@@ -1,7 +1,8 @@
 """Fail-loud OpenAI-shaped client for the official ``cursor-agent acp`` route.
 
-Each completion owns a fresh ask-mode session. Cursor's native tools remain
-observable metadata and are never executed a second time as Hermes tool calls.
+Text-only interface, NOT a read-only execution environment. Ask mode can execute
+Cursor-native tools without permission requests. Completions therefore require
+explicit acknowledgment of native tool effects; Hermes tool requests fail closed.
 """
 from __future__ import annotations
 
@@ -18,8 +19,8 @@ from agent.copilot_acp_client import _effective_timeout, _render_message_content
 from agent.cursor_acp_transport import CursorSession
 
 
-def _unsupported(code, param):
-    message = f"Cursor ACP {param} unsupported."
+def _unsupported(code, param, message=None):
+    message = message or f"Cursor ACP does not support request parameter {param}."
     return BadRequestError(
         message, response=httpx.Response(400, request=httpx.Request("POST", "https://cursor-acp.invalid/completions")),
         body={"message": message, "type": "invalid_request_error", "code": code, "param": param},
@@ -141,33 +142,37 @@ class CursorACPClient:
         self._timeout = _effective_timeout(timeout)
         self._sessions = set()
         self._lock = threading.Lock()
+        self._cancelled = False
         self.is_closed = False
         self.chat = SimpleNamespace(completions=SimpleNamespace(create=self._create))
 
     def _open(self, timeout):
         with self._lock:
+            if self.is_closed or self._cancelled:
+                raise InterruptedError("Cursor ACP client was cancelled or closed.")
             session = CursorSession(self._command, self._args, self._cwd, timeout)
             self._sessions.add(session)
-            self.is_closed = False
             return session
 
     def _release(self, session):
         with self._lock:
-            if session in self._sessions:
-                self._sessions.remove(session)
-                session.close()
+            self._sessions.discard(session)
+        session.close()
 
     def close(self):
         with self._lock:
-            for session in self._sessions:
-                session.close()
+            sessions = list(self._sessions)
             self._sessions.clear()
             self.is_closed = True
+        for session in sessions:
+            session.close()
 
     def cancel(self):
         with self._lock:
-            for session in self._sessions:
-                session.cancel()
+            self._cancelled = True
+            sessions = list(self._sessions)
+        for session in sessions:
+            session.cancel()
 
     def _initialize(self, session):
         session.request("initialize", {"protocolVersion": 1, "clientCapabilities": {
@@ -187,7 +192,14 @@ class CursorACPClient:
             self._release(session)
 
     def _create(self, *, model=None, messages=None, timeout=None, tools=None, functions=None,
-                tool_choice=None, function_call=None, response_format=None, json_schema=None, stream=False, **_: Any):
+                tool_choice=None, function_call=None, response_format=None, json_schema=None,
+                stream=False, extra_body=None, **_: Any):
+        # OpenAI callers may put request controls in extra_body; never silently drop them.
+        if isinstance(extra_body, dict):
+            for param in ("tools", "functions", "tool_choice", "function_call", "response_format", "json_schema"):
+                if param in extra_body:
+                    code = "format_unsupported" if param in ("response_format", "json_schema") else "tool_use_unsupported"
+                    raise _unsupported(code, param)
         for param, value in (("response_format", response_format), ("json_schema", json_schema)):
             if value is not None:
                 raise _unsupported("format_unsupported", param)
@@ -195,8 +207,22 @@ class CursorACPClient:
             if value:
                 raise _unsupported("tool_use_unsupported", param)
         for param, value in (("tool_choice", tool_choice), ("function_call", function_call)):
-            if value is not None and value != "none":
+            if value is not None:
                 raise _unsupported("tool_use_unsupported", param)
+        for message in messages or []:
+            if message.get("role") in ("tool", "function") or message.get("tool_calls") or message.get("function_call"):
+                raise _unsupported("tool_use_unsupported", "messages")
+            content = message.get("content")
+            if isinstance(content, list) and any(not isinstance(part, dict) or part.get("type") != "text" for part in content):
+                raise _unsupported("format_unsupported", "messages")
+        cursor_options = extra_body.get("cursor") if isinstance(extra_body, dict) else None
+        if not isinstance(cursor_options, dict) or cursor_options.get("allow_native_tools") is not True:
+            raise _unsupported("native_tool_safety_unavailable", "extra_body", (
+                "Cursor ACP cannot enforce read-only or no-tools execution: native tools may run "
+                "without permission even in ask mode. This text-only interface requires explicit "
+                "extra_body.cursor.allow_native_tools=true acknowledgment of native tool effects. "
+                "Use another provider when tool safety is required."
+            ))
         result = CursorStream(self, model, messages or [], self._timeout if timeout is None else _effective_timeout(timeout))
         if stream:
             return result

@@ -8,6 +8,9 @@ import pytest
 from openai import BadRequestError
 
 PEER = Path(__file__).parent / "fixtures" / "cursor_acp_peer.py"
+ACK = {"cursor": {"allow_native_tools": True}}
+# All subprocesses are local fixture peers; cleanup signals their owned groups.
+pytestmark = pytest.mark.live_system_guard_bypass
 
 
 def client_for(tmp_path, scenario="normal"):
@@ -23,17 +26,39 @@ def read_journal(path):
 
 
 def complete(client, **kwargs):
-    return client.chat.completions.create(model="default[]", messages=[{"role": "user", "content": "ping"}], timeout=5, **kwargs)
+    return client.chat.completions.create(model="default[]", messages=[{"role": "user", "content": "ping"}], timeout=5, extra_body=ACK, **kwargs)
+
+
+def test_native_tool_safety_requires_explicit_acknowledgment_before_spawn(tmp_path):
+    from agent.error_classifier import classify_api_error
+
+    client, journal = client_for(tmp_path)
+    for stream in (False, True):
+        for extra in (None, {}, {"cursor": {"allow_native_tools": False}},
+                      {"cursor": {"allow_native_tools": "true"}}):
+            with pytest.raises(BadRequestError, match="native tools") as caught:
+                client.chat.completions.create(model="default[]", messages=[], stream=stream, extra_body=extra)
+            verdict = classify_api_error(caught.value, provider="cursor-acp", approx_tokens=150000, num_messages=100)
+            assert not verdict.retryable and not verdict.should_compress and not verdict.should_fallback
+        for requirement in ({"tool_choice": "none"}, {"function_call": "none"},
+                            {"extra_body": {**ACK, "tool_choice": "none"}},
+                            {"messages": [{"role": "tool", "content": "tool output"}]},
+                            {"messages": [{"role": "user", "content": [{"type": "image_url"}]}]}):
+            request = dict(model="default[]", messages=[], stream=stream, extra_body=ACK)
+            request.update(requirement)
+            with pytest.raises(BadRequestError):
+                client.chat.completions.create(**request)
+    assert not journal.exists()
 
 
 def test_model_must_be_advertised_and_selection_must_succeed(tmp_path):
     client, journal = client_for(tmp_path)
     for model in ["composer-2.5", "unknown", None, ""]:
         with pytest.raises(ValueError, match="advertised"):
-            client.chat.completions.create(model=model, messages=[], timeout=5)
+            client.chat.completions.create(model=model, messages=[], timeout=5, extra_body=ACK)
     assert not any(row.get("method") == "session/prompt" for row in read_journal(journal))
     for model in ["default[]", "composer-2.5[fast=true]"]:
-        assert client.chat.completions.create(model=model, messages=[], timeout=5).model == model
+        assert client.chat.completions.create(model=model, messages=[], timeout=5, extra_body=ACK).model == model
     client, journal = client_for(tmp_path, "reject-model")
     with pytest.raises(RuntimeError, match="session/set_config_option"):
         complete(client)
@@ -76,13 +101,13 @@ def test_formats_and_hermes_tools_raise_before_spawning(tmp_path):
             complete(client, **request)
         assert caught.value.status_code == 400
         assert caught.value.code == ("format_unsupported" if "response_format" in request or "json_schema" in request else "tool_use_unsupported")
-        verdict = classify_api_error(caught.value)
+        verdict = classify_api_error(caught.value, approx_tokens=150000, num_messages=100)
         assert verdict.reason == FailoverReason.format_error
         if caught.value.code == "tool_use_unsupported":
             assert verdict.should_fallback
         assert not verdict.retryable
     assert not journal.exists()
-    assert complete(client, tool_choice="none", tools=[]).choices[0].message.content == "pong"
+    assert complete(client, tools=[]).choices[0].message.content == "pong"
 
 
 def test_native_tool_events_are_metadata_never_hermes_calls(tmp_path):
