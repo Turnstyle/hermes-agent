@@ -145,9 +145,9 @@ def test_group_is_sigkilled_after_grace_even_when_leader_already_exited(tmp_path
     try:
         fp = kbd._process_fingerprint(proc.pid)
         info = kbd._terminate_reclaimed_worker(proc.pid, _lock(), started_at=fp)
+        assert _wait_dead(child), "SIGTERM-ignoring grandchild survived the group SIGKILL"
         assert info["terminated"] is True
         assert info["group_signalled"] is True and info["sigkill"] is True
-        assert _wait_dead(child), "SIGTERM-ignoring grandchild survived the group SIGKILL"
     finally:
         _cleanup(child, proc.pid, group=proc.pid)
         proc.wait(timeout=5)
@@ -158,14 +158,19 @@ def test_worker_sharing_callers_group_never_gets_killpg(tmp_path, monkeypatch):
     """A worker NOT leading its own group (getpgid(pid) != pid) must never trigger killpg: the group
     could be the dispatcher's own. Only the worker PID is signalled (previous behaviour)."""
     calls = []
-    real_killpg = os.killpg
-    monkeypatch.setattr(kbd.os, "killpg", lambda pg, sig: (calls.append((pg, sig)), real_killpg(pg, sig)))
+
+    def spy_killpg(pg, sig):  # record, never deliver: a regression must fail here, not kill pytest
+        calls.append((pg, sig))
+        if sig != 0:
+            raise PermissionError("killpg refused by test spy")
+
+    monkeypatch.setattr(kbd.os, "killpg", spy_killpg)
     proc, child = _spawn_worker(tmp_path, _WORKER, _SLEEPER, new_session=False)
     try:
         assert os.getpgid(proc.pid) != proc.pid
         info = kbd._terminate_reclaimed_worker(proc.pid, _lock(), started_at=kbd._process_fingerprint(proc.pid))
-        assert info["terminated"] is True and info["group_signalled"] is False
         assert [c for c in calls if c[1] != 0] == []
+        assert info["terminated"] is True and info["group_signalled"] is False
     finally:
         _cleanup(child, proc.pid)
         proc.wait(timeout=5)
@@ -210,3 +215,35 @@ def test_archive_kills_the_workers_grandchild(board, tmp_path):
         assert _wait_dead(child), "worker's grandchild survived archive"
     finally:
         _cleanup(child, proc.pid, group=proc.pid)
+
+
+def test_legacy_row_without_fingerprint_keeps_single_pid_path(tmp_path, monkeypatch):
+    """A legacy row (no spawn fingerprint) is only ever signalled by PID, never as a whole group."""
+    monkeypatch.setattr(kbd.os, "killpg", lambda *a: pytest.fail("killpg for a legacy row"))
+    proc, child = _spawn_worker(tmp_path, _WORKER, _SLEEPER)
+    try:
+        info = kbd._terminate_reclaimed_worker(proc.pid, _lock(), started_at=None)
+        assert info["terminated"] is True and info["group_signalled"] is False
+    finally:
+        monkeypatch.undo()
+        _cleanup(child, proc.pid, group=proc.pid)
+        proc.wait(timeout=5)
+
+
+def test_zombie_leader_of_another_parent_does_not_hold_the_grace_poll(monkeypatch):
+    """A zombie leader whose parent is not the caller (CLI reclaim / archive) must not keep the
+    poll waiting the full grace: only live group members count."""
+    monkeypatch.setattr(kbd, "_worker_alive", lambda pid, started_at=None: False)
+    monkeypatch.setattr(kbd, "_reap_exited_leader", lambda pid: None)
+    monkeypatch.setattr(kbd, "_live_group_members", lambda pgid: [])
+    monkeypatch.setattr(kbd.time, "sleep", lambda s: pytest.fail("poll slept on a zombie-only group"))
+    assert kbd._poll_worker_group_exit(424242, "fp") is True
+
+
+def test_live_group_members_skips_zombies(monkeypatch):
+    class R:
+        stdout = "  10    10 Z\n  11    10 S\n  12    99 R\n"
+    monkeypatch.setattr(kbd.subprocess, "run", lambda *a, **k: R())
+    assert kbd._live_group_members(10) == [11]
+    assert kbd._live_group_members(99) == [12]
+    assert kbd._live_group_members(5) == []
