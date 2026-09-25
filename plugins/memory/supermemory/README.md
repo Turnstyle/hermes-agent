@@ -56,6 +56,8 @@ Config file: `$HERMES_HOME/supermemory.json`
 | `search_mode` | `hybrid` | Search mode: `hybrid` (profile + memories), `memories` (memories only), `documents` (documents only) |
 | `entity_context` | built-in default | Extraction guidance passed to Supermemory |
 | `api_timeout` | `5.0` | Timeout for SDK requests |
+| `containers` | unset | Per-container operation permissions (see [Container Permissions](#container-permissions)) |
+| `require_availability_proof` | `false` | Require a per-process proof from a key helper, not just a key (see [Availability Proof](#availability-proof)) |
 
 ### Environment Variables
 
@@ -129,6 +131,42 @@ When enabled:
 - The tag must be in the whitelist: primary container + `custom_containers`
 - Automatic operations (turn capture, prefetch, memory write mirroring) always use the **primary** container only
 - Custom container instructions are injected into the system prompt
+
+## Container Permissions
+
+Instructions alone do not stop a write. To make a container read-only (for example a shared, curated corpus),
+give each container explicit operations:
+
+```json
+{
+  "container_tag": "hermes-{identity}",
+  "enable_custom_container_tags": true,
+  "custom_containers": ["shared-knowledge"],
+  "containers": {
+    "hermes-{identity}": {"read": true, "write": true},
+    "shared-knowledge": {"read": true, "write": false}
+  }
+}
+```
+
+- Keys accept `{identity}`, resolved like `container_tag`.
+- Once `containers` is present it is **default-deny**: an unlisted container, or a missing `read`/`write`, gets nothing.
+- `supermemory-save` and `supermemory-forget` need `write`; `supermemory-search`, `supermemory-profile` and prefetch need `read`. A refused call returns a tool error and logs a warning.
+- Automatic writes need both `auto_capture: true` and `write` on the primary container. This covers turn capture and mirroring of built-in memory-tool additions (`on_memory_write`). With `auto_capture: false`, nothing is written unless the agent calls `supermemory-save`.
+- Without `containers`, every whitelisted container allows every operation (previous behaviour).
+
+## Availability Proof
+
+By default the provider is available whenever `SUPERMEMORY_API_KEY` is set. When the key comes from a
+`secrets.command` helper that can only work while some path is up (for example an SSH tunnel), set
+`"require_availability_proof": true`. The provider is then available only when
+`SUPERMEMORY_AVAILABILITY_PROOF` is `v1:<pid of this Hermes process>:<first 16 hex of sha256(key)>`:
+
+- A proof inherited from a parent process (different pid) or minted for another key is rejected.
+- `down:<pid>:<reason>` means the helper found the path down. The reason shows in `hermes memory status`.
+- If the proof fails in a single-profile process, `SUPERMEMORY_API_KEY` is removed from the process environment so child processes do not inherit it. Under a multiplexed gateway the shared environment is left alone and the provider simply refuses the key.
+
+`tunnel_key_helper.py` (stdlib only) is a helper for a proxy behind an SSH local forward. Before it reads any key, it checks three things: the port is open, the listener is this user's `ssh -L <forward> <host>` process, and unauthenticated `/health` answers like the expected proxy. It then reads the key over SSH and confirms authenticated `/health`. See its docstring for a `secrets.command` example; use `override_existing: true` there so the fresh key and proof beat inherited values.
 
 ## Support
 
