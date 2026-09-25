@@ -1,0 +1,4 @@
+name: cursor-acp-provider
+kind: model-provider
+version: 1.0.0
+description: Official Cursor ACP subscription client with strict ask-mode guards
