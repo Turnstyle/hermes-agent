@@ -51,6 +51,9 @@ _BOOL_WORDS = {**dict.fromkeys(("true", "1", "yes", "y", "on"), True), **dict.fr
 # "v1:<hermes pid>:<key fingerprint>" on success, "down:<hermes pid>:<reason>" otherwise.
 _PROOF_ENV = "SUPERMEMORY_AVAILABILITY_PROOF"
 _CONTAINER_OPS = ("read", "write")
+# Why _drop_inherited_key removed SUPERMEMORY_API_KEY from this (single-profile) process. Later gate checks, in any
+# provider instance, report it instead of the missing key the drop left behind.
+_dropped_key_reason = ""
 
 
 def _quietly(fn: Callable[[], Any], fail_msg: str = "", *args: Any, level: int = logging.DEBUG, default: Any = None) -> Any:
@@ -350,9 +353,11 @@ def _drop_inherited_key(reason: str) -> None:
     """Remove an unproven SUPERMEMORY_API_KEY from this process's environ so it can't reach child processes.
     Never under multiplexing or for a routed profile: os.environ is shared there and belongs to no one profile
     (the provider still refuses to use the key)."""
+    global _dropped_key_reason
     if is_multiplex_active() or serves_routed_profile():
         return
     if os.environ.pop("SUPERMEMORY_API_KEY", None) is not None:
+        _dropped_key_reason = reason
         logger.warning("Supermemory: removed SUPERMEMORY_API_KEY from the process environment (%s)", reason)
 
 
@@ -420,7 +425,6 @@ class SupermemoryMemoryProvider(MemoryProvider):
         self._pending_turns: List[Dict[str, str]] = []  # failed writes, each tagged with its session_id; retried on next write/end/switch/shutdown
         self._capture_lock = threading.Lock()  # sync_turn (worker) vs on_session_switch/shutdown (caller thread) both touch _pending_turns
         self._checked_at, self._disabled = 0.0, ""  # last passed live tunnel check; why a re-check dropped the client
-        self._unavailable = ""  # reason from the last is_available()
         self._apply_config(_load_supermemory_config())
         self._base_url, self._allowed_containers = _DEFAULT_BASE_URL, []  # env var is only consulted in initialize()
 
@@ -446,7 +450,10 @@ class SupermemoryMemoryProvider(MemoryProvider):
         if config is None:
             from hermes_constants import get_hermes_home
             config = _load_supermemory_config(str(get_hermes_home()))
-        error = _availability_error(get_secret("SUPERMEMORY_API_KEY", "") or "", config) or _tunnel_error(config)
+        key = get_secret("SUPERMEMORY_API_KEY", "") or ""
+        if not key and _dropped_key_reason and _guarded(config):
+            return _dropped_key_reason
+        error = _availability_error(key, config) or _tunnel_error(config)
         if error and _guarded(config):
             _drop_inherited_key(error)
         return error
@@ -488,13 +495,10 @@ class SupermemoryMemoryProvider(MemoryProvider):
         # No SDK import check: the SDK is lazy-installed in initialize(), so gating on importability here is a
         # chicken-and-egg trap on sealed venvs. Key presence, plus the helper's proof and the live tunnel check when
         # configured (a failure there also drops an unproven inherited key).
-        self._unavailable = self._gate_error()
-        return not self._unavailable
+        return not self._gate_error()
 
     def unavailable_reason(self) -> str:
-        # The host asks right after is_available() failed, which may have dropped the key: report that failure,
-        # not the missing key it left behind.
-        return self._unavailable or self._gate_error()
+        return self._gate_error()
 
     def get_config_schema(self):
         # Only the API key is prompted during `hermes memory setup`; other options live in supermemory.json / env.
