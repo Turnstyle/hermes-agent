@@ -647,7 +647,7 @@ Base URL precedence is `supermemory.json` → `SUPERMEMORY_BASE_URL` → `https:
 - Profile facts injected on first turn and at configurable intervals
 - **Profile-scoped containers** — use `{identity}` in `container_tag` (e.g. `hermes-{identity}` → `hermes-coder`) to isolate memories per Hermes profile
 - **Multi-container mode** — enable `enable_custom_container_tags` with a `custom_containers` list to let the agent read/write across named containers. Automatic operations stay on the primary container.
-- **Guards (opt-in)** — `containers` makes containers read-only or write-enabled (default-deny once set); `require_availability_proof` plus a `tunnel` block keeps a key behind an SSH forward inert unless a key helper proved the endpoint in this process, and re-checks it before every use. Details and the bundled `tunnel_key_helper.py` are in the plugin's `README.md`.
+- **Guards (opt-in)** — `containers` makes containers read-only or write-enabled (default-deny once set); `require_availability_proof` plus a `tunnel` block keeps a key behind an SSH forward inert unless a key helper proved the endpoint in this process, and re-checks it before every use. A `tunnel` forwards a Unix socket in a 0700 directory, never a TCP port, and the SDK's only route is that socket. Details and the bundled `tunnel_key_helper.py` are in the plugin's `README.md`.
 
 <details>
 <summary>Multi-container example</summary>
