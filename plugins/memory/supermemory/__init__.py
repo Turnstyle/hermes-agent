@@ -9,6 +9,7 @@ import logging
 import os
 import re
 import threading
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional
@@ -17,7 +18,10 @@ from agent.memory_provider import MemoryProvider, spawn_context_thread
 from agent.secret_scope import get_secret, is_multiplex_active, serves_routed_profile
 from tools.registry import tool_error
 
+from . import tunnel_key_helper as _tunnel
+
 logger = logging.getLogger(__name__)
+_monotonic = time.monotonic  # re-check clock (a seam for tests)
 
 _DEFAULT_CONTAINER_TAG = "hermes"
 _VALID_SEARCH_MODES = ("hybrid", "memories", "documents")
@@ -94,6 +98,16 @@ def _normalize_permissions(value: Any) -> Optional[Dict[str, Dict[str, bool]]]:
             for tag, perms in value.items() if str(tag).strip()}
 
 
+def _normalize_tunnel(value: Any) -> Optional[Dict[str, str]]:
+    """``tunnel`` block -> {"ssh_host", "forward"}; None = no block; {} = malformed (the gate then fails closed)."""
+    if value is None:
+        return None
+    if not isinstance(value, dict) or not str(value.get("ssh_host") or "").strip():
+        return {}
+    forward = str(value.get("forward") or "").strip()
+    return {"ssh_host": str(value["ssh_host"]).strip(), "forward": forward} if _quietly(lambda: _tunnel.split_forward(forward)) else {}
+
+
 # config key -> (default, normalizer applied to the raw/merged value). Order = supermemory.json layout.
 # container_tag is kept raw here: {identity} templates are resolved in initialize(), and
 # _sanitize_tag runs AFTER that resolution. custom_containers, by contrast, are sanitized on load.
@@ -116,6 +130,11 @@ _CONFIG_SPEC: Dict[str, tuple] = {
     "containers": (None, _normalize_permissions),
     # Require a fresh per-process proof from the key helper (_PROOF_ENV) instead of mere key presence.
     "require_availability_proof": (False, lambda v: _as_bool(v, False)),
+    # The SSH forward base_url goes through, e.g. {"ssh_host": "rosie", "forward": "127.0.0.1:16768:127.0.0.1:6768"}:
+    # its listener is verified at start and again while the provider runs (tunnel_key_helper.tunnel_down_reason).
+    "tunnel": (None, _normalize_tunnel),
+    # With a guard configured (the proof or a tunnel), a passed live tunnel check is trusted this long.
+    "availability_recheck_seconds": (10.0, lambda v: _clamp_number(v, 10.0, 1.0, 300.0, float)),
 }
 
 
@@ -307,6 +326,26 @@ def _availability_error(api_key: str, config: dict) -> str:
     return "" if api_key else "SUPERMEMORY_API_KEY not set"
 
 
+def _guarded(config: dict) -> bool:
+    """An availability guard is configured, so availability is more than key presence and is re-checked on use."""
+    return bool(config["require_availability_proof"] or config["tunnel"] is not None)
+
+
+def _tunnel_error(config: dict) -> str:
+    """"" when there is no ``tunnel`` block or base_url is still served by that ssh forward; else a reason. Live and
+    credential-free (a TCP connect, lsof, the listener's exact argv), so it may run before every client use."""
+    tunnel = config["tunnel"]
+    if tunnel is None:
+        return ""
+    if not tunnel:
+        return "supermemory.json tunnel settings are malformed (need ssh_host and forward bind:port:host:port)"
+    bind_host, port, _, _ = _tunnel.split_forward(tunnel["forward"])
+    if _resolve_base_url(config["base_url"]) != f"http://{bind_host}:{port}":
+        return "supermemory.json base_url is not the local end of tunnel.forward"
+    reason = _tunnel.tunnel_down_reason(tunnel["forward"], tunnel["ssh_host"])
+    return f"tunnel check failed ({reason})" if reason else ""
+
+
 def _drop_inherited_key(reason: str) -> None:
     """Remove an unproven SUPERMEMORY_API_KEY from this process's environ so it can't reach child processes.
     Never under multiplexing or for a routed profile: os.environ is shared there and belongs to no one profile
@@ -380,10 +419,13 @@ class SupermemoryMemoryProvider(MemoryProvider):
         self._prefetch_thread = self._sync_thread = self._write_thread = None  # only _write_thread is ever started
         self._pending_turns: List[Dict[str, str]] = []  # failed writes, each tagged with its session_id; retried on next write/end/switch/shutdown
         self._capture_lock = threading.Lock()  # sync_turn (worker) vs on_session_switch/shutdown (caller thread) both touch _pending_turns
+        self._checked_at, self._disabled = 0.0, ""  # last passed live tunnel check; why a re-check dropped the client
+        self._unavailable = ""  # reason from the last is_available()
         self._apply_config(_load_supermemory_config())
         self._base_url, self._allowed_containers = _DEFAULT_BASE_URL, []  # env var is only consulted in initialize()
 
     def _apply_config(self, config: dict) -> None:
+        self._config = config  # kept for the availability re-check before each client use
         for key in ("auto_recall", "auto_capture", "max_recall_results", "profile_frequency", "capture_mode",
                     "search_mode", "entity_context", "api_timeout", "custom_containers", "custom_container_instructions"):
             setattr(self, f"_{key}", config[key])
@@ -404,10 +446,39 @@ class SupermemoryMemoryProvider(MemoryProvider):
         if config is None:
             from hermes_constants import get_hermes_home
             config = _load_supermemory_config(str(get_hermes_home()))
-        error = _availability_error(get_secret("SUPERMEMORY_API_KEY", "") or "", config)
-        if error and config["require_availability_proof"]:
+        error = _availability_error(get_secret("SUPERMEMORY_API_KEY", "") or "", config) or _tunnel_error(config)
+        if error and _guarded(config):
             _drop_inherited_key(error)
         return error
+
+    def _live_client(self) -> Optional[_SupermemoryClient]:
+        """The client when it may be used right now, else None. Every client use goes through here.
+
+        With a guard configured, each use re-checks the proof and key in the current scope (dict lookups), and the
+        live tunnel once ``availability_recheck_seconds`` have passed since it last passed. A failed re-check is never
+        cached: it drops the client and the key for the rest of this provider's life (_disable). A new session
+        re-runs is_available()/initialize() and comes back only if the gate passes again."""
+        if not (self._active and self._client):
+            return None
+        if not _guarded(self._config):
+            return self._client
+        key = get_secret("SUPERMEMORY_API_KEY", "") or ""
+        error = _availability_error(key, self._config)
+        if not error and key != self._api_key:
+            error = "SUPERMEMORY_API_KEY in scope is not the key this session was started with"
+        if not error and _monotonic() - self._checked_at >= self._config["availability_recheck_seconds"]:
+            error = _tunnel_error(self._config)
+            self._checked_at = _monotonic()
+        if error:
+            self._disable(error)
+            return None
+        return self._client
+
+    def _disable(self, reason: str) -> None:
+        logger.warning("Supermemory disabled for this session: %s. Dropped its client and API key; "
+                       "a new session re-checks availability.", reason)
+        self._client, self._api_key, self._active, self._disabled = None, "", False, reason
+        _drop_inherited_key(reason)
 
     @property
     def name(self) -> str:
@@ -415,12 +486,15 @@ class SupermemoryMemoryProvider(MemoryProvider):
 
     def is_available(self) -> bool:
         # No SDK import check: the SDK is lazy-installed in initialize(), so gating on importability here is a
-        # chicken-and-egg trap on sealed venvs. Key presence, plus the helper's proof when
-        # require_availability_proof is on (that path also drops an unproven inherited key).
-        return not self._gate_error()
+        # chicken-and-egg trap on sealed venvs. Key presence, plus the helper's proof and the live tunnel check when
+        # configured (a failure there also drops an unproven inherited key).
+        self._unavailable = self._gate_error()
+        return not self._unavailable
 
     def unavailable_reason(self) -> str:
-        return self._gate_error()
+        # The host asks right after is_available() failed, which may have dropped the key: report that failure,
+        # not the missing key it left behind.
+        return self._unavailable or self._gate_error()
 
     def get_config_schema(self):
         # Only the API key is prompted during `hermes memory setup`; other options live in supermemory.json / env.
@@ -469,7 +543,8 @@ class SupermemoryMemoryProvider(MemoryProvider):
         self._session_id, self._turn_count, self._pending_turns = session_id, 0, []
         config = _load_supermemory_config(self._hermes_home)
         # Re-checked here: a host may initialize without consulting is_available().
-        if (gate_error := self._gate_error(config)) and config["require_availability_proof"]:
+        self._disabled = ""
+        if (gate_error := self._gate_error(config)) and _guarded(config):
             logger.info("Supermemory inactive: %s", gate_error)
         self._api_key = "" if gate_error else (get_secret("SUPERMEMORY_API_KEY", "") or "")
         self._identity = kwargs.get("agent_identity", "default")
@@ -479,6 +554,7 @@ class SupermemoryMemoryProvider(MemoryProvider):
         self._client = _quietly(lambda: _build_client(self._api_key, config, self._container_tag),
                                 "Supermemory initialization failed", level=logging.WARNING) if self._api_key else None
         self._active = self._client is not None
+        self._checked_at = _monotonic()  # the gate above ran the live tunnel check
 
     def on_turn_start(self, turn_number: int, message: str, **kwargs) -> None:
         self._turn_count = max(turn_number, 0)
@@ -505,10 +581,10 @@ class SupermemoryMemoryProvider(MemoryProvider):
 
     def prefetch(self, query: str, *, session_id: str = "") -> str:
         if not self._active or not self._auto_recall or not self._client or not query.strip() \
-                or not self._permits(self._container_tag, "read"):
+                or not self._permits(self._container_tag, "read") or (client := self._live_client()) is None:
             return ""
         def _recall():
-            profile = self._client.get_profile(query=query[:200])
+            profile = client.get_profile(query=query[:200])
             include_profile = self._turn_count <= 1 or (self._turn_count % self._profile_frequency == 0)
             return _format_prefetch_context(profile["static"] if include_profile else [], profile["dynamic"] if include_profile else [],
                                             profile["search_results"], self._max_recall_results)
@@ -521,7 +597,7 @@ class SupermemoryMemoryProvider(MemoryProvider):
         The lock serializes the snapshot/write/replace sequence across the worker and caller threads."""
         with self._capture_lock:
             turns = self._pending_turns + ([new_turn] if new_turn else [])
-            if not turns:
+            if not turns or (client := self._live_client()) is None:
                 return
             failed: List[Dict[str, str]] = []
             for sid in dict.fromkeys(t["session_id"] for t in turns):
@@ -529,8 +605,8 @@ class SupermemoryMemoryProvider(MemoryProvider):
                 now = datetime.now(timezone.utc)
                 content = "\n\n".join(_format_turn(t["user"], t["assistant"]) for t in batch)
                 metadata = {"type": "conversation", "session_id": sid, "timestamp": now.isoformat()}  # no sm_capture_mode: Hermes policy
-                result = _quietly(lambda: self._client.add_memory(content, metadata=metadata, entity_context=self._entity_context,
-                                                                  custom_id=_capture_custom_id(sid, now)),
+                result = _quietly(lambda: client.add_memory(content, metadata=metadata, entity_context=self._entity_context,
+                                                             custom_id=_capture_custom_id(sid, now)),
                                   "Supermemory capture failed (%s, session=%s, %d turns pending)", mode, sid, len(batch),
                                   level=logging.WARNING if mode != "turn" else logging.DEBUG, default=_FAILED)
                 if result is _FAILED:  # only a raised exception re-queues the batch
@@ -587,14 +663,14 @@ class SupermemoryMemoryProvider(MemoryProvider):
 
     def on_memory_write(self, action: str, target: str, content: str) -> None:
         # Mirroring a built-in memory write exports local memory, so it is capture: same switch, same approval.
-        if not self._may_capture() or action != "add" or not (content or "").strip():
+        if not self._may_capture() or action != "add" or not (content or "").strip() or (client := self._live_client()) is None:
             return
         if self._write_thread and self._write_thread.is_alive():
             self._write_thread.join(timeout=2.0)
         self._write_thread = spawn_context_thread(
             _quietly, daemon=False, name="supermemory-memory-write",
-            args=(lambda: self._client.add_memory(content.strip(), metadata={"target": target, "type": "explicit_memory"},
-                                                  entity_context=self._entity_context), "Supermemory on_memory_write failed"))
+            args=(lambda: client.add_memory(content.strip(), metadata={"target": target, "type": "explicit_memory"},
+                                            entity_context=self._entity_context), "Supermemory on_memory_write failed"))
         self._write_thread.start()
 
     def shutdown(self) -> None:
@@ -667,8 +743,9 @@ class SupermemoryMemoryProvider(MemoryProvider):
 
     def handle_tool_call(self, tool_name: str, args: Dict[str, Any], **kwargs) -> str:
         """Handlers return a tool_error() string for bad args or a dict to JSON-encode; client failures get ``fail_prefix``."""
-        if not self._active or not self._client:
-            return tool_error("Supermemory is not configured")
+        if self._live_client() is None:
+            return tool_error(f"Supermemory is disabled for this session: {self._disabled}" if self._disabled
+                              else "Supermemory is not configured")
         tool_name = _ALIAS_TO_TOOL.get(tool_name, tool_name)
         if tool_name not in self._TOOL_HANDLERS:
             return tool_error(f"Unknown tool: {tool_name}")
