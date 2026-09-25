@@ -22,7 +22,7 @@ KEY = "synthetic-test-key-0001"
 
 
 class FakeClient:
-    def __init__(self, api_key, timeout, container_tag, search_mode="hybrid", base_url=""):
+    def __init__(self, api_key, timeout, container_tag, search_mode="hybrid", base_url="", tunnel=None):
         self.api_key, self.container_tag = api_key, container_tag
         self.add_calls, self.search_calls, self.profile_calls = [], [], []
         self.forgotten_ids, self.forget_queries = [], []
@@ -277,13 +277,13 @@ def test_status_reports_gate_reason_without_the_key(home, monkeypatch):
     assert KEY not in summary
 
 
-# ---- Round 3: a running provider re-checks availability before every client use ---------------
+# ---- A running provider re-checks availability before every client use -------------------------
 # A gateway keeps one provider per agent for hours. The start-up proof alone would let it keep sending the
 # key after the tunnel is gone, so every client use re-checks, and a failed re-check drops the client and key.
 
 LIVE = {**PILOT, "require_availability_proof": True, "auto_capture": True, "auto_recall": True}
-TUNNEL = {"ssh_host": "rosie", "forward": "127.0.0.1:16768:127.0.0.1:6768"}
-LIVE_TUNNEL = {**LIVE, "base_url": "http://127.0.0.1:16768", "tunnel": TUNNEL}
+TUNNEL = {"ssh_host": "rosie", "forward": "/tunnel-dir/rosie.sock:127.0.0.1:6768"}
+LIVE_TUNNEL = {**LIVE, "tunnel": TUNNEL}
 TUNNEL_ARGV = ["/usr/bin/ssh", "-N", "-o", "BatchMode=yes", "-L", TUNNEL["forward"], "rosie"]
 
 
@@ -358,20 +358,21 @@ def test_key_swapped_in_scope_after_initialize_drops_the_client(home, monkeypatc
 
 
 class TunnelOps:
-    """Stands in for the helper's SystemOps: the listener on the forward port, as lsof and argv would report it."""
+    """Stands in for the helper's SystemOps: the forward's socket and its listener, as lstat, the peer credentials and
+    the kernel argv would report them. (test_supermemory_socket_transport.py runs the real ones.)"""
 
     def __init__(self):
-        self.up, self.argv, self.listener_calls = True, list(TUNNEL_ARGV), 0
+        self.socket, self.argv, self.checks = ("", (1, 100)), list(TUNNEL_ARGV), 0
 
     def uid(self):
         return os.getuid()
 
-    def port_open(self, host, port, timeout):
-        return self.up
+    def check_socket(self, socket_path):
+        self.checks += 1
+        return self.socket
 
-    def listeners(self, port, timeout):
-        self.listener_calls += 1
-        return [(4242, os.getuid())] if self.up else []
+    def socket_peer(self, socket_path, timeout):
+        return 4242, os.getuid()
 
     def command_argv(self, pid, timeout):
         return self.argv
@@ -385,53 +386,46 @@ def tunnel_ops(monkeypatch):
     return ops
 
 
-@pytest.fixture
-def clock(monkeypatch):
-    now = [1000.0]
-    monkeypatch.setattr(sm, "_monotonic", lambda: now[0])
-    return now
-
-
-def test_tunnel_check_runs_at_start_and_is_cached_for_the_recheck_interval(home, monkeypatch, tunnel_ops, clock):
-    p = _live_provider(home, monkeypatch, {**LIVE_TUNNEL, "availability_recheck_seconds": 10})
-    assert tunnel_ops.listener_calls == 1
+def test_tunnel_is_verified_at_start_and_before_every_use(home, monkeypatch, tunnel_ops):
+    """No re-check interval: a use never rides on an earlier check."""
+    p = _live_provider(home, monkeypatch, LIVE_TUNNEL)
+    assert tunnel_ops.checks == 1
     for _ in range(3):
-        clock[0] += 3
         USES["search"](p)
-    assert tunnel_ops.listener_calls == 1 and len(p._client.search_calls) == 3
-    clock[0] += 2  # 11 s after the last live check
-    USES["search"](p)
-    assert tunnel_ops.listener_calls == 2 and len(p._client.search_calls) == 4
+    assert tunnel_ops.checks == 4 and len(p._client.search_calls) == 3
 
 
-@pytest.mark.parametrize("break_tunnel", [
-    lambda ops: setattr(ops, "up", False),                                                      # tunnel gone
-    lambda ops: setattr(ops, "argv", ["/usr/bin/python3", "-m", "http.server", "16768"]),     # port taken over
-    lambda ops: setattr(ops, "argv", ["/usr/bin/ssh", "-N", "-L", TUNNEL["forward"], "other-host"]),
+@pytest.mark.parametrize("break_tunnel,reason", [
+    (lambda ops: setattr(ops, "socket", ("socket_missing", None)), "socket_missing"),          # tunnel gone
+    (lambda ops: setattr(ops, "socket", ("", (1, 101))), "socket_replaced"),                   # another socket there
+    (lambda ops: setattr(ops, "argv", ["/usr/bin/python3", "-m", "http.server"]), "listener_unverified"),
+    (lambda ops: setattr(ops, "argv", ["/usr/bin/ssh", "-N", "-L", TUNNEL["forward"], "other-host"]),
+     "listener_unverified"),
 ])
-def test_tunnel_lost_after_initialize_drops_client_and_key_at_the_next_recheck(home, monkeypatch, tunnel_ops, clock,
-                                                                               break_tunnel):
+def test_tunnel_lost_after_initialize_drops_client_and_key_at_the_next_use(home, monkeypatch, tunnel_ops,
+                                                                          break_tunnel, reason):
     p = _live_provider(home, monkeypatch, LIVE_TUNNEL)
     client = p._client
     break_tunnel(tunnel_ops)
-    clock[0] += 60
     out = json.loads(p.handle_tool_call("supermemory-search", {"query": "synthetic"}))
-    assert "disabled" in out["error"] and "tunnel" in out["error"]
+    assert "disabled" in out["error"] and reason in out["error"]
     assert _client_calls(client) == [] and p._client is None and p._api_key == ""
 
 
 def test_tunnel_down_at_start_keeps_the_provider_unavailable(home, monkeypatch, tunnel_ops):
     monkeypatch.setenv(PROOF_ENV, _valid_proof())
-    tunnel_ops.up = False
+    tunnel_ops.socket = ("socket_missing", None)
     (home / "supermemory.json").write_text(json.dumps(LIVE_TUNNEL), encoding="utf-8")
     p = SupermemoryMemoryProvider()
-    assert p.is_available() is False and "port_closed" in p.unavailable_reason()
+    assert p.is_available() is False and "socket_missing" in p.unavailable_reason()
     p.initialize("session-1", hermes_home=str(home), platform="cli", agent_identity="tb_king")
     assert p._client is None and p._active is False
 
 
 @pytest.mark.parametrize("config", [
-    {**LIVE_TUNNEL, "base_url": "http://127.0.0.1:9999"},                    # key would go somewhere the check never saw
+    {**LIVE_TUNNEL, "base_url": "http://127.0.0.1:16768"},                   # a TCP route next to the socket
+    {**LIVE_TUNNEL, "tunnel": {**TUNNEL, "forward": "127.0.0.1:16768:127.0.0.1:6768"}},   # round 3's TCP forward
+    {**LIVE_TUNNEL, "tunnel": {**TUNNEL, "forward": "tunnel-dir/rosie.sock:127.0.0.1:6768"}},  # relative path
     {**LIVE_TUNNEL, "tunnel": {"ssh_host": "rosie"}},                        # malformed: no forward
     {**LIVE_TUNNEL, "tunnel": "rosie"},
 ])
@@ -446,12 +440,12 @@ def test_reason_survives_the_key_drop_across_calls_and_instances(home, monkeypat
     """`hermes memory status` asks several provider instances in one process. The first failed gate drops the key; the
     later ones must still name the real cause, not the missing key that drop left behind."""
     monkeypatch.setenv(PROOF_ENV, _valid_proof())
-    tunnel_ops.up = False
+    tunnel_ops.socket = ("socket_missing", None)
     (home / "supermemory.json").write_text(json.dumps(LIVE_TUNNEL), encoding="utf-8")
     assert SupermemoryMemoryProvider().is_available() is False
     assert "SUPERMEMORY_API_KEY" not in os.environ
-    assert "port_closed" in SupermemoryMemoryProvider().unavailable_reason()
-    assert "port_closed" in SupermemoryMemoryProvider().get_status_config({})["summary"]
+    assert "socket_missing" in SupermemoryMemoryProvider().unavailable_reason()
+    assert "socket_missing" in SupermemoryMemoryProvider().get_status_config({})["summary"]
 
 
 def test_recheck_reads_a_real_bound_secret_scope(home, monkeypatch):

@@ -1,39 +1,47 @@
 #!/usr/bin/env python3
-"""``secrets.command`` key helper for a Supermemory proxy reached through an SSH local forward.
+"""``secrets.command`` key helper for a Supermemory proxy reached through an SSH forward to a local Unix socket.
 
 Prints KEY=VALUE lines for Hermes's command secret source. Stdlib only and never imports Hermes, so each
 Hermes start pays only interpreter start-up plus the probes below.
 
-The key never crosses the local forward port. It is read AND used in ONE ssh session to the tunnel's host:
+The tunnel forwards a Unix socket, never a TCP port: ``ssh -N -o StreamLocalBindMask=0177 -o
+StreamLocalBindUnlink=yes -L <socket>:<proxy host>:<proxy port> <ssh host>``, with ``<socket>`` in a directory
+owned by the Hermes user with mode 0700. Another local user can neither connect to that socket nor put a
+listener in its place, and the provider's SDK client has no route but that socket (no TCP base_url, no fallback).
+
+The key never crosses the local socket either. It is read AND used in ONE ssh session to the tunnel's host:
 a small program sent on stdin runs there and sends it only to the forward's REMOTE end (the proxy's own
-loopback port on that host). ssh authenticates the host by its host key for the whole session, so the
-credential-bearing request is bound to the verified peer from start to finish. Whatever owns the local port,
-now or a moment later, never receives the key from this helper.
+loopback port on that host). ssh authenticates the host by its host key for the whole session.
 
-The local checks carry no credential; they decide AVAILABILITY, because the provider's ``base_url`` is the
-local forward:
+The local checks carry no credential; they decide AVAILABILITY, because the provider's requests go through the
+socket:
 
-1. the local forward port accepts a connection;
-2. its only listener is a process of this user whose exact argv is an ssh forward of ``--forward`` to
-   ``--ssh-host`` (``is_tunnel_argv``: parsed the way ssh parses it; anything that could change the host or
-   how its identity is checked fails closed);
-3. unauthenticated ``GET /health`` through the forward answers like the expected proxy (401, Server header
+1. the socket passes ``check_socket``: every directory above it is a real directory owned by root or this user
+   and not writable by others (unless sticky), its own directory is this user's with mode 0700, and it is a
+   socket of this user with no group/other permission;
+2. the process listening on it (read from a fresh connection's peer credentials) is this user's, and its exact
+   argv is an ssh forward of ``--forward`` to ``--ssh-host`` (``is_tunnel_argv``: parsed the way ssh parses it;
+   anything that could change the host or how its identity is checked fails closed);
+3. unauthenticated ``GET /health`` through the socket answers like the expected proxy (401, Server header
    prefix, JSON ``"error": "Unauthorized"``);
 4. over ssh: the key file is read and an authenticated ``GET /health`` to the forward's remote end reports
    the expected service.
 
-Success prints ``SUPERMEMORY_API_KEY=<key>`` and ``SUPERMEMORY_AVAILABILITY_PROOF=v1:<hermes pid>:<fingerprint>``.
-Any failure prints only ``SUPERMEMORY_AVAILABILITY_PROOF=down:<hermes pid>:<reason>`` and exits 0: the provider
+None of this protects against this same user or root, who can replace or read anything here, or against a
+compromised ssh host. Success prints ``SUPERMEMORY_API_KEY=<key>`` and
+``SUPERMEMORY_AVAILABILITY_PROOF=v1:<hermes pid>:<fingerprint>``. Any failure prints only
+``SUPERMEMORY_AVAILABILITY_PROOF=down:<hermes pid>:<reason>`` and exits 0: the provider
 (``require_availability_proof: true``) then stays inert without a startup warning. Nothing is written to
-stderr or disk. While it runs, the provider repeats checks 1-2 through ``tunnel_down_reason`` (supermemory.json
-``tunnel`` block). Config example (``$PPID`` in ``sh -c`` is the Hermes process)::
+stderr or disk. While it runs, the provider repeats checks 1-2 through ``verify_tunnel`` before every use and
+check 1 before every request (supermemory.json ``tunnel`` block). Config example (``$PPID`` in ``sh -c`` is the
+Hermes process)::
 
     secrets:
       command:
         enabled: true
         override_existing: true
         helper_timeout_seconds: 8
-        command: exec /path/to/python -I /path/to/tunnel_key_helper.py --hermes-pid "$PPID" --forward 127.0.0.1:16768:127.0.0.1:6768 --ssh-host rosie --remote-key-file supermemory-fleet-pilot/data/api-key --server-prefix RosieAuthProxy/ --service supermemory-fleet-pilot
+        command: exec /path/to/python -I /path/to/tunnel_key_helper.py --hermes-pid "$PPID" --forward /Users/me/.hermes/supermemory-tunnel/rosie.sock:127.0.0.1:6768 --ssh-host rosie --remote-key-file supermemory-fleet-pilot/data/api-key --server-prefix RosieAuthProxy/ --service supermemory-fleet-pilot
 """
 
 from __future__ import annotations
@@ -48,6 +56,8 @@ import shlex
 import shutil
 import signal
 import socket
+import stat
+import struct
 import subprocess
 import sys
 import time
@@ -57,6 +67,9 @@ from typing import List, Optional, Tuple
 KEY_ENV = "SUPERMEMORY_API_KEY"
 PROOF_ENV = "SUPERMEMORY_AVAILABILITY_PROOF"
 _MAX_BODY = 64 * 1024
+_MAX_SOCKET_PATH = 103  # sun_path is 104 bytes on macOS (108 on Linux), NUL included
+
+SocketId = Tuple[int, int]  # (st_dev, st_ino) of the socket file a check passed on
 
 # ssh(1) options a tunnel's command line may use: none of them can change which host is reached or how its
 # identity is checked. Any other option letter (-F -J -S -O -p -W -g -A -D -R -M ...), and any other -o keyword
@@ -65,7 +78,8 @@ _SSH_FLAGS = frozenset("46CNTafknqvx")
 _SSH_VALUE_OPTIONS = frozenset("ELilo")
 _SSH_CONFIG_KEYWORDS = frozenset({
     "addressfamily", "batchmode", "compression", "connectionattempts", "connecttimeout", "exitonforwardfailure",
-    "identitiesonly", "identityfile", "loglevel", "serveralivecountmax", "serveraliveinterval", "tcpkeepalive", "user"})
+    "identitiesonly", "identityfile", "loglevel", "serveralivecountmax", "serveraliveinterval",
+    "streamlocalbindmask", "streamlocalbindunlink", "tcpkeepalive", "user"})
 
 # Runs on the ssh host as ``python3 -I -`` (this text on stdin): reads the key file and sends the key only to the
 # proxy's loopback port there. Prints one JSON line; failures leave "key" empty or "status" 0.
@@ -97,12 +111,77 @@ def key_fingerprint(api_key: str) -> str:
     return hashlib.sha256(api_key.encode("utf-8")).hexdigest()[:16]
 
 
-def split_forward(forward: str) -> Tuple[str, int, str, int]:
-    """``bind_host:port:remote_host:remote_port`` -> its four parts; ValueError for any other shape."""
+def split_forward(forward: str) -> Tuple[str, str, int]:
+    """``/absolute/socket/path:remote_host:remote_port`` (ssh -L's local-socket form) -> its three parts. ValueError
+    for any other shape, a TCP ``bind:port:host:port`` forward included: the local end is a Unix socket or nothing."""
     parts = forward.split(":")
-    if len(parts) != 4 or not all(parts) or not (parts[1].isdigit() and parts[3].isdigit()):
-        raise ValueError(f"forward must look like 127.0.0.1:16768:127.0.0.1:6768, not {forward!r}")
-    return parts[0], int(parts[1]), parts[2], int(parts[3])
+    if len(parts) != 3 or not all(parts) or not parts[2].isdigit() or not 0 < int(parts[2]) < 65536 \
+            or not parts[0].startswith("/") or os.path.normpath(parts[0]) != parts[0] \
+            or len(os.fsencode(parts[0])) > _MAX_SOCKET_PATH:
+        raise ValueError(f"forward must look like /Users/me/.hermes/supermemory-tunnel/rosie.sock:127.0.0.1:6768, "
+                         f"not {forward!r}")
+    return parts[0], parts[1], int(parts[2])
+
+
+def current_uid() -> int:
+    """This process's uid; -1 where there is none (Windows): no file owner matches it, so every check fails closed."""
+    return os.getuid() if hasattr(os, "getuid") else -1
+
+
+def check_socket(socket_path: str, uid: int, pinned: Optional[SocketId] = None) -> Tuple[str, Optional[SocketId]]:
+    """("", socket id) when ``socket_path`` is a Unix socket that only ``uid`` (and root) can reach or replace, else
+    (reason, None). lstat only: no connection, no credential. ``pinned`` = the id an earlier check passed on; any
+    other file at the path, even a working one, is ``socket_replaced``. POSIX mode bits only: an ACL granting another
+    user access to the directory is not seen here (the setup step checks for one)."""
+    directory = os.path.dirname(socket_path)
+    try:
+        for level, path in enumerate([directory, *map(str, Path(directory).parents)]):
+            st = os.lstat(path)
+            if not stat.S_ISDIR(st.st_mode):  # a symlink anywhere on the way could be re-pointed
+                return "socket_path_invalid", None
+            if level == 0 and st.st_uid != uid:
+                return "socket_dir_wrong_owner", None
+            if level == 0 and stat.S_IMODE(st.st_mode) != 0o700:
+                return "socket_dir_wrong_mode", None
+            if level > 0 and (st.st_uid not in (0, uid) or st.st_mode & 0o022 and not st.st_mode & stat.S_ISVTX):
+                return "socket_dir_unsafe", None  # someone else could rename the directory and put their own there
+        st = os.lstat(socket_path)
+    except FileNotFoundError:
+        return "socket_missing", None
+    except OSError:
+        return "socket_unreadable", None
+    if not stat.S_ISSOCK(st.st_mode):
+        return "socket_not_a_socket", None
+    if st.st_uid != uid:
+        return "socket_wrong_owner", None
+    if st.st_mode & 0o077:
+        return "socket_wrong_mode", None
+    if pinned is not None and (st.st_dev, st.st_ino) != pinned:
+        return "socket_replaced", None
+    return "", (st.st_dev, st.st_ino)
+
+
+def _peer_credentials(sock: socket.socket) -> Tuple[int, int]:
+    """(pid, uid) of the process at the other end of a connected Unix socket: the one that listens on it."""
+    if sys.platform == "darwin":
+        pid = sock.getsockopt(0, 0x002)  # SOL_LOCAL, LOCAL_PEERPID
+        version, uid = struct.unpack_from("=II", sock.getsockopt(0, 0x001, 128))  # LOCAL_PEERCRED: struct xucred
+        if version != 0:  # XUCRED_VERSION
+            raise OSError("unexpected xucred version")
+        return pid, uid
+    pid, uid, _ = struct.unpack("3i", sock.getsockopt(socket.SOL_SOCKET, socket.SO_PEERCRED, struct.calcsize("3i")))
+    return pid, uid
+
+
+class _UnixHTTPConnection(http.client.HTTPConnection):
+    def __init__(self, socket_path: str, timeout: float):
+        super().__init__("localhost", timeout=timeout)
+        self._socket_path = socket_path
+
+    def connect(self) -> None:
+        self.sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        self.sock.settimeout(self.timeout)
+        self.sock.connect(self._socket_path)
 
 
 def _ssh_options(args: List[str], i: int, forwards: List[str]) -> Tuple[Optional[int], bool]:
@@ -217,26 +296,18 @@ class SystemOps:
         self.remote_python = remote_python
 
     def uid(self) -> int:
-        return os.getuid()
+        return current_uid()
 
-    def port_open(self, host: str, port: int, timeout: float) -> bool:
-        try:
-            with socket.create_connection((host, port), timeout=timeout):
-                return True
-        except OSError:
-            return False
+    def check_socket(self, socket_path: str) -> Tuple[str, Optional[SocketId]]:
+        return check_socket(socket_path, self.uid())
 
-    def listeners(self, port: int, timeout: float) -> List[Tuple[int, int]]:
-        """(pid, uid) of every process listening on TCP ``port`` on any address."""
-        _, out = _run_bounded([_tool("lsof", "/usr/sbin/lsof"), "-nP", f"-iTCP:{port}", "-sTCP:LISTEN", "-Fpu"], timeout)
-        entries, pid = [], None
-        for line in out.decode("utf-8", errors="replace").splitlines():
-            if line.startswith("p") and line[1:].isdigit():
-                pid = int(line[1:])
-            elif line.startswith("u") and line[1:].isdigit() and pid is not None:
-                entries.append((pid, int(line[1:])))
-                pid = None
-        return entries
+    def socket_peer(self, socket_path: str, timeout: float) -> Tuple[int, int]:
+        """(pid, uid) of the listener on ``socket_path``, from the peer credentials of a fresh connection that sends
+        nothing. Raises OSError when nothing accepts (a stale socket file) or the platform has no peer credentials."""
+        with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as sock:
+            sock.settimeout(timeout)
+            sock.connect(socket_path)
+            return _peer_credentials(sock)
 
     def command_argv(self, pid: int, timeout: float) -> Optional[List[str]]:
         """Exact argv of ``pid`` (``ps`` joins it with spaces, which is ambiguous); None when unreadable."""
@@ -248,9 +319,9 @@ class SystemOps:
             return None
         return [os.fsdecode(a) for a in raw.split(b"\0")[:-1]] or None
 
-    def get_health(self, host: str, port: int, timeout: float) -> Tuple[int, dict, bytes]:
-        """Unauthenticated ``GET /health`` through the local forward. It takes no credential by design."""
-        conn = http.client.HTTPConnection(host, port, timeout=timeout)
+    def get_health(self, socket_path: str, timeout: float) -> Tuple[int, dict, bytes]:
+        """Unauthenticated ``GET /health`` through the forward's socket. It takes no credential by design."""
+        conn = _UnixHTTPConnection(socket_path, timeout)
         try:
             conn.request("GET", "/health")
             resp = conn.getresponse()
@@ -298,28 +369,31 @@ def _step(reason: str, fn):
         raise _Down(reason) from None
 
 
-def _verify_listener(ops, forward: str, ssh_host: str, deadline: float) -> None:
-    """Checks 1-2, credential-free: the forward's local port is open and its only listener is this user's ssh
-    forwarding it to ``ssh_host``. Raises _Down."""
-    bind_host, port, _, _ = split_forward(forward)
-    if not _step("port_closed", lambda: ops.port_open(bind_host, port, _left(deadline, 1.0))):
-        raise _Down("port_closed")
-    entries = _step("listener_unverified", lambda: ops.listeners(port, _left(deadline, 2.0)))
-    if len({p for p, _ in entries}) != 1 or entries[0][1] != ops.uid():
+def _verify_listener(ops, forward: str, ssh_host: str, deadline: float) -> SocketId:
+    """Checks 1-2, credential-free: the forward's socket is safe (``check_socket``) and the process listening on it is
+    this user's ssh forwarding it to ``ssh_host``. Returns the socket's id; raises _Down."""
+    socket_path = split_forward(forward)[0]
+    reason, socket_id = _step("socket_unreadable", lambda: ops.check_socket(socket_path))
+    if reason:
+        raise _Down(reason)
+    peer = _step("socket_stale", lambda: ops.socket_peer(socket_path, _left(deadline, 1.0)))
+    if not peer or peer[1] != ops.uid():
         raise _Down("listener_unverified")
-    argv = _step("listener_unverified", lambda: ops.command_argv(entries[0][0], _left(deadline, 2.0)))
+    argv = _step("listener_unverified", lambda: ops.command_argv(peer[0], _left(deadline, 2.0)))
     if not is_tunnel_argv(argv or [], forward, ssh_host):
         raise _Down("listener_unverified")
+    return socket_id
 
 
-def tunnel_down_reason(forward: str, ssh_host: str, budget: float = 3.0) -> str:
-    """"" while the local end of ``forward`` is still this user's ssh forward to ``ssh_host``, else the down reason.
-    The provider's re-check while it runs; sends nothing but a TCP connect to the port."""
+def verify_tunnel(forward: str, ssh_host: str, budget: float = 3.0) -> Tuple[str, Optional[SocketId]]:
+    """("", socket id) while the local end of ``forward`` is this user's ssh forward to ``ssh_host``, else (reason,
+    None). The provider's check before every use; sends nothing but an empty connection to the socket."""
     try:
-        _verify_listener(SystemOps(), forward, ssh_host, time.monotonic() + budget)
+        return "", _verify_listener(SystemOps(), forward, ssh_host, time.monotonic() + budget)
     except _Down as down:
-        return down.reason
-    return ""
+        return down.reason, None
+    except ValueError:
+        return "forward_invalid", None
 
 
 def _json_field(body: bytes, field: str) -> Optional[str]:
@@ -341,7 +415,7 @@ def resolve(args: argparse.Namespace, ops) -> List[str]:
     try:
         _verify_listener(ops, args.forward, args.ssh_host, deadline)
 
-        status, headers, body = _step("identity_mismatch", lambda: ops.get_health(args.bind_host, args.port, _left(deadline, 2.0)))
+        status, headers, body = _step("identity_mismatch", lambda: ops.get_health(args.socket_path, _left(deadline, 2.0)))
         if status != 401 or not headers.get("server", "").startswith(args.server_prefix) \
                 or _json_field(body, "error") != "Unauthorized":
             raise _Down("identity_mismatch")
@@ -362,7 +436,7 @@ def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("--hermes-pid", type=int, default=os.getppid(),
                         help='pid the proof is issued to; pass "$PPID" from the secrets.command shell')
-    parser.add_argument("--forward", required=True, help="the tunnel's -L spec, bind_host:port:remote_host:remote_port")
+    parser.add_argument("--forward", required=True, help="the tunnel's -L spec, /absolute/socket/path:remote_host:remote_port")
     parser.add_argument("--ssh-host", required=True, help="ssh destination that owns the forward and holds the key file")
     parser.add_argument("--remote-key-file", required=True, help="key file on the ssh host (relative to its $HOME)")
     parser.add_argument("--remote-python", default="python3", help="interpreter on the ssh host that runs the key check")
@@ -371,7 +445,7 @@ def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
     parser.add_argument("--budget", type=float, default=7.0, help="total seconds; keep below helper_timeout_seconds")
     args = parser.parse_args(argv)
     try:
-        args.bind_host, args.port, args.remote_host, args.remote_port = split_forward(args.forward)
+        args.socket_path, args.remote_host, args.remote_port = split_forward(args.forward)
     except ValueError as exc:
         parser.error(str(exc))
     return args
