@@ -10,6 +10,7 @@ import logging
 import re
 import sqlite3
 import time
+from pathlib import Path
 
 from hermes_constants import get_hermes_home
 from utils import atomic_json_write
@@ -22,12 +23,13 @@ _RESULT_FIELDS = (
     "id", "command", "cwd", "task_id", "owner_task_id", "session_key",
     "parent_session_id", "started_at", "exit_code", "completion_reason",
     "termination_source", "notify_on_complete",
+    "late_kill_requested_at", "late_kill_source",
 )
 
 
-def _result_paths():
+def _result_paths(home: Path | None = None):
     """Prune by completion time, not start time (jobs can take days)."""
-    directory = get_hermes_home() / "logs" / "process-results"
+    directory = (home or get_hermes_home()) / "logs" / "process-results"
     cutoff = time.time() - RESULT_RETENTION_SECONDS
     retained = []
     for path in directory.glob("proc_*.json"):
@@ -45,23 +47,121 @@ def _result_paths():
     return [path for _, path in retained[:MAX_RETAINED_RESULTS]]
 
 
+def _record_is_concrete_natural_exit(record: dict) -> bool:
+    return (
+        record.get("completion_reason") == "exited"
+        and record.get("exit_code") is not None
+    )
+
+
+def _receipt_identity_matches(session, record: dict) -> bool:
+    if record.get("id") != session.id:
+        return False
+    if record.get("started_at") != session.started_at:
+        return False
+    if record.get("cwd") != session.cwd:
+        return False
+    for field in ("owner_task_id", "session_key", "parent_session_id"):
+        expected = getattr(session, field, "") or ""
+        if expected and record.get(field) != expected:
+            return False
+    return True
+
+
+def _iter_receipt_candidate_paths(session_id: str) -> list[Path]:
+    from hermes_constants import get_default_hermes_root, get_process_hermes_home
+
+    homes: list[Path] = []
+    seen: set[str] = set()
+    for candidate in (get_hermes_home(), get_process_hermes_home()):
+        key = str(candidate)
+        if key not in seen:
+            seen.add(key)
+            homes.append(candidate)
+    profiles = get_default_hermes_root() / "profiles"
+    if profiles.is_dir():
+        for profile_dir in profiles.iterdir():
+            if not profile_dir.is_dir():
+                continue
+            key = str(profile_dir)
+            if key in seen:
+                continue
+            seen.add(key)
+            homes.append(profile_dir)
+    return [home / "logs" / "process-results" / f"{session_id}.json" for home in homes]
+
+
+def _find_existing_receipt_path(session) -> Path | None:
+    """Return a receipt path only when exactly one on-disk copy matches session identity."""
+    matches: list[Path] = []
+    for path in _iter_receipt_candidate_paths(session.id):
+        if not path.is_file():
+            continue
+        try:
+            record = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError, TypeError):
+            continue
+        if _receipt_identity_matches(session, record):
+            matches.append(path)
+    if len(matches) == 1:
+        return matches[0]
+    if len(matches) > 1:
+        logger.warning(
+            "Refusing cross-profile receipt adoption for %s: %d identity matches",
+            session.id,
+            len(matches),
+        )
+    return None
+
+
+def _load_existing_receipt_record(session) -> dict | None:
+    path = _find_existing_receipt_path(session)
+    if path is None:
+        return None
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError, TypeError):
+        return None
+
+
+def _preserve_concrete_natural_exit_over_kill(session) -> bool:
+    """When a kill would overwrite a finalized natural exit, keep the exit evidence."""
+    if session.completion_reason != "killed":
+        return False
+    existing = _load_existing_receipt_record(session)
+    if not existing or not _record_is_concrete_natural_exit(existing):
+        return False
+    session.exit_code = existing["exit_code"]
+    session.completion_reason = existing["completion_reason"]
+    session.termination_source = existing.get("termination_source") or ""
+    return True
+
+
 def save_completed_result(session) -> None:
     from agent.redact import redact_sensitive_text, redact_terminal_output
     from tools.process_registry import MAX_OUTPUT_CHARS
 
+    _preserve_concrete_natural_exit_over_kill(session)
     with session._lock:
         record = {key: getattr(session, key) for key in _RESULT_FIELDS}
         record["output"] = session.output_buffer[-MAX_OUTPUT_CHARS:]
     # Live-output opt-out must not persist raw credentials in durable receipts.
     record["output"] = redact_terminal_output(record["output"], record["command"], force=True)
     record["command"] = redact_sensitive_text(record["command"], code_file=True, force=True)
-    directory = get_hermes_home() / "logs" / "process-results"
+    if session.detached and session.exit_code is None and _find_existing_receipt_path(session):
+        return
+    target_home = Path(session.receipt_home) if session.receipt_home else get_hermes_home()
+    if not session.receipt_home:
+        existing = _find_existing_receipt_path(session)
+        if existing is not None:
+            target_home = existing.parent.parent.parent
+    directory = target_home / "logs" / "process-results"
     try:
         from hermes_constants import assert_named_profile_home_live
         assert_named_profile_home_live(directory)
         directory.mkdir(mode=0o700, parents=True, exist_ok=True)
         atomic_json_write(directory / f"{session.id}.json", record, mode=0o600)
-        _result_paths()
+        _result_paths(target_home)
     except OSError:
         # Preserve live delivery on disk failure, but never silently claim durability.
         logger.warning("Could not retain completed process result %s", session.id, exc_info=True)
@@ -108,7 +208,7 @@ def load_completed_results(prefix: str = "") -> dict:
             if not _owns_result(owner, record.get("parent_session_id")):
                 continue
             session = ProcessSession(
-                **{key: record[key] for key in _RESULT_FIELDS},
+                **{key: record[key] for key in _RESULT_FIELDS if key in record},
                 exited=True, output_buffer=record["output"],
             )
             session._completion_event.set()

@@ -700,11 +700,20 @@ class BaseEnvironment(ABC):
         except Exception:
             logger.debug("terminal wait-bound kill_process failed", exc_info=True)
         pid = getattr(spawned, "pid", None)
-        if not pid:
+        if not isinstance(pid, int) or pid <= 0:
+            return
+        poll = getattr(spawned, "poll", None)
+        if callable(poll) and poll() is not None:
             return
         try:
+            os.kill(pid, 0)
+        except ProcessLookupError:
+            return
+        except PermissionError:
+            pass
+        try:
             from agent.deadline import kill_process_tree
-            kill_process_tree(int(pid))
+            kill_process_tree(pid)
         except Exception:
             logger.debug("terminal wait-bound kill_process_tree failed", exc_info=True)
 
