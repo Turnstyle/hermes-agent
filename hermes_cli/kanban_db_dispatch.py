@@ -646,6 +646,109 @@ def _poll_worker_group_exit(pid: int, started_at=None) -> bool:
     return not _worker_alive(pid, started_at)
 
 
+def _reap_orphaned_worker_group(pid: int, started_at) -> dict[str, Any]:
+    """End what is left of a worker's process group after the worker (the group leader) exited ON
+    ITS OWN — the crash-sweep twin of the group path in ``_terminate_reclaimed_worker`` (t_590dc20c).
+    An external CLI that exits nonzero leaves the helpers it started (``npm exec @playwright/mcp``,
+    other MCP servers that did not ``setsid``) in its group, adopted by init; nothing else ever
+    signals them.
+
+    The group id is the dead leader's PID (``_default_spawn`` uses ``start_new_session=True``). POSIX
+    never hands out a PID equal to a live group id, so while a member survives, that id still names
+    the worker's group. Every guard refuses rather than signal a stranger:
+      * the row must carry a real same-boot spawn fingerprint (legacy ``None``, integer and
+        UNVERIFIED rows are refused; another boot's fingerprint is refused);
+      * the leader PID must be dead now (a live holder means the group id may have been reused);
+      * never the caller's own process group;
+      * ``ps`` must be readable, and every live member must have started at or after the worker
+        did (a member older than the worker cannot be its descendant).
+    Then SIGTERM the group, wait the same ~5 s grace, and SIGKILL any member that is left.
+    Returns ``{"members", "signalled", "sigkill", "survivors", "refused"}``; ``refused`` is None
+    when the guards passed (``members`` empty = nothing to do)."""
+    info: dict[str, Any] = {
+        "members": [], "signalled": False, "sigkill": False, "survivors": [], "refused": None,
+    }
+    if _kb._IS_WINDOWS or not (hasattr(os, "killpg") and hasattr(os, "getpgrp")):
+        info["refused"] = "platform"
+        return info
+    if not pid or int(pid) <= 1:
+        info["refused"] = "no_pid"
+        return info
+    if not (isinstance(started_at, str) and "|" in started_at):
+        # None = legacy row, UNVERIFIED marker, or an integer pre-epoch fingerprint.
+        info["refused"] = "no_fingerprint"
+        return info
+    from gateway.drain_control import current_instantiation_epoch
+    epoch, _, start_raw = started_at.rpartition("|")
+    if epoch != current_instantiation_epoch():
+        info["refused"] = "other_boot"
+        return info
+    try:
+        worker_start = int(start_raw)
+    except ValueError:
+        info["refused"] = "no_fingerprint"
+        return info
+    pgid = int(pid)
+    if _kb._pid_alive(pgid):
+        info["refused"] = "leader_pid_live"
+        return info
+    try:
+        if pgid == os.getpgrp():
+            info["refused"] = "own_group"
+            return info
+    except OSError:
+        info["refused"] = "own_group"
+        return info
+    members = _live_group_members(pgid)
+    if members is None:
+        info["refused"] = "ps_unreadable"
+        return info
+    info["members"] = sorted(members)
+    if not members:
+        return info
+    from gateway.status import get_process_start_time
+    for member in members:
+        member_start = get_process_start_time(int(member))
+        if member_start is not None and int(member_start) < worker_start:
+            info["refused"] = "member_predates_worker"
+            return info
+    if not _signal_worker_group(pgid, signal.SIGTERM):
+        info["survivors"] = sorted(_live_group_members(pgid) or [])
+        return info
+    info["signalled"] = True
+    for _ in range(10):
+        if not _worker_group_has_live_members(pgid):
+            break
+        time.sleep(0.5)
+    if _worker_group_has_live_members(pgid) and not _kb._pid_alive(pgid):
+        if _signal_worker_group(pgid, getattr(signal, "SIGKILL", signal.SIGTERM)):
+            info["sigkill"] = True
+        time.sleep(0.2)
+    info["survivors"] = sorted(_live_group_members(pgid) or [])
+    return info
+
+
+def _reap_crashed_worker_groups(conn: sqlite3.Connection, dead_groups: list) -> None:
+    """Crash-sweep follow-up, run OUTSIDE the reclaim txn (signals and the grace poll never hold the
+    write lock): end each released worker's orphaned group and record one ``worker_group_reaped``
+    event per card that actually had members left. Best-effort: a failure here never un-releases a
+    card or breaks the tick."""
+    for task_id, pid, started_at, run_id in dead_groups:
+        try:
+            info = _reap_orphaned_worker_group(pid, started_at)
+        except Exception as exc:  # pragma: no cover - defensive
+            info = {"members": [], "refused": f"error: {type(exc).__name__}"}
+        if not info.get("members"):
+            continue
+        try:
+            with _kb.write_txn(conn):
+                _kb._append_event(
+                    conn, task_id, "worker_group_reaped", {"pid": int(pid), **info}, run_id=run_id,
+                )
+        except sqlite3.Error:
+            pass
+
+
 def _terminate_reclaimed_worker(
     pid: Optional[int],
     claim_lock: Optional[str],
@@ -1459,6 +1562,9 @@ class _CrashSweep:
     # Worker-exit observer payloads, fired only after every reclaim/accounting
     # txn has committed.
     exited_hook_payloads: list[dict] = field(default_factory=list)
+    # ``(task_id, pid, worker_started_at, run_id)`` of every released worker: its orphaned process
+    # group is ended after the txn via ``_reap_crashed_worker_groups``.
+    dead_groups: list[tuple[str, int, Any, Optional[int]]] = field(default_factory=list)
 
 
 def _reclaim_dead_workers(
@@ -1531,6 +1637,9 @@ def _reclaim_dead_workers(
                 if not _isolate_fenced_row(errors_out, "detect_crashed_workers", row["id"], exc):
                     raise
                 continue
+            sweep.dead_groups.append(
+                (row["id"], pid, _kb._row_get(row, "worker_started_at"), run_id),
+            )
             sweep.exited_hook_payloads.append({
                 "task_id": row["id"],
                 "assignee": row["assignee"],
@@ -1646,6 +1755,9 @@ def detect_crashed_workers(
     Lifecycle-fence refusals are isolated per row into ``errors_out``.
     """
     sweep = _reclaim_dead_workers(conn, board=board, errors_out=errors_out)
+    # Outside the main txn: end what the dead workers left in their own process groups (t_590dc20c).
+    if sweep.dead_groups:
+        _reap_crashed_worker_groups(conn, sweep.dead_groups)
     # Outside the main txn: account each crash and maybe trip the breaker.
     auto_blocked = _account_crashes(conn, sweep.crash_details) if sweep.crash_details else []
     # Side-channel attributes keep the public ``list[str]`` return stable;
