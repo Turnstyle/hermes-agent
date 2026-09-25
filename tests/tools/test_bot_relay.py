@@ -175,6 +175,55 @@ def test_write_reply_reason_passthrough_and_classification(root):
     assert data["reason"] == "" and data["reply"] == "ok"
 
 
+def test_target_scope_error_from_a_connection_target_is_rewritten_to_name_it(root):
+    """A target-scope refusal that came back FROM a relay target must not keep the generic "run
+    `hermes gateway restart`" advice — the delivery turn ran and failed on THAT install, so the
+    sender's gateway is the wrong place to restart. Scoped to a cross-connection envelope."""
+    scope = ("Hermes could not read this profile's API key (an internal profile-scoping bug on the "
+             "multiplexed gateway, not your configuration). Run `hermes gateway restart`; if it keeps "
+             "happening, report it with `hermes debug share`.")
+    envelope = {"id": "a" * 32, "target_connection": "nebular-cooee", "target_profile": "default",
+                "target_handle": "hermes", "message": "hi", "created_at": 1}
+
+    out = bot_relay.relayed_failure_error(scope, envelope)
+    assert "nebular-cooee" in out and "'default'" in out and "@hermes" in out
+    assert "Restarting this gateway cannot fix it" in out
+    assert "Run `hermes gateway restart`" not in out
+
+    # Nothing to rewrite: a LOCAL delivery failure (no connection), another error class, no envelope.
+    assert bot_relay.relayed_failure_error(scope, {"target_profile": "default"}) == scope
+    assert bot_relay.relayed_failure_error("Error code: 429 - rate limit", envelope) == (
+        "Error code: 429 - rate limit")
+    assert bot_relay.relayed_failure_error(scope) == scope
+    assert bot_relay.relayed_failure_error(scope, None) == scope
+
+
+def test_target_scope_refusal_is_written_for_a_sender_on_another_machine():
+    """The TARGET's own copy. It must name the profile and this install, and it must NOT send a
+    remote sender to restart a gateway that has nothing to do with the refusal."""
+    text = bot_relay.target_scope_refusal("default", "C:/Users/x/AppData/Local/hermes")
+    assert "'default'" in text and "THIS install" in text
+    assert "C:/Users/x/AppData/Local/hermes" in text
+    assert "SENDER's gateway cannot fix it" in text
+    # no home supplied, and an unnamed target: still honest, still names one
+    assert "THIS install" in bot_relay.target_scope_refusal("ops")
+    assert "'default'" in bot_relay.target_scope_refusal("")
+
+
+def test_read_claimed_envelope_roundtrip_and_id_validation(root):
+    env_id = "b" * 32
+    base = bot_relay.relay_root(root)
+    (base / bot_relay.CLAIMED_DIR).mkdir(parents=True, exist_ok=True)
+    (base / bot_relay.CLAIMED_DIR / f"{env_id}.json").write_text(
+        json.dumps({"id": env_id, "target_connection": "nebular-cooee"}), encoding="utf-8")
+    assert bot_relay.read_claimed_envelope(root, env_id)["target_connection"] == "nebular-cooee"
+    # absent, malformed id, and non-object payloads all answer {} — never raise at reply time
+    assert bot_relay.read_claimed_envelope(root, "c" * 32) == {}
+    assert bot_relay.read_claimed_envelope(root, "../evil") == {}
+    (base / bot_relay.CLAIMED_DIR / f"{'d' * 32}.json").write_text("[1]", encoding="utf-8")
+    assert bot_relay.read_claimed_envelope(root, "d" * 32) == {}
+
+
 def test_waiter_is_a_runner_entrypoint_the_approval_gate_lets_through(root):
     """The waiter is spawned through terminal_tool from the SENDER's turn. When a bot replies to a
     teammate from its own one-shot delivery turn, that turn runs under ``approvals.single_query_mode``
@@ -706,3 +755,64 @@ def test_delivery_env_carries_only_the_given_author(monkeypatch):
     assert "HERMES_SESSION_ID" not in env
     assert "HERMES_SESSION_PROFILE" not in env
     assert env["HERMES_SESSION_STALL_TIMEOUT"] == "97"
+
+
+def test_delivery_env_resolves_the_launch_home_instead_of_failing_closed():
+    """A relayed DM into the LAUNCH profile's Bot Chat must spawn its turn.
+
+    ``_profile_home`` answers None for the launch profile *by design* ("already the launch profile,
+    no override needed"), and a relay RPC is sessionless so it binds no secret scope. That
+    combination left ``served_profile_child_env`` failing closed under multiplex, so every relayed
+    DM into a *default* profile died with "Hermes could not read this profile's API key" while
+    deliveries to named secondary profiles — which do resolve a home — kept working.
+    """
+    from agent.secret_scope import (
+        current_secret_scope, reset_secret_scope, set_multiplex_active, set_secret_scope)
+    from hermes_constants import get_hermes_home_override, get_routing_process_hermes_home
+
+    assert get_hermes_home_override() is None, "precondition: no host home override in this process"
+    assert current_secret_scope() is None, "precondition: no scope bound on a sessionless relay RPC"
+
+    set_multiplex_active(True)
+    try:
+        env = bot_relay.delivery_env(None, None)
+        assert Path(env["HERMES_HOME"]).resolve() == Path(get_routing_process_hermes_home()).resolve()
+
+        # A bound scope is still the truth when one exists: it must win over the launch-home fallback.
+        token = set_secret_scope({"OPENROUTER_API_KEY": "sentinel-value"})
+        try:
+            assert bot_relay.delivery_env(None, None)["OPENROUTER_API_KEY"] == "sentinel-value"
+        finally:
+            reset_secret_scope(token)
+    finally:
+        set_multiplex_active(False)
+
+
+def test_delivery_env_launch_fallback_never_carries_a_secondary_profiles_ambient_key(monkeypatch):
+    """t_681656e1 checker r1 HIGH: the launch-home fallback must build from the launch env FROZEN
+    at multiplex activation, not live ``os.environ``. The launch home is not a routed home, so
+    ``served_profile_child_env`` skips its credential scrub; a key a secondary profile's code path
+    put into ``os.environ`` after activation would otherwise ride into the launch child."""
+    from agent.secret_scope import set_multiplex_active
+    from tui_gateway import launch_profile_policy
+
+    monkeypatch.delenv("T681656E1_SECONDARY_ONLY_KEY", raising=False)
+    monkeypatch.setattr(launch_profile_policy, "_snapshot", None)
+    set_multiplex_active(True)
+    try:
+        launch_profile_policy.capture_launch_env()  # activation-time freeze (clean)
+        monkeypatch.setenv("T681656E1_SECONDARY_ONLY_KEY", "leaked-from-secondary")  # post-activation pollution
+        env = bot_relay.delivery_env(None, None)
+        assert "T681656E1_SECONDARY_ONLY_KEY" not in env
+        assert env.get("HERMES_HOME")
+    finally:
+        set_multiplex_active(False)
+
+
+def test_delivery_env_single_profile_process_is_unchanged(monkeypatch):
+    """Not multiplexing: no fallback, the child still starts from ``os.environ`` exactly as before."""
+    from agent.secret_scope import is_multiplex_active
+
+    assert not is_multiplex_active()
+    monkeypatch.setenv("T681656E1_AMBIENT", "kept")
+    assert bot_relay.delivery_env(None, None).get("T681656E1_AMBIENT") == "kept"
