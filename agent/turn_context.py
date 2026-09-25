@@ -146,6 +146,16 @@ def consume_surface_switch_note(agent: Any) -> str:
     return _pop_turn_note(agent, "_surface_switch_note")
 
 
+def consume_pending_waiter_note(agent: Any) -> str:
+    """One line naming background reply waiters still pending for this session lineage,
+    armed by an interrupted wait or a compaction; "" otherwise (ledger read only)."""
+    with suppress(Exception):
+        from tools.bot_reply_ledger import consume_turn_note
+
+        return consume_turn_note(getattr(agent, "session_id", None), getattr(agent, "_session_db", None))
+    return ""
+
+
 def append_notes_to_multimodal_content(content: Any, notes: Optional[str]) -> bool:
     """Append must-deliver notes as a durable text part on a multimodal (list) user
     message (the sidecar path returns ``None`` for non-string content)."""
@@ -808,7 +818,8 @@ def _merge_gateway_notes(
     append a durable text part instead."""
     _turn_notes = "\n\n".join(
         part for part in (consume_gateway_turn_context_notes(agent),
-                          consume_surface_switch_note(agent)) if part
+                          consume_surface_switch_note(agent),
+                          consume_pending_waiter_note(agent)) if part
     )
     if not _turn_notes:
         return plugin_user_context

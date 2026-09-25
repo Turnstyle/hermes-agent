@@ -1108,6 +1108,10 @@ class GatewayStartupMixin:
             recovered += self._recover_secondary_process_checkpoints(process_registry)
             if recovered:
                 logger.info("Recovered %s background process(es) from previous run", recovered)
+        # message_agent reply waiters the previous run left behind: adopt, reap, notify.
+        with _log_suppressed(logging.WARNING, "Reply-waiter ledger sweep: %s"):
+            from tools.bot_reply_ledger import sweep_pending_waiters
+            sweep_pending_waiters(registry=process_registry)
         # Recover the turns the last process left marked (in flight, or reply not yet ledgered).
         # SKIP after a clean exit — the previous process already drained.
         _clean_marker = _hermes_home / ".clean_shutdown"

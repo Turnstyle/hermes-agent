@@ -3482,6 +3482,12 @@ def _finish_compaction_boundary(
                 },
             )
 
+    # Background reply waiters are invisible to the compacted transcript: the next turn names them.
+    if session_commit_succeeded:
+        with _swallow("pending reply-waiter note arm failed: %s"):
+            from tools.bot_reply_ledger import arm_turn_note
+            arm_turn_note(agent.session_id)
+
     # Rotation-independent flag: the gateway uses it (not an id diff) to re-baseline
     # transcript handling (history_offset=0 + rewrite on the same id) in-place.
     agent._last_compression_attempt_in_place = compacted_in_place

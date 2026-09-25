@@ -746,6 +746,19 @@ def _wait_reply_main(reply_path: str, label: str, budget_seconds: str) -> int:
         deadline = time.time() + float(budget_seconds)
     except ValueError:
         return 2
+    # Durable "who waits on what" row, removed on every exit (reply, timeout, error, SIGTERM),
+    # so a restarted gateway can adopt or reap this waiter if its spawner dies first.
+    try:
+        from tools.bot_reply_ledger import pending_waiter
+
+        ledger = pending_waiter(reply_path, label, float(budget_seconds))
+    except Exception:  # the reply wake-up matters more than the ledger row
+        ledger = contextlib.nullcontext()
+    with ledger:
+        return _wait_reply_loop(reply_path, label, budget_seconds, deadline)
+
+
+def _wait_reply_loop(reply_path: str, label: str, budget_seconds: str, deadline: float) -> int:
     while time.time() < deadline:
         if os.path.exists(reply_path):
             with open(reply_path, encoding="utf-8") as fh:

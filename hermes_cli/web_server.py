@@ -140,6 +140,17 @@ def _start_desktop_cron_ticker(stop_event: "threading.Event", interval: int = 60
 _DESKTOP_MCP_DISCOVERY_DELAY_S = 1.0
 
 
+def _sweep_reply_waiters() -> None:
+    """Adopt/reap the message_agent reply waiters a previous backend left behind."""
+    try:
+        from tools.bot_reply_ledger import sweep_pending_waiters
+        from tools.process_registry import process_registry
+
+        sweep_pending_waiters(registry=process_registry)
+    except Exception:
+        _log.warning("reply-waiter ledger sweep failed during backend startup", exc_info=True)
+
+
 @asynccontextmanager
 async def _lifespan(app: "FastAPI"):
     app.state.event_channels = {}  # dict[str, set]
@@ -234,6 +245,9 @@ async def _lifespan(app: "FastAPI"):
             name="desktop-cron-ticker",
         )
         cron_thread.start()
+
+    # Off-thread: the Desktop ready-probe must not wait on the reply-waiter sweep.
+    threading.Thread(target=_sweep_reply_waiters, daemon=True, name="reply-waiter-sweep").start()
 
     # Reap idle/dead keep-alive PTY sessions (30-min TTL).
     pty_reaper_task = asyncio.create_task(run_reaper(PTY_REGISTRY))

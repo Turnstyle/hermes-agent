@@ -1933,6 +1933,9 @@ DEFAULT_CONFIG = {
         # before failing with a structured 'target_busy' error. Deliveries are serialized per
         # profile with a cross-process file lock.
         "turn_wait_seconds": 120,
+        # Startup sweep of message_agent reply waiters orphaned by a restart: one still running
+        # this many seconds past its own reply budget is killed (identity-checked first).
+        "waiter_orphan_grace_seconds": 300,
     },
     "code_execution": {  # execute_code settings (programmatic tool calls).
         # project = run in the session cwd with the active venv/conda python so project deps and

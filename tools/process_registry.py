@@ -1996,6 +1996,16 @@ class ProcessRegistry(ProcessCheckpointMixin):
             self._completion_consumed.add(session_id)
         return result
 
+    @staticmethod
+    def _arm_pending_waiter_note(session: ProcessSession) -> None:
+        """An interrupted wait leaves reply waiters running unseen: the next turn names them."""
+        with suppress(Exception):
+            from gateway.session_context import get_session_env
+            from tools.bot_reply_ledger import arm_turn_note
+
+            arm_turn_note(session.parent_session_id)
+            arm_turn_note(get_session_env("HERMES_SESSION_ID", ""))
+
     def wait(self, session_id: str, timeout: int = None) -> dict:
         """Block until the process exits, the timeout elapses, the user interrupts, or a
         mid-turn user message (steer/redirect → ``request_yield``) releases the wait.
@@ -2044,6 +2054,8 @@ class ProcessRegistry(ProcessCheckpointMixin):
                     "note": ("User sent a new message -- wait released; the process is still "
                              "running and you will be notified on exit. Respond to the user now.")}
             if result is not None:
+                if result["status"] == "interrupted":
+                    self._arm_pending_waiter_note(session)
                 if timeout_note:
                     result["timeout_note"] = timeout_note
                 return result
