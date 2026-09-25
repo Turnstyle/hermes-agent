@@ -2,7 +2,8 @@
 
 from __future__ import annotations
 
-import importlib
+import contextlib
+import hashlib
 import json
 import logging
 import os
@@ -13,7 +14,7 @@ from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional
 
 from agent.memory_provider import MemoryProvider, spawn_context_thread
-from agent.secret_scope import get_secret, is_multiplex_active
+from agent.secret_scope import get_secret, is_multiplex_active, serves_routed_profile
 from tools.registry import tool_error
 
 logger = logging.getLogger(__name__)
@@ -42,6 +43,10 @@ _KEBAB_ALIASES = {"supermemory_store": "supermemory-save", "supermemory_search":
                   "supermemory_forget": "supermemory-forget", "supermemory_profile": "supermemory-profile"}
 _ALIAS_TO_TOOL = {kebab: snake for snake, kebab in _KEBAB_ALIASES.items()}
 _BOOL_WORDS = {**dict.fromkeys(("true", "1", "yes", "y", "on"), True), **dict.fromkeys(("false", "0", "no", "n", "off"), False)}
+# Set by a key helper (see tunnel_key_helper.py) when require_availability_proof is on:
+# "v1:<hermes pid>:<key fingerprint>" on success, "down:<hermes pid>:<reason>" otherwise.
+_PROOF_ENV = "SUPERMEMORY_AVAILABILITY_PROOF"
+_CONTAINER_OPS = ("read", "write")
 
 
 def _quietly(fn: Callable[[], Any], fail_msg: str = "", *args: Any, level: int = logging.DEBUG, default: Any = None) -> Any:
@@ -78,6 +83,17 @@ def _clamp_number(value: Any, default, lo, hi, cast):
     return _quietly(lambda: max(lo, min(hi, cast(value))), default=default)
 
 
+def _normalize_permissions(value: Any) -> Optional[Dict[str, Dict[str, bool]]]:
+    """``containers`` map -> {raw tag: {"read": bool, "write": bool}}; None = no map (legacy: every op allowed).
+    A malformed map or entry grants nothing: once permissions are configured, anything unclear is denied."""
+    if value is None:
+        return None
+    if not isinstance(value, dict):
+        return {}
+    return {str(tag).strip(): {op: _as_bool(perms.get(op), False) if isinstance(perms, dict) else False for op in _CONTAINER_OPS}
+            for tag, perms in value.items() if str(tag).strip()}
+
+
 # config key -> (default, normalizer applied to the raw/merged value). Order = supermemory.json layout.
 # container_tag is kept raw here: {identity} templates are resolved in initialize(), and
 # _sanitize_tag runs AFTER that resolution. custom_containers, by contrast, are sanitized on load.
@@ -95,6 +111,11 @@ _CONFIG_SPEC: Dict[str, tuple] = {
     "enable_custom_container_tags": (False, lambda v: _as_bool(v, False)),
     "custom_containers": ([], lambda v: [_sanitize_tag(str(t)) for t in v if t] if isinstance(v, list) else []),
     "custom_container_instructions": ("", lambda v: str(v).strip()),
+    # Per-container operation permissions, e.g. {"hermes_fleet_pilot": {"read": true, "write": false}}; keys accept
+    # {identity}. Absent = every op allowed; present = default-deny (an unlisted container gets neither op).
+    "containers": (None, _normalize_permissions),
+    # Require a fresh per-process proof from the key helper (_PROOF_ENV) instead of mere key presence.
+    "require_availability_proof": (False, lambda v: _as_bool(v, False)),
 }
 
 
@@ -260,10 +281,48 @@ def _resolve_container_tag(config_tag: str, identity: str) -> str:
     return _sanitize_tag(raw_tag.replace("{identity}", identity))
 
 
-def _probe_supermemory_connection(api_key: str, hermes_home: str, *, identity: str = "default") -> dict:
+def _key_fingerprint(api_key: str) -> str:
+    """First 16 hex chars of sha256(key): binds a proof to one key without carrying the key. Must match
+    tunnel_key_helper.key_fingerprint."""
+    return hashlib.sha256(api_key.encode("utf-8")).hexdigest()[:16]
+
+
+def _availability_error(api_key: str, config: dict) -> str:
+    """"" when the provider may use ``api_key``; else a short reason that never contains the key.
+
+    With ``require_availability_proof`` the key helper must have proven, in THIS process, that the endpoint
+    answered for THIS key. A proof inherited from a parent process (other pid) or minted for another key
+    (other fingerprint) is stale, so an inherited SUPERMEMORY_API_KEY alone can no longer make the provider live."""
+    if config.get("require_availability_proof"):
+        state, _, rest = (get_secret(_PROOF_ENV, "") or "").strip().partition(":")
+        pid, _, detail = rest.partition(":")
+        if not state:
+            return f"{_PROOF_ENV} is not set (the key helper has not proven the endpoint reachable in this process)"
+        if state == "down":
+            return f"key helper reported the endpoint down ({detail or 'no reason given'})"
+        if state != "v1" or pid != str(os.getpid()):
+            return f"{_PROOF_ENV} is stale or malformed (not issued to this process)"
+        if not api_key or detail != _key_fingerprint(api_key):
+            return f"SUPERMEMORY_API_KEY is not the key the helper proved ({_PROOF_ENV} fingerprint mismatch)"
+    return "" if api_key else "SUPERMEMORY_API_KEY not set"
+
+
+def _drop_inherited_key(reason: str) -> None:
+    """Remove an unproven SUPERMEMORY_API_KEY from this process's environ so it can't reach child processes.
+    Never under multiplexing or for a routed profile: os.environ is shared there and belongs to no one profile
+    (the provider still refuses to use the key)."""
+    if is_multiplex_active() or serves_routed_profile():
+        return
+    if os.environ.pop("SUPERMEMORY_API_KEY", None) is not None:
+        logger.warning("Supermemory: removed SUPERMEMORY_API_KEY from the process environment (%s)", reason)
+
+
+def _probe_supermemory_connection(api_key: str, hermes_home: str, *, identity: str = "default", gate_error: str = "") -> dict:
     config = _load_supermemory_config(hermes_home)
     status = {"ok": False, "error": "", "profile_facts": 0, "container_tag": _resolve_container_tag(config["container_tag"], identity),
               "auto_recall": bool(config["auto_recall"]), "auto_capture": bool(config["auto_capture"])}
+    if gate_error:
+        return {**status, "error": gate_error}
     if not (api_key or "").strip():
         return {**status, "error": "SUPERMEMORY_API_KEY not set"}
     try:
@@ -305,7 +364,7 @@ _BASE_SCHEMAS = [
 
 
 class _TagError(Exception):
-    """Tool call named a container_tag outside the whitelist."""
+    """Tool call named a container_tag outside the whitelist, or one without the operation's permission."""
 
 
 def _tagged(resp: dict, tag: Optional[str]) -> dict:
@@ -315,6 +374,7 @@ def _tagged(resp: dict, tag: Optional[str]) -> dict:
 class SupermemoryMemoryProvider(MemoryProvider):
     def __init__(self):
         self._api_key = self._session_id = self._hermes_home = ""
+        self._identity = "default"  # expands {identity} in container_tag and in `containers` permission keys
         self._client: Optional[_SupermemoryClient] = None
         self._container_tag, self._turn_count, self._write_enabled, self._active = _DEFAULT_CONTAINER_TAG, 0, True, False
         self._prefetch_thread = self._sync_thread = self._write_thread = None  # only _write_thread is ever started
@@ -329,15 +389,38 @@ class SupermemoryMemoryProvider(MemoryProvider):
             setattr(self, f"_{key}", config[key])
         self._base_url, self._enable_custom_containers = _resolve_base_url(config["base_url"]), config["enable_custom_container_tags"]
         self._allowed_containers: List[str] = [self._container_tag] + list(self._custom_containers)
+        perms = config["containers"]
+        self._container_permissions: Optional[Dict[str, Dict[str, bool]]] = None if perms is None else {
+            _sanitize_tag(tag.replace("{identity}", self._identity)): ops for tag, ops in perms.items()}
+
+    def _permits(self, tag: str, op: str) -> bool:
+        """Operation permission for a resolved container tag; no ``containers`` map = allowed (legacy)."""
+        if self._container_permissions is None:
+            return True
+        return self._container_permissions.get(tag, {}).get(op, False)
+
+    def _gate_error(self, config: Optional[dict] = None) -> str:
+        """Availability reason ("" = usable) for the active profile; drops an unproven key (see _drop_inherited_key)."""
+        if config is None:
+            from hermes_constants import get_hermes_home
+            config = _load_supermemory_config(str(get_hermes_home()))
+        error = _availability_error(get_secret("SUPERMEMORY_API_KEY", "") or "", config)
+        if error and config["require_availability_proof"]:
+            _drop_inherited_key(error)
+        return error
 
     @property
     def name(self) -> str:
         return "supermemory"
 
     def is_available(self) -> bool:
-        # Key presence only, no SDK import check: the SDK is lazy-installed in initialize(), so gating on
-        # importability here is a chicken-and-egg trap on sealed venvs. Mirrors honcho/mem0.
-        return bool(get_secret("SUPERMEMORY_API_KEY", ""))
+        # No SDK import check: the SDK is lazy-installed in initialize(), so gating on importability here is a
+        # chicken-and-egg trap on sealed venvs. Key presence, plus the helper's proof when
+        # require_availability_proof is on (that path also drops an unproven inherited key).
+        return not self._gate_error()
+
+    def unavailable_reason(self) -> str:
+        return self._gate_error()
 
     def get_config_schema(self):
         # Only the API key is prompted during `hermes memory setup`; other options live in supermemory.json / env.
@@ -352,7 +435,10 @@ class SupermemoryMemoryProvider(MemoryProvider):
 
     def get_status_config(self, provider_config: dict) -> dict:
         from hermes_constants import get_hermes_home
-        return {"summary": _format_connection_summary(_probe_supermemory_connection(get_secret("SUPERMEMORY_API_KEY", "") or "", str(get_hermes_home())))}
+        hermes_home = str(get_hermes_home())
+        gate_error = self._gate_error(_load_supermemory_config(hermes_home))
+        return {"summary": _format_connection_summary(_probe_supermemory_connection(
+            get_secret("SUPERMEMORY_API_KEY", "") or "", hermes_home, gate_error=gate_error))}
 
     def post_setup(self, hermes_home: str, config: dict) -> None:
         from hermes_cli.config import save_config
@@ -382,8 +468,12 @@ class SupermemoryMemoryProvider(MemoryProvider):
         self._hermes_home = kwargs.get("hermes_home") or str(get_hermes_home())
         self._session_id, self._turn_count, self._pending_turns = session_id, 0, []
         config = _load_supermemory_config(self._hermes_home)
-        self._api_key = get_secret("SUPERMEMORY_API_KEY", "") or ""
-        self._container_tag = _resolve_container_tag(config["container_tag"], kwargs.get("agent_identity", "default"))
+        # Re-checked here: a host may initialize without consulting is_available().
+        if (gate_error := self._gate_error(config)) and config["require_availability_proof"]:
+            logger.info("Supermemory inactive: %s", gate_error)
+        self._api_key = "" if gate_error else (get_secret("SUPERMEMORY_API_KEY", "") or "")
+        self._identity = kwargs.get("agent_identity", "default")
+        self._container_tag = _resolve_container_tag(config["container_tag"], self._identity)
         self._apply_config(config)
         self._write_enabled = kwargs.get("agent_context", "") not in {"cron", "flush", "subagent"}
         self._client = _quietly(lambda: _build_client(self._api_key, config, self._container_tag),
@@ -400,13 +490,22 @@ class SupermemoryMemoryProvider(MemoryProvider):
             lines += [f"\nMulti-container mode enabled. Available containers: {', '.join(self._allowed_containers)}.",
                       "Pass an optional container_tag to supermemory_search, supermemory_store, supermemory_forget, and supermemory_profile to target a specific container."]
             lines += [f"\n{self._custom_container_instructions}"] if self._custom_container_instructions else []
+        if self._container_permissions is not None:
+            access = [f"{tag}: {'/'.join(op for op in _CONTAINER_OPS if self._permits(tag, op)) or 'none'}"
+                      for tag in self._allowed_containers]
+            lines += [f"\nEnforced container permissions: {'; '.join(access)}. Calls outside these are refused."]
         return "\n".join(lines) if self._active else ""
 
     def _can_write(self) -> bool:
         return bool(self._active and self._write_enabled and self._client)
 
+    def _may_capture(self) -> bool:
+        """Automatic writes (turn capture, built-in memory mirroring): need auto_capture and primary write permission."""
+        return self._can_write() and self._auto_capture and self._permits(self._container_tag, "write")
+
     def prefetch(self, query: str, *, session_id: str = "") -> str:
-        if not self._active or not self._auto_recall or not self._client or not query.strip():
+        if not self._active or not self._auto_recall or not self._client or not query.strip() \
+                or not self._permits(self._container_tag, "read"):
             return ""
         def _recall():
             profile = self._client.get_profile(query=query[:200])
@@ -440,7 +539,7 @@ class SupermemoryMemoryProvider(MemoryProvider):
 
     def sync_turn(self, user_content: str, assistant_content: str, *, session_id: str = "") -> None:
         # Host runs this on a worker thread, so the blocking write is fine here.
-        if not self._can_write() or not self._auto_capture:
+        if not self._may_capture():
             return
         turn = {"user": _clean_text_for_capture(user_content), "assistant": _clean_text_for_capture(assistant_content),
                 "session_id": session_id or self._session_id}
@@ -487,7 +586,8 @@ class SupermemoryMemoryProvider(MemoryProvider):
         self._session_id = str(new_session_id or "").strip() or self._session_id
 
     def on_memory_write(self, action: str, target: str, content: str) -> None:
-        if not self._can_write() or action != "add" or not (content or "").strip():
+        # Mirroring a built-in memory write exports local memory, so it is capture: same switch, same approval.
+        if not self._may_capture() or action != "add" or not (content or "").strip():
             return
         if self._write_thread and self._write_thread.is_alive():
             self._write_thread.join(timeout=2.0)
@@ -519,6 +619,15 @@ class SupermemoryMemoryProvider(MemoryProvider):
             raise _TagError(f"Container tag '{tag}' is not allowed. Allowed: {', '.join(self._allowed_containers)}")
         return tag
 
+    def _permitted_tag(self, args: dict, op: str) -> Optional[str]:
+        """``_tool_container_tag`` plus the ``containers`` permission for ``op``; refusals are logged, not silent."""
+        tag = self._tool_container_tag(args)
+        target = tag or self._container_tag
+        if not self._permits(target, op):
+            logger.warning("Supermemory: refused %s on container %s (not permitted by supermemory.json containers)", op, target)
+            raise _TagError(f"Refused: container '{target}' does not permit {op} (supermemory.json containers permissions).")
+        return tag
+
     def _tool_store(self, args: dict) -> dict | str:
         content = str(args.get("content") or "").strip()
         if not content:
@@ -526,7 +635,7 @@ class SupermemoryMemoryProvider(MemoryProvider):
         metadata = args.get("metadata") if isinstance(args.get("metadata"), dict) else {}
         metadata.setdefault("type", _detect_category(content))
         metadata.pop("source", None)
-        tag = self._tool_container_tag(args)
+        tag = self._permitted_tag(args, "write")
         result = self._client.add_memory(content, metadata=metadata, entity_context=self._entity_context, container_tag=tag)
         return _tagged({"saved": True, "id": result.get("id", ""), "preview": content[:80] + ("..." if len(content) > 80 else "")}, tag)
 
@@ -535,7 +644,7 @@ class SupermemoryMemoryProvider(MemoryProvider):
         if not query:
             return tool_error("query is required")
         limit = _clamp_number(args.get("limit", 5) or 5, 5, 1, 20, int)
-        tag = self._tool_container_tag(args)
+        tag = self._permitted_tag(args, "read")
         results = [{"id": i.get("id", ""), "content": i.get("memory", ""), **({"similarity": pct} if (pct := _similarity_pct(i.get("similarity"))) is not None else {})}
                    for i in self._client.search_memories(query, limit=limit, container_tag=tag)]
         return _tagged({"results": results, "count": len(results)}, tag)
@@ -544,14 +653,14 @@ class SupermemoryMemoryProvider(MemoryProvider):
         memory_id, query = str(args.get("id") or "").strip(), str(args.get("query") or "").strip()
         if not memory_id and not query:
             return tool_error("Provide either id or query")
-        tag = self._tool_container_tag(args)  # not echoed in the response
+        tag = self._permitted_tag(args, "write")  # not echoed in the response
         if not memory_id:
             return self._client.forget_by_query(query, container_tag=tag)
         self._client.forget_memory(memory_id, container_tag=tag)
         return {"forgotten": True, "id": memory_id}
 
     def _tool_profile(self, args: dict) -> dict:
-        tag = self._tool_container_tag(args)
+        tag = self._permitted_tag(args, "read")
         profile = self._client.get_profile(query=str(args.get("query") or "").strip() or None, container_tag=tag)
         return _tagged({"profile": "\n\n".join(_profile_sections(profile["static"], profile["dynamic"])),
                        "static_count": len(profile["static"]), "dynamic_count": len(profile["dynamic"])}, tag)
