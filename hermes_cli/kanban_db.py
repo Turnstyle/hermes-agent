@@ -3267,18 +3267,33 @@ def _unique_attachment_path(directory: Path, filename: str, used: set[Path]) -> 
 def edit_task(
     conn: sqlite3.Connection, task_id: str, *, title: Optional[str] = None,
     body: Optional[str] = None, priority: Optional[int] = None,
+    tenant: Optional[str] = None,
     result: Optional[str] = None, summary: Optional[str] = None,
     metadata: Optional[dict] = None, board: Optional[str] = None,
 ) -> bool:
-    """Edit task fields, optionally backfilling a completed task's result."""
+    """Edit fields, rehome an idle task, or backfill a completed task's result."""
+    if tenant is not None:
+        tenant = tenant.strip()
+        if not tenant:
+            raise ValueError("--tenant requires a non-empty node")
     changed_fields = [
         field for field, value in (("title", title), ("body", body), ("priority", priority))
         if value is not None
     ]
     with write_txn(conn):
-        status = _task_status(conn, task_id)
-        if status is None or (result is not None and status != "done"):
+        row = conn.execute(
+            "SELECT status, tenant FROM tasks WHERE id = ?", (task_id,),
+        ).fetchone()
+        if row is None:
             return False
+        if tenant is not None and row["status"] not in {"ready", "todo", "triage", "blocked"}:
+            raise ValueError(
+                f"cannot rehome {task_id}: status {row['status']!r}; "
+                "--tenant requires ready, todo, triage, or blocked"
+            )
+        if result is not None and row["status"] != "done":
+            return False
+        tenant_changed = tenant is not None and tenant != row["tenant"]
         assignments = []
         params = []
         for field, value in (("title", title), ("body", body), ("priority", priority)):
@@ -3289,16 +3304,23 @@ def edit_task(
             assignments.append("result = ?")
             params.append(result)
             changed_fields.append("result")
-        if not assignments:
-            return False
-        conn.execute(
-            f"UPDATE tasks SET {', '.join(assignments)} WHERE id = ?",
-            (*params, task_id),
-        )
+        if not assignments and not tenant_changed:
+            return tenant is not None
+        if tenant_changed:
+            # Fleet sync classifies priority before tenant: keep routing in its
+            # own UPDATE so a combined edit still emits issue.route.
+            conn.execute("UPDATE tasks SET tenant = ? WHERE id = ?", (tenant, task_id))
+            _append_event(conn, task_id, "rehomed", {"from": row["tenant"], "to": tenant})
+            changed_fields.append("tenant")
+        if assignments:
+            conn.execute(
+                f"UPDATE tasks SET {', '.join(assignments)} WHERE id = ?",
+                (*params, task_id),
+            )
         if priority is not None:
             _append_event(conn, task_id, "reprioritized", {"priority": priority})
         if result is None:
-            non_priority_fields = [field for field in changed_fields if field != "priority"]
+            non_priority_fields = [field for field in changed_fields if field not in {"priority", "tenant"}]
             if non_priority_fields:
                 _append_event(conn, task_id, "edited", {"fields": non_priority_fields})
         else:
