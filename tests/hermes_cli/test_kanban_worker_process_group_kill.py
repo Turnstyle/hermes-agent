@@ -219,13 +219,12 @@ def test_archive_kills_the_workers_grandchild(board, tmp_path):
 
 def test_legacy_row_without_fingerprint_keeps_single_pid_path(tmp_path, monkeypatch):
     """A legacy row (no spawn fingerprint) is only ever signalled by PID, never as a whole group."""
-    monkeypatch.setattr(kbd.os, "killpg", lambda *a: pytest.fail("killpg for a legacy row"))
+    monkeypatch.setattr(kbd, "_signal_worker_group", lambda *a: pytest.fail("group signal for a legacy row"))
     proc, child = _spawn_worker(tmp_path, _WORKER, _SLEEPER)
     try:
         info = kbd._terminate_reclaimed_worker(proc.pid, _lock(), started_at=None)
         assert info["terminated"] is True and info["group_signalled"] is False
     finally:
-        monkeypatch.undo()
         _cleanup(child, proc.pid, group=proc.pid)
         proc.wait(timeout=5)
 
@@ -242,8 +241,18 @@ def test_zombie_leader_of_another_parent_does_not_hold_the_grace_poll(monkeypatc
 
 def test_live_group_members_skips_zombies(monkeypatch):
     class R:
+        returncode = 0
         stdout = "  10    10 Z\n  11    10 S\n  12    99 R\n"
     monkeypatch.setattr(kbd.subprocess, "run", lambda *a, **k: R())
     assert kbd._live_group_members(10) == [11]
     assert kbd._live_group_members(99) == [12]
     assert kbd._live_group_members(5) == []
+
+
+def test_unreadable_ps_never_reads_as_empty_group(monkeypatch):
+    """A failing ``ps`` must fail toward finishing the kill (``None`` = members may remain)."""
+    class R:
+        returncode, stdout = 1, ""
+    monkeypatch.setattr(kbd.subprocess, "run", lambda *a, **k: R())
+    assert kbd._live_group_members(10) is None
+    assert kbd._worker_group_has_live_members(10) is True

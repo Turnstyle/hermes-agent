@@ -552,15 +552,18 @@ def _sigkill(kill, pid: int) -> bool:
 
 def _worker_leads_own_group(pid: int, started_at, signal_fn) -> bool:
     """True when the worker ``pid`` is live, fingerprint-verified AND leads its own process group, so
-    ``os.killpg(pid, sig)`` reaches the worker and every child it started (an external ``claude`` /
-    ``codex`` CLI, a ``sleep``) without touching anything else. ``_default_spawn`` starts workers
+    ``os.killpg(pid, sig)`` reaches the worker and every child it started in its own group (e.g. an
+    external ``claude`` / ``codex`` CLI started with plain ``subprocess.Popen``) without touching
+    anything else. ``_default_spawn`` starts workers
     with ``start_new_session=True``, so the group id equals the PID. Only the exact equality counts:
     the group is NEVER derived as ``killpg(getpgid(pid))`` — a worker sharing the dispatcher's group
     would make that kill the dispatcher itself. Group signals need a real spawn fingerprint: a legacy
     row (``None``), the UNVERIFIED marker, a zombie or a recycled PID keep the single-PID path.
     POSIX only (Windows keeps single-PID termination), and only with real signals: a ``signal_fn``
-    test hook keeps the single-PID behaviour. Children that start their own session (daemons, MCP
-    servers) leave the group and are out of reach here."""
+    test hook keeps the single-PID behaviour. Children that start their own session leave the group
+    and are out of reach here: daemons, MCP servers, and every Hermes terminal-tool command
+    (foreground and background run with ``start_new_session=True``; a ``hermes`` worker's own SIGTERM
+    handler ends its foreground terminal group)."""
     if signal_fn is not None or _kb._IS_WINDOWS:
         return False
     if not (hasattr(os, "killpg") and hasattr(os, "getpgid")):
@@ -590,12 +593,15 @@ def _live_group_members(pgid: int) -> Optional[list[int]]:
     waiting for or killing. ``None`` when ``ps`` cannot be read: callers then assume members remain
     (fail toward finishing the kill, never toward skipping it)."""
     try:
-        out = subprocess.run(
+        proc = subprocess.run(
             ["ps", "-A", "-o", "pid=,pgid=,stat="],
             capture_output=True, text=True, timeout=5, check=False,
-        ).stdout
+        )
     except (OSError, subprocess.SubprocessError):
         return None
+    if proc.returncode != 0 or not proc.stdout.strip():
+        return None  # unreadable: never read as "no members"
+    out = proc.stdout
     members: list[int] = []
     for line in out.splitlines():
         parts = line.split()
@@ -660,14 +666,15 @@ def _terminate_reclaimed_worker(
     reap. After the grace poll, live group members are SIGKILLed even when the leader exited DURING
     the grace (orphaned children keep the group alive). Not covered: children of a leader that had
     already exited before termination began (no verified group to address), and children that called
-    ``setsid`` themselves (daemons, MCP servers). ``group_signalled`` records whether the group path
-    ran."""
+    ``setsid`` themselves (daemons, MCP servers, Hermes terminal-tool commands). ``group_signalled``
+    records whether the group path ran."""
     info: dict[str, Any] = {
         "prev_pid": int(pid) if pid else None,
         "host_local": False,
         "termination_attempted": False,
         "terminated": False,
         "sigkill": False,
+        "group_signalled": False,
     }
     if not pid or pid <= 0 or not claim_lock:
         return info
@@ -689,7 +696,6 @@ def _terminate_reclaimed_worker(
         return info
 
     group = _worker_leads_own_group(pid, started_at, signal_fn)
-    info["group_signalled"] = False
     info["termination_attempted"] = True
     try:
         if group and _signal_worker_group(pid, signal.SIGTERM):
