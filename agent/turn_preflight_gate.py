@@ -52,6 +52,7 @@ def run_preflight_gate(
     # then either clamps the response allowance or stops before the provider is called.
     if apply_cron_token_budget(agent, request_pressure_tokens):
         v.final_response = cron_token_budget_stop_message(agent, request_pressure_tokens)
+        v.failed = False
         v._turn_exit_reason = CRON_MAX_TOKENS_EXIT
         append_message(messages, {"role": "assistant", "content": v.final_response})
         v.api_call_count -= 1
