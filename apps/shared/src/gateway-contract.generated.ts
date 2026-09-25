@@ -2448,6 +2448,7 @@ export interface PromptSubmitParams {
   confirm_truncate?: boolean | null
   confirm_empty_truncate?: boolean | null
   rebind_survivor_row_ids?: number[] | null
+  client_message_id?: string | null
 }
 /** ``status`` is absent only on the typed-stop-phrase reply (``voice_stopped``). After a truncation the survivor row ids let the client rebind its cached ``rowId``s (``None`` map entries: drop the cached id). ``turn_isolation`` marks a compute-host dispatch. */
 export interface PromptSubmitResult {
@@ -4398,6 +4399,13 @@ export interface PersistedTurn {
   user_row_id?: number | null
   final_assistant_row_id?: number | null
 }
+/** ``session_auto_continue._emit_prompt_receipt``: the client send occurrences (``prompt.submit`` ``client_message_id``) a durable user row now answers. Text-only sends queued behind a busy turn merge into ONE row, so several ids can share ``user_row_id``. ``dropped``: the gateway discarded the queued copy as a duplicate of the live turn's prompt; no row will be written for it. */
+export interface PromptReceiptPayload {
+  client_message_ids: string[]
+  status: PromptReceiptStatus
+  user_row_id?: number | null
+}
+export type PromptReceiptStatus = 'persisted' | 'dropped'
 /** ``server._status_update`` and the direct emitters (goal / loop / heartbeat / process). */
 export interface StatusUpdatePayload {
   kind: string
@@ -5513,6 +5521,8 @@ export interface BackendGatewayEventMap {
   'preview.restart.complete': SideAgentCompletePayload
   /** Progress line from the preview-restart agent. */
   'preview.restart.progress': PreviewRestartProgressPayload
+  /** A queued or live send's user row was written (or the queued copy was dropped). */
+  'prompt.receipt': PromptReceiptPayload
   /** Affection reaction detected in the user's message (hearts etc.). */
   reaction: ReactionPayload
   /** A completed reasoning block (non-streaming providers). */
@@ -5622,6 +5632,7 @@ export const GATEWAY_EVENT_TYPES = [
   'preview.open',
   'preview.restart.complete',
   'preview.restart.progress',
+  'prompt.receipt',
   'reaction',
   'reasoning.available',
   'reasoning.delta',
