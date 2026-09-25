@@ -1012,5 +1012,16 @@ def _session_title(agent: Any) -> str:
 
 
 if __name__ == "__main__":  # pragma: no cover - exercised as a background process
-    sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+    _root = Path(__file__).resolve().parent.parent
+    sys.path.insert(0, str(_root))
+    if sys.prefix == sys.base_prefix:
+        # Launched by the backend's sys.executable (PM's bare store Python), this script never passes
+        # through hermes_bootstrap: select the committed dependency environment the same way before any
+        # lazy third-party import (hermes_cli.config -> ruamel). A venv interpreter keeps its own packages.
+        from pm.environments import activate_dependencies
+
+        try:
+            activate_dependencies(_root)
+        except (RuntimeError, OSError) as exc:
+            print(f"bot_mode_dm: {exc}; run `hermes pm repair`", file=sys.stderr)
     raise SystemExit(_delivery_main(sys.argv[1:]))
