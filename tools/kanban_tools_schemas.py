@@ -481,12 +481,12 @@ KANBAN_CREATE_SCHEMA = _schema(
             "Declare at creation: local-only (default), OWNER/REPO for PR publication, or an exact GitHub PR URL. "
             "PR tasks cannot complete until repository-required exact-head CI passes. On publication pass metadata.published_pr."
         )),
-        "goal_max_turns": _prop("integer", (
+        "goal_max_turns": {**_prop("integer", (
                 "Turn budget for goal_mode workers. Caps how many "
                 "continuation turns the worker may take before the task "
                 "is blocked for review. Ignored unless goal_mode is "
                 "true. Defaults to the goal-engine default (20)."
-        )),
+        )), "minimum": 1},
         "model": _prop("string", (
                 "Pin the dispatched worker to this model instead of "
                 "the assignee profile's configured model. Use the "

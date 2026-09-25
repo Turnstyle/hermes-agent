@@ -1280,6 +1280,11 @@ def create_task(
     from hermes_cli.kanban_pr_acceptance import validate_contract
 
     completion_contract = validate_contract(completion_contract)
+    if goal_max_turns is not None:
+        if type(goal_max_turns) is not int:
+            raise ValueError("goal_max_turns must be an integer or None")
+        # Nonpositive budgets carry no extra meaning; NULL is sync-schema safe.
+        goal_max_turns = goal_max_turns if goal_max_turns > 0 else None
     model_override, provider_override = _validate_model_override(model_override, provider_override)
     reasoning_effort = normalize_reasoning_effort(reasoning_effort)
     assignee = _canonical_assignee(assignee)
@@ -1369,7 +1374,7 @@ def create_task(
                         _opt_int(max_runtime_seconds),
                         json.dumps(skills_list) if skills_list is not None else None,
                         _opt_int(max_retries), model_override, provider_override, reasoning_effort,
-                        1 if goal_mode else 0, _opt_int(goal_max_turns), session_id, completion_contract,
+                        1 if goal_mode else 0, goal_max_turns, session_id, completion_contract,
                     ),
                 )
                 for pid in parents:
