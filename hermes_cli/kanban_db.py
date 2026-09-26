@@ -4344,11 +4344,11 @@ def read_worker_log(
         with open(path, "rb") as f:
             if size > tail_bytes:
                 f.seek(size - tail_bytes)
-                # Skip the partial first line unless the window has no newline
-                # at all (readline() would eat everything).
-                probe = f.tell()
-                if not f.readline().endswith(b"\n") and f.tell() >= size:
-                    f.seek(probe)
+                # The window starts inside a line. Always discard that first fragment,
+                # including when the line is longer than the whole window (then the safe
+                # result is empty). Preserving a newline-free fragment can turn a marker
+                # embedded mid-line into an apparent whole-line marker at byte zero.
+                f.readline()
             return f.read().decode("utf-8", errors="replace")
     except OSError:
         return None

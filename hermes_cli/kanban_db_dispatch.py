@@ -1022,13 +1022,19 @@ def _profile_busy_streak(conn: sqlite3.Connection, task_id: str) -> int:
 
 def _profile_busy_backoff_seconds(streak: int) -> int:
     """Wait before re-spawning after ``streak`` consecutive busy runs: base doubling per run, capped."""
-    # Overrides stay inside the contract: a wait is never below 1s (no every-tick respawn) and
-    # never above the cap (a base larger than the cap is held to the cap).
-    base = max(1, _kb._env_int(
-        "HERMES_KANBAN_PROFILE_BUSY_BACKOFF_SECONDS", DEFAULT_PROFILE_BUSY_BACKOFF_SECONDS,
+    # Overrides may tune the curve only inside the published contract. A bad value cannot
+    # cause every-tick retry (<60s) or park a card longer than 15 minutes (>900s).
+    base = min(DEFAULT_PROFILE_BUSY_BACKOFF_MAX_SECONDS, max(
+        DEFAULT_PROFILE_BUSY_BACKOFF_SECONDS,
+        _kb._env_int(
+            "HERMES_KANBAN_PROFILE_BUSY_BACKOFF_SECONDS", DEFAULT_PROFILE_BUSY_BACKOFF_SECONDS,
+        ),
     ))
-    cap = max(1, _kb._env_int(
-        "HERMES_KANBAN_PROFILE_BUSY_BACKOFF_MAX_SECONDS", DEFAULT_PROFILE_BUSY_BACKOFF_MAX_SECONDS,
+    cap = min(DEFAULT_PROFILE_BUSY_BACKOFF_MAX_SECONDS, max(
+        DEFAULT_PROFILE_BUSY_BACKOFF_SECONDS,
+        _kb._env_int(
+            "HERMES_KANBAN_PROFILE_BUSY_BACKOFF_MAX_SECONDS", DEFAULT_PROFILE_BUSY_BACKOFF_MAX_SECONDS,
+        ),
     ))
     # Exponent clamped so a very long streak cannot build a huge integer before the cap applies.
     exponent = min(max(int(streak), 1) - 1, 32)
@@ -2279,16 +2285,16 @@ def _run_reclaim_phase(
     """Reclaim stale/orphaned/crashed/timed-out running tasks, then promote."""
     reap_worker_zombies()
     result.reaped_terminal_workers = reap_terminal_workers(conn)
+    # Classify dead workers before TTL/stale reclaim. Exit evidence is more specific than an
+    # expired lease: a profile-busy worker must not spend retry budget when its claim expired.
+    result.crashed = detect_crashed_workers(conn, board=board)
+    result.auto_blocked.extend(getattr(detect_crashed_workers, "_last_auto_blocked", []))
+    result.rate_limited.extend(getattr(detect_crashed_workers, "_last_rate_limited", []))
+    result.profile_busy.extend(getattr(detect_crashed_workers, "_last_profile_busy", []))
     result.reclaimed = _kb.release_stale_claims(conn, failure_limit=failure_limit)
     if reconcile_orphans:
         result.reconciled_orphans = reconcile_orphaned_running(conn)
     result.stale = detect_stale_running(conn, stale_timeout_seconds=stale_timeout_seconds)
-    result.crashed = detect_crashed_workers(conn, board=board)
-    # Side-channel attributes (see detect_crashed_workers); rate-limited tasks
-    # went back to ``ready`` and the respawn guard defers them until quota clears.
-    result.auto_blocked.extend(getattr(detect_crashed_workers, "_last_auto_blocked", []))
-    result.rate_limited.extend(getattr(detect_crashed_workers, "_last_rate_limited", []))
-    result.profile_busy.extend(getattr(detect_crashed_workers, "_last_profile_busy", []))
     result.timed_out = enforce_max_runtime(conn)
     result.promoted = _kb.recompute_ready(conn, failure_limit=failure_limit)
 
