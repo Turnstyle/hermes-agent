@@ -7,6 +7,7 @@ from unittest.mock import patch
 import pytest
 
 from hermes_cli import main as hermes_main, update_cmd
+from hermes_constants import get_hermes_home
 from tests.hermes_cli.test_update_target_identity import git, update_tree  # noqa: F401
 
 
@@ -20,6 +21,10 @@ def test_update_preserves_local_work_and_rescues_orphan_before_reset(
     update_tree, monkeypatch, capsys, history, failure, keep,
 ):
     t = update_tree
+    # Local history on main, orphan included, is reset away only when opted in (the default
+    # refuses before touching the checkout; see test_update_carried_commits_guard.py).
+    (get_hermes_home() / 'config.yaml').write_text(
+        'updates:\n  carried_commits_policy: reset\n', encoding='utf-8')
     git(t.clone, 'checkout', '-q', 'main')
     if history == 'orphan':
         git(t.clone, 'checkout', '--orphan', 'fresh')
