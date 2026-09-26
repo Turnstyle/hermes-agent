@@ -731,10 +731,9 @@ def _reconcile_diverged_checkout(git_cmd, branch: str, pre_pull_sha, *, target_r
     has_common_ancestor = bool(
         merge_base_result.returncode == 0 and merge_base_result.stdout.strip())
     # A rescue ref alone let an unattended desktop update reset away carried fixes, restart the
-    # gateway on code without them, and exit 0. By default the reset is refused instead; orphan
-    # divergence has nothing to count against and keeps resetting.
-    carried = (
-        _carried_commits_to_refuse(git_cmd, _m().PROJECT_ROOT, merge_ref) if has_common_ancestor else 0)
+    # gateway on code without them, and exit 0. By default the reset is refused instead; the count
+    # needs no common ancestor, so an orphan history is carried in full.
+    carried = _carried_commits_to_refuse(git_cmd, _m().PROJECT_ROOT, merge_ref)
     rescue_ref = saved = None
     if pre_pull_sha:
         from datetime import datetime as _dt, timezone

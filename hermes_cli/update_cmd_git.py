@@ -192,14 +192,16 @@ def _print_parked_branch_kept_notice(current_branch: str, target_branch: str, un
 
 
 def _carried_commits_to_refuse(git_cmd: list[str], cwd: Path, target_ref: str) -> int:
-    """Commits on HEAD that a reset to *target_ref* would drop, or 0 when a config.yaml this run read
-    successfully says ``updates.carried_commits_policy: reset``. Anything else (the default
-    ``refuse``, a typo, an unreadable config and its last-good fallback) refuses: an update that
-    silently drops carried fixes is the worse failure."""
-    from hermes_cli.update_cmd_carried import _carried_commits_policy
+    """Commits on HEAD that *target_ref* never pointed at or reached (an orphan history counts in
+    full), or 0 when a config.yaml this run read successfully says
+    ``updates.carried_commits_policy: reset``. Anything else (the default ``refuse``, a typo, an
+    unreadable config and its last-good fallback) refuses: an update that silently drops carried
+    fixes is the worse failure."""
+    from hermes_cli.update_cmd_carried import _carried_commits, _carried_commits_policy
     if _carried_commits_policy() == "reset":
         return 0
-    return max(_count_commits_between(git_cmd, cwd, target_ref, "HEAD"), 0)
+    carried = _carried_commits(git_cmd, cwd, "HEAD", target_ref)
+    return len(carried) if carried is not None else 0
 
 
 def _print_carried_commits_refusal(
