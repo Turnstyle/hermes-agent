@@ -6,13 +6,13 @@ same-branch reconcile parked HEAD behind a rescue ref and reset --hard to ``orig
 files stayed parked in the autostash, the gateway restarted on code without the carried fixes, and
 the update exited 0.
 
-``updates.carried_commits_policy: refuse`` (the default) stops before the reset: HEAD, branch and
-working tree stay as they were, the rescue ref is still written, the carried commits are named, and
-the update exits 1. Only a config.yaml read successfully by this run can say ``reset``. Carried
-commits are the ones ``origin/<branch>`` has never pointed at or reached: an orphan history counts,
-a commit Git cannot count refuses, while shallow-graft artifacts and upstream force-pushes (commits
-origin itself once served) do not block the update. The reset itself is covered in
-test_update_diverged_rescue_ref.py.
+``updates.carried_commits_policy: refuse`` (the default) stops the update before it touches the
+checkout: HEAD, branches, index and working tree (npm lockfile edits included) stay as they were,
+a rescue ref is still written, the carried commits are named, and the update exits 1. Only a
+config.yaml read successfully by this run can say ``reset``. Carried commits are the ones
+``origin/<branch>`` has never pointed at or reached: an orphan history counts, a commit Git cannot
+count refuses, while shallow-graft artifacts and upstream force-pushes (commits origin itself once
+served) do not block the update. The reset itself is covered in test_update_diverged_rescue_ref.py.
 """
 
 from __future__ import annotations
@@ -37,11 +37,13 @@ def _commit(repo, name, text, message=None):
     return git(repo, "rev-parse", "HEAD")
 
 
-def _carry(t, count=2):
+def _carry(t, count=2, *, lockfile=False):
     """``main`` at the installed commit plus *count* commits that exist only in this checkout."""
     git(t.clone, "checkout", "-q", "main")
     for n in range(1, count + 1):
         _commit(t.clone, f"carried-{n}.txt", f"carried {n}\n")
+    if lockfile:
+        _commit(t.clone, "package-lock.json", '{"lockfileVersion": 3}\n', "carry a lockfile")
 
 
 def _hand_off(t, monkeypatch):
@@ -117,6 +119,22 @@ def test_carried_commits_refuse_the_update_before_anything_moves(update_tree, mo
     assert any(skip["name"] == "code_update" and "carried" in skip["reason"] for skip in receipt["skips"])
 
 
+def test_refused_update_keeps_an_unstaged_lockfile_edit(update_tree, monkeypatch, capsys):
+    """The update's npm lockfile cleanup must not run before the refusal decision."""
+    t = update_tree
+    _carry(t, lockfile=True)
+    edited = '{"lockfileVersion": 3, "local": "edit"}\n'
+    (t.clone / "package-lock.json").write_text(edited, encoding="utf-8")
+    before = _state(t)
+    _hand_off(t, monkeypatch)
+
+    _refused(t)
+
+    assert (t.clone / "package-lock.json").read_text(encoding="utf-8") == edited
+    assert _state(t) == before
+    assert "code update SKIPPED: carried local commits" in capsys.readouterr().out
+
+
 def test_unreadable_config_refuses_even_when_the_saved_policy_is_reset(update_tree, monkeypatch, capsys):
     """A config.yaml that fails to load serves its last good copy; that copy cannot authorize a reset."""
     t = update_tree
@@ -159,6 +177,20 @@ def test_carried_commits_git_cannot_rule_out_refuse(update_tree, monkeypatch, ca
     _refused(t)
 
     assert _state(t) == before
+    assert "code update SKIPPED: carried local commits" in capsys.readouterr().out
+
+
+def test_parked_checkout_is_not_switched_onto_a_branch_that_carries_commits(update_tree, monkeypatch, capsys):
+    t = update_tree
+    _carry(t)
+    git(t.clone, "checkout", "-q", "retained-branch")
+    before = _state(t)
+    _hand_off(t, monkeypatch)
+
+    _refused(t)
+
+    assert _state(t) == before, "the refusal comes before the switch to main"
+    assert git(t.clone, "rev-parse", "main") != t.newer
     assert "code update SKIPPED: carried local commits" in capsys.readouterr().out
 
 
@@ -212,4 +244,18 @@ def test_update_still_lands_when_nothing_is_carried_or_reset_is_chosen(
     assert git(t.clone, "rev-parse", "HEAD") == t.newer
     assert git(t.clone, "branch", "--show-current") == "main"
     assert [sha for sha in _rescue_refs(t).values() if sha == pre] == ([pre] if rescued else [])
+    assert "code update SKIPPED" not in capsys.readouterr().out
+
+
+def test_parked_checkout_with_only_lockfile_churn_still_switches(update_tree, monkeypatch, capsys):
+    """npm lockfile churn is discarded as machine dirt, so it must not read as a dirty parked tree."""
+    t = update_tree
+    _commit(t.clone, "package-lock.json", '{"lockfileVersion": 3}\n')
+    (t.clone / "package-lock.json").write_text('{"lockfileVersion": 3, "npm": "churn"}\n', encoding="utf-8")
+    _hand_off(t, monkeypatch)
+
+    hermes_main.cmd_update(t.args)
+
+    assert git(t.clone, "branch", "--show-current") == "main"
+    assert git(t.clone, "rev-parse", "HEAD") == t.newer
     assert "code update SKIPPED" not in capsys.readouterr().out
