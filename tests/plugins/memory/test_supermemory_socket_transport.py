@@ -140,8 +140,8 @@ def tcp_listener():
 
 @pytest.fixture
 def env(monkeypatch, tmp_path):
-    import pm
-    monkeypatch.setattr(pm, "ensure_import", lambda *a, **k: None)  # the SDK is installed; never install in a test
+    import tools.lazy_deps as lazy_deps
+    monkeypatch.setattr(lazy_deps, "ensure", lambda *a, **k: None)  # the SDK is installed; never install in a test
     monkeypatch.setenv("HERMES_HOME", str(tmp_path))
     for name in [n for n in os.environ if n.startswith("SUPERMEMORY_") or n.lower().endswith("_proxy")]:
         monkeypatch.delenv(name)
