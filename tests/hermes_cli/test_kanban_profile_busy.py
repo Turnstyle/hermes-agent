@@ -233,6 +233,58 @@ def test_expired_claim_busy_exit_is_classified_before_ttl_reclaim(kanban_home):
         assert "gave_up" not in _events(conn, tid)
 
 
+def test_expired_busy_exit_inside_launch_grace_is_still_profile_busy(kanban_home, monkeypatch):
+    """Checker round 3: explicit exit-75 + current-run marker proves the worker ended, so
+    launch grace must not let generic TTL reclaim charge it as a failure."""
+    monkeypatch.setenv("HERMES_KANBAN_CRASH_GRACE_SECONDS", "30")
+    with kbc.connect() as conn:
+        tid = kb.create_task(conn, title="t", assignee="a")
+        pid = 84200
+        run_id = _claim_dead(conn, tid, pid)
+        _append_log(tid, _busy_exit_log(run_id))
+        kbd._record_worker_exit(pid, kb.KANBAN_RATE_LIMIT_EXIT_CODE << 8)
+        conn.execute(
+            "UPDATE tasks SET started_at=?, claim_expires=? WHERE id=?",
+            (int(time.time()), int(time.time()) - 1, tid),
+        )
+        conn.commit()
+        result = kbd.DispatchResult()
+        kbd._run_reclaim_phase(
+            conn, result, stale_timeout_seconds=86400,
+            failure_limit=1, reconcile_orphans=False,
+        )
+        task = kb.get_task(conn, tid)
+        assert task is not None
+        assert tid in result.profile_busy
+        assert result.reclaimed == 0
+        assert task.status == "ready"
+        assert task.consecutive_failures == 0
+        assert _last_run(conn, tid)["outcome"] == "profile_busy"
+
+
+def test_expired_real_crash_uses_dispatchers_failure_limit(kanban_home):
+    """Checker round 3: classifying an expired crash before TTL reclaim must not silently
+    replace the dispatcher's supplied failure limit with the module default."""
+    with kbc.connect() as conn:
+        tid = kb.create_task(conn, title="t", assignee="a")
+        pid = 84300
+        _claim_dead(conn, tid, pid)
+        _append_log(tid, f"\n{KANBAN_WORKER_EXIT_TRAILER}1\n")
+        kbd._record_worker_exit(pid, 1 << 8)
+        conn.execute("UPDATE tasks SET claim_expires=? WHERE id=?", (int(time.time()) - 1, tid))
+        conn.commit()
+        result = kbd.DispatchResult()
+        kbd._run_reclaim_phase(
+            conn, result, stale_timeout_seconds=86400,
+            failure_limit=1, reconcile_orphans=False,
+        )
+        task = kb.get_task(conn, tid)
+        assert task is not None
+        assert task.status == "blocked"
+        assert task.consecutive_failures == 1
+        assert "gave_up" in _events(conn, tid)
+
+
 # --------------------------------------------------------------------- bounded backoff
 
 
