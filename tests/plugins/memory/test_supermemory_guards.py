@@ -195,6 +195,16 @@ def test_search_filters_quarantined_parent_custom_id(home):
     assert "synthetic result" not in json.dumps(out)
 
 
+def test_real_memory_field_mapper_preserves_nested_documents():
+    item = type("SdkResult", (), {
+        "id": "chunk-1", "memory": "synthetic", "similarity": 0.9,
+        "metadata": {}, "documents": [type("Document", (), {"id": "parent-custom-id"})()],
+    })()
+    mapped = sm._memory_fields(item, "id", "memory", "similarity", "metadata", "documents")
+    assert mapped["id"] == "chunk-1"
+    assert mapped["documents"][0].id == "parent-custom-id"
+
+
 def test_profile_refused_for_container_with_quarantined_document(home):
     p = _provider(home, {**PILOT, "quarantined_memory_ids": {"hermes_fleet_pilot": ["r1"]}})
     out = _call(p, "supermemory-profile", query="synthetic", container_tag="hermes_fleet_pilot")

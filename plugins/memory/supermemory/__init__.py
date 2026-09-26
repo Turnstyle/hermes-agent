@@ -242,7 +242,7 @@ def _clean_text_for_capture(text: str) -> str:
 def _memory_fields(item: Any, *keys: str) -> dict:
     """Pick SDK result attrs into a plain dict; ``updated_at`` also accepts camelCase ``updatedAt``."""
     defaults = {"id": "", "memory": "", "similarity": None, "metadata": None}
-    return {k: getattr(item, "updated_at", None) or getattr(item, "updatedAt", None) if k == "updated_at" else getattr(item, k, defaults[k])
+    return {k: getattr(item, "updated_at", None) or getattr(item, "updatedAt", None) if k == "updated_at" else getattr(item, k, defaults.get(k))
             for k in keys}
 
 
