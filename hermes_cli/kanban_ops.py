@@ -123,6 +123,9 @@ def _cmd_dispatch(args: argparse.Namespace) -> int:
             "claim_errors": [
                 {"task_id": tid, "error": err} for tid, err in res.claim_errors
             ],
+            "skipped_foreign_home": [
+                {"task_id": tid, "home_node": node} for tid, node in res.skipped_foreign_home
+            ],
         }, ascii=True)
         return 0
     print(f"Reclaimed:    {res.reclaimed}")
@@ -174,6 +177,10 @@ def _cmd_dispatch(args: argparse.Namespace) -> int:
         print(f"Reclaim refused ({tid}): {err}")
     for tid, err in res.claim_errors:
         print(f"Claim refused ({tid}): {err}")
+    if res.skipped_foreign_home:
+        print(
+            f"Not claimed (homed on another node): {len(res.skipped_foreign_home)} card(s)"
+        )
     return 0
 
 

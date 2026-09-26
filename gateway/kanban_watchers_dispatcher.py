@@ -325,6 +325,15 @@ def _log_spawn_results(results: Optional[list]) -> bool:
             continue
         claim_errors = getattr(res, "claim_errors", None) or []
         reclaim_errors = getattr(res, "reclaim_errors", None) or []
+        foreign_home = getattr(res, "skipped_foreign_home", None) or []
+        if foreign_home:
+            # Expected on a shared fleet board: cards homed on other nodes.
+            # Counted apart so "claim refusal" means a card that should lease
+            # here and did not.
+            logger.debug(
+                "kanban dispatcher [%s]: %d card(s) homed on other nodes, not claimed",
+                slug, len(foreign_home),
+            )
         if claim_errors:
             logger.warning(
                 "kanban dispatcher [%s]: %d claim refusal(s): %s",

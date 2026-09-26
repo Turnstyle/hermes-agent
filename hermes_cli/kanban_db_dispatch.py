@@ -212,6 +212,12 @@ class DispatchResult:
     """``(task_id, "claim: <fence message>")`` for each ready/review row whose
     CLAIM write a lifecycle-guard trigger refused this tick. The row stayed
     unclaimed and is not counted in ``spawned``; later rows still ran."""
+    skipped_foreign_home: list[tuple[str, str]] = field(default_factory=list)
+    """``(task_id, owner_node)`` for ready/review fleet mirrors homed on another
+    node and holding no live lease for this node. The claim is not attempted:
+    the lease fence would refuse it every tick. Keeps ``claim_errors`` for
+    cards that should lease here and did not. Never an authority: anything
+    this node cannot positively place elsewhere is still attempted."""
     reaped_terminal_workers: list[str] = field(default_factory=list)
     """Task ids whose worker outlived its closed run and was terminated by
     :func:`reap_terminal_workers`."""
@@ -2996,6 +3002,57 @@ def _lane_rows(conn: sqlite3.Connection, status: str) -> list[sqlite3.Row]:
     ).fetchall()
 
 
+def _foreign_home_owner(
+    conn: sqlite3.Connection,
+    task_id: str,
+    assignee: Optional[str],
+    installed_node: Optional[str],
+) -> Optional[str]:
+    """The other node a fleet mirror is homed on, or ``None`` to attempt the claim.
+
+    Returns a node id only when the adapter's own lease fence
+    (``fleet_kanban_running_requires_lease``) would certainly refuse the claim
+    AND the card is homed on another node: a parseable fleet adapter, the fence
+    trigger installed, a mapping row whose ``COALESCE(current_node,
+    source_node)`` is a non-blank node id different from this board's installed
+    node, and no unexpired verified lease matching the fence (holder_node = the
+    home node, holder_profile = the assignee). Every other case (no adapter,
+    unparseable adapter, no fence, no mapping row, unknown owner, a lease the
+    fence would accept, a lookup error) returns ``None``, so the fence keeps
+    deciding exactly as before. Cards homed here keep their refusals: those are
+    the signal.
+    """
+    if not installed_node or installed_node == _kb._FLEET_NODE_UNPARSEABLE:
+        return None
+    try:
+        fence = conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type = 'trigger' "
+            "AND name = 'fleet_kanban_running_requires_lease'"
+        ).fetchone()
+        if fence is None:
+            return None
+        row = conn.execute(
+            "SELECT issue_id, current_node, source_node FROM fleet_kanban_issue_map "
+            "WHERE local_task_id = ?",
+            (task_id,),
+        ).fetchone()
+        if row is None:
+            return None
+        current_node, source_node = row["current_node"], row["source_node"]
+        owner = source_node if current_node is None else current_node
+        if not isinstance(owner, str) or not owner.strip() or owner == installed_node:
+            return None
+        fence_would_accept = assignee is not None and conn.execute(
+            "SELECT 1 FROM fleet_kanban_verified_leases "
+            "WHERE issue_id = ? AND holder_profile = ? AND holder_node = ? "
+            "AND expires_at > CAST(strftime('%s','now') AS INTEGER)",
+            (row["issue_id"], assignee, owner),
+        ).fetchone() is not None
+    except sqlite3.Error:
+        return None
+    return None if fence_would_accept else owner
+
+
 def _any_spawnable_review(
     conn: sqlite3.Connection,
     review_rows: list[sqlite3.Row],
@@ -3117,11 +3174,23 @@ def _dispatch_once_locked(
         per_profile_cap=per_profile_cap, per_profile_running=per_profile_running,
     )
     default_assignee = _resolve_default_assignee(default_assignee)
+    # Fleet mirrors homed on another node are skipped before any claim or
+    # default-assignee write: the lease fence would refuse them every tick.
+    try:
+        installed_node = _kb._fleet_adapter_installed_node_id(conn)
+    except sqlite3.Error:
+        installed_node = None
     spawned = 0
     for row in ready_rows:
         if ready_budget is not None and spawned >= ready_budget:
             break
         row_assignee = row["assignee"]
+        foreign = _foreign_home_owner(
+            conn, row["id"], row_assignee or default_assignee, installed_node,
+        )
+        if foreign is not None:
+            result.skipped_foreign_home.append((row["id"], foreign))
+            continue
         if not row_assignee:
             # Honour kanban.default_assignee so an unassigned task doesn't
             # park in 'ready' forever.
@@ -3144,6 +3213,10 @@ def _dispatch_once_locked(
             break
         if not row["assignee"]:
             result.skipped_unassigned.append(row["id"])
+            continue
+        foreign = _foreign_home_owner(conn, row["id"], row["assignee"], installed_node)
+        if foreign is not None:
+            result.skipped_foreign_home.append((row["id"], foreign))
             continue
         if _dispatch_lane_task(conn, row, row["assignee"], result, lane="review", **lane_kwargs):
             spawned += 1
