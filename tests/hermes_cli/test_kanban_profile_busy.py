@@ -267,6 +267,69 @@ def test_busy_runs_do_not_break_or_extend_a_protocol_violation_streak(kanban_hom
         assert kbd._protocol_violation_streak(conn, tid) == 1
 
 
+def _closed_runs(conn, tid: str, outcomes: list[str], *, ended_at: int | None = None) -> None:
+    """Insert closed runs directly (fast; the sweep path is covered above)."""
+    now = int(time.time()) if ended_at is None else ended_at
+    for outcome in outcomes:
+        meta = '{"protocol_violation": true}' if outcome == "violation" else None
+        conn.execute(
+            "INSERT INTO task_runs (task_id, profile, status, outcome, started_at, ended_at, metadata) "
+            "VALUES (?, 'a', ?, ?, ?, ?, ?)",
+            (tid, "crashed" if outcome == "violation" else outcome,
+             "crashed" if outcome == "violation" else outcome, now - 1, now, meta),
+        )
+    conn.commit()
+
+
+def test_a_long_busy_hold_does_not_erase_the_protocol_violation_streak(kanban_home):
+    """Checker round 1, finding 4: busy runs must stay neutral however many there are, not
+    only inside a fixed scan window."""
+    with kbc.connect() as conn:
+        tid = kb.create_task(conn, title="t", assignee="a")
+        _closed_runs(conn, tid, ["violation"] + ["profile_busy"] * 60)
+        assert kbd._protocol_violation_streak(conn, tid) == 1
+
+
+def test_busy_streak_is_exact_past_any_scan_window(kanban_home):
+    """Checker round 1, finding 5: the streak (event, error line) stays exact on a long hold."""
+    with kbc.connect() as conn:
+        tid = kb.create_task(conn, title="t", assignee="a")
+        _closed_runs(conn, tid, ["crashed"] + ["profile_busy"] * 60)
+        assert kbd._profile_busy_streak(conn, tid) == 60
+
+
+def test_same_second_crash_then_busy_still_backs_off(kanban_home):
+    """Checker round 1, finding 2: runs ending in the same second are ordered by run id, so the
+    newest (busy) run decides the guard, not an older crash that tied on ``ended_at``."""
+    with kbc.connect() as conn:
+        tid = kb.create_task(conn, title="t", assignee="a")
+        _closed_runs(conn, tid, ["crashed", "profile_busy"], ended_at=int(time.time()))
+        assert kbd.check_respawn_guard(conn, tid) == "profile_busy_backoff"
+
+
+@pytest.mark.parametrize(
+    "base, cap, streak, wait",
+    [
+        ("0", None, 1, 1),        # zero base cannot mean "retry every tick"
+        ("-5", None, 1, 60),      # invalid -> default
+        ("1000", "900", 1, 900),  # base above the cap is held to the cap
+        (None, "0", 3, 1),        # zero cap is floored, never 0
+        (None, "100000", 20, 100000),
+    ],
+)
+def test_backoff_overrides_stay_bounded(monkeypatch, base, cap, streak, wait):
+    """Checker round 1, finding 3: env overrides cannot remove the wait or exceed the cap."""
+    for name, value in (("HERMES_KANBAN_PROFILE_BUSY_BACKOFF_SECONDS", base),
+                        ("HERMES_KANBAN_PROFILE_BUSY_BACKOFF_MAX_SECONDS", cap)):
+        if value is None:
+            monkeypatch.delenv(name, raising=False)
+        else:
+            monkeypatch.setenv(name, value)
+    got = kbd._profile_busy_backoff_seconds(streak)
+    assert got == wait
+    assert got >= 1
+
+
 # --------------------------------------------------------------------- worker side
 
 
