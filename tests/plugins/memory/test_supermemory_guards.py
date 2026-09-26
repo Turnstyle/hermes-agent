@@ -177,11 +177,53 @@ def test_search_allowed_on_read_only_container(home):
 
 def test_search_filters_quarantined_document_id(home):
     p = _provider(home, {**PILOT, "quarantined_memory_ids": {"hermes_fleet_pilot": ["r1"]}})
-    p._client.search_results.append({"id": "r2", "memory": "approved cited result", "similarity": 0.8})
+    p._client.search_results[0]["documents"] = [{"id": "r1"}]
+    p._client.search_results.append({"id": "r2", "memory": "approved cited result", "similarity": 0.8,
+                                     "documents": [{"id": "approved_doc"}]})
     out = _call(p, "supermemory-search", query="synthetic", container_tag="hermes_fleet_pilot")
     assert out["count"] == 1
     assert [item["id"] for item in out["results"]] == ["r2"]
     assert "synthetic result" not in json.dumps(out)
+
+
+def test_chunk_result_without_parent_document_fails_closed_in_quarantined_container(home):
+    # Document-mode results carry a chunk id; without a parent document id a quarantined document is invisible.
+    p = _provider(home, {**PILOT, "quarantined_memory_ids": {"hermes_fleet_pilot": ["DOC_Q"]}})
+    p._client.search_results[:] = [{"id": "chunk-only-id", "memory": "", "similarity": 0.9, "documents": None},
+                                   {"id": "chunk-ok", "memory": "approved cited result", "similarity": 0.8,
+                                    "documents": [{"id": "approved_doc"}]}]
+    out = _call(p, "supermemory-search", query="synthetic", container_tag="hermes_fleet_pilot")
+    assert [item["id"] for item in out["results"]] == ["chunk-ok"]
+
+
+def test_chunk_result_from_quarantined_sdk_document_is_dropped(home):
+    from supermemory.types.search_memories_response import Result
+    p = _provider(home, {**PILOT, "quarantined_memory_ids": {"hermes_fleet_pilot": ["DOC_Q", "CUSTOM_Q"]}})
+    stamp = {"createdAt": "2026-09-24T00:00:00Z", "updatedAt": "2026-09-24T00:00:00Z"}
+    rows = [Result.model_validate({"id": "chunk-a", "similarity": 0.9, "chunk": "synthetic chunk", **{"updatedAt": stamp["updatedAt"]},
+                                   "documents": [{"id": "DOC_Q", **stamp}]}),
+            Result.model_validate({"id": "chunk-b", "similarity": 0.9, "chunk": "synthetic chunk", "updatedAt": stamp["updatedAt"],
+                                   "documents": [{"id": "doc-x", "metadata": {"customId": "CUSTOM_Q"}, **stamp}]}),
+            Result.model_validate({"id": "chunk-c", "similarity": 0.8, "memory": "approved cited result",
+                                   "updatedAt": stamp["updatedAt"], "documents": [{"id": "approved_doc", **stamp}]})]
+    p._client.search_results[:] = [sm._memory_fields(r, "id", "memory", "similarity", "updated_at", "metadata", "documents")
+                                   for r in rows]
+    out = _call(p, "supermemory-search", query="synthetic", container_tag="hermes_fleet_pilot")
+    assert [item["id"] for item in out["results"]] == ["chunk-c"]
+
+
+def test_real_client_requests_parent_documents_on_search(monkeypatch):
+    seen = {}
+
+    class _Search:
+        def memories(self, **kwargs):
+            seen.update(kwargs)
+            return type("R", (), {"results": []})()
+
+    client = object.__new__(sm._SupermemoryClient)
+    client._client, client._container_tag, client._search_mode = type("C", (), {"search": _Search()})(), "t", "documents"
+    client.search_memories("q", limit=3)
+    assert seen["include"] == {"documents": True} and seen["search_mode"] == "documents"
 
 
 def test_search_filters_quarantined_parent_custom_id(home):
@@ -221,7 +263,8 @@ def test_malformed_quarantine_entry_fails_closed(home):
 def test_forget_by_query_skips_quarantined_match(home):
     p = _provider(home, {"container_tag": "hermes_{identity}",
                          "quarantined_memory_ids": {"hermes_{identity}": ["r1"]}})
-    p._client.search_results.append({"id": "r2", "memory": "approved cited result", "similarity": 0.8})
+    p._client.search_results.append({"id": "r2", "memory": "approved cited result", "similarity": 0.8,
+                                     "documents": [{"id": "approved_doc"}]})
     out = _call(p, "supermemory-forget", query="synthetic")
     assert out == {"success": True, "message": "Forgot the best non-quarantined match.", "id": "r2"}
     assert p._client.forgotten_ids == [("r2", None)]
@@ -231,7 +274,8 @@ def test_forget_by_query_skips_quarantined_match(home):
 def test_prefetch_uses_id_bearing_search_when_primary_has_quarantine(home):
     p = _provider(home, {"container_tag": "hermes_{identity}",
                          "quarantined_memory_ids": {"hermes_{identity}": ["r1"]}})
-    p._client.search_results.append({"id": "r2", "memory": "approved cited result", "similarity": 0.8})
+    p._client.search_results.append({"id": "r2", "memory": "approved cited result", "similarity": 0.8,
+                                     "documents": [{"id": "approved_doc"}]})
     p.on_turn_start(1, "synthetic")
     recalled = p.prefetch("synthetic")
     assert "approved cited result" in recalled
