@@ -983,16 +983,17 @@ def _protocol_violation_streak(conn: sqlite3.Connection, task_id: str) -> int:
     for runs recorded before the marker existed.
     """
     streak = 0
+    # Neutral outcomes are filtered in SQL, not skipped inside the window: a long quota wall or
+    # busy hold (any number of runs) must not push an earlier violation out of the scan.
     rows = conn.execute(
         "SELECT outcome, error, metadata FROM task_runs "
         "WHERE task_id = ? AND ended_at IS NOT NULL "
+        "  AND COALESCE(outcome, '') NOT IN ('rate_limited', 'profile_busy') "
         "ORDER BY id DESC LIMIT ?",
         (task_id, _PROTOCOL_VIOLATION_SCAN_LIMIT),
     ).fetchall()
     for row in rows:
         outcome = row["outcome"] or ""
-        if outcome in ("rate_limited", "profile_busy"):
-            continue
         if outcome == "crashed" and (
             _kb._json_dict(row["metadata"]).get("protocol_violation")
             or "protocol violation" in (row["error"] or "")
@@ -1004,28 +1005,34 @@ def _protocol_violation_streak(conn: sqlite3.Connection, task_id: str) -> int:
 
 
 def _profile_busy_streak(conn: sqlite3.Connection, task_id: str) -> int:
-    """Count the task's trailing run of closed ``profile_busy`` runs (any other outcome breaks it)."""
-    streak = 0
-    for row in conn.execute(
-        "SELECT outcome FROM task_runs WHERE task_id = ? AND ended_at IS NOT NULL "
-        "ORDER BY id DESC LIMIT ?",
-        (task_id, _PROTOCOL_VIOLATION_SCAN_LIMIT),
-    ).fetchall():
-        if (row["outcome"] or "") != "profile_busy":
-            break
-        streak += 1
-    return streak
+    """Count the task's trailing run of closed ``profile_busy`` runs (any other outcome breaks it).
+
+    Exact at any length (no scan window): the busy runs newer than the newest closed run
+    that was not ``profile_busy``.
+    """
+    row = conn.execute(
+        "SELECT COUNT(*) AS n FROM task_runs "
+        "WHERE task_id = ? AND ended_at IS NOT NULL AND outcome = 'profile_busy' "
+        "  AND id > COALESCE((SELECT MAX(id) FROM task_runs WHERE task_id = ? "
+        "      AND ended_at IS NOT NULL AND COALESCE(outcome, '') != 'profile_busy'), 0)",
+        (task_id, task_id),
+    ).fetchone()
+    return int(row["n"] or 0)
 
 
 def _profile_busy_backoff_seconds(streak: int) -> int:
     """Wait before re-spawning after ``streak`` consecutive busy runs: base doubling per run, capped."""
-    base = _kb._env_int("HERMES_KANBAN_PROFILE_BUSY_BACKOFF_SECONDS", DEFAULT_PROFILE_BUSY_BACKOFF_SECONDS)
-    cap = _kb._env_int(
+    # Overrides stay inside the contract: a wait is never below 1s (no every-tick respawn) and
+    # never above the cap (a base larger than the cap is held to the cap).
+    base = max(1, _kb._env_int(
+        "HERMES_KANBAN_PROFILE_BUSY_BACKOFF_SECONDS", DEFAULT_PROFILE_BUSY_BACKOFF_SECONDS,
+    ))
+    cap = max(1, _kb._env_int(
         "HERMES_KANBAN_PROFILE_BUSY_BACKOFF_MAX_SECONDS", DEFAULT_PROFILE_BUSY_BACKOFF_MAX_SECONDS,
-    )
+    ))
     # Exponent clamped so a very long streak cannot build a huge integer before the cap applies.
-    exponent = min(max(int(streak), 1) - 1, 16)
-    return int(min(base * (2 ** exponent), max(cap, base)))
+    exponent = min(max(int(streak), 1) - 1, 32)
+    return int(min(base * (2 ** exponent), cap))
 
 
 def _book_profile_busy(dead: "_DeadWorker", streak: int) -> None:
@@ -1644,7 +1651,8 @@ def check_respawn_guard(
     latest_run = conn.execute(
         "SELECT outcome, ended_at, metadata FROM task_runs "
         "WHERE task_id = ? AND ended_at IS NOT NULL "
-        "ORDER BY ended_at DESC LIMIT 1",
+        # ``id`` breaks same-second ties so the newest run decides (checker round 1).
+        "ORDER BY ended_at DESC, id DESC LIMIT 1",
         (task_id,),
     ).fetchone()
     if latest_run is not None and latest_run["outcome"] == "spawn_failed":
