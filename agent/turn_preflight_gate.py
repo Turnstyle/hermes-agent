@@ -11,6 +11,11 @@ from contextlib import suppress
 from typing import Any
 
 from agent.message_metadata import append_message
+from agent.turn_cron_budget import (
+    CRON_MAX_TOKENS_EXIT,
+    apply_cron_token_budget,
+    cron_token_budget_stop_message,
+)
 from agent.turn_context import _compression_warrants_another_preflight_pass
 from agent.turn_preflight import PreflightGateVerdict, run_preflight_compression
 
@@ -42,6 +47,20 @@ def run_preflight_gate(
         _provider_overflow_recovery_pending=_provider_overflow_recovery_pending,
         _last_preflight_pressure=None,
     )
+
+    # A budgeted cron fire reserves this request's pressure against its per-fire token cap,
+    # then either clamps the response allowance or stops before the provider is called.
+    if apply_cron_token_budget(agent, request_pressure_tokens):
+        v.final_response = cron_token_budget_stop_message(agent, request_pressure_tokens)
+        v.failed = False
+        v._turn_exit_reason = CRON_MAX_TOKENS_EXIT
+        append_message(messages, {"role": "assistant", "content": v.final_response})
+        v.api_call_count -= 1
+        agent._api_call_count = v.api_call_count
+        with suppress(Exception):
+            agent.iteration_budget.refund()
+        v.action = "break"
+        return v
 
     _runtime_context_error = _ollama_context_limit_error(agent, request_pressure_tokens)
     if _runtime_context_error:
