@@ -55,9 +55,18 @@ def _carried_commits(git_cmd: list[str], cwd: Path, branch_ref: str, target_ref:
     Git cannot list them. No merge-base: an orphan history is carried in full. Earlier values of
     *target_ref* count as origin's own history, so neither an upstream force-push nor a shallow graft
     (a depth-1 ``hermes update --check`` fetch hides that origin/main descends from HEAD) reads as
-    local work."""
-    negated = "".join(f"^{rev}\n" for rev in (target_ref, *_target_history(git_cmd, cwd, target_ref)))
-    listed = _git(git_cmd, cwd, "rev-list", "--ignore-missing", "--stdin", branch_ref, stdin=negated)
+    local work. The branch side is strict: a tip that is not a readable commit is None (rev-list
+    would skip a missing one under ``--ignore-missing`` and lists nothing for a non-commit). An
+    exclusion Git cannot read is dropped instead, which can only over-count."""
+    if _git(git_cmd, cwd, "cat-file", "-e", f"{branch_ref}^{{commit}}").returncode != 0:
+        return None
+    history = (target_ref, *_target_history(git_cmd, cwd, target_ref))
+    checked = _git(git_cmd, cwd, "cat-file", "--batch-check=%(objectname) %(objecttype)",
+                   stdin="".join(f"{rev}^{{commit}}\n" for rev in history))
+    if checked.returncode != 0:
+        return None
+    negated = "".join(f"^{line.split()[0]}\n" for line in checked.stdout.splitlines() if line.endswith(" commit"))
+    listed = _git(git_cmd, cwd, "rev-list", "--stdin", branch_ref, stdin=negated)
     return listed.stdout.split() if listed.returncode == 0 else None
 
 
