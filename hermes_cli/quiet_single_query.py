@@ -29,6 +29,24 @@ _MAX_QUIET_NOTIFY_ROUNDS = 8
 # (and a 75 as the same rate-limit requeue) whichever process notices the death.
 KANBAN_WORKER_EXIT_TRAILER = "[kanban-worker-exit] rc="
 
+# Line a Kanban worker writes to its own log, just before the exit trailer, when it never started
+# its turn because its profile was at the active-session cap:
+# ``[kanban-worker-busy] reason=MAX_CONCURRENT_SESSIONS run=<run id>``. Together with an
+# EX_TEMPFAIL exit it tells the dead-worker sweep "profile busy" (requeue with backoff, no failure
+# counted) apart from a provider quota wall. Bound to the run id so a marker left in the
+# append-mode log by an earlier run can never classify a later one. Wire format: never change it
+# without changing the dispatcher's reader on every node in the same carry.
+KANBAN_WORKER_BUSY_MARKER = "[kanban-worker-busy] reason="
+
+
+def write_worker_busy_marker(reason: str) -> None:
+    """Write the run-bound busy marker for a Kanban worker; a no-op outside one (or without a run id)."""
+    run_id = os.environ.get("HERMES_KANBAN_RUN_ID", "").strip()
+    if not (os.environ.get("HERMES_KANBAN_TASK") and run_id.isdigit()):
+        return
+    with contextlib.suppress(Exception):
+        print(f"\n{KANBAN_WORKER_BUSY_MARKER}{reason} run={int(run_id)}", file=sys.stderr, flush=True)
+
 
 def exit_single_query(code: int) -> None:
     """``sys.exit(code)`` for a one-shot turn; a Kanban worker first writes the exit trailer to its log."""

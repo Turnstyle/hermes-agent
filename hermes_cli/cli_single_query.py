@@ -474,9 +474,13 @@ def _run_single_query_mode(cli, query, image, quiet, oneshot, stream_json: bool 
     # isn't engaged) and takes the deterministic approvals.single_query_mode path instead of waiting the
     # full timeout. See #86878.
     os.environ["HERMES_SINGLE_QUERY_SESSION"] = "1"
-    from hermes_cli.quiet_single_query import exit_single_query
+    from hermes_cli.quiet_single_query import exit_single_query, write_worker_busy_marker
     if not cli._claim_active_session("cli", stderr=bool(quiet)):
-        exit_single_query(_session_refusal_exit_code(cli))
+        refusal_code = _session_refusal_exit_code(cli)
+        if refusal_code != 1:
+            # Capacity refusal only: the dispatcher books this run ``profile_busy`` (t_76b0d62d).
+            write_worker_busy_marker(getattr(cli, "_active_session_refusal_reason", ""))
+        exit_single_query(refusal_code)
     try:
         query, single_query_images = _collect_query_images(query, image)
         single_query_image_urls = _collect_kanban_task_images(single_query_images)
