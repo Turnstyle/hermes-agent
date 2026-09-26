@@ -90,7 +90,15 @@ When the parked branch has **uncommitted changes** (dirty tree), Hermes does **n
 
 ### Local commits on the target branch
 
-Commits made directly on the update target (`main`) stop fast-forwards once upstream moves, and the checkout cannot tell them apart from an upstream force-push, so the update resets `main` to `origin/main`. Before the reset it saves the old HEAD as `refs/hermes-update-backups/diverged-main-<stamp>-<sha>` and prints that ref along with how many commits leave the branch. `git log origin/main..<ref>` lists them; `git branch <name> <ref>` or `git cherry-pick` brings them back. Re-running the installer over an existing checkout (`install.sh` / `install.ps1`, which desktop bootstrap does) writes the same refs. Whenever `hermes update` writes one, it keeps the ten newest per kind and drops any older than 30 days. To carry patches across updates, keep them on a custom branch with `updates.parked_branch_strategy: update_in_place` instead.
+Commits made directly on the update target (`main`) stop fast-forwards once upstream moves. By default `hermes update` then **changes nothing**: it decides before it touches the checkout, so HEAD, the branches, the index and the working tree (npm lockfile edits included) stay as they were. It prints the carried commits (first 20) and exits 1 with `code update SKIPPED: carried local commits`; the update receipt records the skip. A carried commit is one `origin/main` never pointed at or contained, going by its reflog: a history with no common ancestor counts in full, and if Git cannot count them the update is refused too, while commits an upstream force-push removed, or a shallow checkout merely cannot connect to `origin/main`, do not count. To proceed, either rebase the commits onto the update yourself (`git rebase origin/main main`, then `hermes update`), or let updates drop them:
+
+```yaml
+# ~/.hermes/config.yaml
+updates:
+  carried_commits_policy: reset   # default: refuse
+```
+
+(`hermes config set updates.carried_commits_policy reset` does the same; it only counts while `config.yaml` loads without errors.) With `reset`, or when nothing is carried, the update resets `main` to `origin/main`. Before the reset it saves the old HEAD as `refs/hermes-update-backups/diverged-main-<stamp>-<sha>` (a refusal saves it too) and prints that ref along with how many commits leave the branch. `git log origin/main..<ref>` lists them; `git branch <name> <ref>` or `git cherry-pick` brings them back. Re-running the installer over an existing checkout (`install.sh` / `install.ps1`, which desktop bootstrap does) writes the same refs. Whenever `hermes update` writes one, it keeps the ten newest per kind and drops any older than 30 days. To carry patches across updates, keep them on a custom branch with `updates.parked_branch_strategy: update_in_place` instead.
 
 ### Local changes on non-interactive updates
 

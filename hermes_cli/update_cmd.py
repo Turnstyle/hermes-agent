@@ -97,8 +97,9 @@ from hermes_cli.update_cmd_git import (  # noqa: F401
     _has_upstream_remote, _is_fork, _locate_real_git, _mark_skip_upstream_prompt,
     _normalize_managed_eol, _portable_git_candidates, _print_fetch_failure,
     _print_parked_branch_kept_notice, _print_parked_branch_skip_warning,
-    _prune_orphan_rescue_refs, _should_skip_upstream_prompt, _sync_fork_with_upstream,
+    _prune_orphan_rescue_refs, _rescue_ref_name, _should_skip_upstream_prompt, _sync_fork_with_upstream,
     _sync_with_upstream_if_needed)
+from hermes_cli.update_cmd_carried import _refuse_update_over_carried_commits
 from hermes_cli.update_cmd_maint import (  # noqa: F401
     _PRE_UPDATE_SNAPSHOT_KEEP, _PRE_UPDATE_SNAPSHOT_MAX_FILE_SIZE,
     _clear_stale_sqlite_sidecars,
@@ -803,12 +804,7 @@ def _reconcile_diverged_checkout(git_cmd, branch: str, pre_pull_sha) -> None:
     has_common_ancestor = bool(
         merge_base_result.returncode == 0 and merge_base_result.stdout.strip())
     if pre_pull_sha:
-        from datetime import datetime as _dt, timezone
-        # SHA suffix so two updates in the same second get distinct refs.
-        kind = "diverged" if has_common_ancestor else "orphan"
-        rescue_ref = (
-            f"refs/hermes-update-backups/{kind}-{branch}-"
-            f"{_dt.now(timezone.utc).strftime('%Y%m%d-%H%M%S')}-{pre_pull_sha[:12]}")
+        rescue_ref = _rescue_ref_name(branch, pre_pull_sha, "diverged" if has_common_ancestor else "orphan")
         head = (
             f"  ⚠ Local history has diverged from origin/{branch} — "
             if has_common_ancestor else
@@ -982,12 +978,23 @@ def _apply_parked_branch_guard(
 def _prepare_checkout_for_update(
     git_cmd, branch, current_branch, *, is_fork, assume_yes, gateway_mode, gw_input_fn,
     switch_branch, _windows_gateway_resume):
-    """Parked-branch guard, land on the target, stash, count new commits. Exits when the
-    checkout is unsafe to move or the target is missing. ``commit_count`` is 0 when up to
-    date, -1 when tips differ but the shallow count is unrecoverable."""
+    """Parked-branch guard, carried-commits refusal, churn cleanup, land on the target, stash,
+    count new commits. Exits, before touching the checkout, when it is unsafe to move or the
+    update would drop commits carried on the target branch; exits when the target is missing.
+    ``commit_count`` is 0 when up to date, -1 when tips differ but the shallow count is
+    unrecoverable."""
     parked_branch_switched, in_place_update, switch_block_reason = _apply_parked_branch_guard(
         git_cmd, branch, current_branch, switch_branch=switch_branch,
         _windows_gateway_resume=_windows_gateway_resume)
+    if not in_place_update:
+        # The checkout lands on local <branch>, whose ff-impossible pull resets it.
+        _refuse_update_over_carried_commits(
+            git_cmd, branch, f"origin/{branch}", windows_gateway_resume=_windows_gateway_resume)
+
+    # Only after every refusal: npm rewrites package-lock.json non-deterministically and line-ending
+    # churn is machine-made dirt; both would otherwise force an autostash every update.
+    _discard_lockfile_churn(git_cmd, _m().PROJECT_ROOT)
+    _normalize_managed_eol(git_cmd, _m().PROJECT_ROOT)
 
     if not in_place_update and current_branch == "HEAD" != branch:
         print(f"  ⚠ Currently on detached HEAD — switching to {branch} for update...")
@@ -1174,11 +1181,6 @@ def _prepare_git_command() -> tuple[bool, list, bool]:
     # swap in a real binary up front so git survives instead of degrading to ZIP.
     # See #87876.
     git_cmd = _ensure_non_trampoline_git(git_cmd)
-
-    # Before stash/branch logic: npm rewrites package-lock.json non-deterministically and
-    # line-ending churn is machine-made dirt; both would otherwise force an autostash every update.
-    _discard_lockfile_churn(git_cmd, _m().PROJECT_ROOT)
-    _normalize_managed_eol(git_cmd, _m().PROJECT_ROOT)
 
     origin_url = _m()._get_origin_url(git_cmd, _m().PROJECT_ROOT)
     is_fork = _is_fork(origin_url)

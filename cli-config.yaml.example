@@ -2139,6 +2139,16 @@ updates:
   #             installs where local source edits should not persist
   non_interactive_local_changes: "stash"
 
+  # What updates do when the update branch (main) carries local commits that
+  # origin/main never had, so a fast-forward is impossible.
+  #
+  #   refuse - skip the code update and change nothing; name the commits and
+  #            exit 1 (default). History Git cannot compare is refused too.
+  #   reset  - reset to origin; the old HEAD is kept under
+  #            refs/hermes-update-backups/ for 30 days. Only honoured while
+  #            this file loads without errors.
+  carried_commits_policy: "refuse"
+
 
 # =============================================================================
 # Web Dashboard
