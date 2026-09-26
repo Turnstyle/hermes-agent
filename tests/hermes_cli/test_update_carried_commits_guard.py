@@ -8,16 +8,22 @@ the update exited 0.
 
 ``updates.carried_commits_policy: refuse`` (the default) stops before the reset: HEAD, branch and
 working tree stay as they were, the rescue ref is still written, the carried commits are named, and
-the update exits 1. Only a config.yaml read successfully by this run can say ``reset``. Orphan
-divergence (no common ancestor) and plain fast-forwards are unaffected. The reset itself is covered
-in test_update_diverged_rescue_ref.py.
+the update exits 1. Only a config.yaml read successfully by this run can say ``reset``. Carried
+commits are the ones ``origin/<branch>`` has never pointed at or reached: an orphan history counts,
+while shallow-graft artifacts and upstream force-pushes (commits
+origin itself once served) do not block the update. The reset itself is covered in
+test_update_diverged_rescue_ref.py.
 """
 
 from __future__ import annotations
 
+import shutil
+import subprocess
+
 import pytest
 
 from hermes_cli import main as hermes_main, update_cmd, update_receipt
+from hermes_cli import source_check
 from hermes_cli.config import load_config
 from hermes_cli.config_read_errors import FailedConfigRead
 from hermes_constants import get_hermes_home
@@ -43,6 +49,8 @@ def _hand_off(t, monkeypatch):
     t.args.branch, t.args.channel, t.args.keep_stash = "main", "main", True
     monkeypatch.setattr(hermes_main, "_sync_with_upstream_if_needed", update_cmd._sync_with_upstream_if_needed)
     monkeypatch.setattr(update_cmd, "_UPDATE_CRITICAL_MODULES", ())
+    # A shallow checkout asks GitHub for the behind count; the fixture is offline.
+    monkeypatch.setattr(source_check, "_github_compare_behind", lambda *_a, **_k: None)
 
 
 def _set_policy(policy):
@@ -67,6 +75,18 @@ def _refused(t):
         hermes_main.cmd_update(t.args)
     assert refused.value.code == 1
     assert t.requests == [], "a refused update must not arm the completion phase"
+
+
+def _fail_git(monkeypatch, failing):
+    """Make every ``git <failing>`` call fail as Git would on a damaged repository."""
+    run = subprocess.run
+
+    def fault(command, *args, **kwargs):
+        if failing(command):
+            return subprocess.CompletedProcess(command, 128, stdout="", stderr="fatal: fixture refusal")
+        return run(command, *args, **kwargs)
+
+    monkeypatch.setattr(subprocess, "run", fault)
 
 
 def test_carried_commits_refuse_the_update_before_anything_moves(update_tree, monkeypatch, capsys):
@@ -116,10 +136,56 @@ def test_unreadable_config_refuses_even_when_the_saved_policy_is_reset(update_tr
     assert "code update SKIPPED: carried local commits" in capsys.readouterr().out
 
 
+@pytest.mark.parametrize("shape", ["orphan", "merge-base-fails"])
+def test_carried_commits_git_cannot_rule_out_refuse(update_tree, monkeypatch, capsys, shape):
+    """No common ancestor and a failing merge-base are never "nothing carried"."""
+    t = update_tree
+    if shape == "orphan":
+        git(t.clone, "checkout", "-q", "--orphan", "fresh")
+        _commit(t.clone, "orphan.txt", "orphan\n")
+        git(t.clone, "branch", "-D", "main")
+        git(t.clone, "branch", "-m", "main")
+    else:
+        _carry(t)
+    before = _state(t)
+    _hand_off(t, monkeypatch)
+    if shape == "merge-base-fails":
+        _fail_git(monkeypatch, lambda command: "merge-base" in command)
+
+    _refused(t)
+
+    assert _state(t) == before
+    assert "code update SKIPPED: carried local commits" in capsys.readouterr().out
+
+
+def _shallow_install_after_check(t):
+    """A legacy installer checkout (``clone --depth 1``) after ``hermes update --check`` fetched
+    origin/main at depth 1: the graft hides that the installed commit is origin/main's ancestor."""
+    git(t.origin, "reset", "-q", "--hard", t.base)
+    git(t.clone.parent, "-c", "advice.detachedHead=false", "clone", "-q", "--depth", "1",
+        t.origin.as_uri(), "shallow")
+    git(t.origin, "reset", "-q", "--hard", t.newer)
+    git(t.clone.parent / "shallow", "fetch", "-q", "--depth", "1", "origin", "main")
+    shutil.rmtree(t.clone)
+    (t.clone.parent / "shallow").rename(t.clone)
+    assert git(t.clone, "rev-parse", "--is-shallow-repository") == "true"
+    assert git(t.clone, "rev-list", "--count", "origin/main..HEAD") == "1", "the graft makes HEAD look carried"
+
+
+def _upstream_force_push(t):
+    """The checkout sits where origin/main used to be; upstream then rewrote main without it."""
+    git(t.clone, "checkout", "-q", "main")
+    git(t.clone, "fetch", "-q", "origin", "main")
+    git(t.clone, "merge", "-q", "--ff-only", "origin/main")
+    git(t.origin, "reset", "-q", "--hard", t.wanted)
+    t.newer = _commit(t.origin, "content.txt", "rewritten upstream\n", "rewritten upstream")
+
+
 @pytest.mark.parametrize("shape,policy,rescued", [
     ("carried", "reset", True),           # opted in: the reset, old HEAD behind a rescue ref
     ("behind", None, False),              # nothing carried: plain fast-forward
-    ("orphan", None, True),               # no common ancestor: the orphan reset under the default policy
+    ("shallow-after-check", None, True),  # graft artifact, nothing carried: the orphan reset
+    ("force-push", None, True),           # origin itself served the dropped commit
 ])
 def test_update_still_lands_when_nothing_is_carried_or_reset_is_chosen(
         update_tree, monkeypatch, capsys, shape, policy, rescued):
@@ -128,11 +194,10 @@ def test_update_still_lands_when_nothing_is_carried_or_reset_is_chosen(
         _carry(t)
     elif shape == "behind":
         git(t.clone, "checkout", "-q", "main")
+    elif shape == "shallow-after-check":
+        _shallow_install_after_check(t)
     else:
-        git(t.clone, "checkout", "-q", "--orphan", "fresh")
-        _commit(t.clone, "orphan.txt", "orphan\n")
-        git(t.clone, "branch", "-D", "main")
-        git(t.clone, "branch", "-m", "main")
+        _upstream_force_push(t)
     if policy:
         _set_policy(policy)
     pre = git(t.clone, "rev-parse", "HEAD")
