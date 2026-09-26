@@ -1,6 +1,6 @@
 """`hermes update` must not silently drop commits carried on the update target branch.
 
-Card t_0382ebfc (2026-09-25): the desktop hand-off ran ``hermes update --yes --gateway --keep-stash
+Field incident (2026-09-25): the desktop hand-off ran ``hermes update --yes --gateway --keep-stash
 --branch main`` on an install whose ``main`` carried 13 local commits. The fast-forward failed, the
 same-branch reconcile parked HEAD behind a rescue ref and reset --hard to ``origin/main``, the dirty
 files stayed parked in the autostash, the gateway restarted on code without the carried fixes, and

@@ -153,6 +153,12 @@ _SCHEMA_OVERRIDES: Dict[str, Dict[str, Any]] = {
         "Terminal updates always ask, regardless of this setting.",
         "stash", "discard",
     ),
+    "updates.carried_commits_policy": _select(
+        "When main carries local commits that are not on origin, 'refuse' skips the code update "
+        "and changes nothing (the update fails loudly, naming the commits); 'reset' resets main "
+        "to origin, keeping the old HEAD under a rescue ref.",
+        "refuse", "reset",
+    ),
     "updates.refresh_cua_driver": {
         "type": "boolean",
         "description": (

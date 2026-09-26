@@ -191,6 +191,44 @@ def _print_parked_branch_kept_notice(current_branch: str, target_branch: str, un
     )
 
 
+def _carried_commits_to_refuse(git_cmd: list[str], cwd: Path, target_ref: str) -> int:
+    """Commits on HEAD that a reset to *target_ref* would drop, or 0 when
+    ``updates.carried_commits_policy`` is ``reset``. Anything else (the default ``refuse``, a typo, an
+    unreadable config) refuses: an update that silently drops carried fixes is the worse failure."""
+    from hermes_cli.update_cmd import _updates_config
+    from hermes_cli.update_cmd_common import _best_effort
+    policy = "refuse"
+    with _best_effort("Could not read updates.carried_commits_policy: %s"):
+        policy = str(_updates_config().get("carried_commits_policy", "refuse")).strip().lower()
+    if policy == "reset":
+        return 0
+    return max(_count_commits_between(git_cmd, cwd, target_ref, "HEAD"), 0)
+
+
+def _print_carried_commits_refusal(
+    git_cmd: list[str], cwd: Path, branch: str, target_ref: str, carried: int, rescue_ref: Optional[str],
+) -> None:
+    """LOUD block: the reset to *target_ref* was refused because it would drop *carried* commits."""
+    log = _git_stdout(git_cmd, ["log", "--oneline", "-20", f"{target_ref}..HEAD"], cwd) or ""
+    print(f"\n{_BAR}\n⚠ CODE UPDATE SKIPPED — '{branch}' carries {carried} local commit(s) not on {target_ref}")
+    print(f"  Updating would reset '{branch}' to {target_ref} and drop them "
+          "(updates.carried_commits_policy: refuse).")
+    print("  Nothing was changed: HEAD, the branch and the working tree are as they were.")
+    print(f"\n  git log --oneline {target_ref}..HEAD{' (first 20)' if carried > 20 else ''}:")
+    for line in log.splitlines():
+        print(f"    {line}")
+    if rescue_ref:
+        print(f"  HEAD is also saved as {rescue_ref}.")
+    print(
+        f"\n  To keep them, rebase them onto the update, then update again\n"
+        f"  (commit or stash uncommitted changes first):\n"
+        f"    git -C {cwd} rebase {target_ref} && hermes update\n"
+        f"  To let updates reset '{branch}' and drop them (a rescue ref keeps them reachable\n"
+        f"  for {_ORPHAN_RESCUE_REF_MAX_AGE_DAYS} days):\n"
+        f"    hermes config set updates.carried_commits_policy reset && hermes update\n{_BAR}"
+    )
+
+
 OFFICIAL_REPO_URLS = {
     "https://github.com/NousResearch/hermes-agent.git",
     "git@github.com:NousResearch/hermes-agent.git",

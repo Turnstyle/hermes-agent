@@ -2352,6 +2352,12 @@ DEFAULT_CONFIG = {
         # merge origin/<target> INTO it after leaving a pre-update-<stamp> tag; a conflict stops the
         # update cleanly. `hermes update --switch-branch` overrides to switch for one run.
         "parked_branch_strategy": "switch",
+        # The update branch itself (main) carries local commits not on origin, so a fast-forward is
+        # impossible. refuse = change nothing (HEAD, branch, working tree; an autostash is put back),
+        # save HEAD under refs/hermes-update-backups/, name the commits, exit 1 with the code update
+        # SKIPPED. reset = reset to origin behind that saved ref (the commits leave the branch).
+        # Orphan divergence (no common ancestor) always resets.
+        "carried_commits_policy": "refuse",
         # Refresh an installed cua-driver during `hermes update` (best-effort, macOS only). Turn off
         # e.g. on non-admin accounts where /Applications isn't writable.
         "refresh_cua_driver": True,
