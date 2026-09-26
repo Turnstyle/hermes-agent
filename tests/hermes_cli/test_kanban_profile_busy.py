@@ -191,6 +191,48 @@ def test_marker_must_be_a_whole_line(kanban_home):
         assert _last_run(conn, tid)["outcome"] == "rate_limited"
 
 
+def test_truncated_log_tail_cannot_turn_a_midline_marker_into_a_whole_line(kanban_home):
+    """Checker round 2: cutting a long, newline-free line at the 4,000-byte tail boundary
+    must not make its embedded marker appear at ``^`` and classify as profile busy."""
+    with kbc.connect() as conn:
+        tid = kb.create_task(conn, title="t", assignee="a")
+        pid = 84001
+        run_id = _claim_dead(conn, tid, pid)
+        marker = f"{KANBAN_WORKER_BUSY_MARKER}MAX_CONCURRENT_SESSIONS run={run_id}"
+        # Seven-byte prefix is cut away by read_worker_log(tail_bytes=4000).
+        _append_log(tid, "prefix " + marker + " " * (4000 - len(marker)))
+        kbd._record_worker_exit(pid, kb.KANBAN_RATE_LIMIT_EXIT_CODE << 8)
+        kbd.detect_crashed_workers(conn)
+        assert _last_run(conn, tid)["outcome"] == "rate_limited"
+
+
+def test_expired_claim_busy_exit_is_classified_before_ttl_reclaim(kanban_home):
+    """Checker round 2: an expired claim must not charge a genuine busy exit as reclaimed.
+    Two expired busy attempts stay ready, do not increment failures, and never give up."""
+    with kbc.connect() as conn:
+        tid = kb.create_task(conn, title="t", assignee="a")
+        for i in range(2):
+            pid = 84100 + i
+            run_id = _claim_dead(conn, tid, pid)
+            _append_log(tid, _busy_exit_log(run_id))
+            kbd._record_worker_exit(pid, kb.KANBAN_RATE_LIMIT_EXIT_CODE << 8)
+            conn.execute("UPDATE tasks SET claim_expires=? WHERE id=?", (int(time.time()) - 1, tid))
+            conn.commit()
+            result = kbd.DispatchResult()
+            kbd._run_reclaim_phase(
+                conn, result, stale_timeout_seconds=86400,
+                failure_limit=kbd.DEFAULT_FAILURE_LIMIT, reconcile_orphans=False,
+            )
+            task = kb.get_task(conn, tid)
+            assert tid in result.profile_busy
+            assert result.reclaimed == 0
+            assert task is not None
+            assert task.status == "ready"
+            assert task.consecutive_failures == 0
+            assert _last_run(conn, tid)["outcome"] == "profile_busy"
+        assert "gave_up" not in _events(conn, tid)
+
+
 # --------------------------------------------------------------------- bounded backoff
 
 
@@ -310,11 +352,11 @@ def test_same_second_crash_then_busy_still_backs_off(kanban_home):
 @pytest.mark.parametrize(
     "base, cap, streak, wait",
     [
-        ("0", None, 1, 1),        # zero base cannot mean "retry every tick"
-        ("-5", None, 1, 60),      # invalid -> default
+        ("0", None, 1, 60),        # contract floor: never below 60s
+        ("-5", None, 1, 60),       # invalid -> default
         ("1000", "900", 1, 900),  # base above the cap is held to the cap
-        (None, "0", 3, 1),        # zero cap is floored, never 0
-        (None, "100000", 20, 100000),
+        (None, "0", 3, 60),        # cap is also held to the contract floor
+        (None, "100000", 20, 900), # contract ceiling: never above 900s
     ],
 )
 def test_backoff_overrides_stay_bounded(monkeypatch, base, cap, streak, wait):
