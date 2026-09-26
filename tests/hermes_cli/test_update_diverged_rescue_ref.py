@@ -1,13 +1,12 @@
 """`hermes update` must not drop local commits without leaving a named way back.
 
-When the checkout sits on the update's target branch, its history has
-diverged, and ``updates.carried_commits_policy`` is ``reset``, the update resets
-hard to ``origin/<branch>``. Divergence there has two indistinguishable causes:
-an upstream force-push (nothing local is lost) and local commits on that branch
-(everything is). The update must park the old HEAD under
-``refs/hermes-update-backups/`` first and tell the user the ref name. The
-default ``refuse`` policy is covered in ``test_update_carried_commits_guard.py``;
-the installer update paths in ``tests/scripts/install/test_install_diverged_rescue_ref.py``.
+When the checkout sits on the update's target branch and its history has
+diverged, the update resets hard to ``origin/<branch>``. Divergence there has
+two indistinguishable causes: an upstream force-push (nothing local is lost)
+and local commits on that branch (everything is). The update must park the old
+HEAD under ``refs/hermes-update-backups/`` first and tell the user the ref name.
+The installer update paths are covered in
+``tests/scripts/install/test_install_diverged_rescue_ref.py``.
 """
 
 from __future__ import annotations
@@ -17,7 +16,6 @@ import subprocess
 import pytest
 
 from hermes_cli import update_cmd
-from hermes_constants import get_hermes_home
 
 
 GIT = ["git"]
@@ -75,8 +73,6 @@ def test_hermes_update_keeps_local_commit_behind_a_rescue_ref(
     """The real apply path: ff-only fails, the reconcile resets, the local commit stays reachable."""
     checkout, local_sha = diverged_checkout
     monkeypatch.setattr(update_cmd._m(), "PROJECT_ROOT", checkout)
-    (get_hermes_home() / "config.yaml").write_text(
-        "updates:\n  carried_commits_policy: reset\n", encoding="utf-8")
 
     update_cmd._pull_updates(
         GIT, "main", None, prompt_for_restore=False, gw_input_fn=None,

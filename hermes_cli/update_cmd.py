@@ -73,7 +73,7 @@ from hermes_cli.update_cmd_stash import (  # noqa: F401
     _AUTOSTASH_NAME_PREFIX, _AUTOSTASH_WARN_AGE_DAYS, _discard_stashed_changes,
     _git_untracked_paths, _park_stashed_changes, _print_stash_cleanup_guidance,
     _reject_unsafe_stash_restore, _resolve_stash_selector, _restore_stashed_changes,
-    _restored_python_paths, _return_stashed_changes, _stash_apply_failed_only_on_existing_untracked,
+    _restored_python_paths, _stash_apply_failed_only_on_existing_untracked,
     _stash_local_changes_if_needed, _warn_orphaned_update_autostashes)
 from hermes_cli.update_cmd_config import (  # noqa: F401
     _LAST_SIBLING_SNAPSHOTS, _check_and_apply_config_migration, _migrate_sibling_profile_configs,
@@ -88,13 +88,14 @@ from hermes_cli.old_updater_deps import (  # noqa: F401 — frozen updater surfa
 from hermes_cli.update_cmd_git import (  # noqa: F401
     OFFICIAL_REPO_URL, OFFICIAL_REPO_URLS, SKIP_UPSTREAM_PROMPT_FILE, _ORPHAN_RESCUE_REFS_TO_KEEP,
     _ORPHAN_RESCUE_REF_MAX_AGE_DAYS, _add_upstream_remote, _assess_parked_branch_switch,
-    _branch_head_label, _branch_head_suffix, _carried_commits_to_refuse, _classify_fetch_failure,
-    _count_commits_between, _discard_lockfile_churn, _ensure_non_trampoline_git, _get_origin_url,
-    _git_is_trampoline, _has_upstream_remote, _is_fork, _locate_real_git, _mark_skip_upstream_prompt,
-    _normalize_managed_eol, _portable_git_candidates, _print_carried_commits_refusal,
-    _print_fetch_failure, _print_parked_branch_kept_notice, _print_parked_branch_skip_warning,
-    _prune_orphan_rescue_refs, _should_skip_upstream_prompt, _sync_fork_with_upstream,
+    _branch_head_label, _branch_head_suffix, _classify_fetch_failure, _count_commits_between,
+    _discard_lockfile_churn, _ensure_non_trampoline_git, _get_origin_url, _git_is_trampoline,
+    _has_upstream_remote, _is_fork, _locate_real_git, _mark_skip_upstream_prompt,
+    _normalize_managed_eol, _portable_git_candidates, _print_fetch_failure,
+    _print_parked_branch_kept_notice, _print_parked_branch_skip_warning,
+    _prune_orphan_rescue_refs, _rescue_ref_name, _should_skip_upstream_prompt, _sync_fork_with_upstream,
     _sync_with_upstream_if_needed)
+from hermes_cli.update_cmd_carried import _refuse_update_over_carried_commits
 from hermes_cli.update_cmd_maint import (  # noqa: F401
     _PRE_UPDATE_SNAPSHOT_KEEP, _PRE_UPDATE_SNAPSHOT_MAX_FILE_SIZE, _clear_stale_sqlite_sidecars,
     _checkout_version, _ensure_acp_launcher, _ensure_fhs_path_guard, _finish_dashboard_update_cleanup,
@@ -700,11 +701,9 @@ def _complete_source_update(request: dict | None) -> None:
         print(f"→ Source subscription moved to {request['channel_retirement']['destination']}")
 
 
-def _reconcile_diverged_checkout(git_cmd, branch: str, pre_pull_sha, *, target_ref=None) -> bool:
+def _reconcile_diverged_checkout(git_cmd, branch: str, pre_pull_sha, *, target_ref=None) -> None:
     """Fast-forward failed: merge on a custom branch (local commits survive) or reset --hard on the
-    same branch after parking the old HEAD behind a rescue ref. Returns False, HEAD untouched, when
-    ``updates.carried_commits_policy`` refuses a reset that would drop local commits; True once
-    HEAD is on the target. ``sys.exit(1)`` on failure."""
+    same branch after parking the old HEAD behind a rescue ref. ``sys.exit(1)`` on failure."""
     # A custom branch (local commits atop origin/<branch>) also can't ff, and reset --hard
     # would discard that work: merge instead, stop on conflict.
     merge_ref = target_ref if target_ref is not None else f"origin/{branch}"
@@ -721,42 +720,23 @@ def _reconcile_diverged_checkout(git_cmd, branch: str, pre_pull_sha, *, target_r
             print(f"  Resolve manually: cd {_m().PROJECT_ROOT} && git merge origin/{branch}")
             print("  Then re-run the update. Local work is untouched.")
             sys.exit(1)
-        return True
-    # Same branch: the two causes of divergence here are indistinguishable from the checkout
-    # alone. An upstream force-push/rebase loses nothing; local commits on this branch lose
-    # everything, and the reflog is the only way back — an expiring log the user has to know to
-    # reach for, in a directory Hermes updates unattended. So park pre_pull_sha behind a rescue
-    # ref for BOTH, orphan divergence (no common ancestor: corrupted HEAD, re-init) included.
+        return
+    # Same branch: the reset below is right either way, but the two causes of divergence here
+    # are indistinguishable from the checkout alone. An upstream force-push/rebase loses
+    # nothing; local commits on this branch lose everything, and the reflog is the only way
+    # back — an expiring log the user has to know to reach for, in a directory Hermes updates
+    # unattended. So park pre_pull_sha behind a rescue ref for BOTH, orphan divergence (no
+    # common ancestor: corrupted HEAD, re-init) included.
     merge_base_result = _git_run(git_cmd, ["merge-base", "HEAD", merge_ref])
     has_common_ancestor = bool(
         merge_base_result.returncode == 0 and merge_base_result.stdout.strip())
-    # A rescue ref alone let an unattended desktop update reset away carried fixes, restart the
-    # gateway on code without them, and exit 0. By default the reset is refused instead; the count
-    # needs no common ancestor, so an orphan history is carried in full.
-    carried = _carried_commits_to_refuse(git_cmd, _m().PROJECT_ROOT, merge_ref)
-    rescue_ref = saved = None
     if pre_pull_sha:
-        from datetime import datetime as _dt, timezone
-        # SHA suffix so two updates in the same second get distinct refs.
-        kind = "diverged" if has_common_ancestor else "orphan"
-        rescue_ref = (
-            f"refs/hermes-update-backups/{kind}-{branch}-"
-            f"{_dt.now(timezone.utc).strftime('%Y%m%d-%H%M%S')}-{pre_pull_sha[:12]}")
-        saved = _git_run(git_cmd, ["update-ref", rescue_ref, pre_pull_sha]).returncode == 0
-        _prune_orphan_rescue_refs(git_cmd, _m().PROJECT_ROOT, branch)
-    if carried != 0:  # None: Git could not count them, which never means "nothing carried"
-        _print_carried_commits_refusal(
-            git_cmd, _m().PROJECT_ROOT, branch, merge_ref, carried, rescue_ref if saved else None)
-        _record_update_skip(
-            "code_update", f"carried local commits: {'an unknown number of' if carried is None else carried} "
-            f"on {branch} not on {merge_ref} (updates.carried_commits_policy: refuse)")
-        return False
-    if pre_pull_sha:
+        rescue_ref = _rescue_ref_name(branch, pre_pull_sha, "diverged" if has_common_ancestor else "orphan")
         head = (
             f"  ⚠ Local history has diverged from origin/{branch} — "
             if has_common_ancestor else
             f"  ⚠ Local history shares no common ancestor with origin/{branch} (orphan divergence) — ")
-        if saved:
+        if _git_run(git_cmd, ["update-ref", rescue_ref, pre_pull_sha]).returncode == 0:
             print(
                 f"{head}backed up current HEAD to {rescue_ref} before resetting. "
                 f"This backup expires after {_ORPHAN_RESCUE_REF_MAX_AGE_DAYS} days.")
@@ -770,6 +750,7 @@ def _reconcile_diverged_checkout(git_cmd, branch: str, pre_pull_sha, *, target_r
             print(
                 f"{head}attempted to back up current HEAD to {rescue_ref} before resetting, "
                 f"but the backup write failed (pre-reset SHA was {pre_pull_sha}).")
+        _prune_orphan_rescue_refs(git_cmd, _m().PROJECT_ROOT, branch)
     print("  ⚠ Fast-forward not possible (history diverged), resetting to match remote...")
     reset_result = _git_run(git_cmd, ["reset", "--hard", merge_ref])
     if reset_result.returncode != 0:
@@ -778,7 +759,6 @@ def _reconcile_diverged_checkout(git_cmd, branch: str, pre_pull_sha, *, target_r
             print(f"  {reset_result.stderr.strip()}")
         print(f"  Try manually: git fetch origin && git reset --hard origin/{branch}")
         sys.exit(1)
-    return True
 
 
 def _rollback_if_pulled_syntax_error(git_cmd, pre_pull_sha) -> None:
@@ -816,11 +796,9 @@ def _pull_updates(
     keep_stash, target_ref=None, pre_sync_sha=None, sync_upstream=False, assume_yes=False,
     in_place_update=False, _windows_gateway_resume=None):
     """Fast-forward onto ``origin/<branch>`` and settle the autostash. Divergence by shape:
-    custom branch -> merge, same branch -> rescue ref then reset (or exit 1 with nothing changed
-    when carried commits refuse it); a post-pull syntax error in a critical file rolls back.
-    Exits on failure; returns pre-pull SHA."""
+    custom branch -> merge, same branch -> rescue ref then reset; a
+    post-pull syntax error in a critical file rolls back. Exits on failure; returns pre-pull SHA."""
     update_succeeded = False
-    landed = True
     # Rescue refs must retain the immediate pre-pull tip, even when syntax
     # rollback needs to cross an earlier upstream sync.
     pre_pull_sha = _capture_head_sha(git_cmd, _m().PROJECT_ROOT)
@@ -846,22 +824,13 @@ def _pull_updates(
                     _git_run(git_cmd, ["update-ref", f"refs/hermes/pre-release/{pre_pull_sha}", pre_pull_sha], check=True)
                 _git_run(git_cmd, ["checkout", "--detach", merge_ref], check=True)
             elif _git_run(git_cmd, ["merge", "--ff-only", merge_ref]).returncode != 0:
-                landed = _reconcile_diverged_checkout(git_cmd, branch, pre_pull_sha, target_ref=merge_ref)
+                _reconcile_diverged_checkout(git_cmd, branch, pre_pull_sha, target_ref=merge_ref)
         except KeyboardInterrupt:
             raise  # Ctrl-C reached git too (same process group): the tree may be torn, keep the marker
         except BaseException:
             pull_marker.unlink(missing_ok=True)  # git exited on its own (sys.exit on conflict/reset failure)
             raise
         pull_marker.unlink(missing_ok=True)  # git is done: the tree is whole again
-        if not landed:
-            # Nothing landed, so --keep-stash (no re-apply onto NEW code) has nothing to protect.
-            if auto_stash_ref is not None:
-                _return_stashed_changes(git_cmd, _m().PROJECT_ROOT, auto_stash_ref)
-            print()
-            print("⚠ Update finished — code update SKIPPED: carried local commits"
-                  f"{_branch_head_suffix(git_cmd, _m().PROJECT_ROOT)}")
-            _m()._resume_windows_gateways_after_update(_windows_gateway_resume)
-            sys.exit(1)
         if sync_upstream:
             # Do not let a second mutation hide a failed origin merge or move an
             # unexpected branch. Keep local edits parked through the final check.
@@ -877,7 +846,7 @@ def _pull_updates(
         _rollback_if_pulled_syntax_error(git_cmd, pre_sync_sha or pre_pull_sha)
         update_succeeded = True
     finally:
-        if auto_stash_ref is not None and landed:
+        if auto_stash_ref is not None:
             # No stash restore if the update failed — tree state is unknown.
             if not update_succeeded:
                 print(f"  ℹ️  Local changes preserved in stash (ref: {auto_stash_ref})")
@@ -956,9 +925,11 @@ def _apply_parked_branch_guard(
 def _prepare_checkout_for_update(
     git_cmd, branch, current_branch, *, is_fork, assume_yes, gateway_mode, gw_input_fn,
     switch_branch, target_ref=None, _windows_gateway_resume):
-    """Parked-branch guard, land on the target, stash, count new commits. Exits when the
-    checkout is unsafe to move or the target is missing. ``commit_count`` is 0 when up to
-    date, -1 when tips differ but the shallow count is unrecoverable."""
+    """Parked-branch guard, carried-commits refusal, churn cleanup, land on the target, stash,
+    count new commits. Exits, before touching the checkout, when it is unsafe to move or the
+    update would drop commits carried on the target branch; exits when the target is missing.
+    ``commit_count`` is 0 when up to date, -1 when tips differ but the shallow count is
+    unrecoverable."""
     if target_ref is None:
         target_ref = f"origin/{branch}"
     release_tag = target_ref != f"origin/{branch}"
@@ -970,6 +941,15 @@ def _prepare_checkout_for_update(
         parked_branch_switched, in_place_update, switch_block_reason = _apply_parked_branch_guard(
             git_cmd, branch, current_branch, switch_branch=switch_branch,
             _windows_gateway_resume=_windows_gateway_resume)
+        if not in_place_update:
+            # The checkout lands on local <branch>, whose ff-impossible pull resets it.
+            _refuse_update_over_carried_commits(
+                git_cmd, branch, target_ref, windows_gateway_resume=_windows_gateway_resume)
+
+    # Only after every refusal: npm rewrites package-lock.json non-deterministically and line-ending
+    # churn is machine-made dirt; both would otherwise force an autostash every update.
+    _discard_lockfile_churn(git_cmd, _m().PROJECT_ROOT)
+    _normalize_managed_eol(git_cmd, _m().PROJECT_ROOT)
 
     if not release_tag and not in_place_update and current_branch == "HEAD" != branch:
         print(f"  ⚠ Currently on detached HEAD — switching to {branch} for update...")
@@ -1137,11 +1117,6 @@ def _prepare_git_command() -> tuple[bool, list, bool]:
     # swap in a real binary up front so git survives instead of degrading to ZIP.
     # See #87876.
     git_cmd = _ensure_non_trampoline_git(git_cmd)
-
-    # Before stash/branch logic: npm rewrites package-lock.json non-deterministically and
-    # line-ending churn is machine-made dirt; both would otherwise force an autostash every update.
-    _discard_lockfile_churn(git_cmd, _m().PROJECT_ROOT)
-    _normalize_managed_eol(git_cmd, _m().PROJECT_ROOT)
 
     origin_url = _m()._get_origin_url(git_cmd, _m().PROJECT_ROOT)
     is_fork = _is_fork(origin_url)

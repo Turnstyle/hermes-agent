@@ -59,8 +59,8 @@ def _prune_orphan_rescue_refs(
     """Expire old rescue refs (``refs/hermes-update-backups/<kind>-<branch>-<ts>-<sha>``).
 
     ``<kind>`` is ``orphan`` (no common ancestor) or ``diverged`` (local commits on the target
-    branch). Both are written before the same ``reset --hard`` and both pin objects, so both
-    expire on the same terms; each kind keeps its own ``keep`` newest.
+    branch). Both are written before the same ``reset --hard`` (or its refusal) and both pin
+    objects, so both expire on the same terms; each kind keeps its own ``keep`` newest.
 
     Each ref pins a possibly multi-GB snapshot against ``git gc``, so a repeatedly corrupted install would
     grow ``.git`` unbounded. Keep the ``keep`` newest AND drop any older than ``max_age_days`` by the
@@ -91,6 +91,13 @@ def _prune_orphan_rescue_refs(
                             stale.add(ref)
         for ref in sorted(stale):
             _git_run(git_cmd, ["update-ref", "-d", ref], cwd)
+
+
+def _rescue_ref_name(branch: str, sha: str, kind: str) -> str:
+    """The rescue ref ``_prune_orphan_rescue_refs`` expires; the SHA suffix keeps two updates in the
+    same second distinct."""
+    return (f"refs/hermes-update-backups/{kind}-{branch}-"
+            f"{datetime.now(timezone.utc).strftime('%Y%m%d-%H%M%S')}-{sha[:12]}")
 
 
 def _branch_head_label(git_cmd=None, cwd=None) -> str | None:
@@ -141,7 +148,9 @@ def _assess_parked_branch_switch(git_cmd: list[str], cwd: Path, current_branch: 
     status = _git_run(git_cmd, ["status", "--porcelain"], cwd)
     if status.returncode != 0:
         return False, "unverifiable"
-    if status.stdout.strip():
+    # npm lockfile churn is discarded before the switch (_discard_lockfile_churn): not dirt here.
+    churn = {f" M {path}" for path in _lockfile_churn_paths(git_cmd, cwd)}
+    if any(line not in churn for line in status.stdout.splitlines() if line.strip()):
         return False, "dirty"
     cherry = _git_run(git_cmd, ["cherry", f"origin/{target_branch}"], cwd)
     if cherry.returncode != 0:
@@ -188,52 +197,6 @@ def _print_parked_branch_kept_notice(current_branch: str, target_branch: str, un
         f"  Switching to {target_branch} so the update can proceed — your "
         f"commit(s) are safe on '{current_branch}'.\n\n"
         f"  To pick the work back up later:\n    git checkout {current_branch}\n{_BAR}"
-    )
-
-
-def _carried_commits_to_refuse(git_cmd: list[str], cwd: Path, target_ref: str) -> Optional[int]:
-    """Commits on HEAD that *target_ref* never pointed at or reached (an orphan history counts in
-    full; None when Git cannot count them), or 0 when a config.yaml this run read successfully says
-    ``updates.carried_commits_policy: reset``. Anything else (the default ``refuse``, a typo, an
-    unreadable config and its last-good fallback) refuses: an update that silently drops carried
-    fixes is the worse failure."""
-    from hermes_cli.update_cmd_carried import _carried_commits, _carried_commits_policy
-    if _carried_commits_policy() == "reset":
-        return 0
-    carried = _carried_commits(git_cmd, cwd, "HEAD", target_ref)
-    return None if carried is None else len(carried)
-
-
-def _print_carried_commits_refusal(
-    git_cmd: list[str], cwd: Path, branch: str, target_ref: str, carried: Optional[int],
-    rescue_ref: Optional[str],
-) -> None:
-    """LOUD block: the reset to *target_ref* was refused because it would drop *carried* commits
-    (None: Git could not count them)."""
-    if carried is None:
-        print(f"\n{_BAR}\n⚠ CODE UPDATE SKIPPED — Git could not count the commits on '{branch}' that are "
-              f"not on {target_ref}")
-    else:
-        print(f"\n{_BAR}\n⚠ CODE UPDATE SKIPPED — '{branch}' carries {carried} local commit(s) not on {target_ref}")
-    print(f"  Updating would reset '{branch}' to {target_ref} and {'could drop' if carried is None else 'drop'} "
-          "them (updates.carried_commits_policy: refuse).")
-    print("  Nothing was changed: HEAD, the branch and the working tree are as they were.")
-    log = _git_stdout(git_cmd, ["log", "--oneline", "-20", f"{target_ref}..HEAD"], cwd) if carried else None
-    if log:
-        print(f"\n  git log --oneline {target_ref}..HEAD{' (first 20)' if carried > 20 else ''}:")
-        for line in log.splitlines():
-            print(f"    {line}")
-    else:
-        print(f"\n  Inspect them with: git -C {cwd} log --oneline {target_ref}..HEAD")
-    if rescue_ref:
-        print(f"  HEAD is also saved as {rescue_ref}.")
-    print(
-        f"\n  To keep them, rebase them onto the update, then update again\n"
-        f"  (commit or stash uncommitted changes first):\n"
-        f"    git -C {cwd} rebase {target_ref} && hermes update\n"
-        f"  To let updates reset '{branch}' and drop them (a rescue ref keeps them reachable\n"
-        f"  for {_ORPHAN_RESCUE_REF_MAX_AGE_DAYS} days):\n"
-        f"    hermes config set updates.carried_commits_policy reset && hermes update\n{_BAR}"
     )
 
 
@@ -532,9 +495,20 @@ def _discard_lockfile_churn(git_cmd, repo_root):
     with its sibling manifest. Best-effort."""
     from hermes_cli.update_cmd_git import _git_run
     with suppress(Exception):
+        dirty = _lockfile_churn_paths(git_cmd, repo_root)
+        if not dirty:
+            return
+        _git_run(git_cmd, ["checkout", "--", *dirty], repo_root)
+        print(f"→ Discarded npm lockfile churn ({len(dirty)} file(s))")
+
+
+def _lockfile_churn_paths(git_cmd, repo_root) -> list[str]:
+    """The unstaged ``package-lock.json`` edits ``_discard_lockfile_churn`` reverts ([] when Git cannot say)."""
+    from hermes_cli.update_cmd_git import _git_run
+    with suppress(Exception):
         diff = _git_run(git_cmd, ["diff", "--name-only"], repo_root)
         if diff.returncode != 0:
-            return
+            return []
         changed = [line.strip() for line in diff.stdout.splitlines()]
         dirty_manifests = {Path(p).parent for p in changed if p.endswith("package.json")}
         root_owners = _npm_lockfile_owners(Path(repo_root))
@@ -548,10 +522,8 @@ def _discard_lockfile_churn(git_cmd, repo_root):
             )
             if not protected:
                 dirty.append(path)
-        if not dirty:
-            return
-        _git_run(git_cmd, ["checkout", "--", *dirty], repo_root)
-        print(f"→ Discarded npm lockfile churn ({len(dirty)} file(s))")
+        return dirty
+    return []
 
 
 def _normalize_managed_eol(git_cmd, repo_root):

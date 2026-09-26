@@ -234,24 +234,6 @@ def _park_stashed_changes(stash_ref: str) -> None:
     _record_stash_disposition("parked", stash_ref, "--keep-stash")
 
 
-def _return_stashed_changes(git_cmd: list[str], cwd: Path, stash_ref: str) -> bool:
-    """Put an autostash back onto the unchanged HEAD it was taken from: the code update was refused,
-    so nothing landed and ``--keep-stash`` (which guards against re-applying onto NEW code) has
-    nothing to protect. ``--index`` keeps staged edits staged. False leaves the stash in place."""
-    from hermes_cli.update_cmd_git import _git_run
-    apply = _git_run(git_cmd, ["stash", "apply", "--index", stash_ref], cwd)
-    if apply.returncode != 0 and not _stash_apply_failed_only_on_existing_untracked(apply.stderr):
-        print("  ⚠ Could not put local changes back; they are still in the stash.")
-        _print_first_line(apply.stderr)
-        print(f"  Restore manually with: git stash apply --index {stash_ref}")
-        _record_stash_disposition("parked", stash_ref, "put-back after refused update failed")
-        return False
-    _drop_restored_stash(git_cmd, cwd, stash_ref)
-    _record_stash_disposition("restored", stash_ref, "code update refused, HEAD unchanged")
-    print("  ✓ Local changes put back (nothing was updated).")
-    return True
-
-
 def _git_untracked_paths(git_cmd: list[str], cwd: Path) -> set[str] | None:
     """Return untracked paths, or ``None`` when Git cannot enumerate them."""
     paths = _git_paths_z(git_cmd, ["ls-files", "--others", "--exclude-standard", "-z"], cwd)
