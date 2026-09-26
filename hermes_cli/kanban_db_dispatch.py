@@ -1845,19 +1845,28 @@ def _reclaim_dead_workers(
             lock = row["claim_lock"] or ""
             if not lock.startswith(host_prefix):
                 continue
-            # Launch-window grace so a freshly-spawned worker isn't reclaimed
-            # before its PID is visible on /proc.
+            # Launch grace protects a freshly spawned PID before it is visible to the OS.
+            # Explicit, run-bound profile-busy evidence proves this worker already exited,
+            # so it alone may bypass grace; generic crashes still wait for the normal probe.
             started_at = _kb._row_get(row, "started_at")
+            dead: Optional[_DeadWorker] = None
             if started_at is not None and time.time() - started_at < _kb._resolve_crash_grace_seconds():
-                continue
+                candidate = _classify_dead_worker(
+                    int(row["worker_pid"]), row["claim_lock"], task_id=row["id"], board=board,
+                    run_id=_kb._row_get(row, "current_run_id"),
+                )
+                if not candidate.profile_busy:
+                    continue
+                dead = candidate
             if _worker_alive(row["worker_pid"], _kb._row_get(row, "worker_started_at")):
                 continue
 
             pid = int(row["worker_pid"])
-            dead = _classify_dead_worker(
-                pid, row["claim_lock"], task_id=row["id"], board=board,
-                run_id=_kb._row_get(row, "current_run_id"),
-            )
+            if dead is None:
+                dead = _classify_dead_worker(
+                    pid, row["claim_lock"], task_id=row["id"], board=board,
+                    run_id=_kb._row_get(row, "current_run_id"),
+                )
             try:
                 with _kb.write_txn(conn, allow_nested=True):
                     retry_status = _kb._retry_status_for_run(conn, row["id"])
@@ -1920,7 +1929,9 @@ def _reclaim_dead_workers(
     return sweep
 
 
-def _account_crashes(conn: sqlite3.Connection, crash_details: list) -> list[str]:
+def _account_crashes(
+    conn: sqlite3.Connection, crash_details: list, *, failure_limit: Optional[int] = None,
+) -> list[str]:
     """Count each crash against the breaker; returns the task ids it tripped.
 
     Protocol violations get a BOUNDED violation-only budget independent of
@@ -1990,7 +2001,7 @@ def _account_crashes(conn: sqlite3.Connection, crash_details: list) -> list[str]
                 conn, tid,
                 error=error_text,
                 outcome="crashed",
-                failure_limit=1 if is_systemic else None,
+                failure_limit=1 if is_systemic else failure_limit,
                 release_claim=False,
                 end_run=False,
                 event_payload_extra=extra,
@@ -2005,6 +2016,7 @@ def detect_crashed_workers(
     board: Optional[str] = None,
     *,
     errors_out: Optional[list] = None,
+    failure_limit: Optional[int] = None,
 ) -> list[str]:
     """Reclaim ``running`` tasks whose worker PID is no longer alive.
 
@@ -2018,7 +2030,10 @@ def detect_crashed_workers(
     """
     sweep = _reclaim_dead_workers(conn, board=board, errors_out=errors_out)
     # Outside the main txn: account each crash and maybe trip the breaker.
-    auto_blocked = _account_crashes(conn, sweep.crash_details) if sweep.crash_details else []
+    auto_blocked = (
+        _account_crashes(conn, sweep.crash_details, failure_limit=failure_limit)
+        if sweep.crash_details else []
+    )
     # Side-channel attributes keep the public ``list[str]`` return stable;
     # ``dispatch_once`` reads them to populate ``DispatchResult``. Rate-limited
     # requeues did NOT count a failure and are NOT crashes.
@@ -2066,7 +2081,7 @@ def _record_task_failure(
     error: str,
     *,
     outcome: str,
-    failure_limit: int = None,
+    failure_limit: Optional[int] = None,
     force_trip: bool = False,
     release_claim: bool = False,
     end_run: bool = False,
@@ -3066,7 +3081,9 @@ def _run_reclaim_phase(
     # Classify dead workers before TTL/stale reclaim. Exit evidence is more specific than an
     # expired lease: in particular, a worker refused its profile slot must be booked
     # ``profile_busy`` without spending retry budget even when its claim expired first.
-    result.crashed = detect_crashed_workers(conn, board=board, errors_out=errors)
+    result.crashed = detect_crashed_workers(
+        conn, board=board, errors_out=errors, failure_limit=failure_limit,
+    )
     result.auto_blocked.extend(getattr(detect_crashed_workers, "_last_auto_blocked", []))
     result.rate_limited.extend(getattr(detect_crashed_workers, "_last_rate_limited", []))
     result.profile_busy.extend(getattr(detect_crashed_workers, "_last_profile_busy", []))
