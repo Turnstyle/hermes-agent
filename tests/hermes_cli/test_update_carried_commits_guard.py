@@ -10,7 +10,7 @@ the update exited 0.
 working tree stay as they were, the rescue ref is still written, the carried commits are named, and
 the update exits 1. Only a config.yaml read successfully by this run can say ``reset``. Carried
 commits are the ones ``origin/<branch>`` has never pointed at or reached: an orphan history counts,
-while shallow-graft artifacts and upstream force-pushes (commits
+a commit Git cannot count refuses, while shallow-graft artifacts and upstream force-pushes (commits
 origin itself once served) do not block the update. The reset itself is covered in
 test_update_diverged_rescue_ref.py.
 """
@@ -136,9 +136,9 @@ def test_unreadable_config_refuses_even_when_the_saved_policy_is_reset(update_tr
     assert "code update SKIPPED: carried local commits" in capsys.readouterr().out
 
 
-@pytest.mark.parametrize("shape", ["orphan", "merge-base-fails"])
+@pytest.mark.parametrize("shape", ["orphan", "merge-base-fails", "count-fails"])
 def test_carried_commits_git_cannot_rule_out_refuse(update_tree, monkeypatch, capsys, shape):
-    """No common ancestor and a failing merge-base are never "nothing carried"."""
+    """No common ancestor, a failing merge-base and a failing count are never "nothing carried"."""
     t = update_tree
     if shape == "orphan":
         git(t.clone, "checkout", "-q", "--orphan", "fresh")
@@ -151,6 +151,10 @@ def test_carried_commits_git_cannot_rule_out_refuse(update_tree, monkeypatch, ca
     _hand_off(t, monkeypatch)
     if shape == "merge-base-fails":
         _fail_git(monkeypatch, lambda command: "merge-base" in command)
+    if shape == "count-fails":
+        # Only the update's own behind count (HEAD..origin/main) still answers.
+        _fail_git(monkeypatch, lambda command: "rev-list" in command and not any(
+            str(arg).startswith("HEAD..") for arg in command))
 
     _refused(t)
 
