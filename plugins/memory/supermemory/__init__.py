@@ -242,7 +242,7 @@ def _clean_text_for_capture(text: str) -> str:
 def _memory_fields(item: Any, *keys: str) -> dict:
     """Pick SDK result attrs into a plain dict; ``updated_at`` also accepts camelCase ``updatedAt``."""
     defaults = {"id": "", "memory": "", "similarity": None, "metadata": None}
-    return {k: getattr(item, "updated_at", None) or getattr(item, "updatedAt", None) if k == "updated_at" else getattr(item, k, defaults[k])
+    return {k: getattr(item, "updated_at", None) or getattr(item, "updatedAt", None) if k == "updated_at" else getattr(item, k, defaults.get(k))
             for k in keys}
 
 
@@ -315,7 +315,7 @@ class _SupermemoryClient:
         kwargs: dict[str, Any] = {"q": query, "container_tag": container_tag or self._container_tag, "limit": limit,
                                   **({"search_mode": mode} if mode in _VALID_SEARCH_MODES else {})}
         response = self._client.search.memories(**kwargs)
-        return [{**_memory_fields(item, "id", "memory", "similarity", "updated_at", "metadata"), "memory": getattr(item, "memory", "") or ""}
+        return [{**_memory_fields(item, "id", "memory", "similarity", "updated_at", "metadata", "documents"), "memory": getattr(item, "memory", "") or ""}
                 for item in (getattr(response, "results", None) or [])]
 
     def get_profile(self, query: Optional[str] = None, *, container_tag: Optional[str] = None) -> dict:
@@ -546,7 +546,17 @@ class SupermemoryMemoryProvider(MemoryProvider):
         quarantined = self._quarantined_ids(tag)
         if "*" in quarantined:
             return []
-        return [item for item in results if str(item.get("id") or "").strip() not in quarantined]
+
+        def identifiers(item: dict) -> set[str]:
+            ids = {str(item.get("id") or "").strip()}
+            for document in item.get("documents") or []:
+                if isinstance(document, dict):
+                    ids.update(str(document.get(key) or "").strip() for key in ("id", "custom_id", "customId"))
+                else:
+                    ids.update(str(getattr(document, key, "") or "").strip() for key in ("id", "custom_id", "customId"))
+            return ids - {""}
+
+        return [item for item in results if identifiers(item).isdisjoint(quarantined)]
 
     def _live_client(self) -> Optional[_SupermemoryClient]:
         """The client when it may be used right now, else None. Every client use goes through here.
