@@ -311,6 +311,8 @@ class _SupermemoryClient:
                         search_mode: Optional[str] = None) -> list[dict]:
         mode = search_mode or self._search_mode
         kwargs: dict[str, Any] = {"q": query, "container_tag": container_tag or self._container_tag, "limit": limit,
+                                  # Parent documents let the quarantine see through chunk ids (document mode).
+                                  "include": {"documents": True},
                                   **({"search_mode": mode} if mode in _VALID_SEARCH_MODES else {})}
         response = self._client.search.memories(**kwargs)
         return [{**_memory_fields(item, "id", "memory", "similarity", "updated_at", "metadata", "documents"), "memory": getattr(item, "memory", "") or ""}
@@ -541,20 +543,45 @@ class SupermemoryMemoryProvider(MemoryProvider):
         return self._quarantined_memory_ids.get(tag or self._container_tag, set())
 
     def _filter_quarantined(self, results: List[dict], tag: Optional[str] = None) -> List[dict]:
+        """Drop results tied to a quarantined id; fail closed when provenance is missing.
+
+        Document-mode results are chunks whose top-level id is a chunk id, so a quarantined *document* can only be
+        recognized through the parent ``documents`` list (requested with ``include.documents``). In a container that
+        has a quarantine, a result carrying no parent document id cannot be proven clean and is dropped.
+        """
         quarantined = self._quarantined_ids(tag)
+        if not quarantined:
+            return results
         if "*" in quarantined:
             return []
 
-        def identifiers(item: dict) -> set[str]:
-            ids = {str(item.get("id") or "").strip()}
-            for document in item.get("documents") or []:
-                if isinstance(document, dict):
-                    ids.update(str(document.get(key) or "").strip() for key in ("id", "custom_id", "customId"))
-                else:
-                    ids.update(str(getattr(document, key, "") or "").strip() for key in ("id", "custom_id", "customId"))
-            return ids - {""}
+        def _field(obj: Any, key: str) -> Any:
+            return obj.get(key) if isinstance(obj, dict) else getattr(obj, key, None)
 
-        return [item for item in results if identifiers(item).isdisjoint(quarantined)]
+        def _custom_ids(obj: Any) -> set[str]:
+            ids = {str(_field(obj, key) or "").strip() for key in ("custom_id", "customId")}
+            metadata = _field(obj, "metadata")
+            if isinstance(metadata, dict):
+                ids.update(str(metadata.get(key) or "").strip() for key in ("custom_id", "customId"))
+            return ids
+
+        def provenance(item: dict) -> tuple[set[str], set[str]]:
+            """(every identifier seen, parent document ids)."""
+            ids = {str(item.get("id") or "").strip()} | _custom_ids(item)
+            parents: set[str] = set()
+            for document in item.get("documents") or []:
+                doc_id = str(_field(document, "id") or "").strip()
+                parents.add(doc_id)
+                ids.add(doc_id)
+                ids |= _custom_ids(document)
+            return ids - {""}, parents - {""}
+
+        kept = []
+        for item in results:
+            ids, parents = provenance(item)
+            if parents and ids.isdisjoint(quarantined):
+                kept.append(item)
+        return kept
 
     def _live_client(self) -> Optional[_SupermemoryClient]:
         """The client when it may be used right now, else None. Every client use goes through here.
