@@ -22,7 +22,7 @@ import subprocess
 
 import pytest
 
-from hermes_cli import main as hermes_main, update_cmd, update_receipt
+from hermes_cli import main as hermes_main, update_cmd, update_cmd_carried as update_carried, update_receipt
 from hermes_cli import source_check
 from hermes_cli.config import load_config
 from hermes_cli.config_read_errors import FailedConfigRead
@@ -180,6 +180,30 @@ def test_carried_commits_git_cannot_rule_out_refuse(update_tree, monkeypatch, ca
     assert "code update SKIPPED: carried local commits" in capsys.readouterr().out
 
 
+@pytest.mark.parametrize("damage", ["tip-object-missing", "tip-not-a-commit"])
+def test_a_branch_tip_git_cannot_read_as_a_commit_refuses(update_tree, monkeypatch, capsys, damage):
+    """A branch ref whose tip is not a readable commit is not "nothing carried": the count skipped a
+    missing tip and never walks a non-commit one, so both read as zero. Called directly because a
+    full update stops at the fetch, which also trips over the bad ref; that is not the guard."""
+    t = update_tree
+    _carry(t)
+    git(t.clone, "fetch", "-q", "origin")
+    tip = git(t.clone, "rev-parse", "main")
+    if damage == "tip-object-missing":
+        (t.clone / ".git" / "objects" / tip[:2] / tip[2:]).unlink()  # the older carried commit survives
+    else:
+        tip = git(t.clone, "hash-object", "-w", "carried-1.txt")
+        (t.clone / ".git" / "refs" / "heads" / "main").write_text(f"{tip}\n", encoding="utf-8")
+
+    with pytest.raises(SystemExit) as refused:
+        update_carried._refuse_update_over_carried_commits(
+            update_cmd._base_git_cmd(), "main", "origin/main", windows_gateway_resume=None)
+
+    assert refused.value.code == 1
+    assert git(t.clone, "rev-parse", "--verify", "refs/heads/main") == tip
+    assert "code update SKIPPED: carried local commits" in capsys.readouterr().out
+
+
 def test_parked_checkout_is_not_switched_onto_a_branch_that_carries_commits(update_tree, monkeypatch, capsys):
     t = update_tree
     _carry(t)
@@ -217,9 +241,21 @@ def _upstream_force_push(t):
     t.newer = _commit(t.origin, "content.txt", "rewritten upstream\n", "rewritten upstream")
 
 
+def _origin_history_lost(t):
+    """``main`` is behind; origin/main once held a commit upstream then force-pushed away, and that
+    commit's object is gone (only the reflog still names it)."""
+    git(t.clone, "checkout", "-q", "main")
+    dropped = _commit(t.origin, "dropped.txt", "dropped\n", "dropped upstream")
+    git(t.clone, "fetch", "-q", "origin")
+    git(t.origin, "reset", "-q", "--hard", t.newer)
+    git(t.clone, "fetch", "-q", "origin")
+    (t.clone / ".git" / "objects" / dropped[:2] / dropped[2:]).unlink()
+
+
 @pytest.mark.parametrize("shape,policy,rescued", [
     ("carried", "reset", True),           # opted in: the reset, old HEAD behind a rescue ref
     ("behind", None, False),              # nothing carried: plain fast-forward
+    ("origin-history-lost", None, False), # an unreadable old origin value only drops an exclusion
     ("shallow-after-check", None, True),  # graft artifact, nothing carried: the orphan reset
     ("force-push", None, True),           # origin itself served the dropped commit
 ])
@@ -230,6 +266,8 @@ def test_update_still_lands_when_nothing_is_carried_or_reset_is_chosen(
         _carry(t)
     elif shape == "behind":
         git(t.clone, "checkout", "-q", "main")
+    elif shape == "origin-history-lost":
+        _origin_history_lost(t)
     elif shape == "shallow-after-check":
         _shallow_install_after_check(t)
     else:
