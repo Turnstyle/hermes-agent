@@ -3,7 +3,8 @@ branch it updates.
 
 Field incident (2026-09-25): the desktop hand-off updated an install whose ``main`` carried 13 local
 commits; the same-branch reset parked them behind a rescue ref, the gateway restarted on code without
-them, and the update exited 0. The guard fails closed: anything short of a readable ``reset`` refuses.
+them, and the update exited 0. The guard fails closed: anything short of a readable ``reset`` or a
+proven zero refuses.
 """
 
 import subprocess

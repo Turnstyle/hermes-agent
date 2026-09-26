@@ -744,12 +744,12 @@ def _reconcile_diverged_checkout(git_cmd, branch: str, pre_pull_sha, *, target_r
             f"{_dt.now(timezone.utc).strftime('%Y%m%d-%H%M%S')}-{pre_pull_sha[:12]}")
         saved = _git_run(git_cmd, ["update-ref", rescue_ref, pre_pull_sha]).returncode == 0
         _prune_orphan_rescue_refs(git_cmd, _m().PROJECT_ROOT, branch)
-    if carried:
+    if carried != 0:  # None: Git could not count them, which never means "nothing carried"
         _print_carried_commits_refusal(
             git_cmd, _m().PROJECT_ROOT, branch, merge_ref, carried, rescue_ref if saved else None)
         _record_update_skip(
-            "code_update", f"carried local commits: {carried} on {branch} not on {merge_ref} "
-            "(updates.carried_commits_policy: refuse)")
+            "code_update", f"carried local commits: {'an unknown number of' if carried is None else carried} "
+            f"on {branch} not on {merge_ref} (updates.carried_commits_policy: refuse)")
         return False
     if pre_pull_sha:
         head = (

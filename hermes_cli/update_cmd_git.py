@@ -191,9 +191,9 @@ def _print_parked_branch_kept_notice(current_branch: str, target_branch: str, un
     )
 
 
-def _carried_commits_to_refuse(git_cmd: list[str], cwd: Path, target_ref: str) -> int:
+def _carried_commits_to_refuse(git_cmd: list[str], cwd: Path, target_ref: str) -> Optional[int]:
     """Commits on HEAD that *target_ref* never pointed at or reached (an orphan history counts in
-    full), or 0 when a config.yaml this run read successfully says
+    full; None when Git cannot count them), or 0 when a config.yaml this run read successfully says
     ``updates.carried_commits_policy: reset``. Anything else (the default ``refuse``, a typo, an
     unreadable config and its last-good fallback) refuses: an update that silently drops carried
     fixes is the worse failure."""
@@ -201,21 +201,30 @@ def _carried_commits_to_refuse(git_cmd: list[str], cwd: Path, target_ref: str) -
     if _carried_commits_policy() == "reset":
         return 0
     carried = _carried_commits(git_cmd, cwd, "HEAD", target_ref)
-    return len(carried) if carried is not None else 0
+    return None if carried is None else len(carried)
 
 
 def _print_carried_commits_refusal(
-    git_cmd: list[str], cwd: Path, branch: str, target_ref: str, carried: int, rescue_ref: Optional[str],
+    git_cmd: list[str], cwd: Path, branch: str, target_ref: str, carried: Optional[int],
+    rescue_ref: Optional[str],
 ) -> None:
-    """LOUD block: the reset to *target_ref* was refused because it would drop *carried* commits."""
-    log = _git_stdout(git_cmd, ["log", "--oneline", "-20", f"{target_ref}..HEAD"], cwd) or ""
-    print(f"\n{_BAR}\n⚠ CODE UPDATE SKIPPED — '{branch}' carries {carried} local commit(s) not on {target_ref}")
-    print(f"  Updating would reset '{branch}' to {target_ref} and drop them "
-          "(updates.carried_commits_policy: refuse).")
+    """LOUD block: the reset to *target_ref* was refused because it would drop *carried* commits
+    (None: Git could not count them)."""
+    if carried is None:
+        print(f"\n{_BAR}\n⚠ CODE UPDATE SKIPPED — Git could not count the commits on '{branch}' that are "
+              f"not on {target_ref}")
+    else:
+        print(f"\n{_BAR}\n⚠ CODE UPDATE SKIPPED — '{branch}' carries {carried} local commit(s) not on {target_ref}")
+    print(f"  Updating would reset '{branch}' to {target_ref} and {'could drop' if carried is None else 'drop'} "
+          "them (updates.carried_commits_policy: refuse).")
     print("  Nothing was changed: HEAD, the branch and the working tree are as they were.")
-    print(f"\n  git log --oneline {target_ref}..HEAD{' (first 20)' if carried > 20 else ''}:")
-    for line in log.splitlines():
-        print(f"    {line}")
+    log = _git_stdout(git_cmd, ["log", "--oneline", "-20", f"{target_ref}..HEAD"], cwd) if carried else None
+    if log:
+        print(f"\n  git log --oneline {target_ref}..HEAD{' (first 20)' if carried > 20 else ''}:")
+        for line in log.splitlines():
+            print(f"    {line}")
+    else:
+        print(f"\n  Inspect them with: git -C {cwd} log --oneline {target_ref}..HEAD")
     if rescue_ref:
         print(f"  HEAD is also saved as {rescue_ref}.")
     print(
