@@ -115,6 +115,28 @@ def _normalize_tunnel(value: Any) -> Optional[Dict[str, str]]:
     return {"ssh_host": str(value["ssh_host"]).strip(), "forward": forward} if _quietly(lambda: _tunnel.split_forward(forward)) else {}
 
 
+def _normalize_quarantined_ids(value: Any) -> Dict[str, List[str]]:
+    """Container -> exact memory ids excluded from every recall path.
+
+    Malformed entries grant no recall: non-list values become empty lists, and
+    ids are stripped, deduplicated, and bounded to avoid untrusted config growth.
+    Container templates are resolved later alongside the permission map.
+    """
+    if not isinstance(value, dict):
+        return {}
+    normalized: Dict[str, List[str]] = {}
+    for tag, ids in value.items():
+        tag = str(tag).strip()
+        if not tag:
+            continue
+        # A configured but malformed quarantine must not silently become "no quarantine".
+        normalized[tag] = ["*"] if not isinstance(ids, list) else list(dict.fromkeys(
+            str(memory_id).strip()[:256] for memory_id in ids
+            if str(memory_id).strip()
+        ))[:256]
+    return normalized
+
+
 # config key -> (default, normalizer applied to the raw/merged value). Order = supermemory.json layout.
 # container_tag is kept raw here: {identity} templates are resolved in initialize(), and
 # _sanitize_tag runs AFTER that resolution. custom_containers, by contrast, are sanitized on load.
@@ -132,6 +154,9 @@ _CONFIG_SPEC: Dict[str, tuple] = {
     "enable_custom_container_tags": (False, lambda v: _as_bool(v, False)),
     "custom_containers": ([], lambda v: [_sanitize_tag(str(t)) for t in v if t] if isinstance(v, list) else []),
     "custom_container_instructions": ("", lambda v: str(v).strip()),
+    # Container-scoped exact memory ids that must never be returned. When a container has quarantined ids, profile
+    # recall is disabled for that container because the aggregate profile API does not identify source documents.
+    "quarantined_memory_ids": ({}, _normalize_quarantined_ids),
     # Per-container operation permissions, e.g. {"hermes_fleet_pilot": {"read": true, "write": false}}; keys accept
     # {identity}. Absent = every op allowed; present = default-deny (an unlisted container gets neither op).
     "containers": (None, _normalize_permissions),
@@ -290,7 +315,7 @@ class _SupermemoryClient:
         kwargs: dict[str, Any] = {"q": query, "container_tag": container_tag or self._container_tag, "limit": limit,
                                   **({"search_mode": mode} if mode in _VALID_SEARCH_MODES else {})}
         response = self._client.search.memories(**kwargs)
-        return [{**_memory_fields(item, "id", "memory", "similarity", "updated_at", "metadata"), "memory": getattr(item, "memory", "") or ""}
+        return [{**_memory_fields(item, "id", "memory", "similarity", "updated_at", "metadata", "documents"), "memory": getattr(item, "memory", "") or ""}
                 for item in (getattr(response, "results", None) or [])]
 
     def get_profile(self, query: Optional[str] = None, *, container_tag: Optional[str] = None) -> dict:
@@ -300,7 +325,7 @@ class _SupermemoryClient:
         raw_results = getattr(search_data, "results", None) or search_data or []
         return {
             **{k: (getattr(profile_data, k, []) or []) if profile_data else [] for k in ("static", "dynamic")},
-            "search_results": [item if isinstance(item, dict) else _memory_fields(item, "memory", "updated_at", "similarity")
+            "search_results": [item if isinstance(item, dict) else _memory_fields(item, "id", "memory", "updated_at", "similarity")
                                for item in raw_results] if isinstance(raw_results, list) else [],
         }
 
@@ -500,6 +525,10 @@ class SupermemoryMemoryProvider(MemoryProvider):
         self._base_url = _resolve_base_url(config["base_url"]) if config["tunnel"] is None else _TUNNEL_BASE_URL
         self._enable_custom_containers = config["enable_custom_container_tags"]
         self._allowed_containers: List[str] = [self._container_tag] + list(self._custom_containers)
+        self._quarantined_memory_ids: Dict[str, set[str]] = {
+            _sanitize_tag(tag.replace("{identity}", self._identity)): set(memory_ids)
+            for tag, memory_ids in config["quarantined_memory_ids"].items()
+        }
         perms = config["containers"]
         self._container_permissions: Optional[Dict[str, Dict[str, bool]]] = None if perms is None else {
             _sanitize_tag(tag.replace("{identity}", self._identity)): ops for tag, ops in perms.items()}
@@ -509,6 +538,25 @@ class SupermemoryMemoryProvider(MemoryProvider):
         if self._container_permissions is None:
             return True
         return self._container_permissions.get(tag, {}).get(op, False)
+
+    def _quarantined_ids(self, tag: Optional[str] = None) -> set[str]:
+        return self._quarantined_memory_ids.get(tag or self._container_tag, set())
+
+    def _filter_quarantined(self, results: List[dict], tag: Optional[str] = None) -> List[dict]:
+        quarantined = self._quarantined_ids(tag)
+        if "*" in quarantined:
+            return []
+
+        def identifiers(item: dict) -> set[str]:
+            ids = {str(item.get("id") or "").strip()}
+            for document in item.get("documents") or []:
+                if isinstance(document, dict):
+                    ids.update(str(document.get(key) or "").strip() for key in ("id", "custom_id", "customId"))
+                else:
+                    ids.update(str(getattr(document, key, "") or "").strip() for key in ("id", "custom_id", "customId"))
+            return ids - {""}
+
+        return [item for item in results if identifiers(item).isdisjoint(quarantined)]
 
     def _live_client(self) -> Optional[_SupermemoryClient]:
         """The client when it may be used right now, else None. Every client use goes through here.
@@ -644,8 +692,15 @@ class SupermemoryMemoryProvider(MemoryProvider):
                 or not self._permits(self._container_tag, "read") or (client := self._live_client()) is None:
             return ""
         def _recall():
-            profile = client.get_profile(query=query[:200])
             include_profile = self._turn_count <= 1 or (self._turn_count % self._profile_frequency == 0)
+            if self._quarantined_ids():
+                # The profile API aggregates facts without source ids, so it cannot enforce an exact-document
+                # quarantine. Fall back to id-bearing search results for this container and filter them locally.
+                results = self._filter_quarantined(
+                    client.search_memories(query[:200], limit=self._max_recall_results)
+                )
+                return _format_prefetch_context([], [], results, self._max_recall_results)
+            profile = client.get_profile(query=query[:200])
             return _format_prefetch_context(profile["static"] if include_profile else [], profile["dynamic"] if include_profile else [],
                                             profile["search_results"], self._max_recall_results)
         return _quietly(_recall, "Supermemory prefetch failed", default="")
@@ -781,8 +836,9 @@ class SupermemoryMemoryProvider(MemoryProvider):
             return tool_error("query is required")
         limit = _clamp_number(args.get("limit", 5) or 5, 5, 1, 20, int)
         tag = self._permitted_tag(args, "read")
+        raw_results = self._client.search_memories(query, limit=limit, container_tag=tag)
         results = [{"id": i.get("id", ""), "content": i.get("memory", ""), **({"similarity": pct} if (pct := _similarity_pct(i.get("similarity"))) is not None else {})}
-                   for i in self._client.search_memories(query, limit=limit, container_tag=tag)]
+                   for i in self._filter_quarantined(raw_results, tag)]
         return _tagged({"results": results, "count": len(results)}, tag)
 
     def _tool_forget(self, args: dict) -> dict | str:
@@ -791,12 +847,24 @@ class SupermemoryMemoryProvider(MemoryProvider):
             return tool_error("Provide either id or query")
         tag = self._permitted_tag(args, "write")  # not echoed in the response
         if not memory_id:
-            return self._client.forget_by_query(query, container_tag=tag)
+            results = self._filter_quarantined(
+                self._client.search_memories(query, limit=5, container_tag=tag), tag
+            )
+            memory_id = results[0].get("id", "") if results else ""
+            if not memory_id:
+                return {"success": False, "message": "No non-quarantined matching memory found to forget."}
+            self._client.forget_memory(memory_id, container_tag=tag)
+            return {"success": True, "message": "Forgot the best non-quarantined match.", "id": memory_id}
         self._client.forget_memory(memory_id, container_tag=tag)
         return {"forgotten": True, "id": memory_id}
 
     def _tool_profile(self, args: dict) -> dict:
         tag = self._permitted_tag(args, "read")
+        if self._quarantined_ids(tag):
+            raise _TagError(
+                f"Refused: container '{tag or self._container_tag}' has quarantined memory ids; "
+                "use supermemory-search so exact-document quarantine can be enforced."
+            )
         profile = self._client.get_profile(query=str(args.get("query") or "").strip() or None, container_tag=tag)
         return _tagged({"profile": "\n\n".join(_profile_sections(profile["static"], profile["dynamic"])),
                        "static_count": len(profile["static"]), "dynamic_count": len(profile["dynamic"])}, tag)

@@ -25,6 +25,7 @@ class FakeClient:
     def __init__(self, api_key, timeout, container_tag, search_mode="hybrid", base_url="", tunnel=None, socket_pin=None):
         self.api_key, self.container_tag = api_key, container_tag
         self.add_calls, self.search_calls, self.profile_calls = [], [], []
+        self.search_results = [{"id": "r1", "memory": "synthetic result", "similarity": 0.9}]
         self.forgotten_ids, self.forget_queries = [], []
 
     def add_memory(self, content, metadata=None, *, entity_context="", container_tag=None, custom_id=None):
@@ -33,7 +34,7 @@ class FakeClient:
 
     def search_memories(self, query, *, limit=5, container_tag=None, search_mode=None):
         self.search_calls.append(container_tag)
-        return [{"id": "r1", "memory": "synthetic result", "similarity": 0.9}]
+        return self.search_results
 
     def get_profile(self, query=None, *, container_tag=None):
         self.profile_calls.append(container_tag)
@@ -172,6 +173,60 @@ def test_search_allowed_on_read_only_container(home):
     out = _call(p, "supermemory-search", query="synthetic", container_tag="hermes_fleet_pilot")
     assert out["count"] == 1
     assert p._client.search_calls == ["hermes_fleet_pilot"]
+
+
+def test_search_filters_quarantined_document_id(home):
+    p = _provider(home, {**PILOT, "quarantined_memory_ids": {"hermes_fleet_pilot": ["r1"]}})
+    p._client.search_results.append({"id": "r2", "memory": "approved cited result", "similarity": 0.8})
+    out = _call(p, "supermemory-search", query="synthetic", container_tag="hermes_fleet_pilot")
+    assert out["count"] == 1
+    assert [item["id"] for item in out["results"]] == ["r2"]
+    assert "synthetic result" not in json.dumps(out)
+
+
+def test_search_filters_quarantined_parent_custom_id(home):
+    custom_id = "session_2026-09-24_b4"
+    p = _provider(home, {**PILOT, "quarantined_memory_ids": {"hermes_fleet_pilot": [custom_id]}})
+    p._client.search_results[0]["documents"] = [{"id": custom_id}]
+    p._client.search_results.append({"id": "r2", "memory": "approved cited result", "similarity": 0.8,
+                                     "documents": [{"id": "approved_custom_id"}]})
+    out = _call(p, "supermemory-search", query="synthetic", container_tag="hermes_fleet_pilot")
+    assert [item["id"] for item in out["results"]] == ["r2"]
+    assert "synthetic result" not in json.dumps(out)
+
+
+def test_profile_refused_for_container_with_quarantined_document(home):
+    p = _provider(home, {**PILOT, "quarantined_memory_ids": {"hermes_fleet_pilot": ["r1"]}})
+    out = _call(p, "supermemory-profile", query="synthetic", container_tag="hermes_fleet_pilot")
+    assert "error" in out and "quarantined" in out["error"]
+    assert p._client.profile_calls == []
+
+
+def test_malformed_quarantine_entry_fails_closed(home):
+    p = _provider(home, {**PILOT, "quarantined_memory_ids": {"hermes_fleet_pilot": "r1"}})
+    out = _call(p, "supermemory-search", query="synthetic", container_tag="hermes_fleet_pilot")
+    assert out["count"] == 0 and out["results"] == []
+
+
+def test_forget_by_query_skips_quarantined_match(home):
+    p = _provider(home, {"container_tag": "hermes_{identity}",
+                         "quarantined_memory_ids": {"hermes_{identity}": ["r1"]}})
+    p._client.search_results.append({"id": "r2", "memory": "approved cited result", "similarity": 0.8})
+    out = _call(p, "supermemory-forget", query="synthetic")
+    assert out == {"success": True, "message": "Forgot the best non-quarantined match.", "id": "r2"}
+    assert p._client.forgotten_ids == [("r2", None)]
+    assert "synthetic result" not in json.dumps(out)
+
+
+def test_prefetch_uses_id_bearing_search_when_primary_has_quarantine(home):
+    p = _provider(home, {"container_tag": "hermes_{identity}",
+                         "quarantined_memory_ids": {"hermes_{identity}": ["r1"]}})
+    p._client.search_results.append({"id": "r2", "memory": "approved cited result", "similarity": 0.8})
+    p.on_turn_start(1, "synthetic")
+    recalled = p.prefetch("synthetic")
+    assert "approved cited result" in recalled
+    assert "synthetic result" not in recalled
+    assert p._client.profile_calls == []
 
 
 def test_store_allowed_on_write_approved_primary(home):
