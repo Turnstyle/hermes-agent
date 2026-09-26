@@ -7,6 +7,7 @@ import pytest
 from hermes_cli import config as hermes_config
 from hermes_cli import main as hermes_main
 from hermes_cli import update_cmd
+from hermes_constants import get_hermes_home
 
 
 # ---------------------------------------------------------------------------
@@ -115,6 +116,14 @@ def test_refresh_active_memory_provider_dependencies_reinstalls_active_provider(
     assert recorded == [("mem0", True)]
 
 
+
+
+
+def _opt_into_carried_commits_reset():
+    """These tests drive the reset itself; the default policy refuses before it (the refusal is covered
+    in test_update_carried_commits_guard.py), so opt in the way a user would."""
+    (get_hermes_home() / "config.yaml").write_text(
+        "updates:\n  carried_commits_policy: reset\n", encoding="utf-8")
 
 
 def _make_update_side_effect(
@@ -265,6 +274,7 @@ def test_cmd_update_orphan_history_backs_up_before_reset(monkeypatch, tmp_path, 
     """No common ancestor with origin/<branch> → HEAD is parked behind a
     ``refs/hermes-update-backups/orphan-*`` ref before the reset proceeds."""
     _setup_update_mocks(monkeypatch, tmp_path)
+    _opt_into_carried_commits_reset()
 
     side_effect, recorded = _make_update_side_effect(
         ff_only_fails=True, merge_base_exists=False,
@@ -295,6 +305,7 @@ def test_cmd_update_orphan_rescue_ref_write_failure_message_is_honest(monkeypatc
     """When ``git update-ref`` fails, the printed message must not claim a
     backup exists — it should say the write was attempted and failed."""
     _setup_update_mocks(monkeypatch, tmp_path)
+    _opt_into_carried_commits_reset()
 
     side_effect, recorded = _make_update_side_effect(
         ff_only_fails=True, merge_base_exists=False, update_ref_fails=True,
@@ -315,6 +326,7 @@ def test_cmd_update_orphan_rescue_refs_pruned_beyond_keep_limit(monkeypatch, tmp
     from datetime import datetime, timedelta, timezone
 
     _setup_update_mocks(monkeypatch, tmp_path)
+    _opt_into_carried_commits_reset()
 
     # All refs are recent (within the age window) so only the count cap
     # applies — the age-expiry path is exercised separately below.
@@ -349,6 +361,7 @@ def test_cmd_update_orphan_rescue_refs_expired_by_age(monkeypatch, tmp_path, cap
     from datetime import datetime, timedelta, timezone
 
     _setup_update_mocks(monkeypatch, tmp_path)
+    _opt_into_carried_commits_reset()
 
     now = datetime.now(timezone.utc)
     old = now - timedelta(days=update_cmd._ORPHAN_RESCUE_REF_MAX_AGE_DAYS + 5)
@@ -440,6 +453,7 @@ def test_cmd_update_orphan_rescue_ref_write_failure_is_non_fatal(monkeypatch, tm
     permissions) while parking the orphan rescue ref. The backup attempt is
     best-effort — so the reset must still proceed and the update succeed."""
     _setup_update_mocks(monkeypatch, tmp_path)
+    _opt_into_carried_commits_reset()
 
     side_effect, recorded = _make_update_side_effect(
         ff_only_fails=True, merge_base_exists=False, update_ref_fails=True,
@@ -469,6 +483,7 @@ def test_cmd_update_orphan_guard_skips_rescue_ref_when_pre_pull_sha_missing(
     ref pointing at nothing — the reset must still proceed without crashing.
     """
     _setup_update_mocks(monkeypatch, tmp_path)
+    _opt_into_carried_commits_reset()
 
     side_effect, recorded = _make_update_side_effect(
         ff_only_fails=True, merge_base_exists=False, pre_pull_sha_unavailable=True,
@@ -489,6 +504,7 @@ def test_cmd_update_orphan_rescue_ref_persists_when_reset_fails(monkeypatch, tmp
     fails, the rescue ref must already have been written — the backup is
     not lost just because the overall update aborts."""
     _setup_update_mocks(monkeypatch, tmp_path)
+    _opt_into_carried_commits_reset()
 
     side_effect, recorded = _make_update_side_effect(
         ff_only_fails=True, merge_base_exists=False, reset_fails=True,
