@@ -931,6 +931,8 @@ class HermesCLI(CLIInitMixin, CLITuiRuntimeMixin, CLIProcessNotificationsMixin, 
             logger.warning("Failed to claim active session slot: %s", exc)
             return True
         if message:
+            # Kept so a one-shot Kanban worker can map a capacity refusal to its exit code.
+            self._active_session_refusal_reason = getattr(message, "reason", "")
             print(format_refusal_stderr(message), file=sys.stderr) if stderr else self._console_print(f"[bold red]{message}[/]")
             return False
         self._active_session_lease = lease

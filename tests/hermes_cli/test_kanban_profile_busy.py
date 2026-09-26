@@ -202,9 +202,11 @@ def _busy_runs(conn, tid: str, n: int) -> None:
 
 
 def _age_last_run(conn, tid: str, seconds: int) -> None:
+    """Move every closed run back in time, keeping their order, so the newest ended ``seconds`` ago."""
     conn.execute(
-        "UPDATE task_runs SET ended_at = ? WHERE id = (SELECT MAX(id) FROM task_runs WHERE task_id = ?)",
-        (int(time.time()) - seconds, tid),
+        "UPDATE task_runs SET ended_at = ? - ((SELECT MAX(id) FROM task_runs WHERE task_id = ?) - id) "
+        "WHERE task_id = ?",
+        (int(time.time()) - seconds, tid, tid),
     )
     conn.commit()
 

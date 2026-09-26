@@ -142,6 +142,24 @@ _TERMINAL_PROVIDER_REASONS = frozenset({
 })
 
 
+def _session_refusal_exit_code(cli) -> int:
+    """Exit code for a one-shot run refused an active-session slot.
+
+    A Kanban worker refused only by the ``max_concurrent_sessions`` CAP never started its turn:
+    the profile was busy, the task did not fail. It exits ``KANBAN_RATE_LIMIT_EXIT_CODE``
+    (EX_TEMPFAIL) so the dispatcher requeues WITHOUT counting a failure (booked ``profile_busy``
+    when the run-bound busy marker is present, t_76b0d62d). A per-session ownership refusal
+    (another live writer owns the session) or an unprovable registry stays 1: those are not
+    capacity waits. Ported to 0.21.5 from TurnerBook carry c9e7438ede.
+    """
+    if os.environ.get("HERMES_KANBAN_TASK"):
+        from hermes_cli.active_sessions import MAX_CONCURRENT_SESSIONS
+        if getattr(cli, "_active_session_refusal_reason", "") == MAX_CONCURRENT_SESSIONS:
+            from hermes_cli.kanban_db import KANBAN_RATE_LIMIT_EXIT_CODE
+            return KANBAN_RATE_LIMIT_EXIT_CODE
+    return 1
+
+
 def _single_query_exit_code(result, *, credentials_rate_limited: bool = False) -> int:
     """Map a one-shot turn result onto a process exit code, for both `-q` and `-Q`.
 
@@ -456,9 +474,13 @@ def _run_single_query_mode(cli, query, image, quiet, oneshot, stream_json: bool 
     # isn't engaged) and takes the deterministic approvals.single_query_mode path instead of waiting the
     # full timeout. See #86878.
     os.environ["HERMES_SINGLE_QUERY_SESSION"] = "1"
-    from hermes_cli.quiet_single_query import exit_single_query
+    from hermes_cli.quiet_single_query import exit_single_query, write_worker_busy_marker
     if not cli._claim_active_session("cli", stderr=bool(quiet)):
-        exit_single_query(1)
+        refusal_code = _session_refusal_exit_code(cli)
+        if refusal_code != 1:
+            # Capacity refusal only: the dispatcher books this run ``profile_busy`` (t_76b0d62d).
+            write_worker_busy_marker(getattr(cli, "_active_session_refusal_reason", ""))
+        exit_single_query(refusal_code)
     try:
         query, single_query_images = _collect_query_images(query, image)
         single_query_image_urls = _collect_kanban_task_images(single_query_images)

@@ -107,3 +107,28 @@ def test_quiet_kanban_worker_exits_tempfail_when_credentials_are_rate_limited(mo
     with pytest.raises(SystemExit) as exc:
         cli._run_single_query_mode(stub, "do the thing", None, True, True)
     assert exc.value.code == expected
+
+
+@pytest.mark.parametrize(
+    ("in_kanban", "reason", "expected"),
+    [
+        (True, "MAX_CONCURRENT_SESSIONS", KANBAN_RATE_LIMIT_EXIT_CODE),  # profile busy: a capacity wait
+        (True, "SESSION_NOT_OWNED", 1),  # another live writer owns the session: never a retry signal
+        (True, "SESSION_COORDINATION_UNAVAILABLE", 1),  # unprovable registry fails closed
+        (False, "MAX_CONCURRENT_SESSIONS", 1),  # a person's run keeps 1
+    ],
+)
+def test_worker_refused_a_session_slot_signals_capacity_not_crash(monkeypatch, in_kanban, reason, expected):
+    """A dispatcher-spawned worker refused by ``max_concurrent_sessions`` never ran its turn.
+
+    Exiting 1 made the dispatcher count a crash; a burst of cap refusals then tripped the
+    systemic breaker and parked every card it touched. Only the cap refusal maps to EX_TEMPFAIL.
+    """
+    if in_kanban:
+        monkeypatch.setenv("HERMES_KANBAN_TASK", "t_abc123")
+    monkeypatch.setattr(cli, "_should_seed_interactive", lambda *a, **k: False)
+    stub = SimpleNamespace(_active_session_refusal_reason=reason)
+    stub._claim_active_session = lambda *a, **k: False
+    with pytest.raises(SystemExit) as exc:
+        cli._run_single_query_mode(stub, "do the thing", None, True, True)
+    assert exc.value.code == expected

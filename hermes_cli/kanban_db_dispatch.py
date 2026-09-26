@@ -25,7 +25,7 @@ from typing import Mapping
 from typing import Optional
 from typing import TYPE_CHECKING
 
-from hermes_cli.quiet_single_query import KANBAN_WORKER_EXIT_TRAILER
+from hermes_cli.quiet_single_query import KANBAN_WORKER_BUSY_MARKER, KANBAN_WORKER_EXIT_TRAILER
 
 if TYPE_CHECKING:
     from hermes_cli.kanban_db import Task
@@ -78,6 +78,16 @@ _RESPAWN_GUARD_SUCCESS_WINDOW = 3600  # 1 hour
 # wall, burning a worker slot every tick for hours. Overridable via
 # ``HERMES_KANBAN_RATE_LIMIT_COOLDOWN_SECONDS``.
 DEFAULT_RATE_LIMIT_COOLDOWN_SECONDS = 300  # 5 minutes
+
+# Backoff after a ``profile_busy`` requeue (worker refused its profile's only active-session
+# slot, t_76b0d62d): 60s, doubling per consecutive busy run, capped at 15 min. Never counts a
+# failure, so it must be bounded here instead of by the breaker. Overridable via
+# ``HERMES_KANBAN_PROFILE_BUSY_BACKOFF_SECONDS`` / ``..._BACKOFF_MAX_SECONDS``.
+DEFAULT_PROFILE_BUSY_BACKOFF_SECONDS = 60
+DEFAULT_PROFILE_BUSY_BACKOFF_MAX_SECONDS = 900
+# From this many consecutive busy runs on, each ``profile_busy`` event carries ``long_busy``
+# and the card's error line names the streak, so a long hold stays visible on the board.
+PROFILE_BUSY_LONG_STREAK = 6
 
 # Within this window a GitHub PR URL in a comment blocks re-spawn.
 _RESPAWN_GUARD_PR_WINDOW = 86400  # 24 hours
@@ -145,6 +155,10 @@ class DispatchResult:
     """Task ids whose workers bailed on a provider rate-limit / quota wall
     (EX_TEMPFAIL sentinel exit) and were released to ``ready`` WITHOUT counting
     a failure — a long quota window must never trip the circuit breaker."""
+    profile_busy: list[str] = field(default_factory=list)
+    """Task ids whose workers were refused their profile's active-session slot
+    (the profile's one session was held elsewhere) and were released WITHOUT
+    counting a failure, behind a bounded backoff (t_76b0d62d)."""
     skipped_locked: bool = False
     """True when another process held the board's dispatch lock: this tick did
     no DB writes; the lock holder is making progress on the same board."""
@@ -173,6 +187,8 @@ def describe_suppression(results: Iterable[Optional["DispatchResult"]]) -> str:
             counts[reason] = counts.get(reason, 0) + 1
         if res.rate_limited:
             counts["rate_limited"] = counts.get("rate_limited", 0) + len(res.rate_limited)
+        if getattr(res, "profile_busy", None):
+            counts["profile_busy"] = counts.get("profile_busy", 0) + len(res.profile_busy)
         if res.skipped_locked:
             counts["skipped_locked"] = counts.get("skipped_locked", 0) + 1
         if res.memory_pressure:
@@ -276,6 +292,36 @@ def _worker_log_exit_code(task_id: str, board: Optional[str] = None) -> Optional
         return None
     matches = _EXIT_TRAILER_RE.findall(raw or "")
     return int(matches[-1]) if matches else None
+
+
+# Whole line only: a tool that echoes the marker mid-line never matches.
+_BUSY_MARKER_RE = re.compile(
+    r"^" + re.escape(KANBAN_WORKER_BUSY_MARKER) + r"([A-Z_]+) run=(\d+)\s*$", re.MULTILINE,
+)
+
+# The only refusal reason booked ``profile_busy``: the active-session CAP. An ownership refusal
+# (another live writer owns the session) or an unprovable registry is not a capacity wait.
+_PROFILE_BUSY_REASON = "MAX_CONCURRENT_SESSIONS"
+
+
+def _worker_log_busy_for_run(task_id: str, run_id: Optional[int], board: Optional[str] = None) -> bool:
+    """True when the worker's own log carries the busy marker for exactly ``run_id``.
+
+    The worker writes it (``quiet_single_query.write_worker_busy_marker``) only when it was
+    refused its profile's session slot by the cap and before any turn ran. Bound to the run id,
+    so a marker an earlier run left in the append-mode log never classifies a later run, and
+    printing the human refusal phrase (which a real crash may do) is never enough.
+    """
+    if not task_id or run_id is None:
+        return False
+    try:
+        raw = _kb.read_worker_log(task_id, tail_bytes=4000, board=board)
+    except Exception:
+        return False
+    return any(
+        reason == _PROFILE_BUSY_REASON and int(run) == int(run_id)
+        for reason, run in _BUSY_MARKER_RE.findall(raw or "")
+    )
 
 
 def reap_worker_zombies() -> "list[int]":
@@ -945,7 +991,7 @@ def _protocol_violation_streak(conn: sqlite3.Connection, task_id: str) -> int:
     ).fetchall()
     for row in rows:
         outcome = row["outcome"] or ""
-        if outcome == "rate_limited":
+        if outcome in ("rate_limited", "profile_busy"):
             continue
         if outcome == "crashed" and (
             _kb._json_dict(row["metadata"]).get("protocol_violation")
@@ -955,6 +1001,47 @@ def _protocol_violation_streak(conn: sqlite3.Connection, task_id: str) -> int:
             continue
         break
     return streak
+
+
+def _profile_busy_streak(conn: sqlite3.Connection, task_id: str) -> int:
+    """Count the task's trailing run of closed ``profile_busy`` runs (any other outcome breaks it)."""
+    streak = 0
+    for row in conn.execute(
+        "SELECT outcome FROM task_runs WHERE task_id = ? AND ended_at IS NOT NULL "
+        "ORDER BY id DESC LIMIT ?",
+        (task_id, _PROTOCOL_VIOLATION_SCAN_LIMIT),
+    ).fetchall():
+        if (row["outcome"] or "") != "profile_busy":
+            break
+        streak += 1
+    return streak
+
+
+def _profile_busy_backoff_seconds(streak: int) -> int:
+    """Wait before re-spawning after ``streak`` consecutive busy runs: base doubling per run, capped."""
+    base = _kb._env_int("HERMES_KANBAN_PROFILE_BUSY_BACKOFF_SECONDS", DEFAULT_PROFILE_BUSY_BACKOFF_SECONDS)
+    cap = _kb._env_int(
+        "HERMES_KANBAN_PROFILE_BUSY_BACKOFF_MAX_SECONDS", DEFAULT_PROFILE_BUSY_BACKOFF_MAX_SECONDS,
+    )
+    # Exponent clamped so a very long streak cannot build a huge integer before the cap applies.
+    exponent = min(max(int(streak), 1) - 1, 16)
+    return int(min(base * (2 ** exponent), max(cap, base)))
+
+
+def _book_profile_busy(dead: "_DeadWorker", streak: int) -> None:
+    """Stamp the busy streak, the next retry and (past the threshold) ``long_busy`` on the
+    run/event payload and lead the card's error line with them, so a long hold is visible."""
+    wait = _profile_busy_backoff_seconds(streak)
+    dead.event_payload["busy_streak"] = streak
+    dead.event_payload["next_retry_after_seconds"] = wait
+    long_busy = streak >= PROFILE_BUSY_LONG_STREAK
+    if long_busy:
+        dead.event_payload["long_busy"] = True
+    dead.error_text = (
+        f"profile busy: {'LONG HOLD, ' if long_busy else ''}refused its profile's only "
+        f"active-session slot {streak} times in a row; requeued without counting a failure, "
+        f"next try in {wait}s. " + dead.error_text
+    )
 
 
 _PROTOCOL_VIOLATION_ERROR = (
@@ -1027,16 +1114,22 @@ class _DeadWorker:
     terminal_provider: bool = False
     """``KANBAN_TERMINAL_PROVIDER_EXIT_CODE``: the provider rejected the worker's
     credential/model — trips the breaker on this first occurrence."""
+    profile_busy: bool = False
+    """EX_TEMPFAIL exit plus the run-bound busy marker: the worker was refused its
+    profile's active-session slot and never ran — requeued with backoff, never counted."""
 
     @property
     def run_outcome(self) -> str:
-        # A rate-limited requeue is recorded as ``rate_limited`` so board history
-        # doesn't show a phantom crash for a quota wall.
+        # A rate-limited requeue is recorded as ``rate_limited`` (and a busy profile as
+        # ``profile_busy``) so board history doesn't show a phantom crash.
+        if self.profile_busy:
+            return "profile_busy"
         return "rate_limited" if self.rate_limited else "crashed"
 
 
 def _classify_dead_worker(
     pid: int, claimer: Optional[str], *, task_id: Optional[str] = None, board: Optional[str] = None,
+    run_id: Optional[int] = None,
 ) -> _DeadWorker:
     """Map a dead worker's reaped exit status to its reclaim bookkeeping.
 
@@ -1044,7 +1137,7 @@ def _classify_dead_worker(
     in the event payload, appended to the error text) so the board and the retry
     worker see WHY instead of a bare label; a rate-limited requeue does not need it.
     """
-    dead = _classify_dead_worker_exit(pid, claimer, task_id=task_id, board=board)
+    dead = _classify_dead_worker_exit(pid, claimer, task_id=task_id, board=board, run_id=run_id)
     if task_id and not dead.rate_limited:
         worker_output = _worker_final_output(task_id, board=board)
         if worker_output:
@@ -1059,6 +1152,7 @@ def _classify_dead_worker_exit(
     *,
     task_id: Optional[str] = None,
     board: Optional[str] = None,
+    run_id: Optional[int] = None,
 ) -> _DeadWorker:
     """Exit status -> reclaim bookkeeping, before the worker's own words are folded in.
 
@@ -1084,6 +1178,18 @@ def _classify_dead_worker_exit(
             # run metadata.
             {"pid": pid, "claimer": claimer, "exit_code": code, "protocol_violation": True},
             protocol_violation=True,
+        )
+    if kind == "rate_limited" and task_id and _worker_log_busy_for_run(task_id, run_id, board=board):
+        # Profile busy (t_76b0d62d): the worker was refused its profile's active-session slot
+        # by the cap and never started its turn. Needs BOTH the EX_TEMPFAIL exit and the marker
+        # written for THIS run; the refusal phrase in the output alone never classifies.
+        return _DeadWorker(
+            "profile_busy", code,
+            f"pid {pid} was refused its profile's active-session slot",
+            "profile_busy",
+            {"pid": pid, "claimer": claimer, "exit_kind": "profile_busy", "exit_code": code,
+             "reason": _PROFILE_BUSY_REASON},
+            profile_busy=True,
         )
     if kind == "rate_limited":
         # Quota wall — NOT a task failure. Release to the source phase and do
@@ -1126,6 +1232,7 @@ class _CrashSweep:
 
     crashed: list[str] = field(default_factory=list)
     rate_limited: list[str] = field(default_factory=list)
+    profile_busy: list[str] = field(default_factory=list)
     # ``(task_id, pid, claimer, dead_worker)``: accounted after the txn via
     # ``_record_task_failure`` (needs its own write_txn).
     crash_details: list[tuple[str, int, str, _DeadWorker]] = field(default_factory=list)
@@ -1139,7 +1246,8 @@ def _reclaim_dead_workers(conn: sqlite3.Connection, board: Optional[str] = None)
     sweep = _CrashSweep()
     with _kb.write_txn(conn):
         rows = conn.execute(
-            "SELECT id, worker_pid, worker_started_at, claim_lock, started_at, assignee "
+            "SELECT id, worker_pid, worker_started_at, claim_lock, started_at, assignee, "
+            "current_run_id "
             "FROM tasks "
             "WHERE status = 'running' AND worker_pid IS NOT NULL"
         ).fetchall()
@@ -1157,7 +1265,10 @@ def _reclaim_dead_workers(conn: sqlite3.Connection, board: Optional[str] = None)
                 continue
 
             pid = int(row["worker_pid"])
-            dead = _classify_dead_worker(pid, row["claim_lock"], task_id=row["id"], board=board)
+            dead = _classify_dead_worker(
+                pid, row["claim_lock"], task_id=row["id"], board=board,
+                run_id=_kb._row_get(row, "current_run_id"),
+            )
             retry_status = _kb._retry_status_for_run(conn, row["id"])
             dead.event_payload["retry_status"] = retry_status
             cur = conn.execute(
@@ -1169,6 +1280,9 @@ def _reclaim_dead_workers(conn: sqlite3.Connection, board: Optional[str] = None)
             )
             if cur.rowcount != 1:
                 continue
+            if dead.profile_busy:
+                # Streak BEFORE this run closes: prior consecutive busy runs + this one.
+                _book_profile_busy(dead, _profile_busy_streak(conn, row["id"]) + 1)
             run_id = _kb._end_run(
                 conn, row["id"],
                 outcome=dead.run_outcome, status=dead.run_outcome,
@@ -1186,7 +1300,7 @@ def _reclaim_dead_workers(conn: sqlite3.Connection, board: Optional[str] = None)
                 "outcome": dead.run_outcome,
                 "retry_status": retry_status,
             })
-            if dead.rate_limited or dead.protocol_violation:
+            if dead.rate_limited or dead.protocol_violation or dead.profile_busy:
                 # Stamp last_failure_error WITHOUT touching ``consecutive_failures``:
                 # a rate-limited requeue must show ``check_respawn_guard`` a quota
                 # blocker; a below-budget protocol violation never reaches
@@ -1196,7 +1310,9 @@ def _reclaim_dead_workers(conn: sqlite3.Connection, board: Optional[str] = None)
                     "UPDATE tasks SET last_failure_error = ? WHERE id = ?",
                     (dead.error_text[:500], row["id"]),
                 )
-            if dead.rate_limited:
+            if dead.profile_busy:
+                sweep.profile_busy.append(row["id"])
+            elif dead.rate_limited:
                 sweep.rate_limited.append(row["id"])
             else:
                 sweep.crashed.append(row["id"])
@@ -1302,6 +1418,7 @@ def detect_crashed_workers(conn: sqlite3.Connection, board: Optional[str] = None
     # requeues did NOT count a failure and are NOT crashes.
     detect_crashed_workers._last_auto_blocked = auto_blocked  # type: ignore[attr-defined]
     detect_crashed_workers._last_rate_limited = sweep.rate_limited  # type: ignore[attr-defined]
+    detect_crashed_workers._last_profile_busy = sweep.profile_busy  # type: ignore[attr-defined]
     # Fired only now, after the reclaim txn AND breaker accounting have
     # committed, so subscribers always observe fully durable board state.
     if sweep.exited_hook_payloads and _kb._kanban_observer_consumed("on_kanban_worker_exited"):
@@ -1535,6 +1652,15 @@ def check_respawn_guard(
             ended_at = latest_run["ended_at"]
             if ended_at is not None and (now - int(ended_at)) < rl_cooldown:
                 return "infrastructure_cooldown"
+    if latest_run is not None and latest_run["outcome"] == "profile_busy":
+        # Bounded backoff (60s doubling, 15 min cap) keyed on the consecutive busy streak.
+        # Returns before blocker_auth: the stamped error carries the worker's output, which
+        # is context, not a quota/auth diagnosis. Retries forever, spaced, never counted.
+        ended_at = latest_run["ended_at"]
+        wait = _profile_busy_backoff_seconds(_profile_busy_streak(conn, task_id))
+        if ended_at is not None and (now - int(ended_at)) < wait:
+            return "profile_busy_backoff"
+        return None
     if latest_run is not None and latest_run["outcome"] == "rate_limited":
         if rl_cooldown <= 0:
             # Cooldown disabled — respawn immediately, skipping blocker_auth so
@@ -2154,6 +2280,7 @@ def _run_reclaim_phase(
     # went back to ``ready`` and the respawn guard defers them until quota clears.
     result.auto_blocked.extend(getattr(detect_crashed_workers, "_last_auto_blocked", []))
     result.rate_limited.extend(getattr(detect_crashed_workers, "_last_rate_limited", []))
+    result.profile_busy.extend(getattr(detect_crashed_workers, "_last_profile_busy", []))
     result.timed_out = enforce_max_runtime(conn)
     result.promoted = _kb.recompute_ready(conn, failure_limit=failure_limit)
 
