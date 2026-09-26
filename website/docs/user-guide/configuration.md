@@ -211,7 +211,7 @@ updates:
   carried_commits_policy: refuse        # refuse | reset — local commits on main that are not on origin
 ```
 
-`carried_commits_policy` decides what happens when the update branch itself carries commits that `origin` does not have: `refuse` (default) skips the code update, changes nothing, names the commits and exits 1; `reset` resets to `origin` behind a rescue ref. See [Local commits on the target branch](../getting-started/updating.md#local-commits-on-the-target-branch).
+`carried_commits_policy` decides what happens when the update branch itself carries commits that `origin` never had: `refuse` (default) skips the code update, changes nothing, names the commits and exits 1; `reset` resets to `origin` behind a rescue ref. `reset` is only honoured while `config.yaml` loads without errors — the last-good copy Hermes serves for a broken file cannot authorize dropping commits. See [Local commits on the target branch](../getting-started/updating.md#local-commits-on-the-target-branch).
 
 `pre_update_backup` is the single pre-update safety knob: `quick` (default) snapshots critical state files (pairing data, cron jobs, config, auth; files over 1 GiB are skipped) into `state-snapshots/`; `full` additionally zips all of `HERMES_HOME` into `backups/` and can add minutes on large homes; `off` disables both. Legacy booleans are honored (`true` → `full`, `false` → `off`).
 

@@ -154,9 +154,10 @@ _SCHEMA_OVERRIDES: Dict[str, Dict[str, Any]] = {
         "stash", "discard",
     ),
     "updates.carried_commits_policy": _select(
-        "When main carries local commits that are not on origin, 'refuse' skips the code update "
+        "When main carries local commits that origin never had, 'refuse' skips the code update "
         "and changes nothing (the update fails loudly, naming the commits); 'reset' resets main "
-        "to origin, keeping the old HEAD under a rescue ref.",
+        "to origin, keeping the old HEAD under a rescue ref. 'reset' only applies while "
+        "config.yaml loads without errors.",
         "refuse", "reset",
     ),
     "updates.refresh_cua_driver": {
