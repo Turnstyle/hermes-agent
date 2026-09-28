@@ -7,6 +7,7 @@ the SENDER gateway for its waiter). Plumbing: ``tools/bot_relay.py``; handlers a
 server.py's globals (method_ctx.py) and reference ``_ok``/``_err`` bare."""
 
 import contextlib
+import logging
 import os
 import subprocess
 import time
@@ -20,6 +21,7 @@ from .method_ctx import HandlerRegistry
 
 _registry = HandlerRegistry()
 method = _registry.method
+logger = logging.getLogger(__name__)
 
 
 def _relay_root() -> Path:
@@ -51,6 +53,15 @@ def _run_delivery(profile: str, tmp: str, env: dict | None = None, *,
             os.unlink(report)
 
 
+def _log_deliver(requested: str, resolved: str, path: str, profile_home) -> None:
+    """One structured line per ``bot_relay.deliver`` call, so a misroute (a turn run against a
+    DIFFERENT profile than the one the RPC named — see ``delivered_profile`` on the ok response
+    below) is provable from this install's own logs even without reproducing live. No message body,
+    no secrets — just which profile was asked for, which one actually ran, and how."""
+    logger.info("bot_relay.deliver requested_profile=%s delivered_profile=%s path=%s profile_home=%s",
+                requested, resolved, path, profile_home)
+
+
 @method("bot_relay.roster.sync")
 def _(rid, params: dict, _root=_relay_root) -> dict:
     """Replace this gateway's view of agents on OTHER connections → ``{count}`` accepted rows
@@ -75,7 +86,7 @@ def _(rid, params: dict, _root=_relay_root) -> dict:
 
 @method("bot_relay.deliver")
 def _(rid, params: dict, _root=_relay_root, _run=_run_delivery,
-      _failure_reason=delivery_failure_reason) -> dict:
+      _failure_reason=delivery_failure_reason, _log_deliver=_log_deliver) -> dict:
     """Deliver a relayed DM (``profile``, attribution-prefixed ``message``) into a Bot Chat ON THIS
     GATEWAY via the one-turn ``hermes -p <profile> chat -c "Bot Chat"`` transport local DMs use →
     ``{reply}``. Blocking by design (Desktop relay worker; the RPC pool keeps it off the reader)."""
@@ -152,12 +163,15 @@ def _(rid, params: dict, _root=_relay_root, _run=_run_delivery,
             record = await_delivery(owner_home, record["delivery_id"], _LIVE_WAIT_SECONDS) or record
             if record["status"] == "settled":
                 from tui_gateway.prompt_turn import _bot_mode_delivery_text
-                return _ok(rid, {"reply": _bot_mode_delivery_text((record.get("reply") or "").strip(), successful=True)})
+                _log_deliver(profile, resolved, "live_owner", owner_home)
+                return _ok(rid, {"reply": _bot_mode_delivery_text((record.get("reply") or "").strip(), successful=True),
+                                 "delivered_profile": resolved, "requested_profile": profile})
             if record["status"] in ("queued", "claimed"):
                 # Admitted but not answered within the budget: the receipt stays, the turn still runs.
                 reply = (f"Queued for @{resolved}'s open Bot Chat; it runs as that chat's next turn and the reply "
                          "will appear there. Do not resend.")
-                return _ok(rid, {"reply": reply})
+                _log_deliver(profile, resolved, "live_owner", owner_home)
+                return _ok(rid, {"reply": reply, "delivered_profile": resolved, "requested_profile": profile})
             from tools.bot_failure_reasons import CANCELLED, classify_agent_error
             error = str(record.get("error") or f"Bot Chat delivery {record['status']}")
             reason = record.get("reason") or (CANCELLED if record["status"] == "cancelled" else classify_agent_error(error))
@@ -175,7 +189,8 @@ def _(rid, params: dict, _root=_relay_root, _run=_run_delivery,
             if "error" in submitted:
                 return submitted
             reply = f"Delivered into @{resolved}'s open Bot Chat; the reply will appear there."
-            return _ok(rid, {"reply": reply})
+            _log_deliver(profile, resolved, "live_sid", want_home)
+            return _ok(rid, {"reply": reply, "delivered_profile": resolved, "requested_profile": profile})
 
         def _detail(p) -> str:
             from tools.bot_failure_reasons import turn_failure_text
@@ -242,7 +257,8 @@ def _(rid, params: dict, _root=_relay_root, _run=_run_delivery,
         # back to the relay caller as visible prose.
         from tui_gateway.prompt_turn import _bot_mode_delivery_text
         reply = _bot_mode_delivery_text((proc.stdout or "").strip(), successful=True)
-        return _ok(rid, {"reply": reply})
+        _log_deliver(profile, resolved, "cli", str(live_home) if live_home is not None else None)
+        return _ok(rid, {"reply": reply, "delivered_profile": resolved, "requested_profile": profile})
     except subprocess.TimeoutExpired:
         # Every classified refusal has to ride `data.reason`: the Desktop forwards only that field,
         # and the sender re-classifies from free text, which cannot name these. This branch is also
