@@ -258,6 +258,16 @@ _SPECS = [
                   "--provider <name>). Cleared together with the model."),
     ], help="Set or clear a task's model/provider override (takes effect on the next dispatch)"),
     _cmd("reclaim", [_TASK_ID, _RECLAIM_REASON], help="Release an active worker claim on a running task"),
+    _cmd("recover-ghost", [
+        _TASK_ID,
+        _arg("--run", type=int, required=True, dest="run_id", help="Expected running task_runs id"),
+        _arg("--apply", action="store_true", help="Apply the recovery after rechecking under a write lock"),
+        _arg("--done", action="store_true", help="Record completion evidence (Fleet: handoff only)"),
+        _arg("--evidence", help="Non-empty evidence required with --done"),
+        _arg("--expect", help="Expected dry-run fingerprint"),
+        _arg("--wait", type=_nonnegative_int, help="Seconds to wait for Fleet sync (default 60)"),
+        _json_flag(),
+    ], help="Safely recover a claimless running task (dry-run by default)"),
     _cmd("reassign", [
         _TASK_ID,
         _arg("profile", help="New profile name (or 'none' to unassign)"),

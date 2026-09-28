@@ -178,6 +178,8 @@ def kanban_command(args: argparse.Namespace) -> int:
     with board_scope:
         # `repair` dispatches BEFORE auto-init: on a corrupt DB init_db() itself raises
         # KanbanDbCorruptError, which would turn every repair into "could not initialize database".
+        if action == "recover-ghost":
+            return _cmd_recover_ghost(args)
         if action == "repair":
             return _cmd_repair(args)
         # init_db is idempotent (one sqlite_master SELECT when tables exist) and prevents
@@ -205,7 +207,7 @@ def _profile_author() -> str:
 
 
 _DELEGATED_CHILD_DENIED_ACTIONS: frozenset[str] = frozenset({
-    "init", "create", "swarm", "assign", "reclaim", "reassign", "link", "unlink",
+    "init", "create", "swarm", "assign", "reclaim", "recover-ghost", "reassign", "link", "unlink",
     "claim", "comment", "attach", "attach-rm", "complete", "edit", "block",
     "schedule", "unblock", "promote", "archive", "dispatch", "daemon", "repair",
     "heartbeat", "notify-subscribe", "notify-unsubscribe", "specify", "decompose",
@@ -602,6 +604,11 @@ def _cmd_reclaim(args: argparse.Namespace) -> int:
         ok = kb.reclaim_task(conn, args.task_id, reason=getattr(args, "reason", None))
     return _ok_or_err(ok, f"cannot reclaim {args.task_id} (not running or unknown id)",
                       f"Reclaimed {args.task_id}")
+
+
+def _cmd_recover_ghost(args: argparse.Namespace) -> int:
+    from hermes_cli.kanban_recover_ghost import recover_ghost
+    return recover_ghost(args)
 
 
 def _cmd_reassign(args: argparse.Namespace) -> int:
