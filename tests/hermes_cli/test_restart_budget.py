@@ -356,6 +356,7 @@ def test_degraded_alive_bypasses_budget(tmp_path, monkeypatch):
 
 
 def test_guard_refusal_does_not_consume_budget(tmp_path, monkeypatch):
+    """Named-profile guard refusal and foreground fallback must leave the hour free."""
     import time
 
     from hermes_cli import gateway as gw
@@ -395,9 +396,8 @@ def test_guard_refusal_does_not_consume_budget(tmp_path, monkeypatch):
     gw._cmd_restart(SimpleNamespace(system=False, all=False, force=False))
     assert ran
 
-    allowed2, minutes = evaluate_restart_budget(now=t1 + 120, home=tmp_path)
-    assert not allowed2
-    assert minutes is not None
+    allowed2, _ = evaluate_restart_budget(now=t1 + 120, home=tmp_path)
+    assert allowed2, "foreground fallback must not consume the hourly restart budget"
 
 
 def test_failed_service_restart_does_not_consume_budget(tmp_path, monkeypatch):
@@ -430,10 +430,17 @@ def test_failed_service_restart_does_not_consume_budget(tmp_path, monkeypatch):
     allowed, _ = evaluate_restart_budget(now=t0, home=tmp_path)
     assert allowed
 
+    import os
+
     success = []
-    monkeypatch.setattr(
-        gw, "_service_call", lambda *a, **k: success.append(True)
-    )
+    live_pid = {"value": None}
+
+    def success_call(*a, **k):
+        success.append(True)
+        live_pid["value"] = os.getpid()
+
+    monkeypatch.setattr("gateway.status.get_running_pid", lambda *a, **k: live_pid["value"])
+    monkeypatch.setattr(gw, "_service_call", success_call)
     monkeypatch.setattr("hermes_cli.restart_budget.time.time", lambda: t0)
 
     gw._cmd_restart(SimpleNamespace(system=False, all=False, force=False))
@@ -569,12 +576,18 @@ def test_empty_s6_all_restart_allows_immediate_retry(tmp_path, monkeypatch):
 
     restarted = []
 
+    import os
+
     class _One:
         def list_profile_gateways(self):
             return ["coder"]
 
         def restart(self, name):
             restarted.append(name)
+            monkeypatch.setattr(
+                "gateway.status.get_running_pid",
+                lambda *a, **k: os.getpid(),
+            )
 
     monkeypatch.setattr(
         "hermes_cli.service_manager.get_service_manager", lambda: _One()
@@ -589,17 +602,23 @@ def test_empty_s6_all_restart_allows_immediate_retry(tmp_path, monkeypatch):
 
 def test_systemd_start_limit_allows_immediate_retry(tmp_path, monkeypatch, capsys):
     """A start-limit rejection from ``_systemd_reset_and_run`` must not keep the hour."""
+    import os
     import subprocess
 
     from hermes_cli import gateway as gw
 
+    live_pid = {"value": None}
+
+    def get_running_pid(*a, **k):
+        return live_pid["value"]
+
     _bind_restart_cli(monkeypatch, gw, tmp_path)
+    monkeypatch.setattr("gateway.status.get_running_pid", get_running_pid)
     monkeypatch.setattr(gw, "_dispatch_all_via_service_manager_if_s6", lambda *a, **k: False)
     monkeypatch.setattr(gw, "_dispatch_via_service_manager_if_s6", lambda *a, **k: False)
     monkeypatch.setattr(gw, "_installed_service_kind_for", lambda *a, **k: "systemd")
     monkeypatch.setattr(gw, "_systemd_scope_preamble", lambda *a, **k: False)
     monkeypatch.setattr(gw, "refresh_systemd_unit_if_needed", lambda **k: None)
-    monkeypatch.setattr("gateway.status.get_running_pid", lambda *a, **k: None)
     monkeypatch.setattr(gw, "_systemd_main_pid", lambda **k: None)
     monkeypatch.setattr(gw, "_recover_pending_systemd_restart", lambda **k: False)
     monkeypatch.setattr(gw, "get_service_name", lambda: "hermes-gateway")
@@ -620,6 +639,7 @@ def test_systemd_start_limit_allows_immediate_retry(tmp_path, monkeypatch, capsy
 
     def accept_restart(args, **kwargs):
         started.append(list(args))
+        live_pid["value"] = os.getpid()
         return subprocess.CompletedProcess(args, 0, "", "")
 
     monkeypatch.setattr(gw, "_run_systemctl", accept_restart)
@@ -653,7 +673,10 @@ def test_launchd_rejected_kickstart_allows_immediate_retry(tmp_path, monkeypatch
     monkeypatch.setattr(gw, "get_launchd_plist_path", lambda: plist)
     monkeypatch.setattr(gw, "_wait_for_api_server_port_free", lambda: None)
     monkeypatch.setattr(gw, "_clear_launchd_unsupported_marker", lambda: None)
-    monkeypatch.setattr("gateway.status.get_running_pid", lambda *a, **k: None)
+    live_pid = {"value": None}
+    monkeypatch.setattr(
+        "gateway.status.get_running_pid", lambda *a, **k: live_pid["value"]
+    )
 
     calls = []
 
@@ -671,8 +694,12 @@ def test_launchd_rejected_kickstart_allows_immediate_retry(tmp_path, monkeypatch
 
     calls.clear()
 
+    import os
+
     def accepting_launchctl(cmd, check=False, timeout=None, **kwargs):
         calls.append(list(cmd))
+        if check and cmd[:2] == ["launchctl", "kickstart"]:
+            live_pid["value"] = os.getpid()
         return subprocess.CompletedProcess(cmd, 0, "", "")
 
     monkeypatch.setattr(launchd.subprocess, "run", accepting_launchctl)
@@ -682,3 +709,214 @@ def test_launchd_rejected_kickstart_allows_immediate_retry(tmp_path, monkeypatch
 
     _assert_retry_then_consume(monkeypatch, gw, tmp_path, retry)
     assert any(cmd[:3] == ["launchctl", "kickstart", "-k"] for cmd in calls)
+
+
+@pytest.mark.parametrize(
+    "scenario",
+    [
+        pytest.param("systemd-graceful-start-limit", id="systemd-graceful-start-limit"),
+        pytest.param("launchd-exit-0-no-new-pid", id="launchd-exit-0-no-new-pid"),
+        pytest.param("s6-down-service", id="s6-down-service"),
+        pytest.param("all-failed-stop", id="all-failed-stop"),
+        pytest.param("foreground-fallback", id="foreground-fallback"),
+    ],
+)
+def test_cmd_restart_hour_free_without_observed_pid(
+    tmp_path, monkeypatch, capsys, scenario
+):
+    """Handled restart backends roll the hour back when no new live PID appears."""
+    import json
+    import os
+    import subprocess
+
+    from hermes_cli import gateway as gw
+
+    t0 = 1_700_000_000.0
+    _bind_restart_cli(monkeypatch, gw, tmp_path)
+    monkeypatch.setattr("hermes_cli.restart_budget.time.time", lambda: t0)
+
+    if scenario == "systemd-graceful-start-limit":
+        monkeypatch.setattr(gw, "_dispatch_all_via_service_manager_if_s6", lambda *a, **k: False)
+        monkeypatch.setattr(gw, "_dispatch_via_service_manager_if_s6", lambda *a, **k: False)
+        monkeypatch.setattr(gw, "_installed_service_kind_for", lambda *a, **k: "systemd")
+        monkeypatch.setattr(gw, "_systemd_scope_preamble", lambda *a, **k: False)
+        monkeypatch.setattr(gw, "refresh_systemd_unit_if_needed", lambda **k: None)
+        monkeypatch.setattr(gw, "get_service_name", lambda: "hermes-gateway")
+        monkeypatch.setattr(gw, "get_systemd_linger_status", lambda: (True, "ok"))
+        monkeypatch.setattr("gateway.status.get_running_pid", lambda *a, **k: os.getpid())
+        monkeypatch.setattr(
+            gw, "probe_gateway_loop_liveness", lambda pid, home=None: gw.GATEWAY_LOOP_ALIVE
+        )
+        monkeypatch.setattr(gw, "_graceful_restart_via_sigusr1", lambda *a, **k: True)
+        monkeypatch.setattr(gw, "_wait_for_systemd_service_restart", lambda **k: False)
+        monkeypatch.setattr(gw, "_systemd_service_is_start_limited", lambda **k: True)
+    elif scenario == "launchd-exit-0-no-new-pid":
+        monkeypatch.setattr(gw, "_dispatch_all_via_service_manager_if_s6", lambda *a, **k: False)
+        monkeypatch.setattr(gw, "_dispatch_via_service_manager_if_s6", lambda *a, **k: False)
+        import hermes_cli.gateway_launchd as launchd
+
+        plist = tmp_path / "ai.hermes.gateway.plist"
+        plist.write_text("<plist/>", encoding="utf-8")
+        monkeypatch.setattr(gw, "_installed_service_kind_for", lambda *a, **k: "launchd")
+        monkeypatch.setattr(gw, "refresh_launchd_plist_if_needed", lambda: True)
+        monkeypatch.setattr(gw, "get_launchd_label", lambda: "ai.hermes.gateway")
+        monkeypatch.setattr(gw, "_launchd_domain", lambda: "gui/501")
+        monkeypatch.setattr(gw, "get_launchd_plist_path", lambda: plist)
+        monkeypatch.setattr(gw, "_wait_for_api_server_port_free", lambda: None)
+        monkeypatch.setattr(gw, "_clear_launchd_unsupported_marker", lambda: None)
+        monkeypatch.setattr("gateway.status.get_running_pid", lambda *a, **k: None)
+        monkeypatch.setattr(
+            launchd.subprocess,
+            "run",
+            lambda *a, **k: subprocess.CompletedProcess(a[0] if a else [], 0, "", ""),
+        )
+    elif scenario == "s6-down-service":
+        monkeypatch.setattr(
+            "hermes_cli.service_manager.detect_service_manager", lambda: "s6"
+        )
+
+        class _Down:
+            def restart(self, service):
+                return None
+
+        monkeypatch.setattr(
+            "hermes_cli.service_manager.get_service_manager", lambda: _Down()
+        )
+        monkeypatch.setattr("gateway.status.get_running_pid", lambda *a, **k: None)
+    elif scenario == "all-failed-stop":
+        monkeypatch.setattr(gw, "_dispatch_all_via_service_manager_if_s6", lambda *a, **k: False)
+        monkeypatch.setattr(gw, "_host_multiplexer_for_all_verb", lambda: None)
+        monkeypatch.setattr(gw, "kill_gateway_processes", lambda **k: 0)
+        monkeypatch.setattr(gw, "_stop_installed_service", lambda *a, **k: False)
+        monkeypatch.setattr(gw, "_wait_for_gateway_exit", lambda **k: None)
+        monkeypatch.setattr(gw, "_wait_for_api_server_port_free", lambda: None)
+        monkeypatch.setattr(gw, "_discard_dead_host_record", lambda: True)
+        monkeypatch.setattr(gw, "_installed_service_kind_for", lambda *a, **k: "systemd")
+        monkeypatch.setattr("gateway.status.get_running_pid", lambda *a, **k: os.getpid())
+        monkeypatch.setattr(gw, "_service_call", lambda *a, **k: None)
+        args = SimpleNamespace(system=False, all=True, force=False)
+    elif scenario == "foreground-fallback":
+        monkeypatch.setattr(gw, "_dispatch_all_via_service_manager_if_s6", lambda *a, **k: False)
+        monkeypatch.setattr(gw, "_dispatch_via_service_manager_if_s6", lambda *a, **k: False)
+        monkeypatch.setattr(gw, "_installed_service_kind_for", lambda *a, **k: None)
+        monkeypatch.setattr(gw, "stop_profile_gateway", lambda: False)
+        monkeypatch.setattr(gw, "_wait_for_gateway_exit", lambda **k: None)
+        monkeypatch.setattr(gw, "_wait_for_api_server_port_free", lambda: None)
+        ran = []
+        monkeypatch.setattr(gw, "run_gateway", lambda **k: ran.append(True))
+        monkeypatch.setattr("gateway.status.get_running_pid", lambda *a, **k: os.getpid())
+        args = SimpleNamespace(system=False, all=False, force=False)
+
+    if scenario != "all-failed-stop" and scenario != "foreground-fallback":
+        args = SimpleNamespace(system=False, all=False, force=False)
+
+    gw._cmd_restart(args)
+
+    if scenario == "foreground-fallback":
+        assert ran
+    out = capsys.readouterr().out
+    if scenario != "foreground-fallback":
+        assert "No restart was observed." in out
+    allowed, _ = evaluate_restart_budget(now=t0 + 120, home=tmp_path)
+    assert allowed
+
+
+@pytest.mark.parametrize(
+    "scenario",
+    [
+        pytest.param("systemd-success", id="systemd-success"),
+        pytest.param("launchd-success", id="launchd-success"),
+        pytest.param("s6-single", id="s6-single"),
+        pytest.param("s6-all-one-profile", id="s6-all-one-profile"),
+    ],
+)
+def test_cmd_restart_consumes_hour_when_new_pid_observed(
+    tmp_path, monkeypatch, scenario
+):
+    import os
+    import subprocess
+
+    from hermes_cli import gateway as gw
+
+    t0 = 1_700_000_000.0
+    _bind_restart_cli(monkeypatch, gw, tmp_path)
+    monkeypatch.setattr("hermes_cli.restart_budget.time.time", lambda: t0)
+    live_pid = {"value": None}
+
+    def get_running_pid(*a, **k):
+        return live_pid["value"]
+
+    monkeypatch.setattr("gateway.status.get_running_pid", get_running_pid)
+
+    if scenario == "systemd-success":
+        monkeypatch.setattr(gw, "_dispatch_all_via_service_manager_if_s6", lambda *a, **k: False)
+        monkeypatch.setattr(gw, "_dispatch_via_service_manager_if_s6", lambda *a, **k: False)
+        monkeypatch.setattr(gw, "_installed_service_kind_for", lambda *a, **k: "systemd")
+        monkeypatch.setattr(gw, "_systemd_scope_preamble", lambda *a, **k: False)
+        monkeypatch.setattr(gw, "refresh_systemd_unit_if_needed", lambda **k: None)
+        monkeypatch.setattr(gw, "get_service_name", lambda: "hermes-gateway")
+        monkeypatch.setattr(gw, "_systemd_main_pid", lambda **k: None)
+        monkeypatch.setattr(gw, "_recover_pending_systemd_restart", lambda **k: False)
+        monkeypatch.setattr(gw, "_wait_for_systemd_service_restart", lambda **k: True)
+
+        def accept_systemctl(args, **kwargs):
+            live_pid["value"] = os.getpid()
+            return subprocess.CompletedProcess(args, 0, "", "")
+
+        monkeypatch.setattr(gw, "_run_systemctl", accept_systemctl)
+        args = SimpleNamespace(system=False, all=False, force=False)
+    elif scenario == "launchd-success":
+        import hermes_cli.gateway_launchd as launchd
+
+        plist = tmp_path / "ai.hermes.gateway.plist"
+        plist.write_text("<plist/>", encoding="utf-8")
+        monkeypatch.setattr(gw, "_dispatch_all_via_service_manager_if_s6", lambda *a, **k: False)
+        monkeypatch.setattr(gw, "_dispatch_via_service_manager_if_s6", lambda *a, **k: False)
+        monkeypatch.setattr(gw, "_installed_service_kind_for", lambda *a, **k: "launchd")
+        monkeypatch.setattr(gw, "refresh_launchd_plist_if_needed", lambda: True)
+        monkeypatch.setattr(gw, "get_launchd_label", lambda: "ai.hermes.gateway")
+        monkeypatch.setattr(gw, "_launchd_domain", lambda: "gui/501")
+        monkeypatch.setattr(gw, "get_launchd_plist_path", lambda: plist)
+        monkeypatch.setattr(gw, "_wait_for_api_server_port_free", lambda: None)
+        monkeypatch.setattr(gw, "_clear_launchd_unsupported_marker", lambda: None)
+
+        def accepting_launchctl(cmd, check=False, timeout=None, **kwargs):
+            if check and cmd[:2] == ["launchctl", "kickstart"]:
+                live_pid["value"] = os.getpid()
+            return subprocess.CompletedProcess(cmd, 0, "", "")
+
+        monkeypatch.setattr(launchd.subprocess, "run", accepting_launchctl)
+        args = SimpleNamespace(system=False, all=False, force=False)
+    elif scenario == "s6-single":
+        monkeypatch.setattr(
+            "hermes_cli.service_manager.detect_service_manager", lambda: "s6"
+        )
+
+        class _Mgr:
+            def restart(self, service):
+                live_pid["value"] = os.getpid()
+
+        monkeypatch.setattr(
+            "hermes_cli.service_manager.get_service_manager", lambda: _Mgr()
+        )
+        args = SimpleNamespace(system=False, all=False, force=False)
+    else:
+        monkeypatch.setattr(
+            "hermes_cli.service_manager.detect_service_manager", lambda: "s6"
+        )
+
+        class _All:
+            def list_profile_gateways(self):
+                return ["coder"]
+
+            def restart(self, name):
+                live_pid["value"] = os.getpid()
+
+        monkeypatch.setattr(
+            "hermes_cli.service_manager.get_service_manager", lambda: _All()
+        )
+        args = SimpleNamespace(system=False, all=True, force=False)
+
+    gw._cmd_restart(args)
+    allowed, _ = evaluate_restart_budget(now=t0 + 120, home=tmp_path)
+    assert not allowed

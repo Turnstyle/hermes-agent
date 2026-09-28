@@ -121,6 +121,15 @@ def isolated_source_completion(monkeypatch):
 
 
 @pytest.fixture(autouse=True)
+def _restart_observe_timeout_zero(monkeypatch):
+    """Avoid 90s PID polls during gateway restart budget tests."""
+    monkeypatch.setattr(
+        "hermes_cli.gateway_restart_observe.RESTART_OBSERVE_TIMEOUT_S",
+        0.0,
+    )
+
+
+@pytest.fixture(autouse=True)
 def _reset_prompt_toolkit_output_cache():
     """Clear prompt_toolkit's cached AppSession output around each CLI test.
 
