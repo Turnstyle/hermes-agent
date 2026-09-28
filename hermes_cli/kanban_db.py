@@ -132,6 +132,11 @@ _IS_WINDOWS = sys.platform == "win32"
 KANBAN_ATTACHMENT_MAX_BYTES = 25 * 1024 * 1024  # one cap for dashboard, tools and CLI
 
 
+_OWN_TASK_REASSIGN_ACTIVE: ContextVar[bool] = ContextVar(
+    "kanban_own_task_reassign_active", default=False
+)
+
+
 def _assert_not_delegated_child_mutation(path: "str | Path | None" = None) -> None:
     """Reject Kanban mutations from ``delegate_task`` child contexts.
 
@@ -144,6 +149,9 @@ def _assert_not_delegated_child_mutation(path: "str | Path | None" = None) -> No
     from agent.delegation_context import kanban_path_is_fenced
 
     if kanban_path_is_fenced(kanban_home() if path is None else path):
+        own_task = (os.environ.get("HERMES_KANBAN_TASK") or os.environ.get("KANBAN_TASK_ID") or "").strip()
+        if own_task and _OWN_TASK_REASSIGN_ACTIVE.get():
+            return
         raise PermissionError("delegate_task child contexts cannot mutate Kanban tasks or boards")
 
 
@@ -231,7 +239,7 @@ def notify_task_updated(
 _TICK_ACTIVITY_FIELDS = (
     "spawned", "reclaimed", "promoted", "reconciled_orphans", "reaped_terminal_workers", "crashed", "stale",
     "timed_out", "auto_blocked", "rate_limited", "profile_busy", "auto_assigned_default",
-    "respawn_guarded", "skipped_per_profile_capped", "skipped_unassigned",
+    "auto_rerouted_builder", "respawn_guarded", "skipped_per_profile_capped", "skipped_unassigned",
     "skipped_nonspawnable", "owner_unavailable",
 )
 
@@ -2743,18 +2751,24 @@ def reassign_task(
 ) -> bool:
     """Reassign (None unassigns); a running task is refused unless
     ``reclaim_first`` releases its claim — the "this profile's model is broken" path."""
-    if reclaim_first:
-        # Safe to call even if nothing to reclaim.
-        reclaim_task(conn, task_id, reason=reason or "reassign")
-    # assign_task handles its own txn + the still-running guard. ``reason`` is
-    # kept on the ``assigned`` event either way, so a recovery hand-off records
-    # why this claimant was chosen even without a reclaim.
+    own_task = (os.environ.get("HERMES_KANBAN_TASK") or os.environ.get("KANBAN_TASK_ID") or "").strip()
+    is_own_card = bool(own_task and task_id and own_task == task_id)
+    token = _OWN_TASK_REASSIGN_ACTIVE.set(True) if is_own_card else None
     try:
+        if reclaim_first:
+            # Safe to call even if nothing to reclaim.
+            reclaim_task(conn, task_id, reason=reason or "reassign")
+        # assign_task handles its own txn + the still-running guard. ``reason`` is
+        # kept on the ``assigned`` event either way, so a recovery hand-off records
+        # why this claimant was chosen even without a reclaim.
         return assign_task(conn, task_id, profile, reason=reason)
     except RuntimeError:
         # Task is still running and reclaim_first was False; caller
         # needs to decide whether to retry with reclaim.
         return False
+    finally:
+        if token is not None:
+            _OWN_TASK_REASSIGN_ACTIVE.reset(token)
 
 
 def _verify_created_cards(

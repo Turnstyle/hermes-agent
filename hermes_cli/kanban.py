@@ -228,6 +228,15 @@ def _is_delegated_child_cli_mutation(args: argparse.Namespace) -> bool:
             return False
     elif action not in _DELEGATED_CHILD_DENIED_ACTIONS:
         return False
+
+    # Scoped exception: a worker in a delegated child context may reassign its OWN card
+    # (matching HERMES_KANBAN_TASK / KANBAN_TASK_ID) to support live handbacks without failing.
+    if action == "reassign":
+        own_task = (os.environ.get("HERMES_KANBAN_TASK") or os.environ.get("KANBAN_TASK_ID") or "").strip()
+        target_task = (getattr(args, "task_id", None) or "").strip()
+        if own_task and target_task and own_task == target_task:
+            return False
+
     from agent.delegation_context import kanban_path_is_fenced
 
     return kanban_path_is_fenced(kb.kanban_home()) or kanban_path_is_fenced(kb.kanban_db_path())
@@ -614,13 +623,20 @@ def _cmd_recover_ghost(args: argparse.Namespace) -> int:
 def _cmd_reassign(args: argparse.Namespace) -> int:
     profile = _none_profile(args.profile)
     reclaim = bool(getattr(args, "reclaim", False))
-    with kbc.connect_closing() as conn:
-        ok = kb.reassign_task(conn, args.task_id, profile, reclaim_first=reclaim, reason=getattr(args, "reason", None))
-    return _ok_or_err(
-        ok,
-        f"cannot reassign {args.task_id} (unknown id, or still running — pass --reclaim to release first)",
-        f"Reassigned {args.task_id} to {profile or '(unassigned)'}" + (" (claim reclaimed)" if reclaim else ""),
-    )
+    own_task = (os.environ.get("HERMES_KANBAN_TASK") or os.environ.get("KANBAN_TASK_ID") or "").strip()
+    is_own_card = bool(own_task and getattr(args, "task_id", None) == own_task)
+    token = kb._OWN_TASK_REASSIGN_ACTIVE.set(True) if is_own_card else None
+    try:
+        with kbc.connect_closing() as conn:
+            ok = kb.reassign_task(conn, args.task_id, profile, reclaim_first=reclaim, reason=getattr(args, "reason", None))
+        return _ok_or_err(
+            ok,
+            f"cannot reassign {args.task_id} (unknown id, or still running — pass --reclaim to release first)",
+            f"Reassigned {args.task_id} to {profile or '(unassigned)'}" + (" (claim reclaimed)" if reclaim else ""),
+        )
+    finally:
+        if token is not None:
+            kb._OWN_TASK_REASSIGN_ACTIVE.reset(token)
 
 
 def _rows_by_task(conn, table: str, ids: list[str]) -> dict[str, list]:

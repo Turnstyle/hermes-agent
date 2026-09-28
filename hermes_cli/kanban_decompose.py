@@ -73,6 +73,9 @@ Rules:
   - Pick assignees from the roster by matching the task to the profile's
     DESCRIPTION (not just the name). When nothing matches well, use null
     and the system will route to the default_assignee.
+  - Never assign child tasks or single execution tasks to decomposition-only or
+    planning profiles (e.g. taskers). Execution tasks must only route to builder
+    or specialist profiles.
   - Each child task body is what a fresh worker will read with no other
     context — be specific about goal, approach, and acceptance criteria.
 
@@ -156,7 +159,8 @@ def _resolve_profile_from_cfg(cfg: dict, key: str, *, fallback: Optional[str] = 
 
 def _build_roster() -> tuple[list[dict], set[str]]:
     """``(roster_for_prompt, valid_assignee_names)``; entries are
-    ``{name, description, has_description}``."""
+    ``{name, description, has_description}``. Decompose-only profiles are excluded
+    from execution rosters so child tasks never route to them."""
     try:
         all_profiles = profiles_mod.list_profiles()
     except Exception as exc:
@@ -164,13 +168,23 @@ def _build_roster() -> tuple[list[dict], set[str]]:
         return [], set()
     roster = []
     for p in all_profiles:
+        if profiles_mod.is_decompose_only_profile(p):
+            continue
         desc = (p.description or "").strip()
         roster.append({
             "name": p.name,
             "description": desc or f"(no description; profile named {p.name!r})",
             "has_description": bool(desc),
         })
-    return roster, {p.name for p in all_profiles}
+    if not roster and all_profiles:
+        for p in all_profiles:
+            desc = (p.description or "").strip()
+            roster.append({
+                "name": p.name,
+                "description": desc or f"(no description; profile named {p.name!r})",
+                "has_description": bool(desc),
+            })
+    return roster, {entry["name"] for entry in roster}
 
 
 def _format_roster(roster: list[dict]) -> str:
@@ -182,13 +196,35 @@ def _format_roster(roster: list[dict]) -> str:
     )
 
 
-def _normalize_assignee_choice(assignee: object, *, default_assignee: str, valid_names: set[str]) -> str:
-    """A valid assignee, else ``default_assignee`` — promoted work is never
-    left unassigned."""
+def _normalize_assignee_choice(
+    assignee: object,
+    *,
+    default_assignee: str,
+    valid_names: set[str],
+    tenant: Optional[str] = None,
+) -> str:
+    if isinstance(assignee, str) and profiles_mod.is_decompose_only_profile(assignee.strip()):
+        builder = profiles_mod.resolve_node_builder(tenant=tenant, fallback=default_assignee)
+        logger.info(
+            "decompose: raw assignee %r is decompose-only; re-routing to builder %r",
+            assignee, builder,
+        )
+        return builder
+
     if not isinstance(assignee, str) or not assignee.strip():
-        return default_assignee
-    chosen = assignee.strip()
-    return chosen if chosen in valid_names else default_assignee
+        target = default_assignee
+    else:
+        chosen = assignee.strip()
+        target = chosen if chosen in valid_names else default_assignee
+
+    if profiles_mod.is_decompose_only_profile(target):
+        builder = profiles_mod.resolve_node_builder(tenant=tenant, fallback=default_assignee)
+        logger.info(
+            "decompose: assignee %r is decompose-only; re-routing to builder %r",
+            target, builder,
+        )
+        return builder
+    return target
 
 
 @dataclass
@@ -200,9 +236,10 @@ class _Routing:
     auto_promote: bool
     roster: list[dict]
     valid_names: set[str]
+    tenant: Optional[str] = None
 
 
-def _load_routing(*, root_assignee: Optional[str] = None) -> _Routing:
+def _load_routing(*, root_assignee: Optional[str] = None, tenant: Optional[str] = None) -> _Routing:
     from hermes_cli.config import load_config_readonly
     try:
         cfg = load_config_readonly()
@@ -216,6 +253,7 @@ def _load_routing(*, root_assignee: Optional[str] = None) -> _Routing:
         auto_promote=bool(kanban_cfg.get("auto_promote_children", True)),
         roster=roster,
         valid_names=valid_names,
+        tenant=tenant,
     )
 
 
@@ -223,16 +261,26 @@ def _apply_single(task: kb.Task, parsed: dict, routing: _Routing, author: str) -
     """``fanout=false``: single-task spec promotion (same effect as specify)."""
     title_val, body_val = _title_body(parsed)
     assignee_val = None
-    if not task.assignee:
+    reroute_comment = None
+    target_tenant = task.tenant or routing.tenant
+    if not task.assignee or profiles_mod.is_decompose_only_profile(task.assignee):
         assignee_val = _normalize_assignee_choice(
-            parsed.get("assignee"), default_assignee=routing.default_assignee, valid_names=routing.valid_names,
+            parsed.get("assignee"), default_assignee=routing.default_assignee,
+            valid_names=routing.valid_names, tenant=target_tenant,
         )
+        if task.assignee and profiles_mod.is_decompose_only_profile(task.assignee):
+            reroute_comment = (
+                f"[auto-reroute] Re-routed execution card from decompose-only profile "
+                f"'{task.assignee}' to builder '{assignee_val}'."
+            )
     if title_val is None and body_val is None:
         return DecomposeOutcome(task.id, False, "decomposer returned fanout=false with no title/body")
     with kbc.connect_closing() as conn:
         ok = kb.specify_triage_task(
             conn, task.id, title=title_val, body=body_val, assignee=assignee_val, author=author,
         )
+        if ok and reroute_comment:
+            kb.add_comment(conn, task.id, author, reroute_comment)
     if not ok:
         return DecomposeOutcome(task.id, False, "task moved out of triage before promotion")
     return DecomposeOutcome(task.id, True, "single task (no fanout)", fanout=False, new_title=title_val)
@@ -252,12 +300,13 @@ def _clean_children(task_id: str, raw_tasks: list, routing: _Routing) -> tuple[l
         assignee = entry.get("assignee")
         chosen = _normalize_assignee_choice(
             assignee, default_assignee=routing.default_assignee, valid_names=routing.valid_names,
+            tenant=routing.tenant,
         )
         if isinstance(assignee, str) and assignee.strip() and assignee.strip() not in routing.valid_names:
             logger.info(
                 "decompose: task %s child %d picked unknown assignee %r — "
                 "routing to default_assignee %r",
-                task_id, idx, assignee, routing.default_assignee,
+                task_id, idx, assignee, chosen,
             )
         parents = entry.get("parents") or []
         if not isinstance(parents, list):
@@ -314,7 +363,7 @@ def decompose_task(
     if task is None:
         return DecomposeOutcome(task_id, False, reason)
 
-    routing = _load_routing(root_assignee=task.assignee)
+    routing = _load_routing(root_assignee=task.assignee, tenant=task.tenant)
     raw, reason = _call_aux(
         "decompose", task_id, aux_task="kanban_decomposer", system=_SYSTEM_PROMPT,
         user=_USER_TEMPLATE.format(
