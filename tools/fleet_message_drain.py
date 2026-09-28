@@ -59,6 +59,7 @@ import dataclasses
 import datetime
 import json
 import logging
+import os
 import re
 import subprocess
 import sys
@@ -394,8 +395,12 @@ def _live_token() -> str:
             _live_credentials = None
         try:
             if not _gcloud_token_cached or time.monotonic() >= _gcloud_token_until:
+                # gcloud runs its own Python; the Hermes bootstrap's PYTHONPATH/PYTHONHOME would load
+                # Hermes's crypto packages into it and crash it (pyOpenSSL: no attribute GEN_EMAIL).
+                gcloud_env = {k: v for k, v in os.environ.items()
+                              if k not in ("PYTHONPATH", "PYTHONHOME", "VIRTUAL_ENV")}
                 proc = subprocess.run(["gcloud", "auth", "print-access-token"], capture_output=True,
-                                      text=True, check=True, timeout=3)
+                                      text=True, check=True, timeout=3, env=gcloud_env)
                 token = proc.stdout.strip()
                 if not token:
                     raise ValueError("gcloud returned no token")
