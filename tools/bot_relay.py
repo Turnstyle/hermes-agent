@@ -37,6 +37,18 @@ OUTBOX_DIR = "outbox"
 CLAIMED_DIR = "claimed"
 REPLIES_DIR = "replies"
 LOCKS_DIR = "locks"
+ENVELOPE_META_SUFFIX = ".meta.json"
+REPLY_META_SUFFIX = ".reply.meta.json"
+_STALL_META_STATUSES = frozenset({"queued", "claimed"})
+def _stall_reply_reasons() -> frozenset[str]:
+    from tools.bot_failure_reasons import ALL_REASONS
+
+    return ALL_REASONS | frozenset({"ok", ""})
+
+
+def _normalize_stall_reply_reason(code: str) -> str:
+    normalized = str(code or "ok")
+    return normalized if normalized in _stall_reply_reasons() else "unknown"
 
 # Config fallbacks (real knobs: ``bot_mode.turn_wait_seconds`` / ``bot_mode.envelope_ttl_seconds``).
 TURN_WAIT_SECONDS_FALLBACK = 1800  # busy-bot queue: 30 min (Turner 2026-09-28); mirrors config_defaults
@@ -113,6 +125,81 @@ def _ensure_dirs(root: Path | str) -> Path:
 
 def _atomic_write_json(target: Path, payload: Any, *, sort_keys: bool = False) -> None:
     atomic_json_write(target, payload, indent=None, sort_keys=sort_keys, mode=0o600)
+
+
+def _is_relay_payload_json(path: Path) -> bool:
+    name = path.name
+    return (
+        name.endswith(".json")
+        and not name.endswith(ENVELOPE_META_SUFFIX)
+        and not name.endswith(REPLY_META_SUFFIX)
+    )
+
+
+def iter_relay_payload_json(directory: Path) -> Iterator[Path]:
+    """Envelope/reply body files only — never metadata sidecars."""
+    for path in directory.glob("*.json"):
+        if _is_relay_payload_json(path):
+            yield path
+
+
+def write_envelope_stall_meta(
+    envelope_json_path: Path,
+    *,
+    envelope_id: str,
+    status: str,
+    created_at: int,
+    claimed_at: int | None = None,
+    deadline_seconds: float | None = None,
+) -> Path:
+    """Privacy-safe stall-watch metadata beside an envelope body file (no message text)."""
+    if status not in _STALL_META_STATUSES:
+        raise ValueError(f"invalid envelope stall meta status: {status!r}")
+    safe_id = str(envelope_id or "").strip()
+    if not re.match(r"^[0-9a-f]{32}$", safe_id):
+        raise ValueError(f"invalid envelope id: {envelope_id!r}")
+    payload: dict[str, Any] = {
+        "envelope_id": safe_id,
+        "status": status,
+        "created_at": int(created_at),
+    }
+    if claimed_at is not None:
+        payload["claimed_at"] = int(claimed_at)
+    if deadline_seconds is not None:
+        payload["deadline_seconds"] = float(deadline_seconds)
+    target = envelope_json_path.parent / f"{envelope_json_path.stem}{ENVELOPE_META_SUFFIX}"
+    _atomic_write_json(target, payload, sort_keys=True)
+    return target
+
+
+def write_reply_stall_meta(
+    replies_dir: Path,
+    envelope_id: str,
+    *,
+    reason: str,
+    terminal_at: int | None = None,
+) -> Path:
+    """Privacy-safe reply metadata (typed reason code only, no reply/error text)."""
+    safe = str(envelope_id or "").strip()
+    if not re.match(r"^[0-9a-f]{32}$", safe):
+        raise ValueError(f"invalid envelope id: {envelope_id!r}")
+    code = _normalize_stall_reply_reason(reason)
+    payload = {
+        "envelope_id": safe,
+        "reason": code,
+        "terminal_at": int(terminal_at if terminal_at is not None else time.time()),
+    }
+    target = replies_dir / f"{safe}{REPLY_META_SUFFIX}"
+    _atomic_write_json(target, payload, sort_keys=True)
+    return target
+
+
+def _move_envelope_meta(src_body: Path, dst_body: Path) -> None:
+    src_meta = src_body.parent / f"{src_body.stem}{ENVELOPE_META_SUFFIX}"
+    dst_meta = dst_body.parent / f"{dst_body.stem}{ENVELOPE_META_SUFFIX}"
+    if src_meta.is_file():
+        with contextlib.suppress(OSError):
+            os.replace(src_meta, dst_meta)
 
 
 def _bot_mode_cfg(key: str, *, loader: str) -> Any:
@@ -305,7 +392,15 @@ def enqueue_envelope(root: Path | str, *, target: dict, message: str, sender_pro
         "target_connection": target["connection_id"], "target_profile": target["profile"],
         "target_handle": target["handle"], "message": message,
     }
-    _atomic_write_json(base / OUTBOX_DIR / f"{envelope['id']}.json", envelope)
+    body_path = base / OUTBOX_DIR / f"{envelope['id']}.json"
+    _atomic_write_json(body_path, envelope)
+    write_envelope_stall_meta(
+        body_path,
+        envelope_id=envelope["id"],
+        status="queued",
+        created_at=int(envelope["created_at"]),
+        deadline_seconds=float(_envelope_ttl_seconds()),
+    )
     return envelope
 
 
@@ -355,18 +450,31 @@ def claim_pending_envelopes(root: Path | str) -> list[dict]:
     # Oldest first: the Desktop delivers each target's claimed envelopes in the order this list
     # gives them, so a sender's two DMs to one agent arrive in the order they were sent. Sorting
     # by filename ordered them by ``uuid4().hex`` — at random.
-    for path in sorted((base / OUTBOX_DIR).glob("*.json"), key=_queued_at):
+    for path in sorted(iter_relay_payload_json(base / OUTBOX_DIR), key=_queued_at):
         if ttl > 0 and _expire_if_stale(root, path, ttl, now):
             with contextlib.suppress(OSError):
                 path.unlink()
+                meta = path.parent / f"{path.stem}{ENVELOPE_META_SUFFIX}"
+                if meta.is_file():
+                    meta.unlink()
             continue
         claimed = base / CLAIMED_DIR / path.name
         with contextlib.suppress(OSError, ValueError):
             os.replace(path, claimed)  # atomic claim
+            _move_envelope_meta(path, claimed)
             os.utime(claimed, (now, now))  # the re-offer window counts from the claim, not the enqueue
             envelope = json.loads(claimed.read_text(encoding="utf-8"))
             if not isinstance(envelope, dict):
                 raise ValueError(f"expected a JSON object, got {type(envelope).__name__}")
+            created = int(envelope.get("created_at") or now)
+            write_envelope_stall_meta(
+                claimed,
+                envelope_id=str(envelope.get("id") or claimed.stem),
+                status="claimed",
+                created_at=created,
+                claimed_at=int(now),
+                deadline_seconds=float(REOFFER_AFTER_SECONDS),
+            )
             out.append(envelope)
     return out
 
@@ -387,7 +495,7 @@ def _reoffer_unanswered(root: Path | str, base: Path, ttl: float, now: float) ->
       later than that refuses it with ``queued_expired``.
     """
     out: list[dict] = []
-    for path in sorted((base / CLAIMED_DIR).glob("*.json"), key=_queued_at):
+    for path in sorted(iter_relay_payload_json(base / CLAIMED_DIR), key=_queued_at):
         if (base / REPLIES_DIR / path.name).exists():
             continue
         with contextlib.suppress(OSError, ValueError):
@@ -415,6 +523,15 @@ def _reoffer_unanswered(root: Path | str, base: Path, ttl: float, now: float) ->
                 continue
             envelope["reoffered_at"] = int(now)
             _atomic_write_json(path, envelope)
+            created = int(envelope.get("created_at") or claimed_at)
+            write_envelope_stall_meta(
+                path,
+                envelope_id=env_id,
+                status="claimed",
+                created_at=created,
+                claimed_at=int(claimed_at),
+                deadline_seconds=float(REOFFER_AFTER_SECONDS),
+            )
             out.append(envelope)
     return out
 
@@ -513,15 +630,16 @@ def write_reply(root: Path | str, envelope_id: str, *, reply: str = "", error: s
     if not re.match(r"^[0-9a-f]{32}$", safe):
         raise ValueError(f"invalid envelope id: {envelope_id!r}")
     path = base / REPLIES_DIR / f"{safe}.json"
-    if path.exists():
-        # Idempotent by envelope id: the first settled reply is the one the waiter already read (or
-        # will). A re-offered delivery's second outcome — or a late duplicate — never displaces it.
-        return path
     err, code = str(error or ""), str(reason or "")
     if not code and err:
         from tools.bot_failure_reasons import classify_agent_error
 
         code = classify_agent_error(err)
+    if path.exists():
+        # Idempotent by envelope id: the first settled reply is the one the waiter already read (or
+        # will). A re-offered delivery's second outcome — or a late duplicate — never displaces it.
+        # Never fabricate missing sidecars from a later duplicate call (legacy bodies stay UNKNOWN).
+        return path
     record = {"id": safe, "at": int(time.time()), "reply": str(reply or ""), "error": err, "reason": code}
     if reply_relayed is not None:
         record["reply_relayed"] = bool(reply_relayed)
@@ -532,6 +650,7 @@ def write_reply(root: Path | str, envelope_id: str, *, reply: str = "", error: s
     if message_id:
         record["message_id"] = str(message_id)
     _atomic_write_json(path, record)
+    write_reply_stall_meta(base / REPLIES_DIR, safe, reason=_normalize_stall_reply_reason(code))
     return path
 
 
@@ -541,9 +660,19 @@ def unlink_files_older_than(directory: Path, pattern: str, cutoff: float) -> int
     with contextlib.suppress(OSError):
         for path in directory.glob(pattern):
             with contextlib.suppress(OSError):
-                if path.is_file() and path.stat().st_mtime < cutoff:
-                    path.unlink()
-                    removed += 1
+                if not path.is_file() or path.stat().st_mtime >= cutoff:
+                    continue
+                path.unlink()
+                removed += 1
+                if _is_relay_payload_json(path):
+                    if path.parent.name == REPLIES_DIR:
+                        sidecars = [path.parent / f"{path.stem}{REPLY_META_SUFFIX}"]
+                    else:
+                        sidecars = [path.parent / f"{path.stem}{ENVELOPE_META_SUFFIX}"]
+                    for sidecar in sidecars:
+                        if sidecar.is_file():
+                            sidecar.unlink()
+                            removed += 1
     return removed
 
 

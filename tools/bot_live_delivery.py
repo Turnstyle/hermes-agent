@@ -25,6 +25,7 @@ log = logging.getLogger(__name__)
 
 DELIVERY_DIR_NAME = "bot_live_delivery"
 _SEQUENCE_FILE = ".sequence"
+MAILBOX_META_SUFFIX = ".meta.json"
 _OWNER_KEYS = ("profile_home", "session_id", "lease_id", "live_session_id")
 _TERMINAL = frozenset({"settled", "failed", "cancelled", "ambiguous"})
 
@@ -183,15 +184,64 @@ def _next_sequence(root: Path) -> int:
     except (OSError, ValueError):
         persisted = 0
     scanned = max((record.get("sequence", record["created_at"])
-                   for candidate in root.glob("*.json")
+                   for candidate in _mailbox_payload_paths(root)
                    if (record := _scan_read(candidate)) is not None), default=0)
     sequence = max(persisted, scanned) + 1
     atomic_write_text(counter, str(sequence), mode=0o600, fsync_dir=True)
     return sequence
 
 
+def _is_mailbox_payload_json(path: Path) -> bool:
+    name = path.name
+    return name.endswith(".json") and not name.endswith(MAILBOX_META_SUFFIX) and name != _SEQUENCE_FILE
+
+
+def _mailbox_payload_paths(root: Path) -> list[Path]:
+    return [p for p in root.glob("*.json") if _is_mailbox_payload_json(p)]
+
+
+def _stall_terminal_reasons() -> frozenset[str]:
+    from tools.bot_failure_reasons import ALL_REASONS
+
+    return ALL_REASONS | frozenset({"", "owner_gone"})
+
+
+def _stall_meta_from_record(record: dict[str, Any]) -> dict[str, Any]:
+    from tools.bot_relay import dm_queue_wait_seconds
+
+    payload: dict[str, Any] = {
+        "delivery_id": record["delivery_id"],
+        "status": record["status"],
+        "created_at": record["created_at"],
+        "deadline_seconds": float(record.get("deadline_seconds") or dm_queue_wait_seconds()),
+    }
+    if record.get("claimed_at") is not None:
+        payload["claimed_at"] = record["claimed_at"]
+    progress_at = record.get("progress_at")
+    if progress_at is not None:
+        payload["progress_at"] = progress_at
+    elif record.get("claimed_at") is not None:
+        payload["progress_at"] = record["claimed_at"]
+    if record.get("completed_at") is not None:
+        payload["terminal_at"] = record["completed_at"]
+    reason = str(record.get("reason") or "")
+    if record["status"] in _TERMINAL and reason in _stall_terminal_reasons():
+        payload["reason"] = reason
+    return payload
+
+
+def write_mailbox_stall_meta(ticket_json_path: Path, record: dict[str, Any]) -> Path:
+    """Privacy-safe stall-watch metadata beside a mailbox ticket (no message body)."""
+    meta_path = ticket_json_path.parent / f"{ticket_json_path.stem}{MAILBOX_META_SUFFIX}"
+    atomic_json_write(
+        meta_path, _stall_meta_from_record(record), indent=None, sort_keys=True, fsync_dir=True, mode=0o600,
+    )
+    return meta_path
+
+
 def _write(path: Path, record: dict[str, Any]) -> None:
     atomic_json_write(path, record, indent=None, sort_keys=True, fsync_dir=True, mode=0o600)
+    write_mailbox_stall_meta(path, record)
 
 
 def deliver_to_live_owner(
@@ -216,9 +266,14 @@ def deliver_to_live_owner(
                     or existing.get("notification_category", "result") != notification_category):
                 raise ValueError("delivery id already belongs to a different payload")
             return existing
-        record = dict(delivery_id=key, id=key, owner=pinned, **pinned,
-                      message=message, status="queued", created_at=time.time_ns(),
-                      sequence=_next_sequence(root), **({"author": dict(author)} if author else {}))
+        from tools.bot_relay import dm_queue_wait_seconds
+
+        record = dict(
+            delivery_id=key, id=key, owner=pinned, **pinned,
+            message=message, status="queued", created_at=time.time_ns(),
+            deadline_seconds=dm_queue_wait_seconds(),
+            sequence=_next_sequence(root), **({"author": dict(author)} if author else {}),
+        )
         if notification_category == "diagnostic":
             record["notification_category"] = notification_category
         _write(path, record)
@@ -254,7 +309,7 @@ def claim_pending_delivery(
         return None
     with _locked(profile_home) as root:
         pending = []
-        for path in root.glob("*.json"):
+        for path in _mailbox_payload_paths(root):
             record = _scan_read(path)
             if record is not None and record["status"] == "queued" and _matches(profile_home, record, current):
                 pending.append(record)
@@ -324,7 +379,7 @@ def queued_pins(profile_home: Path | str, *, only_id: str | None = None) -> dict
     if not _root(profile_home).is_dir():
         return {}
     with _locked(profile_home) as root:
-        paths = [root / f"{_delivery_id(only_id)}.json"] if only_id else list(root.glob("*.json"))
+        paths = [root / f"{_delivery_id(only_id)}.json"] if only_id else _mailbox_payload_paths(root)
         return {record["delivery_id"]: record["owner"]["lease_id"] for path in paths
                 if (record := _scan_read(path)) is not None and record["status"] == "queued"}
 
@@ -359,7 +414,7 @@ def reconcile_orphaned_deliveries(
     now = time.time_ns() if now_ns is None else now_ns
     max_age_ns = int(max(0.0, float(adopt_max_age_seconds)) * 1e9)
     with _locked(profile_home) as root:
-        paths = [root / f"{_delivery_id(only_id)}.json"] if only_id else list(root.glob("*.json"))
+        paths = [root / f"{_delivery_id(only_id)}.json"] if only_id else _mailbox_payload_paths(root)
         for path in paths:
             record = _scan_read(path)
             if record is None or record["status"] != "queued":
