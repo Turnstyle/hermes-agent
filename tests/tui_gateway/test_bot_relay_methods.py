@@ -921,6 +921,43 @@ def _spy_popen():
     return procs, spy
 
 
+@pytest.mark.platforms("posix")
+def test_relay_releases_profile_lock_at_report_before_child_exit(home, tmp_path, monkeypatch):
+    from tools.bot_relay import TurnBusyError, acquire_turn_lock
+
+    ready = tmp_path / "ready"
+    child = tmp_path / "child.py"
+    child.write_text("""import json, os, time
+from pathlib import Path
+report = Path(os.environ.pop('HERMES_QUIET_TURN_REPORT_FILE'))
+assert os.environ['HERMES_BOT_CHAT_DELIVERY_PROFILE'] == 'ops'
+Path(READY_PATH).write_text('ready')
+time.sleep(0.7)
+report.write_text(json.dumps({'pid': os.getpid(), 'exit_code': 0, 'error': '', 'reply': 'first'}))
+time.sleep(1.2)
+print('final reply')
+""".replace("READY_PATH", repr(str(ready))))
+    monkeypatch.setattr(bot_relay, "local_delivery_command", lambda *_a: [sys.executable, str(child)])
+    outcome = []
+    worker = threading.Thread(target=lambda: outcome.append(
+        srv._methods["bot_relay.deliver"](1, {"profile": "ops", "message": "ping"})))
+    worker.start()
+    try:
+        until = time.monotonic() + 5
+        while not ready.exists() and time.monotonic() < until:
+            time.sleep(0.02)
+        assert ready.exists(), outcome
+        with pytest.raises(TurnBusyError):
+            with acquire_turn_lock(home, "ops", 0.1):
+                pass
+        with acquire_turn_lock(home, "ops", 1.5):
+            assert worker.is_alive()
+        worker.join(timeout=5)
+        assert _result(outcome[0])["reply"] == "final reply"
+    finally:
+        worker.join(timeout=5)
+
+
 def test_reported_turn_still_lingering_at_the_cap_is_booked_from_its_latest_report_not_killed(tmp_path, monkeypatch):
     """#114980: the cap bounds the TURN. A child that reported its turn and then lingers for a
     nested notify_on_complete reply (bounded by oneshot_completion_wait_seconds, default == the

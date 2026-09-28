@@ -260,10 +260,12 @@ def _run_quiet_single_query(cli, effective_query, emitter=None):
     from agent.interrupt_compat import _accepts_keyword
     from agent.turn_author import take_turn_author_from_env
     from hermes_cli.quiet_single_query import (
-        adopt_unanswered_turn, bind_quiet_session_key, continue_quiet_notify_completions,
+        BOT_CHAT_DELIVERY_PROFILE_ENV, adopt_unanswered_turn, bind_quiet_session_key,
+        bot_chat_follow_up_lock, continue_quiet_notify_completions,
         exit_single_query, quiet_notify_linger_seconds, take_turn_report_path, write_turn_report,
     )
 
+    delivery_profile = os.environ.pop(BOT_CHAT_DELIVERY_PROFILE_ENV, None)
     author = take_turn_author_from_env()
     # A spawner that bounds only the turn (cron Bot Chat lane) learns the outcome from this
     # report, written before the linger below; popped so tool subprocesses do not inherit it.
@@ -296,12 +298,17 @@ def _run_quiet_single_query(cli, effective_query, emitter=None):
                 reply=res.get("final_response", "") if isinstance(res, dict) else str(res),
             )
 
+        if delivery_profile:
+            cli._release_active_session()
         _report_turn(result)
+        linger_deadline = time.monotonic() + quiet_notify_linger_seconds() if delivery_profile else None
         if isinstance(result, dict) and not result.get("failed"):
             history = result.get("messages") or cli.conversation_history
 
             def _follow_up(text):
                 nonlocal history
+                if delivery_profile:
+                    history = cli.conversation_history
                 follow = cli.agent.run_conversation(
                     user_message=text, conversation_history=history, **author_kwargs,
                 )
@@ -319,11 +326,15 @@ def _run_quiet_single_query(cli, effective_query, emitter=None):
             # statement, so anything raising past that point has consumed budget the
             # finalize pass must not re-wait.
             try:
+                linger_budget = (max(0.0, linger_deadline - time.monotonic()) if delivery_profile
+                                 else quiet_notify_linger_seconds())
                 continued = continue_quiet_notify_completions(
                     getattr(cli, "session_id", "") or "",
                     _follow_up,
                     owns_event=getattr(cli, "_owns_process_notification", None),
-                    linger_budget=quiet_notify_linger_seconds(),
+                    linger_budget=linger_budget,
+                    **({"turn_guard": lambda: bot_chat_follow_up_lock(cli, delivery_profile, linger_deadline)}
+                       if delivery_profile else {}),
                 )
             finally:
                 cli._quiet_notify_linger_done = True
@@ -334,7 +345,13 @@ def _run_quiet_single_query(cli, effective_query, emitter=None):
         response = result.get("final_response", "") if isinstance(result, dict) else str(result)
         if _single_query_exit_code(result) == 0:
             try:
-                _drain_quiet_bot_chat(cli, history)
+                if delivery_profile:
+                    with bot_chat_follow_up_lock(
+                            cli, delivery_profile, linger_deadline) as acquired:
+                        if acquired:
+                            _drain_quiet_bot_chat(cli, cli.conversation_history)
+                else:
+                    _drain_quiet_bot_chat(cli, history)
             except Exception as exc:
                 from tools.fleet_message_drain import NoGoogleCredentials
                 if not isinstance(exc, NoGoogleCredentials):

@@ -11,7 +11,9 @@ was never injected as a follow-up.
 from __future__ import annotations
 
 import contextlib
+import contextvars
 import json
+import logging
 import os
 import subprocess
 import sys
@@ -65,6 +67,74 @@ def exit_single_query(code: int) -> None:
 # contract as HERMES_TURN_AUTHOR): nothing the turn spawns inherits it, and a nested one-shot
 # never writes over its host's report — the record also carries the writer's pid.
 TURN_REPORT_FILE_ENV = "HERMES_QUIET_TURN_REPORT_FILE"
+BOT_CHAT_DELIVERY_PROFILE_ENV = "HERMES_BOT_CHAT_DELIVERY_PROFILE"
+_report_callback = contextvars.ContextVar("quiet_turn_report_callback", default=None)
+logger = logging.getLogger(__name__)
+
+
+@contextlib.contextmanager
+def release_lock_at_report(callback):
+    token = _report_callback.set(callback)
+    try:
+        yield
+    finally:
+        _report_callback.reset(token)
+
+
+@contextlib.contextmanager
+def bot_chat_follow_up_lock(cli, profile: str, deadline: float):
+    """Admit a delivery follow-up under both cross-process locks and fresh DB history."""
+    from hermes_constants import get_hermes_home
+    from hermes_cli import active_sessions
+    from tools.bot_mode_probe import _hermes_root
+    from tools.bot_relay import acquire_turn_lock
+    from pathlib import Path
+
+    agent = cli.agent
+    db = getattr(agent, "_session_db", None) or getattr(cli, "_session_db", None)
+    stack = contextlib.ExitStack()
+    lease = None
+    try:
+        if db is None:
+            raise RuntimeError("session DB unavailable")
+        stack.enter_context(acquire_turn_lock(_hermes_root(Path(get_hermes_home())), profile,
+                                              max(0.0, deadline - time.monotonic())))
+        while True:
+            session_id = db.resolve_resume_session_id(cli.session_id) or cli.session_id
+            lease, refusal = active_sessions.try_acquire_active_session(
+                session_id=session_id, surface="cli", config=cli.config,
+                metadata={"live_session_id": str(session_id)})
+            if refusal is None:
+                break
+            if time.monotonic() >= deadline:
+                raise RuntimeError(f"active-session lease refused: {getattr(refusal, 'reason', refusal)}")
+            time.sleep(min(0.1, max(0.0, deadline - time.monotonic())))
+        cli._active_session_lease = lease
+        tip = db.resolve_resume_session_id(session_id) or session_id
+        if tip != session_id:
+            raise RuntimeError("session tip changed during admission")
+        agent.session_id = cli.session_id = tip
+        cli.conversation_history = db.get_messages_as_conversation(
+            tip, repair_alternation=True, include_row_ids=True)
+    except Exception as exc:
+        if lease is not None:
+            cli._release_active_session()
+        stack.close()
+        owner_pids = []
+        with contextlib.suppress(Exception):
+            owner_pids = [entry.get("pid") for entry in active_sessions._read_entries(
+                active_sessions._state_path()) if entry.get("session_id") == cli.session_id]
+        logger.warning("Bot Chat follow-up skipped: child_pid=%s delivery_pid=%s holder_pids=%s profile=%s: %s",
+                       os.getpid(), os.getppid(), owner_pids, profile, exc)
+        yield False
+        return
+    try:
+        yield True
+    finally:
+        try:
+            cli._release_active_session()
+        finally:
+            stack.close()
 
 
 def take_turn_report_path(environ: MutableMapping[str, str] = os.environ) -> str | None:
@@ -104,7 +174,7 @@ def read_turn_report(path: str, pid: int) -> dict | None:
 REPORTED_TURN_EXIT_GRACE_SECONDS = 2.0
 
 
-def run_reported_turn(argv: list, *, env: MutableMapping[str, str], report_path: str, timeout: float,
+def run_reported_turn(argv: list, *, env: MutableMapping[str, str], report_path: str, timeout: float | None,
                       exit_grace: float | None = REPORTED_TURN_EXIT_GRACE_SECONDS, cwd: str | None = None,
                       encoding: str | None = None) -> subprocess.CompletedProcess:
     """Run one ``hermes chat -Q`` delivery child; *timeout* bounds the TURN, not the process.
@@ -145,7 +215,7 @@ def run_reported_turn(argv: list, *, env: MutableMapping[str, str], report_path:
 
     drain = threading.Thread(target=_drain, name=f"quiet-turn-drain-{proc.pid}", daemon=True)
     drain.start()
-    deadline = time.monotonic() + timeout
+    deadline = time.monotonic() + timeout if timeout is not None else None
     report = None
     while True:
         drain.join(timeout=exit_grace if report is not None and exit_grace is not None else 0.25)
@@ -154,8 +224,13 @@ def run_reported_turn(argv: list, *, env: MutableMapping[str, str], report_path:
         if report is not None and exit_grace is not None:
             break
         # Re-read while waiting for the cap: a follow-up turn rewrites the report with its answer.
-        report = read_turn_report(report_path, proc.pid) or report
-        if time.monotonic() >= deadline:
+        current = read_turn_report(report_path, proc.pid)
+        if current is not None and report is None:
+            callback = _report_callback.get()
+            if callback is not None:
+                callback()
+        report = current or report
+        if deadline is not None and time.monotonic() >= deadline:
             if report is not None:
                 break
             proc.kill()
@@ -214,6 +289,7 @@ def continue_quiet_notify_completions(
     owns_event=None,
     max_rounds: int = _MAX_QUIET_NOTIFY_ROUNDS,
     linger_budget: float | None = None,
+    turn_guard=None,
 ) -> Any:
     """Linger for ``notify_on_complete`` work, then run owned completion texts as follow-up turns.
 
@@ -233,29 +309,23 @@ def continue_quiet_notify_completions(
     deadline = time.monotonic() + max(float(linger_budget), 0.0)
     for _ in range(max_rounds):
         wait = process_registry.wait_for_pending_completions(None, timeout=max(deadline - time.monotonic(), 0.0))
-        drained = []
-        for event, text in process_registry.drain_notifications(session_key=key, owns_event=owns_event):
-            # Durable async_delegation events carry a delivery ledger: without the
-            # claim/complete handshake the row stays delivery_state='pending' and
-            # restore_undelivered_completions re-queues it on the next process start,
-            # injecting the same result twice. Same contract as every other drain consumer.
-            claim = claim_event_delivery(event, "cli-quiet")
-            if claim is None:
-                continue
-            complete_event_delivery(event, claim)
-            drained.append((event, text))
-        # Every drained event type carries formatted text (completions, watch matches,
-        # async_delegation results): drain_notifications POPS owned events off the queue,
-        # so filtering by type here would consume-and-silently-drop owned
-        # async_delegation results. Keep everything that rendered.
-        texts = [text for _event, text in drained if text]
-        if texts:
-            follow = run_turn("\n\n".join(texts))
-            # Same admission rule as the interactive CLI turn: a wake made ONLY of automatic
-            # diagnostics (early failure / watch notices) still runs, but under suppression its
-            # reply never displaces the requested one-shot answer on stdout.
-            if not _diagnostic_only_wake_muted([event for event, text in drained if text]):
-                last = follow
+        guard = turn_guard() if turn_guard is not None else contextlib.nullcontext(True)
+        with guard as acquired:
+            if not acquired:
+                return last
+            drained = []
+            for event, text in process_registry.drain_notifications(session_key=key, owns_event=owns_event):
+                # Claim/complete durable events only after admission; drain_notifications pops them.
+                claim = claim_event_delivery(event, "cli-quiet")
+                if claim is None:
+                    continue
+                complete_event_delivery(event, claim)
+                drained.append((event, text))
+            texts = [text for _event, text in drained if text]
+            if texts:
+                follow = run_turn("\n\n".join(texts))
+                if not _diagnostic_only_wake_muted([event for event, text in drained if text]):
+                    last = follow
         if wait.get("timed_out"):
             break
         if not texts:

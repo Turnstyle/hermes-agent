@@ -39,14 +39,15 @@ def _run_delivery(profile: str, tmp: str, env: dict | None = None, *,
     child that exits under the cap is booked from its streams as before; one still lingering at the
     cap is booked from its turn report — its answer and outcome, never a timeout — and left to finish
     the linger that protects its own handoff. Only a turn that never ends is a timeout."""
-    from hermes_cli.quiet_single_query import run_reported_turn
+    from hermes_cli.quiet_single_query import BOT_CHAT_DELIVERY_PROFILE_ENV, run_reported_turn
     from tools.bot_relay import local_delivery_command
     report = f"{tmp}.turn.json"
     try:
         # The relay pins UTF-8 on every platform (#93590): its child is the bootstrapped hermes_cli
         # and its answer is relayed verbatim, unlike the cron lane's locale-decoded tails.
         return run_reported_turn(
-            local_delivery_command(profile, tmp), env=os.environ if env is None else env,
+            local_delivery_command(profile, tmp),
+            env={**(os.environ if env is None else env), BOT_CHAT_DELIVERY_PROFILE_ENV: profile},
             report_path=report, timeout=timeout, exit_grace=None, encoding="utf-8")
     finally:
         with contextlib.suppress(OSError):
@@ -104,6 +105,7 @@ def _(rid, params: dict, _root=_relay_root, _run=_run_delivery,
     GATEWAY via the one-turn ``hermes -p <profile> chat -c "Bot Chat"`` transport local DMs use →
     ``{reply}``. Blocking by design (Desktop relay worker; the RPC pool keeps it off the reader)."""
     import tempfile
+    from contextlib import ExitStack
     handler_started = time.monotonic()
     profile = str(params.get("profile") or "").strip()
     message = str(params.get("message") or "").strip()
@@ -278,9 +280,20 @@ def _(rid, params: dict, _root=_relay_root, _run=_run_delivery,
             while True:
                 remaining = max(0.0, deadline - time.monotonic())
                 try:
-                    with acquire_turn_lock(root, resolved,
-                                           min(0.1, remaining) if first_attempt and queue_config else remaining):
-                        proc = _run(resolved, tmp, turn_env)
+                    from hermes_cli.quiet_single_query import release_lock_at_report
+                    with ExitStack() as lock_stack:
+                        lock_stack.enter_context(acquire_turn_lock(
+                            root, resolved,
+                            min(0.1, remaining) if first_attempt and queue_config else remaining))
+                        released = False
+
+                        def _release_reported_lock():
+                            nonlocal released
+                            lock_stack.close()
+                            released = True
+
+                        with release_lock_at_report(_release_reported_lock):
+                            proc = _run(resolved, tmp, turn_env)
                         held = proc.returncode != 0 and refused_not_owned(proc.stderr or "")
                         if proc.returncode != 0 and not held:
                             # Retry policy: transient classes re-run the SAME session once; context_overflow
@@ -292,7 +305,11 @@ def _(rid, params: dict, _root=_relay_root, _run=_run_delivery,
                             if retry_action(classify_agent_error(_detail(proc))) != RETRY_NONE:
                                 # The failed attempt already persisted the DM; the re-run resumes that row.
                                 from tools.bot_relay import retry_turn_env
-                                proc = _run(resolved, tmp, retry_turn_env(turn_env))
+                                if released:
+                                    lock_stack.enter_context(acquire_turn_lock(
+                                        root, resolved, max(0.0, deadline - time.monotonic())))
+                                with release_lock_at_report(_release_reported_lock):
+                                    proc = _run(resolved, tmp, retry_turn_env(turn_env))
                 except TurnBusyError:
                     queued = _queue_busy() if first_attempt else None
                     if queued is not None:

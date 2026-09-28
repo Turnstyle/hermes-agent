@@ -10,12 +10,134 @@ from __future__ import annotations
 import os
 import datetime
 from types import SimpleNamespace
+import json
+import time
 
 import cli
 import pytest
 from tools import fleet_message_drain as fmd
 from agent.context_compressor import _DB_PERSISTED_MARKER
 from tools.bot_relay import RESUME_UNANSWERED_TURN_ENV
+
+
+def test_delivery_linger_releases_lease_then_reacquires_both_and_reloads(monkeypatch, tmp_path):
+    from hermes_cli import active_sessions, quiet_single_query as qsq
+    from tools.bot_relay import TurnBusyError, acquire_turn_lock
+
+    home = tmp_path / "profiles" / "ops"
+    home.mkdir(parents=True)
+    monkeypatch.setenv("HERMES_HOME", str(home))
+    monkeypatch.setenv(qsq.BOT_CHAT_DELIVERY_PROFILE_ENV, "ops")
+    lease, refusal = active_sessions.try_acquire_active_session(
+        session_id="s-1", surface="cli", config={}, metadata={"live_session_id": "s-1"})
+    assert refusal is None
+
+    fresh = [{"role": "user", "content": "first", "_row_id": 1},
+             {"role": "assistant", "content": "first reply", "_row_id": 2},
+             {"role": "user", "content": "another delivery", "_row_id": 3},
+             {"role": "assistant", "content": "other reply", "_row_id": 4}]
+
+    class DB:
+        def resolve_resume_session_id(self, sid):
+            return sid
+
+        def get_messages_as_conversation(self, sid, **kwargs):
+            assert kwargs == {"repair_alternation": True, "include_row_ids": True}
+            return list(fresh)
+
+    seen = []
+
+    def run_conversation(**kwargs):
+        seen.append(kwargs)
+        return {"final_response": "first reply" if len(seen) == 1 else "follow reply",
+                "messages": fresh if len(seen) > 1 else fresh[:2]}
+
+    agent = SimpleNamespace(run_conversation=run_conversation, session_id="s-1", _session_db=DB())
+
+    class CLI:
+        config = {}
+        session_id = "s-1"
+        conversation_history = []
+        _active_session_lease = lease
+
+        def _release_active_session(self):
+            if self._active_session_lease is not None:
+                self._active_session_lease.release()
+                self._active_session_lease = None
+
+    owner = CLI()
+    owner.agent = agent
+    drained = []
+
+    def check_drain(_cli, history):
+        assert owner._active_session_lease is not None
+        assert history == fresh
+        with pytest.raises(TurnBusyError):
+            with acquire_turn_lock(tmp_path, "ops", 0):
+                pass
+        drained.append(True)
+
+    monkeypatch.setattr("hermes_cli.cli_single_query._drain_quiet_bot_chat", check_drain)
+
+    def linger(_sid, run_turn, **kwargs):
+        assert owner._active_session_lease is None
+        assert json.loads(active_sessions._state_path().read_text())["entries"] == []
+        with acquire_turn_lock(tmp_path, "ops", 0.5):
+            pass
+        with kwargs["turn_guard"]() as acquired:
+            assert acquired
+            assert owner._active_session_lease is not None
+            with pytest.raises(TurnBusyError):
+                with acquire_turn_lock(tmp_path, "ops", 0):
+                    pass
+            result = run_turn("notify")
+        assert owner._active_session_lease is None
+        return result
+
+    monkeypatch.setattr(qsq, "continue_quiet_notify_completions", linger)
+    with pytest.raises(SystemExit) as exc:
+        cli._run_quiet_single_query(owner, "first")
+    assert exc.value.code == 0
+    assert seen[1]["conversation_history"] == fresh
+    assert drained == [True]
+    assert qsq.BOT_CHAT_DELIVERY_PROFILE_ENV not in os.environ
+
+
+def test_busy_follow_up_does_not_pop_notifications(monkeypatch, tmp_path, caplog):
+    from hermes_cli import quiet_single_query as qsq
+    from tools.bot_relay import acquire_turn_lock
+
+    home = tmp_path / "profiles" / "ops"
+    home.mkdir(parents=True)
+    monkeypatch.setenv("HERMES_HOME", str(home))
+    monkeypatch.setattr("tools.process_registry.process_registry.wait_for_pending_completions",
+                        lambda *_a, **_k: {"timed_out": False})
+    popped = []
+    monkeypatch.setattr("tools.process_registry.process_registry.drain_notifications",
+                        lambda **_k: popped.append(True))
+    owner = SimpleNamespace(agent=SimpleNamespace(_session_db=object()), session_id="s-1", config={})
+    with acquire_turn_lock(tmp_path, "ops", 0.5):
+        result = qsq.continue_quiet_notify_completions(
+            "s-1", lambda _: pytest.fail("follow-up ran"), max_rounds=1, linger_budget=0,
+            turn_guard=lambda: qsq.bot_chat_follow_up_lock(owner, "ops", time.monotonic()))
+    assert result is None and popped == []
+    assert "Bot Chat follow-up skipped" in caplog.text
+    assert "child_pid=" in caplog.text and "delivery_pid=" in caplog.text
+
+
+def test_personal_quiet_run_does_not_release_active_session(monkeypatch):
+    from hermes_cli import quiet_single_query as qsq
+
+    monkeypatch.delenv(qsq.BOT_CHAT_DELIVERY_PROFILE_ENV, raising=False)
+    monkeypatch.setattr(qsq, "continue_quiet_notify_completions", lambda *_a, **_k: None)
+    monkeypatch.setattr("hermes_cli.cli_single_query._drain_quiet_bot_chat", lambda *_a: None)
+    released = []
+    owner = SimpleNamespace(
+        agent=SimpleNamespace(run_conversation=lambda **_k: {"final_response": "ok"}, session_id="s-1"),
+        session_id="s-1", conversation_history=[], _release_active_session=lambda: released.append(True))
+    with pytest.raises(SystemExit):
+        cli._run_quiet_single_query(owner, "hi")
+    assert released == []
 
 
 def test_bot_chat_quiet_turn_drains_one_message_without_changing_stdout(monkeypatch, capsys, tmp_path):
