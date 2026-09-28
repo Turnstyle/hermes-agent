@@ -19,6 +19,11 @@ QUEUED_EXPIRED = "queued_expired"
 DELIVERY_TIMEOUT = "delivery_timeout"
 AGENT_BLOCKED = "agent_blocked"
 CANCELLED = "cancelled"
+# A relay delivery into a live Bot Chat is durably admitted and WILL run — never a failure — but it
+# didn't settle inside the wait budget, so the turn's real answer can only ever reach that Bot Chat
+# on the target machine, not this ok reply. Rides an otherwise-ok payload (`reply_relayed: false`),
+# not an error: distinct from every other code here, which all ride `_err`.
+REPLY_NOT_RELAYED = "reply_not_relayed"
 
 # agent-side
 PROVIDER_AUTH_OR_ACCESS = "provider_auth_or_access"
@@ -35,7 +40,7 @@ TARGET_SCOPE_UNRESOLVED = "target_scope_unresolved"
 UNKNOWN = "unknown"
 
 ALL_REASONS = frozenset({
-    RUNTIME_OFFLINE, QUEUED_EXPIRED, DELIVERY_TIMEOUT, AGENT_BLOCKED, CANCELLED,
+    RUNTIME_OFFLINE, QUEUED_EXPIRED, DELIVERY_TIMEOUT, AGENT_BLOCKED, CANCELLED, REPLY_NOT_RELAYED,
     PROVIDER_AUTH_OR_ACCESS, PROVIDER_QUOTA_LIMIT, PROVIDER_RATE_LIMIT,
     PROVIDER_SERVER_ERROR, CONTEXT_OVERFLOW, MISSING_CONFIG, MODEL_UNAVAILABLE,
     TARGET_SCOPE_UNRESOLVED, UNKNOWN,
