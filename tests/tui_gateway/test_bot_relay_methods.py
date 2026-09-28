@@ -372,6 +372,93 @@ def test_deliver_into_a_busy_open_bot_chat_reports_it_queued_and_keeps_the_recei
         lease.release()
 
 
+_REFUSAL_STDERR = "hermes-refusal-reason: SESSION_NOT_OWNED\nCe chat est occupé.\n"
+
+
+def test_deliver_queues_behind_a_held_session_then_delivers(home, monkeypatch):
+    """#<relay-busy-queue>: the CLI transport's SESSION_NOT_OWNED refusal (another surface — plain
+    `hermes chat`, a gateway bridge turn — holds the target's live Bot Chat, distinct from this
+    handler's own turn lock) used to fail on the first attempt; it must retry like a lock-wait
+    timeout already does, bounded by bot_mode.turn_wait_seconds."""
+    from tools import bot_mode_dm
+
+    monkeypatch.setattr(bot_relay, "turn_wait_seconds", lambda: 5.0)
+    monkeypatch.setattr(bot_mode_dm, "_BUSY_SLICE_SECONDS", 0.05)
+    calls = []
+
+    class _Proc:
+        def __init__(self, returncode, stdout="", stderr=""):
+            self.returncode, self.stdout, self.stderr = returncode, stdout, stderr
+
+    def _fake_run(argv, **kwargs):
+        calls.append(list(argv))
+        if len(calls) <= 2:
+            return _Proc(1, stderr=_REFUSAL_STDERR)
+        return _Proc(0, stdout="pong from ops")
+
+    monkeypatch.setattr("hermes_cli.quiet_single_query.run_reported_turn", _fake_run)
+    out = _result(srv._methods["bot_relay.deliver"](1, {"profile": "ops", "message": "ping"}))
+    assert out["reply"] == "pong from ops"
+    assert len(calls) == 3
+
+
+def test_deliver_fails_target_busy_after_the_full_turn_wait_budget(home, monkeypatch):
+    """Held for the whole budget: a target_busy refusal, mentioning how long it queued, within a
+    bounded number of attempts and never past turn_wait_seconds plus one retry slice — the
+    Desktop's fixed deliver deadline depends on this handler never holding longer than that."""
+    from tools import bot_mode_dm
+
+    slice_seconds, budget = 0.05, 0.3
+    monkeypatch.setattr(bot_relay, "turn_wait_seconds", lambda: budget)
+    monkeypatch.setattr(bot_mode_dm, "_BUSY_SLICE_SECONDS", slice_seconds)
+    calls = []
+
+    class _Proc:
+        def __init__(self, returncode, stdout="", stderr=""):
+            self.returncode, self.stdout, self.stderr = returncode, stdout, stderr
+
+    def _fake_run(argv, **kwargs):
+        calls.append(list(argv))
+        return _Proc(1, stderr=_REFUSAL_STDERR)
+
+    monkeypatch.setattr("hermes_cli.quiet_single_query.run_reported_turn", _fake_run)
+    started = time.monotonic()
+    out = srv._methods["bot_relay.deliver"](1, {"profile": "ops", "message": "ping"})
+    elapsed = time.monotonic() - started
+
+    assert "error" in out
+    assert out["error"]["code"] == 5092
+    assert out["error"]["data"]["reason"] == "target_busy"
+    assert "queu" in out["error"]["message"].lower()
+    # The final slice doesn't sleep before giving up, so elapsed may fall a bit short of the full
+    # budget (by at most one slice) — never far short, and this handler must never hold long past it
+    # (the Desktop's fixed deliver deadline depends on that).
+    assert budget - slice_seconds <= elapsed < budget + 2.0
+    assert 1 <= len(calls) <= 30
+
+
+def test_deliver_non_held_failure_path_is_unchanged(home, monkeypatch):
+    """A non-held failure (no SESSION_NOT_OWNED refusal) still gets exactly the existing
+    policy-gated retry, unaffected by the busy-queue loop around it."""
+    calls = []
+
+    class _Proc:
+        def __init__(self, returncode, stdout="", stderr=""):
+            self.returncode, self.stdout, self.stderr = returncode, stdout, stderr
+
+    def _fake_run(argv, **kwargs):
+        calls.append(list(argv))
+        if len(calls) == 1:
+            return _Proc(1, stderr="Error code: 429 - rate limit exceeded")
+        return _Proc(0, stdout="recovered reply")
+
+    monkeypatch.setattr("hermes_cli.quiet_single_query.run_reported_turn", _fake_run)
+    out = _result(srv._methods["bot_relay.deliver"](1, {"profile": "ops", "message": "ping"}))
+    assert out["reply"] == "recovered reply"
+    assert len(calls) == 2
+    assert calls[0] == calls[1], "retry must re-run the SAME session/argv"
+
+
 def test_reply_roundtrip_and_id_validation(home):
     envelope_id = "c" * 32
     _result(srv._methods["bot_relay.reply"](1, {"id": envelope_id, "reply": "hi"}))
