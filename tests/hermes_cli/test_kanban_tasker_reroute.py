@@ -293,29 +293,69 @@ def _run_hermes_cli(home: Path, *args: str, env_vars: dict[str, str] | None = No
     )
 
 
-def test_delegated_child_cli_fence_allows_own_card_reassign(tmp_path):
+def test_delegated_child_cli_fence_denies_env_var_spoof(tmp_path):
+    """Proves that a delegated child setting HERMES_KANBAN_TASK=<victim> is refused."""
     home = tmp_path / "hermes"
     home.mkdir()
 
-    # Create task
-    created = _run_hermes_cli(home, "kanban", "create", "test card for worker handback", "--json")
+    # Create a victim card
+    created = _run_hermes_cli(home, "kanban", "create", "victim card", "--json")
     assert created.returncode == 0, created.stderr
-    task_id = json.loads(created.stdout)["id"]
+    victim_id = json.loads(created.stdout)["id"]
 
-    # In delegated child context, reassigning own card should SUCCEED
-    res_own = _run_hermes_cli(
+    # In delegated child context, spoofing HERMES_KANBAN_TASK to victim_id must FAIL
+    res_spoof = _run_hermes_cli(
         home,
         "kanban",
         "reassign",
-        task_id,
-        "new-assignee",
+        victim_id,
+        "attacker-profile",
         env_vars={
             "HERMES_DELEGATED_CHILD_CONTEXT": "1",
-            "HERMES_KANBAN_TASK": task_id,
+            "HERMES_KANBAN_TASK": victim_id,
         },
     )
-    assert res_own.returncode == 0, res_own.stderr
-    assert "delegate_task child contexts cannot mutate" not in res_own.stderr
+    assert res_spoof.returncode == 1
+    assert "delegate_task child contexts cannot mutate Kanban tasks via the CLI" in res_spoof.stderr
+
+    # Verify victim card was NOT reassigned
+    show = _run_hermes_cli(home, "kanban", "show", victim_id, "--json")
+    assert show.returncode == 0, show.stderr
+    card = json.loads(show.stdout)["task"]
+    assert card["assignee"] != "attacker-profile"
+
+
+def test_delegated_child_cli_fence_denies_env_var_spoof_with_reclaim(tmp_path):
+    """Proves the exact REVIEW-r1.md exploit is refused:
+    HERMES_KANBAN_TASK=<victim> hermes kanban reassign <victim> <profile> --reclaim
+    """
+    home = tmp_path / "hermes"
+    home.mkdir()
+
+    created = _run_hermes_cli(home, "kanban", "create", "victim card", "--json")
+    assert created.returncode == 0, created.stderr
+    victim_id = json.loads(created.stdout)["id"]
+
+    res_exploit = _run_hermes_cli(
+        home,
+        "kanban",
+        "reassign",
+        victim_id,
+        "attacker-profile",
+        "--reclaim",
+        env_vars={
+            "HERMES_DELEGATED_CHILD_CONTEXT": "1",
+            "HERMES_KANBAN_TASK": victim_id,
+        },
+    )
+    assert res_exploit.returncode == 1
+    assert ("cannot reclaim" in res_exploit.stderr or "cannot mutate" in res_exploit.stderr)
+
+    # Verify victim card is intact
+    show = _run_hermes_cli(home, "kanban", "show", victim_id, "--json")
+    assert show.returncode == 0, show.stderr
+    card = json.loads(show.stdout)["task"]
+    assert card["assignee"] != "attacker-profile"
 
 
 def test_delegated_child_cli_fence_denies_other_card_reassign(tmp_path):
@@ -342,3 +382,74 @@ def test_delegated_child_cli_fence_denies_other_card_reassign(tmp_path):
     )
     assert res_other.returncode == 1
     assert "delegate_task child contexts cannot mutate Kanban tasks via the CLI" in res_other.stderr
+
+
+def test_dispatcher_worker_allows_own_card_reassign(tmp_path):
+    """A dispatcher-owned worker (with scrubbed owned_kanban_task() identity and no child fence)
+    can reassign its own card.
+    """
+    home = tmp_path / "hermes"
+    home.mkdir()
+
+    created = _run_hermes_cli(home, "kanban", "create", "worker card for handback", "--json")
+    assert created.returncode == 0, created.stderr
+    task_id = json.loads(created.stdout)["id"]
+
+    # Dispatcher worker runs with HERMES_KANBAN_TASK set, but without child fence
+    res_own = _run_hermes_cli(
+        home,
+        "kanban",
+        "reassign",
+        task_id,
+        "new-assignee",
+        env_vars={
+            "HERMES_KANBAN_TASK": task_id,
+        },
+    )
+    assert res_own.returncode == 0, res_own.stderr
+    assert "Reassigned" in res_own.stdout
+
+    # Verify card was reassigned
+    show = _run_hermes_cli(home, "kanban", "show", task_id, "--json")
+    assert show.returncode == 0, show.stderr
+    card = json.loads(show.stdout)["task"]
+    assert card["assignee"] == "new-assignee"
+
+
+def test_dispatcher_claimed_card_reassign_by_worker(tmp_path):
+    """A running task with a dispatcher-recorded claim matching the caller's process tree
+    can be reassigned without --reclaim even in a child context.
+    """
+    home = tmp_path / "hermes"
+    home.mkdir()
+
+    # Create and claim task via DB directly
+    db_path = home / "kanban.db"
+    conn = kbc.connect(db_path)
+    task_id = kb.create_task(conn, title="running claimed card", assignee="worker-profile")
+    with kb.write_txn(conn):
+        conn.execute("UPDATE tasks SET status = 'ready' WHERE id = ?", (task_id,))
+    claimed = kb.claim_task(conn, task_id)
+    assert claimed is not None
+    # Set worker_pid to current Python PID so the spawned CLI process is a child
+    dispatch_mod._set_worker_pid(conn, task_id, os.getpid())
+    conn.close()
+
+    # In delegated child context, since the worker_pid matches this parent process,
+    # reassign without --reclaim should SUCCEED
+    res_reassign = _run_hermes_cli(
+        home,
+        "kanban",
+        "reassign",
+        task_id,
+        "builder-profile",
+        env_vars={
+            "HERMES_DELEGATED_CHILD_CONTEXT": "1",
+        },
+    )
+    assert res_reassign.returncode == 0, res_reassign.stderr
+
+    conn = kbc.connect(db_path)
+    updated = kb.get_task(conn, task_id)
+    assert updated.assignee == "builder-profile"
+    conn.close()
