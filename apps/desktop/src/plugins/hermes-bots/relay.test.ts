@@ -632,6 +632,45 @@ describe('the drain loop wires drain → deliver → reply', () => {
     target_profile: 'ops'
   }
 
+  it('labels a queued bot_relay.deliver result as queued for the target, not Reply from', async () => {
+    const calls = respondWith(call => {
+      if (call.method === 'bot_relay.outbox.drain') {
+        return { envelopes: call.connectionId === 'a' ? [envelope] : [] }
+      }
+
+      if (call.method === 'bot_relay.deliver') {
+        return {
+          delivered_profile: 'ops',
+          message_id: 'fm-queued',
+          reply: 'queued (fm-queued)',
+          reply_relayed: false,
+          status: 'queued'
+        }
+      }
+
+      return {}
+    })
+
+    const { startBotRelay, stopBotRelay } = await loadRelay()
+
+    startBotRelay()
+    await pushAndSettle()
+
+    const reply = calls.find(call => call.method === 'bot_relay.reply')
+
+    expect(reply?.params).toMatchObject({
+      id: 'env-1',
+      delivered_profile: 'ops',
+      message_id: 'fm-queued',
+      reply: 'Queued for @ops, not yet answered',
+      reply_relayed: false,
+      status: 'queued'
+    })
+    expect(JSON.stringify(reply?.params)).not.toMatch(/Reply from/)
+
+    stopBotRelay()
+  })
+
   it('delivers on the target’s own socket and posts the reply to the sender', async () => {
     const calls = respondWith(call => {
       if (call.method === 'bot_relay.outbox.drain') {

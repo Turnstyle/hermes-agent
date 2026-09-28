@@ -1386,12 +1386,14 @@ class APIServerAdapter(OpenAICompatRoutesMixin, BasePlatformAdapter):
         if not isinstance(message, str) or not message.strip() or not session_id:
             return draining
         message_id = uuid.uuid4().hex
+        from gateway.shutdown_flush import GATEWAY_DRAINING_REASON
+
         wrote = _flush_value(
             _get_flush_dir(),
             "drain",
             f"agent:api:{session_id}",
             {"text": message, "session_id": session_id},
-            reason="gateway_draining",
+            reason=GATEWAY_DRAINING_REASON,
             message_id=message_id,
             ts=int(time.time()),
         )
@@ -3295,11 +3297,21 @@ class APIServerAdapter(OpenAICompatRoutesMixin, BasePlatformAdapter):
         gateway_session_key, key_err = self._parse_session_key_header(request)
         if key_err is not None:
             return None, key_err
-        session_id = request.match_info["session_id"]
-        session, err = await self._get_existing_session_or_404(session_id)
+        body, err = await self._read_json_body(request)
         if err:
             return None, err
-        body, err = await self._read_json_body(request)
+        return await self._build_session_chat_ctx(
+            session_id=request.match_info["session_id"],
+            body=body,
+            gateway_session_key=gateway_session_key,
+        )
+
+    async def _build_session_chat_ctx(
+        self, *, session_id: str, body: Dict[str, Any],
+        gateway_session_key: Optional[str] = None,
+    ) -> tuple:
+        """Validate session chat inputs and build ``ctx`` for ``_run_agent`` (HTTP or startup replay)."""
+        session, err = await self._get_existing_session_or_404(session_id)
         if err:
             return None, err
         user_message, err = _session_chat_user_message(body)
@@ -3356,6 +3368,38 @@ class APIServerAdapter(OpenAICompatRoutesMixin, BasePlatformAdapter):
             "gateway_session_key": gateway_session_key, "session_id": session_id, "body": body,
             "user_message": user_message, "runtime_request": runtime_request,
             "lock_active": lock_active, "run_kwargs": run_kwargs}, None
+
+    async def dispatch_session_chat_turn(self, *, session_id: str, message: str) -> bool:
+        """Run one session-chat turn (same path as POST /api/sessions/{id}/chat when not draining).
+
+        Returns True once the turn dispatch is accepted and completes; False when admission refuses
+        or the turn raises, leaving drain spool files for a later restart attempt.
+        """
+        from tools.bot_failure_reasons import RETRY_NONE, result_retry_action
+
+        limited = self._concurrency_limited_response()
+        if limited is not None:
+            return False
+        ctx, err = await self._build_session_chat_ctx(
+            session_id=session_id, body={"message": message}, gateway_session_key=None)
+        if err is not None:
+            return False
+        handed_off = await self._answer_through_live_bot_chat(ctx)
+        if handed_off is not None:
+            return int(handed_off.status) < 500
+        sid = ctx["session_id"]
+        history = await self._conversation_history_for_session(sid)
+        try:
+            result, _usage = await self._run_agent(conversation_history=history, **ctx["run_kwargs"])
+            if result_retry_action(result) != RETRY_NONE:
+                history = await self._conversation_history_for_session(sid)
+                await self._run_agent(
+                    conversation_history=history, resume_unanswered_turn=True, **ctx["run_kwargs"])
+        except Exception:
+            logger.warning(
+                "Gateway-draining session chat replay failed for %s", sid, exc_info=True)
+            return False
+        return True
 
     @staticmethod
     def _session_headers(session_id: str, gateway_session_key: Optional[str]) -> Dict[str, str]:

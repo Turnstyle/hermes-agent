@@ -1611,6 +1611,7 @@ export interface BotRelayDeliverParams {
   from_handle?: string | null
   from_connection?: string | null
   target_profile?: string | null
+  envelope_id?: string | null
 }
 /** ``delivered_profile`` is this gateway's attestation of which profile ran the turn. */
 export interface BotRelayDeliverResult {
@@ -1619,6 +1620,8 @@ export interface BotRelayDeliverResult {
   requested_profile?: string | null
   reply_relayed?: boolean | null
   reason?: string | null
+  status?: string | null
+  message_id?: string | null
 }
 export interface BotRelayReplyParams {
   profile?: string | null
@@ -1628,6 +1631,8 @@ export interface BotRelayReplyParams {
   reason?: string | null
   reply_relayed?: boolean | null
   delivered_profile?: string | null
+  status?: string | null
+  message_id?: string | null
 }
 export interface OkResult {
   ok?: boolean
@@ -2461,8 +2466,6 @@ export interface PromptSubmitParams {
 /** ``status`` is absent only on the typed-stop-phrase reply (``voice_stopped``). After a truncation the survivor row ids let the client rebind its cached ``rowId``s (``None`` map entries: drop the cached id). ``turn_isolation`` marks a compute-host dispatch. */
 export interface PromptSubmitResult {
   status?: PromptSubmitStatus | null
-  /** Set when a human send waited on a bot CLI lease instead of taking the chat. */
-  behind?: 'bot' | null
   voice_stopped?: boolean | null
   user_row_id?: number | null
   survivor_user_row_ids?: (number | null)[] | null

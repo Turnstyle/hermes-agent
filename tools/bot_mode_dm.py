@@ -788,6 +788,19 @@ def _run_delivery_locked(argv: list[str], dm_file: str, *, stdin_file: bool,
         except (_session_held_cls(), TurnBusyError) as exc:
             if not can_queue:
                 raise
+            from tools.bot_mode_probe import _default_home, _hermes_root, _roster
+            from tools.fleet_message_drain import recipient_drain_enabled
+
+            recipient_home = home
+            if recipient_home is None:
+                recipient_home = dict(_roster(_hermes_root(Path(_default_home())))).get(exc.profile)
+            if not recipient_drain_enabled(exc.profile, profile_home=recipient_home):
+                print(json.dumps({
+                    "error": (f"Delivery failed: @{exc.profile}'s Bot Chat is busy and the recipient "
+                              "does not drain queued fleet messages at turn end."),
+                    "reason": "target_busy",
+                }))
+                return 1
             try:
                 body = Path(dm_file).read_text(encoding="utf-8")
                 sender = "sender"
@@ -1035,6 +1048,12 @@ def _wait_reply_main(reply_path: str, label: str, budget_seconds: str) -> int:
                 )
                 print(d.get("reply") or "(empty reply)")
                 return 1
+            status = str(d.get("status") or "").strip()
+            if status == "queued":
+                from tools.bot_relay import relay_queued_sender_text
+
+                print(relay_queued_sender_text(delivered or expected))
+                return 0
             reason = str(d.get("reason") or "").strip()
             relayed = d.get("reply_relayed")
             # An admitted-but-unrelayed ok reply is not the target's answer. Exit 0 so the sender

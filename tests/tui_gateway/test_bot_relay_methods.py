@@ -34,7 +34,10 @@ from tui_gateway import methods_bot_relay
 def home(tmp_path, monkeypatch):
     h = tmp_path / ".hermes"
     (h / "profiles" / "ops").mkdir(parents=True)
-    (h / "profiles" / "ops" / "config.yaml").write_text("{}\n")  # identity marker: a bare dir is no target
+    (h / "profiles" / "ops" / "config.yaml").write_text(
+        "fleet_messages:\n  drain_on_turn_end: true\n  emulator_host: 127.0.0.1:1\n",
+        encoding="utf-8",
+    )
     monkeypatch.setenv("HERMES_HOME", str(h))
     return h
 
@@ -468,7 +471,7 @@ _REFUSAL_STDERR = "hermes-refusal-reason: SESSION_NOT_OWNED\nCe chat est occupé
 def test_deliver_fast_acks_a_held_session(home, monkeypatch):
     """A SESSION_NOT_OWNED Bot Chat is written to fleet_messages_v1 on the first
     refusal. The sender gets queued (message_id) without a turn_wait_seconds loop."""
-    from tools.fleet_message_enqueue import queued_ack
+    from tools.bot_relay import relay_queued_sender_text
 
     calls = []
 
@@ -486,8 +489,10 @@ def test_deliver_fast_acks_a_held_session(home, monkeypatch):
         lambda **kwargs: "fmrelay",
     )
     out = _result(srv._methods["bot_relay.deliver"](1, {"profile": "ops", "message": "ping"}))
-    assert out["reply"] == queued_ack("fmrelay")
+    assert out["reply"] == relay_queued_sender_text("ops")
     assert out["status"] == "queued"
+    assert out["message_id"] == "fmrelay"
+    assert out["reply_relayed"] is False
     assert len(calls) == 1
 
 
@@ -533,7 +538,7 @@ def test_deliver_held_computed_from_final_proc_after_provider_retry(home, monkey
         format_refusal_stderr,
         session_already_owned_message,
     )
-    from tools.fleet_message_enqueue import queued_ack
+    from tools.bot_relay import relay_queued_sender_text
 
     sid = "chat"
     refusal_stderr = format_refusal_stderr(
@@ -557,8 +562,9 @@ def test_deliver_held_computed_from_final_proc_after_provider_retry(home, monkey
     monkeypatch.setattr("hermes_cli.quiet_single_query.run_reported_turn", _fake_run)
     monkeypatch.setattr("tools.fleet_message_enqueue.enqueue_busy_dm", lambda **kwargs: "fm-retry")
     out = _result(srv._methods["bot_relay.deliver"](1, {"profile": "ops", "message": "ping"}))
-    assert out["reply"] == queued_ack("fm-retry")
+    assert out["reply"] == relay_queued_sender_text("ops")
     assert out["status"] == "queued"
+    assert out["reply_relayed"] is False
     assert len(calls) == 2
     assert out.get("reason") != "unknown"
 

@@ -221,16 +221,25 @@ function normalizeRelayProfile(name: string): string {
   return trimmed.toLowerCase() === 'hermes' ? 'default' : trimmed
 }
 
+/** Matches tools.bot_relay.relay_queued_sender_text for busy fast-ack deliveries. */
+function relayQueuedSenderText(targetProfile: string): string {
+  const target = normalizeRelayProfile(String(targetProfile || '').trim())
+
+  return `Queued for @${target || 'target'}, not yet answered`
+}
+
 interface RelayReplyPayload {
   delivered_profile?: string
   error?: string
+  message_id?: string
   reason?: string
   reply?: string
   reply_relayed?: boolean
+  status?: string
 }
 
 /** `bot_relay.reply` keys a sender backend older than delivery attestation does not declare. */
-const ATTESTATION_REPLY_FIELDS = ['delivered_profile', 'reply_relayed'] as const
+const ATTESTATION_REPLY_FIELDS = ['delivered_profile', 'reply_relayed', 'status', 'message_id'] as const
 
 function withoutAttestationFields(payload: RelayReplyPayload): RelayReplyPayload {
   if (!ATTESTATION_REPLY_FIELDS.some(key => key in payload)) {
@@ -655,6 +664,8 @@ async function deliverRelayEnvelope(
       delivered_profile?: string
       reason?: string
       reply_relayed?: boolean
+      status?: string
+      message_id?: string
     }>(
       route,
       'bot_relay.deliver',
@@ -664,7 +675,8 @@ async function deliverRelayEnvelope(
         message: String(envelope?.message || ''),
         from_profile: String(envelope?.from_profile || ''),
         from_handle: String(envelope?.from_handle || ''),
-        from_connection: String(sender.id)
+        from_connection: String(sender.id),
+        envelope_id: envelopeId
       },
       RELAY_DELIVER_TIMEOUT_MS
     )
@@ -694,15 +706,23 @@ async function deliverRelayEnvelope(
     }
 
     clearBotAttention(attentionKey)
+    const deliverStatus = typeof res?.status === 'string' ? res.status.trim() : ''
+    const queued = deliverStatus === 'queued'
     await postReply({
-      reply: String(res?.reply || ''),
+      reply: queued ? relayQueuedSenderText(normalizedRequestedProfile) : String(res?.reply || ''),
       delivered_profile: deliveredProfile,
       // Forward the gateway's own machine-readable classification of an otherwise-ok reply (e.g.
       // reply_relayed: false / reason: "reply_not_relayed" for a REPLY NOT RELAYED text, pairs
       // 9-12) the same way the MISROUTED branch above forwards its reason — the sender's
       // waiter/telemetry can then branch on `reason` instead of re-parsing the prose. Omitted
       // entirely when absent (older gateway, or a plain success) — additive, no behavior change.
-      ...(typeof res?.reply_relayed === 'boolean' ? { reply_relayed: res.reply_relayed } : {}),
+      ...(queued
+        ? { reply_relayed: false }
+        : typeof res?.reply_relayed === 'boolean'
+          ? { reply_relayed: res.reply_relayed }
+          : {}),
+      ...(queued ? { status: 'queued' } : {}),
+      ...(queued && res?.message_id ? { message_id: String(res.message_id) } : {}),
       ...(res?.reason ? { reason: String(res.reason) } : {})
     })
   } catch (error: any) {

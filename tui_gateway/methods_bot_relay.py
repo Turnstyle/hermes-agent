@@ -247,23 +247,34 @@ def _(rid, params: dict, _root=_relay_root, _run=_run_delivery,
             # One short lock probe. A busy target is written to fleet_messages_v1 and
             # acked in under 5s; the recipient drain delivers it. Not an 1800s wait.
             from tools.bot_mode_dm import _FAST_ACK_SECONDS, refused_not_owned
-            from tools.bot_relay import TurnBusyError, turn_wait_seconds
-            from tools.fleet_message_enqueue import FleetEnqueueError, enqueue_busy_dm, queued_ack
+            from tools.bot_relay import TurnBusyError, relay_queued_sender_text, turn_wait_seconds
+            from tools.fleet_message_drain import recipient_drain_enabled
+            from tools.fleet_message_enqueue import FleetEnqueueError, enqueue_busy_dm
+
+            relay_envelope_id = str(params.get("envelope_id") or "").strip() or None
 
             def _fast_ack_busy() -> dict:
                 sender = "sender"
                 if isinstance(author, dict):
                     sender = str(author.get("name") or author.get("id") or sender)
+                recipient_home = _profile_home(resolved)
+                if not recipient_drain_enabled(resolved, profile_home=recipient_home):
+                    return _err(rid, 5092,
+                                f"delivery turn failed: @{resolved}'s Bot Chat is busy and fleet drain is disabled",
+                                data={"reason": "target_busy"})
                 try:
                     body = Path(tmp).read_text(encoding="utf-8")
-                    message_id = enqueue_busy_dm(sender=sender, recipient=resolved, body=body)
+                    enqueue_kwargs = {"sender": sender, "recipient": resolved, "body": body}
+                    if relay_envelope_id:
+                        enqueue_kwargs["message_id"] = relay_envelope_id
+                    message_id = enqueue_busy_dm(**enqueue_kwargs)
                 except (FleetEnqueueError, OSError, ValueError) as exc:
                     return _err(rid, 5092, f"delivery turn failed: could not queue for @{resolved}: {exc}",
                                 data={"reason": "target_busy"})
                 _log_deliver(profile, resolved, "fleet_queued", want_home)
-                return _ok(rid, {"reply": queued_ack(message_id), "message_id": message_id,
+                return _ok(rid, {"reply": relay_queued_sender_text(resolved), "message_id": message_id,
                                  "status": "queued", "delivered_profile": resolved,
-                                 "requested_profile": profile})
+                                 "requested_profile": profile, "reply_relayed": False})
 
             try:
                 with acquire_turn_lock(root, resolved, min(_FAST_ACK_SECONDS, turn_wait_seconds())):
@@ -347,7 +358,9 @@ def _(rid, params: dict, _root=_relay_root) -> dict:
                     error=relayed_failure_error(raw_error, read_claimed_envelope(root, envelope_id)),
                     reason=code,
                     delivered_profile=str(params.get("delivered_profile") or "").strip() or None,
-                    reply_relayed=reply_relayed if isinstance(reply_relayed, bool) else None)
+                    reply_relayed=reply_relayed if isinstance(reply_relayed, bool) else None,
+                    status=str(params.get("status") or "").strip() or None,
+                    message_id=str(params.get("message_id") or "").strip() or None)
         return _ok(rid, {"ok": True})
     except ValueError as e:
         return _err(rid, 4094, str(e))

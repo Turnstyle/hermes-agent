@@ -12,6 +12,7 @@ import importlib.util
 import json
 import re
 import tempfile
+import urllib.error
 import uuid
 from pathlib import Path
 from typing import Any, Callable, Optional
@@ -77,6 +78,23 @@ def _default_writer(paths, collection: str, set_by: str) -> int:
     return int(module.write_files(paths, collection, set_by=set_by))
 
 
+def _default_reader(message_id: str) -> dict | None:
+    spec = importlib.util.spec_from_file_location("fleet_ops", _FLEET_OPS)
+    if spec is None or spec.loader is None:
+        raise FleetEnqueueError(f"fleet_ops missing at {_FLEET_OPS}")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    try:
+        doc, _ = module.get_doc("fleet_messages_v1", message_id)
+        return doc
+    except urllib.error.HTTPError as exc:
+        if exc.code == 404:
+            return None
+        raise FleetEnqueueError(f"fleet_ops get_doc HTTP {exc.code}") from exc
+    except SystemExit as exc:
+        raise FleetEnqueueError(str(exc)) from exc
+
+
 def enqueue_busy_dm(
     *,
     sender: str,
@@ -84,9 +102,21 @@ def enqueue_busy_dm(
     body: str,
     message_id: Optional[str] = None,
     writer: Optional[Callable[..., int]] = None,
+    reader: Optional[Callable[[str], dict | None]] = None,
 ) -> str:
     """Write one queued doc. Returns ``message_id``. Raises when the write does not land."""
     doc = build_queued_dm(sender=sender, recipient=recipient, body=body, message_id=message_id)
+    doc_id = doc["message_id"]
+    if message_id is not None:
+        read = reader or _default_reader
+        try:
+            existing = read(doc_id)
+        except FleetEnqueueError:
+            raise
+        except Exception as exc:
+            raise FleetEnqueueError(str(exc)) from exc
+        if existing is not None:
+            return doc_id
     write = writer or _default_writer
     with tempfile.NamedTemporaryFile("w", suffix=".json", delete=False, encoding="utf-8") as handle:
         json.dump(doc, handle)
