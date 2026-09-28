@@ -241,7 +241,13 @@ def write_mailbox_stall_meta(ticket_json_path: Path, record: dict[str, Any]) -> 
 
 def _write(path: Path, record: dict[str, Any]) -> None:
     atomic_json_write(path, record, indent=None, sort_keys=True, fsync_dir=True, mode=0o600)
-    write_mailbox_stall_meta(path, record)
+    # The sidecar is advisory stall-watch metadata written after the ticket's durable state change.
+    # A failure must never abort the caller (e.g. after a ticket is marked ``claimed``), or the
+    # ticket is stranded: later claims and orphan reconciliation skip claimed tickets (checker HIGH).
+    try:
+        write_mailbox_stall_meta(path, record)
+    except (OSError, ValueError, TypeError, KeyError) as exc:
+        log.warning("bot_live_delivery: mailbox stall meta write failed for %s: %s", path.name, exc)
 
 
 def deliver_to_live_owner(
