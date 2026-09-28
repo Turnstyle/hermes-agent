@@ -72,6 +72,8 @@ from pathlib import Path
 from typing import Any, Callable, Optional
 
 logger = logging.getLogger(__name__)
+_config_read_warned = False
+_config_read_warning_lock = threading.Lock()
 
 COLLECTION = "fleet_messages_v1"
 DEFAULT_PROJECT = "mission-control-444444"
@@ -116,8 +118,12 @@ def drain_config(cfg: Optional[dict] = None) -> Optional[DrainConfig]:
         try:
             from hermes_cli.config import load_config
             cfg = load_config() or {}
-        except Exception:
-            logger.debug("fleet message drain: config read failed", exc_info=True)
+        except Exception as exc:
+            global _config_read_warned
+            with _config_read_warning_lock:
+                if not _config_read_warned:
+                    _config_read_warned = True
+                    logger.warning("fleet message drain: config read failed (%s)", type(exc).__name__)
             return None
     section = (cfg or {}).get("fleet_messages") or {}
     if not isinstance(section, dict) or section.get("drain_on_turn_end") is not True:
@@ -693,11 +699,29 @@ def reclaim_stale(store: Any, *, older_than_seconds: int = 1800, max_attempts: i
 def main(argv: Optional[list[str]] = None) -> int:
     parser = argparse.ArgumentParser(description="Fleet message maintenance")
     subparsers = parser.add_subparsers(dest="command", required=True)
+    enqueue = subparsers.add_parser("enqueue", help="queue a busy target's message")
+    enqueue.add_argument("--from", dest="from_handle", required=True)
+    enqueue.add_argument("--to-home", type=Path, required=True)
+    enqueue.add_argument("--body-file", type=Path, required=True)
     reclaim = subparsers.add_parser("reclaim-stale", help="requeue stale delivered/read claims")
     reclaim.add_argument("--older-than", type=int, default=1800, metavar="SECONDS")
     reclaim.add_argument("--target", choices=("live", "emulator"))
     reclaim.add_argument("--dry-run", action="store_true")
     args = parser.parse_args(argv)
+    if args.command == "enqueue":
+        try:
+            config = drain_config_for_home(args.to_home)
+            if config is None:
+                print(json.dumps({"status": "disabled"}))
+                return 0
+            body = args.body_file.read_text(encoding="utf-8-sig")
+            message_id = enqueue_message(args.from_handle, bot_identity(args.to_home), body, config=config)
+        except Exception as exc:
+            reason = str(exc).splitlines()
+            print(f"fleet message enqueue: {reason[0] if reason else type(exc).__name__}", file=sys.stderr)
+            return 1
+        print(json.dumps({"status": "queued", "message_id": message_id}))
+        return 0
     # This standalone cron command owns its stderr contract even if the credential
     # fallback or config loader logs a warning before raising.
     prior_log_level = logging.root.manager.disable

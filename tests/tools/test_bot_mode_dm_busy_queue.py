@@ -4,8 +4,10 @@ loop is the bug: the sender must see queued (message_id) in under 5s.
 
 import json
 import datetime
+import io
 import subprocess
 import time
+from contextlib import redirect_stdout
 from pathlib import Path
 
 import pytest
@@ -29,8 +31,15 @@ def test_busy_opted_in_target_is_enqueued_on_first_attempt(tmp_path, monkeypatch
     monkeypatch.setattr(fmd, "store_for", lambda config: type("Store", (), {
         "create": lambda self, doc_id, fields: writes.append((doc_id, fields, config))})())
     calls = []
+    enqueue_calls = []
 
     def held(argv, **kwargs):
+        if "tools.fleet_message_drain" in argv:
+            enqueue_calls.append((argv, kwargs))
+            output = io.StringIO()
+            with redirect_stdout(output):
+                assert fmd.main(argv[argv.index("enqueue"):]) == 0
+            return subprocess.CompletedProcess(argv, 0, stdout=output.getvalue(), stderr="")
         calls.append(argv)
         return subprocess.CompletedProcess(argv, 1, stdout="", stderr=_REFUSAL_STDERR)
 
@@ -39,7 +48,8 @@ def test_busy_opted_in_target_is_enqueued_on_first_attempt(tmp_path, monkeypatch
     rc = bot_mode_dm._run_delivery(["hermes", "-p", "ops"], str(dm_file), stdin_file=False,
                                    profile_home=target, author={"id": "bot:tb-cndr", "name": "tb-cndr"})
     assert rc == 0 and time.monotonic() - started < 5
-    assert len(calls) == 1 and len(writes) == 1
+    assert len(calls) == 1 and len(enqueue_calls) == 1 and len(writes) == 1
+    assert enqueue_calls[0][0][:3] == ["hermes", "--run-module", "tools.fleet_message_drain"]
     payload = json.loads(capsys.readouterr().out)
     doc_id, fields, config = writes[0]
     assert payload["status"] == "queued" and payload["message_id"] == doc_id
@@ -53,6 +63,58 @@ def test_busy_opted_in_target_is_enqueued_on_first_attempt(tmp_path, monkeypatch
     assert config.timeout_seconds <= 1.5
     assert "No need to resend" in payload["reply"]
     assert not dm_file.exists()
+
+
+def test_busy_queue_uses_delivery_venv_when_store_python_cannot_read_config(tmp_path, monkeypatch, capsys):
+    home, dm_file = _setup(tmp_path, monkeypatch, queue_wait=1800)
+    target = home / "profiles" / "ops"
+    target.mkdir(parents=True)
+    venv = tmp_path / "venv"
+    (venv / "bin").mkdir(parents=True)
+    (venv / "pyvenv.cfg").write_text("home = test\n")
+    for name in ("hermes", "python"):
+        (venv / "bin" / name).write_text("stub\n")
+    monkeypatch.setattr(live, "find_canonical_live_owner", lambda h: None)
+    monkeypatch.setattr(fmd, "drain_config_for_home", lambda h: (_ for _ in ()).throw(ImportError("yaml")))
+    monkeypatch.setattr(bot_mode_dm.time, "sleep", lambda seconds: pytest.fail("entered slice wait"))
+    calls = []
+
+    def fake_run(argv, **kwargs):
+        calls.append((argv, kwargs))
+        if "tools.fleet_message_drain" in argv:
+            return subprocess.CompletedProcess(argv, 0, stdout='{"status":"queued","message_id":"m1"}', stderr="")
+        return subprocess.CompletedProcess(argv, 1, stdout="", stderr=_REFUSAL_STDERR)
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    started = time.monotonic()
+    rc = bot_mode_dm._run_delivery([str(venv / "bin" / "hermes"), "-p", "ops"], str(dm_file),
+                                   stdin_file=False, profile_home=target, author={"id": "bot:tb-cndr"})
+    assert rc == 0 and time.monotonic() - started < 5
+    assert len(calls) == 2
+    assert calls[1][0] == [str(venv / "bin" / "python"), "-m", "tools.fleet_message_drain",
+                           "enqueue", "--from", "tb-cndr", "--to-home", str(target),
+                           "--body-file", str(dm_file)]
+    assert calls[1][1]["timeout"] == 5
+    assert json.loads(capsys.readouterr().out)["message_id"] == "m1"
+    assert not dm_file.exists()
+
+
+def test_nonbusy_delivery_does_not_start_enqueue_subprocess(tmp_path, monkeypatch, capsys):
+    home, dm_file = _setup(tmp_path, monkeypatch)
+    target = home / "profiles" / "ops"
+    monkeypatch.setattr(live, "find_canonical_live_owner", lambda h: None)
+    monkeypatch.setattr(fmd, "drain_config_for_home", lambda h: pytest.fail("eager opt-in check"))
+    calls = []
+
+    def delivered(argv, **kwargs):
+        calls.append(argv)
+        return subprocess.CompletedProcess(argv, 0, stdout="delivered", stderr="")
+
+    monkeypatch.setattr(subprocess, "run", delivered)
+    assert bot_mode_dm._run_delivery(["hermes", "-p", "ops"], str(dm_file), stdin_file=False,
+                                     profile_home=target, author={"id": "bot:tb-cndr"}) == 0
+    assert len(calls) == 1 and "tools.fleet_message_drain" not in calls[0]
+    assert capsys.readouterr().out == "delivered"
 
 
 def _setup(tmp_path, monkeypatch, *, slice_seconds=0.05, queue_wait=5.0):

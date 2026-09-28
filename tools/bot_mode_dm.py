@@ -678,6 +678,17 @@ def _local_delivery_home(argv: list[str]) -> Path | None:
     return dict(_roster(_hermes_root(Path(_default_home())))).get(argv[2])
 
 
+def _drain_enqueue_command(cli: str, sender: str, home: Path, dm_file: str) -> list[str]:
+    """Use the delivery CLI's own Hermes runtime for the Firestore write."""
+    launcher = Path(cli)
+    python = launcher.parent / ("python.exe" if sys.platform == "win32" else "python")
+    if launcher.is_absolute() and (launcher.parent.parent / "pyvenv.cfg").is_file() and python.is_file():
+        prefix = [str(python), "-m", "tools.fleet_message_drain"]
+    else:
+        prefix = [cli, "--run-module", "tools.fleet_message_drain"]
+    return [*prefix, "enqueue", "--from", sender, "--to-home", str(home), "--body-file", dm_file]
+
+
 @contextlib.contextmanager
 def _dm_runner_lock(dm_file: str):
     """One runner per DM file for its whole lifecycle (live admission, owner_gone re-admission, CLI fallback).
@@ -768,32 +779,37 @@ def _run_delivery_locked(argv: list[str], dm_file: str, *, stdin_file: bool,
     try:
         from tools.bot_relay import TurnBusyError, delivery_env, dm_queue_wait_seconds
 
-        queue_config = None
         author_id = str((author or {}).get("id") or "")
         sender = author_id.removeprefix("bot:").split(":", 1)[0] if author_id.startswith("bot:") else ""
-        if home is not None and sender and not stdin_file:
-            try:
-                from tools import fleet_message_drain as fmd
-                queue_config = fmd.drain_config_for_home(home)
-            except Exception:
-                logger.warning("fleet message drain: could not check recipient opt-in", exc_info=True)
+        queue_candidate = home is not None and bool(sender) and not stdin_file
+        env = delivery_env(author, profile_home if not stdin_file else None)
 
         def _queue_busy() -> bool:
-            if queue_config is None:
+            if not queue_candidate:
                 return False
             try:
-                from tools import fleet_message_drain as fmd
-                body = Path(dm_file).read_text(encoding="utf-8-sig")
-                message_id = fmd.enqueue_message(sender, fmd.bot_identity(home), body, config=queue_config)
+                result = subprocess.run(_drain_enqueue_command(argv[0], sender, home, dm_file),
+                                        check=False, stdin=subprocess.DEVNULL, capture_output=True,
+                                        text=True, encoding="utf-8", errors="replace", timeout=5, env=env)
+                if result.returncode != 0:
+                    logger.warning("fleet message drain: enqueue exited %s; using delivery wait",
+                                   result.returncode)
+                    return False
+                payload = json.loads(result.stdout)
+                if payload.get("status") != "queued":
+                    return False
+                message_id = payload["message_id"]
+                if not isinstance(message_id, str) or not message_id:
+                    raise ValueError("missing queue message id")
             except Exception:
                 logger.warning("fleet message drain: enqueue failed; using delivery wait", exc_info=True)
                 return False
-            reply = (f"Queued for @{fmd.bot_identity(home)} (message_id {message_id}): it is mid-turn and will "
+            recipient = home.name if home.parent.name == "profiles" else "default"
+            reply = (f"Queued for @{recipient} (message_id {message_id}): it is mid-turn and will "
                      "get this right after its current turn ends. No need to resend.")
             print(json.dumps({"status": "queued", "message_id": message_id, "reply": reply}))
             return True
 
-        env = delivery_env(author, profile_home if not stdin_file else None)
         if stdin_file:
             with _delivery_lock(argv, stdin_file=stdin_file):
                 # Keep the file open until the transport exits; cleanup occurs
@@ -828,7 +844,7 @@ def _run_delivery_locked(argv: list[str], dm_file: str, *, stdin_file: bool,
                 return 1
             try:
                 with _delivery_lock(argv, stdin_file=False,
-                                    timeout_seconds=(min(0.1, remaining) if first_attempt and queue_config
+                                    timeout_seconds=(min(0.1, remaining) if first_attempt and queue_candidate
                                                      else remaining if final else _BUSY_SLICE_SECONDS)):
                     return _run_local_turn(argv, dm_file, env=env, busy_raises=can_queue)
             except _session_held_cls() as exc:
