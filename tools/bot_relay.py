@@ -887,7 +887,8 @@ class TurnBusyError(RuntimeError):
         self.profile, self.waited_seconds = profile, waited_seconds
         super().__init__(f"target_busy: another delivery turn is already running for profile '{profile}' — "
                          f"queued behind it for ~{int(round(waited_seconds))}s without it finishing. "
-                         "The message was NOT delivered; retry shortly.")
+                         "The single-owner lock is still held, so this send did not run. "
+                         "Continue the rest of the card; do not park it for this lock.")
 
 
 def turn_wait_seconds() -> float:
