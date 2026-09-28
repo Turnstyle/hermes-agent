@@ -1,10 +1,14 @@
 """A held Bot Chat is fast-acked into fleet_messages_v1. The old 1800s retry
-loop is the bug: the sender must see queued (message_id) in under 5s.
+loop is the bug: the sender must see a queued reply in under 5s.
+
+The write itself is a subprocess of the source-checkout launcher
+(``.hermes/bin/hermes --run-module tools.fleet_message_drain enqueue``), keyed
+by the delivery envelope id. Queueing happens only when the recipient drain is
+on; otherwise the reply is an immediate ``target_busy``.
 """
 
-import json
-import datetime
 import io
+import json
 import subprocess
 import time
 from contextlib import redirect_stdout
@@ -18,7 +22,22 @@ from tools import bot_mode_dm, bot_relay, fleet_message_drain as fmd
 _REFUSAL_STDERR = "hermes-refusal-reason: SESSION_NOT_OWNED\nCe chat est occupé.\n"
 
 
+def _enqueue_completed(argv):
+    output = io.StringIO()
+    with redirect_stdout(output):
+        rc = fmd.main(argv[argv.index("enqueue"):])
+    return subprocess.CompletedProcess(argv, rc, stdout=output.getvalue(), stderr="")
+
+
 def test_busy_opted_in_target_is_enqueued_on_first_attempt(tmp_path, monkeypatch, capsys):
+    """Adapted from tb-king: the launcher subprocess stays, the writer is create-only.
+
+    The fresh-uuid ``enqueue_message`` field set, the 32-hex doc id, the 1.5s store
+    timeout, and the "No need to resend" prose asserted the weaker writer. This asserts
+    the envelope id, ``reply_relayed`` false, and ``enqueue_busy_dm`` instead.
+    """
+    from tools.fleet_message_enqueue import queued_ack
+
     home, dm_file = _setup(tmp_path, monkeypatch, queue_wait=1800)
     target = home / "profiles" / "ops"
     target.mkdir(parents=True)
@@ -27,19 +46,20 @@ def test_busy_opted_in_target_is_enqueued_on_first_attempt(tmp_path, monkeypatch
     assert fmd.drain_config_for_home(target) is not None
     assert fmd.drain_config_for_home(home) is None
     monkeypatch.setattr(live, "find_canonical_live_owner", lambda h: None)
-    writes = []
-    monkeypatch.setattr(fmd, "store_for", lambda config: type("Store", (), {
-        "create": lambda self, doc_id, fields: writes.append((doc_id, fields, config))})())
+    seen = []
+
+    def fake_enqueue(*, sender, recipient, body, message_id=None, writer=None, reader=None):
+        seen.append({"sender": sender, "recipient": recipient, "body": body, "message_id": message_id})
+        return message_id
+
+    monkeypatch.setattr("tools.fleet_message_enqueue.enqueue_busy_dm", fake_enqueue)
     calls = []
     enqueue_calls = []
 
     def held(argv, **kwargs):
         if "tools.fleet_message_drain" in argv:
             enqueue_calls.append((argv, kwargs))
-            output = io.StringIO()
-            with redirect_stdout(output):
-                assert fmd.main(argv[argv.index("enqueue"):]) == 0
-            return subprocess.CompletedProcess(argv, 0, stdout=output.getvalue(), stderr="")
+            return _enqueue_completed(argv)
         calls.append(argv)
         return subprocess.CompletedProcess(argv, 1, stdout="", stderr=_REFUSAL_STDERR)
 
@@ -48,29 +68,45 @@ def test_busy_opted_in_target_is_enqueued_on_first_attempt(tmp_path, monkeypatch
     rc = bot_mode_dm._run_delivery(["hermes", "-p", "ops"], str(dm_file), stdin_file=False,
                                    profile_home=target, author={"id": "bot:tb-cndr", "name": "tb-cndr"})
     assert rc == 0 and time.monotonic() - started < 5
-    assert len(calls) == 1 and len(enqueue_calls) == 1 and len(writes) == 1
+    assert len(calls) == 1 and len(enqueue_calls) == 1 and len(seen) == 1
     source_launcher = Path(bot_mode_dm.__file__).resolve().parents[1] / ".hermes" / "bin" / "hermes"
     expected_launcher = str(source_launcher) if source_launcher.is_file() else "hermes"
+    envelope_id = bot_mode_dm._generation_delivery_id(str(dm_file), 0)
     assert enqueue_calls[0][0][:3] == [expected_launcher, "--run-module", "tools.fleet_message_drain"]
+    assert enqueue_calls[0][0][3:] == ["enqueue", "--from", "tb-cndr", "--to-home", str(target),
+                                       "--body-file", str(dm_file), "--message-id", envelope_id]
+    assert enqueue_calls[0][1]["timeout"] == 5
+    assert isinstance(enqueue_calls[0][1].get("env"), dict)
     payload = json.loads(capsys.readouterr().out)
-    doc_id, fields, config = writes[0]
-    assert payload["status"] == "queued" and payload["message_id"] == doc_id
-    assert len(doc_id) == 32 and int(doc_id, 16) >= 0
-    assert set(fields) == {"message_id", "from", "to", "kind", "body", "status", "attempts",
-                           "created_at", "updated_at", "expires_at"}
-    assert (fields["from"], fields["to"], fields["body"], fields["status"], fields["attempts"]) == (
-        "tb-cndr", "ops", "hi", "queued", 0)
-    assert fields["message_id"] == doc_id and fields["created_at"] == fields["updated_at"]
-    assert fmd.parse_ts(fields["expires_at"]) - fmd.parse_ts(fields["created_at"]) == datetime.timedelta(hours=24)
-    assert config.timeout_seconds <= 1.5
-    assert "No need to resend" in payload["reply"]
+    assert payload["status"] == "queued" and payload["reply_relayed"] is False
+    assert payload["message_id"] == envelope_id
+    assert payload["reply"] == queued_ack(envelope_id)
+    assert seen[0] == {"sender": "tb-cndr", "recipient": "ops", "body": "hi", "message_id": envelope_id}
     assert not dm_file.exists()
+
+    (target / "config.yaml").write_text("fleet_messages:\n  drain_on_turn_end: false\n")
+    before = len(seen)
+    assert fmd.main(["enqueue", "--from", "tb-cndr", "--to-home", str(target),
+                     "--body-file", str(dm_file), "--message-id", envelope_id]) == 0
+    disabled = json.loads(capsys.readouterr().out)
+    assert disabled["status"] == "disabled" and disabled["reply_relayed"] is False
+    assert len(seen) == before
 
 
 def test_busy_queue_uses_delivery_venv_when_store_python_cannot_read_config(tmp_path, monkeypatch, capsys):
+    """Adapted: the parent does not read config via ``drain_config_for_home``.
+
+    Admission still requires a readable drain-on config in this interpreter; the
+    launcher argv gains ``--message-id`` so the write is create-only. The delivery
+    venv python is still not the enqueue interpreter.
+    """
     home, dm_file = _setup(tmp_path, monkeypatch, queue_wait=1800)
     target = home / "profiles" / "ops"
     target.mkdir(parents=True)
+    (target / "config.yaml").write_text(
+        "fleet_messages:\n  drain_on_turn_end: true\n  emulator_host: 127.0.0.1:1\n",
+        encoding="utf-8",
+    )
     venv = tmp_path / "venv"
     (venv / "bin").mkdir(parents=True)
     (venv / "pyvenv.cfg").write_text("home = test\n")
@@ -95,12 +131,14 @@ def test_busy_queue_uses_delivery_venv_when_store_python_cannot_read_config(tmp_
     assert len(calls) == 2
     source_launcher = Path(bot_mode_dm.__file__).resolve().parents[1] / ".hermes" / "bin" / "hermes"
     expected_launcher = str(source_launcher) if source_launcher.is_file() else str(venv / "bin" / "hermes")
+    envelope_id = bot_mode_dm._generation_delivery_id(str(dm_file), 0)
     assert calls[1][0] == [expected_launcher, "--run-module", "tools.fleet_message_drain",
                            "enqueue", "--from", "tb-cndr", "--to-home", str(target),
-                           "--body-file", str(dm_file)]
+                           "--body-file", str(dm_file), "--message-id", envelope_id]
     assert str(venv / "bin" / "python") not in calls[1][0], "venv python imports the stale editable workspace"
     assert calls[1][1]["timeout"] == 5
-    assert json.loads(capsys.readouterr().out)["message_id"] == "m1"
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["message_id"] == "m1" and payload["status"] == "queued" and payload["reply_relayed"] is False
     assert not dm_file.exists()
 
 
@@ -134,8 +172,12 @@ def _setup(tmp_path, monkeypatch, *, slice_seconds=0.05, queue_wait=5.0):
 
 
 def test_message_agent_fast_acks_a_held_session(tmp_path, monkeypatch, capsys):
-    """A held Bot Chat is queued to fleet_messages_v1 on the first refusal, under 5s,
-    and the sender sees queued (message_id). The CLI is not retried for the old budget."""
+    """A held Bot Chat is queued to fleet_messages_v1 on the first refusal, under 5s.
+
+    Adapted for the launcher subprocess: the parent no longer calls ``enqueue_busy_dm``
+    itself. The checkout CLI does, and the sender-facing payload is status, message_id,
+    and ``reply_relayed`` false, with ``queued (<id>)`` as the reply text.
+    """
     from tools.fleet_message_enqueue import queued_ack
 
     home, dm_file = _setup(tmp_path, monkeypatch, queue_wait=30.0)
@@ -148,8 +190,8 @@ def test_message_agent_fast_acks_a_held_session(tmp_path, monkeypatch, capsys):
     monkeypatch.setattr(live, "find_canonical_live_owner", lambda h: None)
     seen = {}
 
-    def fake_enqueue(*, sender, recipient, body, message_id=None, writer=None):
-        seen.update(sender=sender, recipient=recipient, body=body)
+    def fake_enqueue(*, sender, recipient, body, message_id=None, writer=None, reader=None):
+        seen.update(sender=sender, recipient=recipient, body=body, message_id=message_id)
         return "fm-held"
 
     monkeypatch.setattr("tools.fleet_message_enqueue.enqueue_busy_dm", fake_enqueue)
@@ -157,6 +199,8 @@ def test_message_agent_fast_acks_a_held_session(tmp_path, monkeypatch, capsys):
 
     def fake_run(argv, **kwargs):
         calls.append(argv)
+        if "tools.fleet_message_drain" in argv:
+            return _enqueue_completed(argv)
         return subprocess.CompletedProcess(argv, 1, stdout="", stderr=_REFUSAL_STDERR)
 
     monkeypatch.setattr(subprocess, "run", fake_run)
@@ -170,9 +214,12 @@ def test_message_agent_fast_acks_a_held_session(tmp_path, monkeypatch, capsys):
     elapsed = time.monotonic() - started
 
     assert rc == 0
-    assert len(calls) == 1
+    assert len(calls) == 2 and "tools.fleet_message_drain" not in calls[0]
     assert elapsed < 5
-    assert capsys.readouterr().out.strip() == queued_ack("fm-held")
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["status"] == "queued" and payload["reply_relayed"] is False
+    assert payload["message_id"] == "fm-held"
+    assert payload["reply"] == queued_ack("fm-held")
     assert seen["recipient"] == "ops"
     assert seen["sender"] == "tb-cndr"
     assert seen["body"] == "hi"
@@ -197,6 +244,8 @@ def test_message_agent_does_not_claim_queued_when_the_registry_write_fails(tmp_p
     monkeypatch.setattr("tools.fleet_message_enqueue.enqueue_busy_dm", fake_enqueue)
 
     def fake_run(argv, **kwargs):
+        if "tools.fleet_message_drain" in argv:
+            return _enqueue_completed(argv)
         return subprocess.CompletedProcess(argv, 1, stdout="", stderr=_REFUSAL_STDERR)
 
     monkeypatch.setattr(subprocess, "run", fake_run)

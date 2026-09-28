@@ -321,7 +321,10 @@ def _run_quiet_single_query(cli, effective_query, emitter=None):
     Nested Bot Mode notifies bind this session's key (not the dispatcher's) and resume in-process
     before stdout is printed, so a teammate reply is the quiet run's final answer rather than a
     stranded receipt."""
-    from cli import _emit_interrupted_session_end, _run_kanban_goal_loop_q, _single_query_exit_code, _sync_cli_session_id_from_agent
+    from cli import (
+        _emit_interrupted_session_end, _handed_off_session_ids, _run_kanban_goal_loop_q, _single_query_exit_code,
+        _sync_cli_session_id_from_agent,
+    )
     from agent.interrupt_compat import _accepts_keyword
     from agent.turn_author import take_turn_author_from_env
     from hermes_cli.quiet_single_query import (
@@ -365,6 +368,17 @@ def _run_quiet_single_query(cli, effective_query, emitter=None):
         _report_turn(result)
         if isinstance(result, dict) and not result.get("failed"):
             history = result.get("messages") or cli.conversation_history
+            linger_budget = quiet_notify_linger_seconds()
+            linger_deadline = time.monotonic() + linger_budget
+            # The lease fences transcript WRITERS; the idle linger below writes nothing, so holding
+            # it there refused every other delivery into this chat for the whole linger budget
+            # ("opened by cli 10m ago"). Kanban goal mode keeps it: its loop below runs more turns.
+            idle_release = os.environ.get("HERMES_KANBAN_GOAL_MODE") != "1"
+            rows_at_release = None
+            last_follow = None
+            if idle_release:
+                rows_at_release = _durable_row_count(cli)
+                cli._release_active_session()
 
             def _follow_up(text):
                 nonlocal history, rows_at_release, last_follow
@@ -407,10 +421,14 @@ def _run_quiet_single_query(cli, effective_query, emitter=None):
                     getattr(cli, "session_id", "") or "",
                     _follow_up,
                     owns_event=getattr(cli, "_owns_process_notification", None),
-                    linger_budget=quiet_notify_linger_seconds(),
+                    linger_budget=linger_budget,
                 )
             finally:
                 cli._quiet_notify_linger_done = True
+            if idle_release and not cli._claim_active_session("cli", silent=True):
+                # Another writer holds the chat now; ending its row here is the #88234 class
+                # (a leg vanishes from history). That writer's own exit finalizes it.
+                _handed_off_session_ids.add(getattr(cli, "session_id", None))
             if isinstance(continued, dict):
                 result = continued
                 # A teammate's reply displaced the answer this run prints; tell the spawner.

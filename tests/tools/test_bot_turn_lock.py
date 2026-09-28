@@ -9,6 +9,10 @@ process, so threads exercise the true kernel-lock semantics.
 
 from __future__ import annotations
 
+try:
+    import fcntl  # POSIX-only; on Windows the module is skipped wholesale
+except ImportError:  # pragma: no cover - Windows
+    fcntl = None
 import json
 import os
 import subprocess
@@ -18,16 +22,7 @@ import time
 
 import pytest
 
-# `fcntl` does not exist on Windows, and an unguarded module-level import here
-# aborts collection for the whole `tests/tools/` directory rather than skipping
-# this one file. Skip before importing it, matching
-# `tests/cli/test_termios_drift_heal.py`. There is nothing to run here anyway:
-# `acquire_turn_lock()` degrades to a no-op contextmanager on Windows (no
-# `fcntl`), so the contention this module asserts on cannot occur.
-if sys.platform == "win32":  # pragma: no cover
-    pytest.skip("bot turn lock contention is POSIX flock-only", allow_module_level=True)
-
-import fcntl
+pytestmark = pytest.mark.platforms("linux")
 
 from tools import bot_mode_dm, bot_relay
 from tools.bot_relay import TurnBusyError, acquire_turn_lock, turn_lock_path
@@ -271,7 +266,9 @@ def test_relay_deliver_returns_target_busy_error(tmp_path, monkeypatch):
 
     h = tmp_path / "h"
     (h / "profiles" / "ops").mkdir(parents=True)
-    (h / "profiles" / "ops" / "config.yaml").touch()  # identity marker: bare dirs are not profiles
+    (h / "profiles" / "ops" / "config.yaml").write_text(
+        "fleet_messages:\n  drain_on_turn_end: true\n  target: live\n"
+    )
     monkeypatch.setenv("HERMES_HOME", str(h))
     monkeypatch.setattr(bot_relay, "turn_wait_seconds", lambda: 0.2)
 
@@ -308,7 +305,7 @@ def test_relay_deliver_returns_target_busy_error(tmp_path, monkeypatch):
     try:
         out = srv._methods["bot_relay.deliver"](1, {"profile": "ops", "message": "x"})
         assert "error" not in out, out
-        assert out["result"]["reply"] == "queued (fm-lock)"
+        assert out["result"]["reply"] == "Queued for @ops, not yet answered"
         assert out["result"]["status"] == "queued"
         assert not spawned, "turn must not spawn while the profile is busy"
     finally:

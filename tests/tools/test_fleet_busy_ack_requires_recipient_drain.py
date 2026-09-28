@@ -2,12 +2,14 @@
 
 from __future__ import annotations
 
+import io
 import json
 import subprocess
 import time
+from contextlib import redirect_stdout
 
 from tools import bot_live_delivery as live
-from tools import bot_mode_dm, bot_relay
+from tools import bot_mode_dm, bot_relay, fleet_message_drain as fmd
 
 _REFUSAL_STDERR = "hermes-refusal-reason: SESSION_NOT_OWNED\nCe chat est occupé.\n"
 
@@ -39,6 +41,11 @@ def test_busy_dm_is_queued_only_when_recipient_drain_is_enabled(tmp_path, monkey
     monkeypatch.setattr("tools.fleet_message_enqueue.enqueue_busy_dm", fake_enqueue)
 
     def fake_run(argv, **kwargs):
+        if "tools.fleet_message_drain" in argv:
+            output = io.StringIO()
+            with redirect_stdout(output):
+                rc = fmd.main(list(argv[argv.index("enqueue"):]))
+            return subprocess.CompletedProcess(argv, rc, stdout=output.getvalue(), stderr="")
         return subprocess.CompletedProcess(argv, 1, stdout="", stderr=_REFUSAL_STDERR)
 
     monkeypatch.setattr(subprocess, "run", fake_run)
@@ -53,7 +60,10 @@ def test_busy_dm_is_queued_only_when_recipient_drain_is_enabled(tmp_path, monkey
     assert rc == 0
     assert time.monotonic() - started < 5
     assert enqueued
-    assert capsys.readouterr().out.strip() == queued_ack("fm-test-id")
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["status"] == "queued" and payload["reply_relayed"] is False
+    assert payload["message_id"] == "fm-test-id"
+    assert payload["reply"] == queued_ack("fm-test-id")
 
     enqueued.clear()
     dm_file.write_text("hi", encoding="utf-8")

@@ -498,7 +498,10 @@ def write_reply(root: Path | str, envelope_id: str, *, reply: str = "", error: s
     code, ``tools.bot_failure_reasons``) is classified from ``error`` when omitted. ``reply_relayed``
     is the relay's own machine-readable flag for an otherwise-ok reply whose real answer never made
     it back (e.g. ``reason="reply_not_relayed"``, pairs 9-12) — written only when given, so an
-    ordinary reply's record is byte-identical to before this field existed.
+    ordinary reply's record is byte-identical to before this field existed. ``delivered_profile`` is
+    the target gateway's attestation of which profile actually ran the turn — written only when
+    given; the sender-side waiter (``tools.bot_mode_dm.py::_wait_reply_main``) compares it with the
+    claimed envelope's ``target_profile``.
 
     Idempotent by envelope id — the first settled reply stands, error or not. That is safe because
     two deliveries of one envelope never overlap: ``_reoffer_unanswered`` waits past the Desktop's own

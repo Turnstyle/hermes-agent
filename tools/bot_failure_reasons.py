@@ -19,6 +19,8 @@ QUEUED_EXPIRED = "queued_expired"
 DELIVERY_TIMEOUT = "delivery_timeout"
 AGENT_BLOCKED = "agent_blocked"
 CANCELLED = "cancelled"
+# Target Bot Chat held by another live owner or delivery turn; nothing reached a model — queue/retry later.
+TARGET_BUSY = "target_busy"
 # A relay delivery into a live Bot Chat is durably admitted and WILL run — never a failure — but it
 # didn't settle inside the wait budget, so the turn's real answer can only ever reach that Bot Chat
 # on the target machine, not this ok reply. Rides an otherwise-ok payload (`reply_relayed: false`),
@@ -40,7 +42,8 @@ TARGET_SCOPE_UNRESOLVED = "target_scope_unresolved"
 UNKNOWN = "unknown"
 
 ALL_REASONS = frozenset({
-    RUNTIME_OFFLINE, QUEUED_EXPIRED, DELIVERY_TIMEOUT, AGENT_BLOCKED, CANCELLED, REPLY_NOT_RELAYED,
+    RUNTIME_OFFLINE, QUEUED_EXPIRED, DELIVERY_TIMEOUT, AGENT_BLOCKED, CANCELLED, TARGET_BUSY,
+    REPLY_NOT_RELAYED,
     PROVIDER_AUTH_OR_ACCESS, PROVIDER_QUOTA_LIMIT, PROVIDER_RATE_LIMIT,
     PROVIDER_SERVER_ERROR, CONTEXT_OVERFLOW, MISSING_CONFIG, MODEL_UNAVAILABLE,
     TARGET_SCOPE_UNRESOLVED, UNKNOWN,
@@ -80,7 +83,9 @@ _STATUS = r"(?:error code:?\s*|status(?:\s*code)?:?\s*|http\s*)"
 _RULES: tuple[tuple[re.Pattern[str], str], ...] = tuple(
     (re.compile(pat, re.IGNORECASE), code)
     for pat, code in (
-        # FIRST: the message text itself mentions an "API key" and a restart, so it must be claimed
+        # Ownership refusal: no model call; relayed text prefixes the marker on the same line — match anywhere.
+        (r"hermes-refusal-reason:\s*SESSION_NOT_OWNED|already has a live owner", TARGET_BUSY),
+        # The message text itself mentions an "API key" and a restart, so it must be claimed
         # before the auth/status rules can read it as a provider verdict. Two spellings reach here —
         # the generic ``UnscopedSecretError`` copy (secret name empty, so the lede is a stand-in) and
         # ``served_profile_child_env``'s detailed one.
@@ -146,8 +151,7 @@ def delivery_failure_reason(error: BaseException) -> str:
     expect a closed set. Anything else is classified like every other failure. Shared by the
     relay lane (``bot_relay.deliver``) and the local runner (``bot_mode_dm --run-delivery``).
     """
-    # 'target_busy' extends the structured refusal enum and predates ALL_REASONS.
     supplied = str(getattr(error, "reason", "") or "").strip()
-    if supplied == "target_busy" or supplied in ALL_REASONS:
+    if supplied in ALL_REASONS:
         return supplied
     return classify_agent_error(str(error))

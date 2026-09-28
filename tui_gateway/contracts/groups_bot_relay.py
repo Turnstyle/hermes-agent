@@ -543,7 +543,9 @@ method("bot_relay.outbox.drain", params=BotRelayOutboxDrainParams, result=BotRel
 
 
 class BotRelayDeliverParams(Params):
-    """``profile`` here is the TARGET profile on this gateway (also what the desktop route wrapper adds)."""
+    """``profile`` is what the desktop route wrapper stamps (the dialled route's key, which can
+    differ from the envelope's target). ``target_profile``, when sent, is the authoritative
+    target the transport never rewrites."""
 
     profile: str
     message: str
@@ -555,6 +557,8 @@ class BotRelayDeliverParams(Params):
 
 
 class BotRelayDeliverResult(Result):
+    """``delivered_profile`` is this gateway's attestation of which profile ran the turn."""
+
     reply: str
     delivered_profile: str | None = None
     requested_profile: str | None = None

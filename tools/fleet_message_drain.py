@@ -60,7 +60,6 @@ import datetime
 import json
 import logging
 import os
-import re
 import subprocess
 import sys
 import threading
@@ -68,7 +67,6 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
-import uuid
 from pathlib import Path
 from typing import Any, Callable, Optional
 
@@ -89,7 +87,6 @@ WRITABLE_FIELDS = frozenset({"status", "updated_at", "delivered_at", "read_at", 
 MAX_LIMIT = 50
 LAST_ERROR_CHARS = 500
 _SCOPE = "https://www.googleapis.com/auth/datastore"
-SAFE_HANDLE_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._@+:-]{0,127}\Z")
 
 
 class PreconditionFailed(RuntimeError):
@@ -146,6 +143,16 @@ def drain_config(cfg: Optional[dict] = None) -> Optional[DrainConfig]:
                        project=str(section.get("project") or DEFAULT_PROJECT),
                        database=str(section.get("database") or DEFAULT_DATABASE),
                        limit=limit, max_attempts=max_attempts, timeout_seconds=timeout)
+
+
+def drain_config_for_home(profile_home: Path | str) -> Optional[DrainConfig]:
+    """Resolve a recipient's opt-in from its own profile, without changing process env."""
+    from hermes_constants import reset_hermes_home_override, set_hermes_home_override
+    token = set_hermes_home_override(profile_home)
+    try:
+        return drain_config()
+    finally:
+        reset_hermes_home_override(token)
 
 
 def _config_for_profile_home(profile_home: Path) -> Optional[dict]:
@@ -424,28 +431,6 @@ def store_for(config: DrainConfig) -> FirestoreStore:
                           database=config.database, token_fn=_live_token, timeout=config.timeout_seconds)
 
 
-def enqueue_message(from_handle: str, to_handle: str, body: str, kind: str = "dm",
-                    *, config: Optional[DrainConfig] = None) -> str:
-    """Write a busy target's message to Mission Control before acknowledging its sender."""
-    if not isinstance(from_handle, str) or not SAFE_HANDLE_RE.fullmatch(from_handle):
-        raise Refused("invalid sender handle")
-    if not isinstance(to_handle, str) or not SAFE_HANDLE_RE.fullmatch(to_handle):
-        raise Refused("invalid recipient handle")
-    if kind not in KINDS or not isinstance(body, str) or not body.strip():
-        raise Refused("invalid message kind or empty body")
-    config = config or drain_config()
-    if config is None:
-        raise Refused("fleet message drain is disabled")
-    message_id = uuid.uuid4().hex
-    now = utcnow()
-    stamp = rfc3339(now)
-    fields = {"message_id": message_id, "from": from_handle, "to": to_handle, "kind": kind,
-              "body": body, "status": "queued", "attempts": 0, "created_at": stamp,
-              "updated_at": stamp, "expires_at": rfc3339(now + datetime.timedelta(hours=24))}
-    store_for(dataclasses.replace(config, timeout_seconds=min(config.timeout_seconds, 1.5))).create(message_id, fields)
-    return message_id
-
-
 # ---------- drain logic ----------
 @dataclasses.dataclass
 class Claimed:
@@ -708,6 +693,8 @@ def main(argv: Optional[list[str]] = None) -> int:
     enqueue.add_argument("--from", dest="from_handle", required=True)
     enqueue.add_argument("--to-home", type=Path, required=True)
     enqueue.add_argument("--body-file", type=Path, required=True)
+    enqueue.add_argument("--message-id", default=None,
+                         help="relay envelope id; create-only, an existing doc is not rewritten")
     reclaim = subparsers.add_parser("reclaim-stale", help="requeue stale delivered/read claims")
     reclaim.add_argument("--older-than", type=int, default=1800, metavar="SECONDS")
     reclaim.add_argument("--target", choices=("live", "emulator"))
@@ -715,17 +702,19 @@ def main(argv: Optional[list[str]] = None) -> int:
     args = parser.parse_args(argv)
     if args.command == "enqueue":
         try:
-            config = drain_config_for_home(args.to_home)
-            if config is None:
-                print(json.dumps({"status": "disabled"}))
+            recipient = bot_identity(args.to_home)
+            if not recipient_drain_enabled(recipient, profile_home=args.to_home):
+                print(json.dumps({"status": "disabled", "reason": "target_busy", "reply_relayed": False}))
                 return 0
             body = args.body_file.read_text(encoding="utf-8-sig")
-            message_id = enqueue_message(args.from_handle, bot_identity(args.to_home), body, config=config)
+            from tools.fleet_message_enqueue import enqueue_busy_dm
+            message_id = enqueue_busy_dm(
+                sender=args.from_handle, recipient=recipient, body=body, message_id=args.message_id)
         except Exception as exc:
             reason = str(exc).splitlines()
             print(f"fleet message enqueue: {reason[0] if reason else type(exc).__name__}", file=sys.stderr)
             return 1
-        print(json.dumps({"status": "queued", "message_id": message_id}))
+        print(json.dumps({"status": "queued", "message_id": message_id, "reply_relayed": False}))
         return 0
     # This standalone cron command owns its stderr contract even if the credential
     # fallback or config loader logs a warning before raising.

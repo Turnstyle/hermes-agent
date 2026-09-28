@@ -31,6 +31,14 @@ def root(tmp_path):
     return tmp_path
 
 
+def _write_claimed_envelope(root, env: dict, *, target_profile: str) -> None:
+    base = bot_relay.relay_root(root)
+    (base / bot_relay.CLAIMED_DIR).mkdir(parents=True, exist_ok=True)
+    payload = {**env, "target_profile": target_profile}
+    (base / bot_relay.CLAIMED_DIR / f"{env['id']}.json").write_text(
+        json.dumps(payload), encoding="utf-8")
+
+
 def _rows():
     return [
         {
@@ -307,11 +315,23 @@ def test_waiter_prints_the_completion_notification_the_sender_wakes_on(root, cap
 
     env = {"id": "d" * 32, "target_handle": "researcher", "target_connection": "ssh-vps"}
     reply_path = bot_relay.relay_root(root) / bot_relay.REPLIES_DIR / f"{env['id']}.json"
-    reply_path.parent.mkdir(parents=True, exist_ok=True)
+    label = "@researcher on ssh-vps"
     if reply_file is not None:
-        reply_path.write_text(json.dumps(reply_file), encoding="utf-8")
+        if reply_file.get("error"):
+            bot_relay.write_reply(
+                root, env["id"],
+                error=str(reply_file["error"]),
+                reason=str(reply_file.get("reason") or ""),
+            )
+        else:
+            _write_claimed_envelope(root, env, target_profile="researcher")
+            bot_relay.write_reply(
+                root, env["id"],
+                reply=str(reply_file.get("reply") or ""),
+                delivered_profile="researcher",
+            )
 
-    code = bot_mode_dm._delivery_main(["--wait-reply", str(reply_path), "@researcher on ssh-vps", "0.3"])
+    code = bot_mode_dm._delivery_main(["--wait-reply", str(reply_path), label, "0.3"])
 
     out = capsys.readouterr().out
     assert code == expected_code
@@ -511,9 +531,8 @@ def test_hostile_roster_fields_ride_as_argv_data(root):
 
     assert "-c" not in parts
     assert parts[4] == f"@researcher on {inj}"
-    reply_path = bot_relay.relay_root(root) / bot_relay.REPLIES_DIR / f"{env['id']}.json"
-    reply_path.parent.mkdir(parents=True, exist_ok=True)
-    reply_path.write_text(json.dumps({"reply": "pong"}), encoding="utf-8")
+    _write_claimed_envelope(root, env, target_profile="researcher")
+    bot_relay.write_reply(root, env["id"], reply="pong", delivered_profile="researcher")
     proc = subprocess.run(parts, capture_output=True, text=True, timeout=30)
 
     assert proc.returncode == 0 and proc.stdout.splitlines() == [f"Reply from @researcher on {inj}:", "pong"]
