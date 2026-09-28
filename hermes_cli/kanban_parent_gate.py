@@ -95,11 +95,13 @@ def parent_gate_allows_completion(
     return True
 
 
-# A parent in ``review`` is waiting on an approval gate (request_review writes
-# no sticky block), so no rehome or merged-PR evidence may release it.
-_NEVER_RELEASE_STATUSES = frozenset({"review"})
-# A ``blocked`` parent may be a hold; only a verified rehome releases it.
-_NO_MERGE_RELEASE_STATUSES = frozenset({"review", "blocked"})
+# Allow-lists, not deny-lists: any status not named here (triage, review,
+# running, and any status added later) keeps the parent gate closed, because
+# those mean a person, reviewer, or worker still holds the parent.
+# A verified rehome may release an idle parent, or a non-sticky blocked one.
+_REHOME_RELEASE_STATUSES = frozenset({"todo", "scheduled", "ready", "blocked"})
+# A verified merged PR may release only an idle parent.
+_MERGE_RELEASE_STATUSES = frozenset({"todo", "scheduled", "ready"})
 
 
 def _parent_release(
@@ -111,13 +113,13 @@ def _parent_release(
 ) -> bool:
     from hermes_cli.kanban_db import _has_sticky_block
 
-    if status in _NEVER_RELEASE_STATUSES:
+    if status not in _REHOME_RELEASE_STATUSES:
         return False
     if _has_sticky_block(conn, parent_id):
         return False
     if _verified_parent_rehome(conn, parent_id):
         return True
-    if status in _NO_MERGE_RELEASE_STATUSES:
+    if status not in _MERGE_RELEASE_STATUSES:
         return False
     return _verified_merged_pr_parent(conn, parent_id, allow_network=allow_network)
 

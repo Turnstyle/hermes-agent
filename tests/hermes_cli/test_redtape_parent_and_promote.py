@@ -312,7 +312,7 @@ def test_human_hold_keeps_gate_despite_verified_merged_pr(kanban_home, monkeypat
         assert kb.get_task(conn, child).status == "ready"
 
 
-@pytest.mark.parametrize("parent_status", ["review", "blocked"])
+@pytest.mark.parametrize("parent_status", ["review", "blocked", "triage", "running"])
 def test_parent_awaiting_review_or_blocked_keeps_gate_despite_merged_pr(
     kanban_home, monkeypatch, parent_status
 ):
@@ -332,6 +332,23 @@ def test_parent_awaiting_review_or_blocked_keeps_gate_despite_merged_pr(
         conn.commit()
         assert kb.complete_task(conn, child, result="should not close") is False
         assert kb.get_task(conn, child).status == "ready"
+
+
+@pytest.mark.parametrize("parent_status", ["review", "triage", "running"])
+def test_held_parent_keeps_gate_despite_recorded_rehome(kanban_home, parent_status):
+    """R3 HIGH: triage (and review/running) is a person or worker hold; a
+    recorded rehome must not release it."""
+    with kbc.connect() as conn:
+        successor = kb.create_task(conn, title="successor")
+        parent = kb.create_task(conn, title="held parent")
+        conn.execute("UPDATE tasks SET status = ? WHERE id = ?", (parent_status, parent))
+        conn.commit()
+        assert record_parent_rehome(conn, parent, successor, action="rehomed") is True
+        child = kb.create_task(conn, title="child")
+        kb.link_tasks(conn, parent, child)
+        conn.execute("UPDATE tasks SET status = 'ready' WHERE id = ?", (child,))
+        conn.commit()
+        assert kb.complete_task(conn, child, result="should not close") is False
 
 
 def test_pr_acceptance_system_event_releases_without_completion_contract(kanban_home, monkeypatch):
