@@ -464,7 +464,9 @@ def _run_post_turn_followups(
             if _drain_fleet_messages_once(sid, session):
                 return
     except Exception as _fm_exc:
-        _hook_failure("fleet message drain", _fm_exc)
+        from tools.fleet_message_drain import NoGoogleCredentials
+        if not isinstance(_fm_exc, NoGoogleCredentials):
+            _hook_failure("fleet message drain", _fm_exc)
     # Safety net for completion events that arrived mid-turn.  Ownership is positive-proof
     # and compression-chain aware (same fail-closed gate as the poller): session B must
     # not consume session A's event.  Unclaimable events are requeued for the poller.

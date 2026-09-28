@@ -492,6 +492,28 @@ def test_deliver_queues_behind_a_held_session_then_delivers(home, monkeypatch):
     assert len(calls) == 3
 
 
+def test_relay_busy_opted_in_target_enqueues_without_wait(home, monkeypatch):
+    from tools import fleet_message_drain as fmd
+
+    monkeypatch.setattr(fmd, "drain_config_for_home", lambda h: fmd.DrainConfig(target="live"))
+    queued = []
+    monkeypatch.setattr(fmd, "enqueue_message", lambda *args, **kwargs: queued.append(args) or "relay123")
+    calls = []
+
+    def held(argv, **kwargs):
+        calls.append(argv)
+        return subprocess.CompletedProcess(argv, 1, stdout="", stderr=_REFUSAL_STDERR)
+
+    monkeypatch.setattr("hermes_cli.quiet_single_query.run_reported_turn", held)
+    started = time.monotonic()
+    out = _result(srv._methods["bot_relay.deliver"](
+        1, {"profile": "ops", "message": "ping", "from_profile": "tb-cndr", "from_handle": "tb-cndr"}))
+    assert time.monotonic() - started < 5
+    assert len(calls) == 1 and queued[0][:2] == ("tb-cndr", "ops")
+    assert out["status"] == "queued" and out["message_id"] == "relay123"
+    assert "No need to resend" in out["reply"]
+
+
 def test_deliver_fails_target_busy_after_the_full_turn_wait_budget(home, monkeypatch):
     """Held for the whole budget: a target_busy refusal, mentioning how long it queued, within a
     bounded number of attempts and never past turn_wait_seconds plus one retry slice — the

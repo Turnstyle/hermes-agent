@@ -13,6 +13,7 @@ import os
 import threading
 import urllib.request
 import uuid
+from types import SimpleNamespace
 
 import pytest
 
@@ -22,6 +23,42 @@ NOW = datetime.datetime(2026, 9, 28, 6, 0, tzinfo=datetime.timezone.utc)
 ME = "tb-king"
 EMU = os.environ.get("FLEET_MESSAGES_EMULATOR", "")
 PROJECT = "mission-control-444444"
+
+
+def test_live_token_falls_back_to_gcloud_and_warns_once_per_failed_streak(monkeypatch, caplog):
+    import google.auth
+    from google.auth.exceptions import RefreshError
+
+    class Expired:
+        valid = False
+
+        def refresh(self, request):
+            raise RefreshError("expired")
+
+    monkeypatch.setattr(google.auth, "default", lambda **kwargs: (Expired(), None))
+    monkeypatch.setattr(fmd, "_live_credentials", None)
+    monkeypatch.setattr(fmd, "_gcloud_token_cached", "")
+    monkeypatch.setattr(fmd, "_gcloud_token_until", 0)
+    monkeypatch.setattr(fmd, "_credentials_warned", False)
+    calls = []
+
+    def gcloud(*args, **kwargs):
+        calls.append(kwargs)
+        return SimpleNamespace(stdout="gcloud-token\n")
+
+    monkeypatch.setattr(fmd.subprocess, "run", gcloud)
+    assert fmd._live_token() == "gcloud-token"
+    assert fmd._live_token() == "gcloud-token"
+    assert len(calls) == 1 and calls[0]["timeout"] <= 3
+
+    monkeypatch.setattr(fmd, "_gcloud_token_cached", "")
+    monkeypatch.setattr(fmd.subprocess, "run", lambda *a, **kw: (_ for _ in ()).throw(OSError("offline")))
+    for _ in range(2):
+        with pytest.raises(fmd.NoGoogleCredentials, match="ADC expired and gcloud token failed"):
+            fmd._live_token()
+    assert [r.message for r in caplog.records if "no Google credentials" in r.message] == [
+        "fleet message drain: no Google credentials (ADC expired and gcloud token failed); "
+        "drain skipped, turns unaffected"]
 
 
 class MemoryStore:

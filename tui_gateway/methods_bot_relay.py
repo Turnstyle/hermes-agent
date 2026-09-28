@@ -111,7 +111,7 @@ def _(rid, params: dict, _root=_relay_root, _run=_run_delivery,
         return _err(rid, 4090, "profile and message required")
     try:
         from tools.bot_mode_dm import MESSAGE_MAX_CHARS
-        from tools.bot_relay import acquire_turn_lock
+        from tools.bot_relay import TurnBusyError, acquire_turn_lock
         if len(message) > MESSAGE_MAX_CHARS + 200:  # + attribution headroom
             return _err(rid, 4091, "message too long")
         root = _root()
@@ -233,6 +233,28 @@ def _(rid, params: dict, _root=_relay_root, _run=_run_delivery,
             return turn_failure_text(p.stdout, p.stderr)
 
         turn_env = delivery_env(author, live_home)
+        from tools import fleet_message_drain as fmd
+        author_id = str((author or {}).get("id") or "")
+        sender = author_id.removeprefix("bot:").split(":", 1)[0] if author_id.startswith("bot:") else ""
+        try:
+            queue_config = fmd.drain_config_for_home(owner_home) if sender else None
+        except Exception:
+            logger.warning("fleet message drain: could not check relay recipient opt-in", exc_info=True)
+            queue_config = None
+
+        def _queue_busy() -> dict | None:
+            if queue_config is None:
+                return None
+            try:
+                message_id = fmd.enqueue_message(sender, fmd.bot_identity(owner_home), message,
+                                                 config=queue_config)
+            except Exception:
+                logger.warning("fleet message drain: relay enqueue failed; using delivery wait", exc_info=True)
+                return None
+            reply = (f"Queued for @{resolved} (message_id {message_id}): it is mid-turn and will get this "
+                     "right after its current turn ends. No need to resend.")
+            return _ok(rid, {"status": "queued", "message_id": message_id, "reply": reply,
+                             "delivered_profile": resolved, "requested_profile": profile})
 
         fd, tmp = tempfile.mkstemp(prefix="hermes-relay-dm-", suffix=".txt", text=True)
         try:
@@ -252,24 +274,40 @@ def _(rid, params: dict, _root=_relay_root, _run=_run_delivery,
 
             started = time.monotonic()
             deadline = started + turn_wait_seconds()
+            first_attempt = True
             while True:
                 remaining = max(0.0, deadline - time.monotonic())
-                with acquire_turn_lock(root, resolved, remaining):
-                    proc = _run(resolved, tmp, turn_env)
-                    held = proc.returncode != 0 and refused_not_owned(proc.stderr or "")
-                    if proc.returncode != 0 and not held:
-                        # Retry policy: transient classes re-run the SAME session once; context_overflow
-                        # too — the retried turn's pre-API compaction pass compacts the over-threshold
-                        # transcript first (no fresh session is minted). Auth/quota/config never retry.
-                        # See #93091.
-                        from tools.bot_failure_reasons import (
-                            RETRY_NONE, classify_agent_error, retry_action)
-                        if retry_action(classify_agent_error(_detail(proc))) != RETRY_NONE:
-                            # The failed attempt already persisted the DM; the re-run resumes that row.
-                            from tools.bot_relay import retry_turn_env
-                            proc = _run(resolved, tmp, retry_turn_env(turn_env))
+                try:
+                    with acquire_turn_lock(root, resolved,
+                                           min(0.1, remaining) if first_attempt and queue_config else remaining):
+                        proc = _run(resolved, tmp, turn_env)
+                        held = proc.returncode != 0 and refused_not_owned(proc.stderr or "")
+                        if proc.returncode != 0 and not held:
+                            # Retry policy: transient classes re-run the SAME session once; context_overflow
+                            # too — the retried turn's pre-API compaction pass compacts the over-threshold
+                            # transcript first (no fresh session is minted). Auth/quota/config never retry.
+                            # See #93091.
+                            from tools.bot_failure_reasons import (
+                                RETRY_NONE, classify_agent_error, retry_action)
+                            if retry_action(classify_agent_error(_detail(proc))) != RETRY_NONE:
+                                # The failed attempt already persisted the DM; the re-run resumes that row.
+                                from tools.bot_relay import retry_turn_env
+                                proc = _run(resolved, tmp, retry_turn_env(turn_env))
+                except TurnBusyError:
+                    queued = _queue_busy() if first_attempt else None
+                    if queued is not None:
+                        return queued
+                    if queue_config is None:
+                        raise
+                    queue_config = None  # enqueue failed: use the original full lock wait
+                    first_attempt = False
+                    continue
                 if not held:
                     break
+                queued = _queue_busy() if first_attempt else None
+                if queued is not None:
+                    return queued
+                first_attempt = False
                 # Held: leave the lock (already released above) before sleeping, so a live owner or
                 # another delivery can still get in — then retry, bounded by the shared deadline.
                 remaining = max(0.0, deadline - time.monotonic())

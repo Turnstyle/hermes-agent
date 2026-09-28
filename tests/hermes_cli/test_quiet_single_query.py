@@ -8,11 +8,64 @@ the re-run resumes that row instead of appending a second copy of the DM.
 from __future__ import annotations
 
 import os
+import datetime
 from types import SimpleNamespace
 
 import cli
+import pytest
+from tools import fleet_message_drain as fmd
 from agent.context_compressor import _DB_PERSISTED_MARKER
 from tools.bot_relay import RESUME_UNANSWERED_TURN_ENV
+
+
+def test_bot_chat_quiet_turn_drains_one_message_without_changing_stdout(monkeypatch, capsys, tmp_path):
+    from hermes_cli import quiet_single_query as qsq
+
+    home = tmp_path / "profiles" / "ops"
+    home.mkdir(parents=True)
+    monkeypatch.setenv("HERMES_HOME", str(home))
+    config = fmd.DrainConfig(target="emulator", emulator_host="unused")
+    monkeypatch.setattr(fmd, "drain_config", lambda: config)
+    now = fmd.utcnow()
+    fields = {"message_id": "m1", "from": "sender", "to": "ops", "kind": "dm", "body": "hello",
+              "status": "queued", "attempts": 0, "created_at": fmd.rfc3339(now),
+              "updated_at": fmd.rfc3339(now), "expires_at": fmd.rfc3339(now + datetime.timedelta(hours=24))}
+
+    class Store:
+        def __init__(self):
+            self.fields = fields
+            self.version = 0
+
+        def query_queued(self, to, limit):
+            return [fmd.Row("m1", dict(self.fields), str(self.version))] if self.fields["status"] == "queued" else []
+
+        def update(self, doc_id, changes, update_time):
+            assert doc_id == "m1" and update_time == str(self.version)
+            self.fields.update(changes)
+            self.version += 1
+            return str(self.version)
+
+    store = Store()
+    monkeypatch.setattr(fmd, "store_for", lambda _: store)
+    monkeypatch.setattr(qsq, "continue_quiet_notify_completions", lambda *a, **kw: None)
+    turns = []
+
+    def run_conversation(**kwargs):
+        turns.append(kwargs)
+        if len(turns) == 2:
+            print("drained output")
+        return {"final_response": "first reply" if len(turns) == 1 else "drained reply",
+                "messages": [{"role": "assistant", "content": "saved"}]}
+
+    agent = SimpleNamespace(run_conversation=run_conversation, session_id="s-1", _session_title_hint="Bot Chat")
+    with pytest.raises(SystemExit) as exc:
+        cli._run_quiet_single_query(SimpleNamespace(agent=agent, conversation_history=[], session_id="s-1"), "first")
+    assert exc.value.code == 0
+    assert len(turns) == 2
+    assert turns[1]["conversation_history"] == [{"role": "assistant", "content": "saved"}]
+    assert turns[1]["turn_author"]["id"] == "bot:sender"
+    assert store.fields["status"] == "done"
+    assert capsys.readouterr().out == "first reply\n"
 
 
 def _quiet_turn(monkeypatch, history, marker):

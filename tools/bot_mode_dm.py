@@ -764,6 +764,31 @@ def _run_delivery_locked(argv: list[str], dm_file: str, *, stdin_file: bool,
     try:
         from tools.bot_relay import TurnBusyError, delivery_env, dm_queue_wait_seconds
 
+        queue_config = None
+        author_id = str((author or {}).get("id") or "")
+        sender = author_id.removeprefix("bot:").split(":", 1)[0] if author_id.startswith("bot:") else ""
+        if home is not None and sender and not stdin_file:
+            try:
+                from tools import fleet_message_drain as fmd
+                queue_config = fmd.drain_config_for_home(home)
+            except Exception:
+                logger.warning("fleet message drain: could not check recipient opt-in", exc_info=True)
+
+        def _queue_busy() -> bool:
+            if queue_config is None:
+                return False
+            try:
+                from tools import fleet_message_drain as fmd
+                body = Path(dm_file).read_text(encoding="utf-8-sig")
+                message_id = fmd.enqueue_message(sender, fmd.bot_identity(home), body, config=queue_config)
+            except Exception:
+                logger.warning("fleet message drain: enqueue failed; using delivery wait", exc_info=True)
+                return False
+            reply = (f"Queued for @{fmd.bot_identity(home)} (message_id {message_id}): it is mid-turn and will "
+                     "get this right after its current turn ends. No need to resend.")
+            print(json.dumps({"status": "queued", "message_id": message_id, "reply": reply}))
+            return True
+
         env = delivery_env(author, profile_home if not stdin_file else None)
         if stdin_file:
             with _delivery_lock(argv, stdin_file=stdin_file):
@@ -784,6 +809,7 @@ def _run_delivery_locked(argv: list[str], dm_file: str, *, stdin_file: bool,
         can_queue = home is not None
         first = True
         while True:
+            first_attempt = first
             if not first:
                 rc = _via_live_owner()
                 if rc is not None:
@@ -794,9 +820,12 @@ def _run_delivery_locked(argv: list[str], dm_file: str, *, stdin_file: bool,
             final = remaining <= _BUSY_SLICE_SECONDS
             try:
                 with _delivery_lock(argv, stdin_file=False,
-                                    timeout_seconds=remaining if final else _BUSY_SLICE_SECONDS):
+                                    timeout_seconds=(min(0.1, remaining) if first_attempt and queue_config
+                                                     else remaining if final else _BUSY_SLICE_SECONDS)):
                     return _run_local_turn(argv, dm_file, env=env, busy_raises=can_queue)
             except _session_held_cls() as exc:
+                if first_attempt and _queue_busy():
+                    return 0
                 if final:
                     waited = time.monotonic() - started
                     print(json.dumps({
@@ -808,6 +837,8 @@ def _run_delivery_locked(argv: list[str], dm_file: str, *, stdin_file: bool,
                     return 1
                 time.sleep(min(_BUSY_SLICE_SECONDS, remaining))
             except TurnBusyError as exc:
+                if first_attempt and _queue_busy():
+                    return 0
                 if final:
                     raise TurnBusyError(exc.profile, time.monotonic() - started) from None
     finally:
