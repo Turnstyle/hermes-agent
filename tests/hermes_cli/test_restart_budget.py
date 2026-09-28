@@ -15,6 +15,34 @@ from hermes_cli.restart_budget import (
 )
 
 
+
+@pytest.fixture(autouse=True)
+def _observer_identity_via_running_pid(request, monkeypatch):
+    """Command-path tests fake a replacement by stubbing ``get_running_pid``.
+
+    The observer asks ``live_gateway_pid_for_home`` (the real identity check,
+    exercised unstubbed by tests marked ``real_identity``). For the command-path
+    tests, route that call through the stubbed ``get_running_pid`` so they keep
+    testing claim keep/rollback, not PID identity.
+    """
+    if request.node.get_closest_marker("real_identity"):
+        return
+    import gateway.status as status
+
+    def _via_running_pid(home):
+        from pathlib import Path
+
+        from hermes_constants import get_hermes_home
+
+        if Path(home).resolve() == Path(get_hermes_home()).resolve():
+            return status.get_running_pid()
+        pid_path = Path(home) / "gateway.pid"
+        if not pid_path.exists():
+            return None
+        return status.get_running_pid(pid_path, cleanup_stale=False)
+
+    monkeypatch.setattr(status, "live_gateway_pid_for_home", _via_running_pid)
+
 def test_first_restart_allowed(tmp_path):
     allowed, minutes = evaluate_restart_budget(now=1_000_000.0, home=tmp_path)
     assert allowed and minutes is None
@@ -922,32 +950,33 @@ def test_cmd_restart_consumes_hour_when_new_pid_observed(
     assert not allowed
 
 
-def test_observer_ignores_reused_pid_from_stale_state_file(tmp_path, monkeypatch):
-    """R5 HIGH: a stale gateway_state.json PID reused by an unrelated live
-    process must not count as an observed restart."""
+def _state_record(home, pid, start_time, profile):
     import json
-    import os
 
-    from hermes_cli import gateway_restart_observe as obs
-
-    monkeypatch.setattr("hermes_constants.get_hermes_home", lambda: tmp_path)
-    monkeypatch.setattr("gateway.status.get_running_pid", lambda *a, **k: None)
-    tmp_path.joinpath("gateway_state.json").write_text(
-        json.dumps({"pid": os.getpid(), "gateway_state": "running"}), encoding="utf-8"
+    argv = ["hermes"] + (["-p", profile] if profile else []) + ["gateway", "run"]
+    home.joinpath("gateway_state.json").write_text(
+        json.dumps(
+            {
+                "pid": pid,
+                "gateway_state": "running",
+                "kind": "hermes-gateway",
+                "argv": argv,
+                "start_time": start_time,
+                "hermes_home": str(home),
+            }
+        ),
+        encoding="utf-8",
     )
-    # os.getpid() is alive but is pytest, not a gateway.
-    monkeypatch.setattr("gateway.status._looks_like_gateway_process", lambda pid: False)
-    assert obs.replacement_was_observed(frozenset(), all_profiles=False) is False
-
-    monkeypatch.setattr("gateway.status._looks_like_gateway_process", lambda pid: True)
-    monkeypatch.setattr("gateway.status._read_process_cmdline", lambda pid: "hermes gateway run")
-    assert obs.replacement_was_observed(frozenset(), all_profiles=False) is True
 
 
-def test_observer_ignores_pid_reused_by_another_profiles_gateway(tmp_path, monkeypatch):
-    """R6 HIGH: a stale PID now owned by another profile's gateway is not this
-    home's restart."""
-    import json
+def _stub_live_process(monkeypatch, cmdline, start_time):
+    monkeypatch.setattr("gateway.status._read_process_cmdline", lambda pid: cmdline)
+    monkeypatch.setattr("gateway.status._get_process_start_time", lambda pid: start_time)
+
+
+@pytest.mark.real_identity
+def test_observer_ignores_reused_pid_from_stale_state_file(tmp_path, monkeypatch):
+    """R5 HIGH: a stale state PID now held by an unrelated process is not a restart."""
     import os
 
     from hermes_cli import gateway_restart_observe as obs
@@ -955,18 +984,54 @@ def test_observer_ignores_pid_reused_by_another_profiles_gateway(tmp_path, monke
     home = tmp_path / "profiles" / "alpha"
     home.mkdir(parents=True)
     monkeypatch.setattr("hermes_constants.get_hermes_home", lambda: home)
-    monkeypatch.setattr("gateway.status.get_running_pid", lambda *a, **k: None)
-    home.joinpath("gateway_state.json").write_text(
-        json.dumps({"pid": os.getpid(), "gateway_state": "running"}), encoding="utf-8"
-    )
-    monkeypatch.setattr("gateway.status._looks_like_gateway_process", lambda pid: True)
-    monkeypatch.setattr(
-        "gateway.status._read_process_cmdline", lambda pid: "hermes -p beta gateway run"
-    )
+    _state_record(home, os.getpid(), 111, "alpha")
+    _stub_live_process(monkeypatch, "python -m pytest", 111)
     assert obs.replacement_was_observed(frozenset(), all_profiles=False) is False
-    monkeypatch.setattr(
-        "gateway.status._read_process_cmdline", lambda pid: "hermes -p alpha gateway run"
-    )
+
+
+@pytest.mark.real_identity
+def test_observer_ignores_pid_reused_by_another_profiles_gateway(tmp_path, monkeypatch):
+    """R6 HIGH: a stale PID now owned by another profile's gateway is not a restart."""
+    import os
+
+    from hermes_cli import gateway_restart_observe as obs
+
+    home = tmp_path / "profiles" / "alpha"
+    home.mkdir(parents=True)
+    monkeypatch.setattr("hermes_constants.get_hermes_home", lambda: home)
+    _state_record(home, os.getpid(), 111, "alpha")
+    _stub_live_process(monkeypatch, "hermes -p beta gateway run", 111)
+    assert obs.replacement_was_observed(frozenset(), all_profiles=False) is False
+
+
+@pytest.mark.real_identity
+def test_observer_ignores_new_incarnation_of_recorded_pid(tmp_path, monkeypatch):
+    """R7 HIGH: same PID, same profile, different start time = a different
+    process than the record describes; not an observed restart."""
+    import os
+
+    from hermes_cli import gateway_restart_observe as obs
+
+    home = tmp_path / "profiles" / "alpha"
+    home.mkdir(parents=True)
+    monkeypatch.setattr("hermes_constants.get_hermes_home", lambda: home)
+    _state_record(home, os.getpid(), 111, "alpha")
+    _stub_live_process(monkeypatch, "hermes -p alpha gateway run", 222)
+    assert obs.replacement_was_observed(frozenset(), all_profiles=False) is False
+
+
+@pytest.mark.real_identity
+def test_observer_counts_matching_live_gateway(tmp_path, monkeypatch):
+    """Positive control: record and live process agree on profile and start time."""
+    import os
+
+    from hermes_cli import gateway_restart_observe as obs
+
+    home = tmp_path / "profiles" / "alpha"
+    home.mkdir(parents=True)
+    monkeypatch.setattr("hermes_constants.get_hermes_home", lambda: home)
+    _state_record(home, os.getpid(), 111, "alpha")
+    _stub_live_process(monkeypatch, "hermes -p alpha gateway run", 111)
     assert obs.replacement_was_observed(frozenset(), all_profiles=False) is True
 
 
