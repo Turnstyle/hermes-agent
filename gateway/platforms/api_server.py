@@ -42,6 +42,37 @@ def _prefix_names_served_profile(profile: str) -> bool:
         return False
 
 
+def _profile_alias_slug(text: str) -> str:
+    """Lowercase, non-alphanumeric runs -> '-' ("Web-Reviewer" and "web reviewer" -> "web-reviewer")."""
+    return re.sub(r"[^a-z0-9]+", "-", str(text or "").strip().lower()).strip("-")
+
+
+def _resolve_profile_alias(prefix: str, served_pairs) -> Optional[str]:
+    """Canonical served profile whose display name, Bot Chat title, or previous name slugs to
+    ``prefix``; ``None`` when nothing or more than one profile matches (fail closed)."""
+    want = _profile_alias_slug(prefix)
+    if not want:
+        return None
+    try:
+        from hermes_cli.profiles import read_profile_meta
+    except Exception:
+        return None
+    hits = set()
+    for name, home in served_pairs:
+        try:
+            meta = read_profile_meta(Path(home))
+        except Exception:
+            continue
+        names = [meta.get("display_name"), meta.get("bot_title"), *(meta.get("previous_names") or [])]
+        if any(_profile_alias_slug(n) == want for n in names if n):
+            hits.add(name)
+    if len(hits) == 1:
+        found = hits.pop()
+        logger.info("api_server: /p/%s/ resolved by alias to profile %s", prefix, found)
+        return found
+    return None
+
+
 # Per-request /p/<profile>/ selection: set by the profile-prefix middleware, read by handlers.
 _api_request_profile: ContextVar[Optional[str]] = ContextVar(
     "api_server_request_profile", default=None)
@@ -1553,10 +1584,16 @@ class APIServerAdapter(OpenAICompatRoutesMixin, BasePlatformAdapter):
             return None if _prefix_names_served_profile(profile) else _PROFILE_REJECTED
         try:
             from hermes_cli.profiles import profiles_to_serve
-            served = {name for name, _ in profiles_to_serve(multiplex=True)}
+            served_pairs = list(profiles_to_serve(multiplex=True))
         except Exception:
             return _PROFILE_REJECTED
-        return profile if profile in served else _PROFILE_REJECTED
+        served = {name for name, _ in served_pairs}
+        if profile in served:
+            return profile
+        # Peers address bots by the name the roster shows (display name / Bot Chat title) or a
+        # pre-rename id: map a UNIQUE slug match to the canonical served id; else fail closed.
+        alias = _resolve_profile_alias(profile, served_pairs)
+        return alias if alias else _PROFILE_REJECTED
 
     @staticmethod
     def _profile_scope(profile: Optional[str]):
