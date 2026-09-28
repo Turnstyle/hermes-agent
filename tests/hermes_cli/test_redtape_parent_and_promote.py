@@ -351,6 +351,34 @@ def test_held_parent_keeps_gate_despite_recorded_rehome(kanban_home, parent_stat
         assert kb.complete_task(conn, child, result="should not close") is False
 
 
+def test_dependency_wait_parent_with_open_grandparent_keeps_gate(kanban_home, monkeypatch):
+    """R4 HIGH: block_task(kind="dependency") parks a parent in todo while its
+    own prerequisite is open; rehome or merged-PR evidence must not skip it."""
+    pr_url = "https://github.com/acme/app/pull/24"
+    monkeypatch.setattr(
+        "hermes_cli.kanban_parent_gate.query_pr_merge_state",
+        lambda _url: {"state": "MERGED", "mergedAt": "2026-09-28T12:00:00Z"},
+    )
+    with kbc.connect() as conn:
+        grandparent = kb.create_task(conn, title="upstream prerequisite")
+        conn.execute("UPDATE tasks SET status = 'todo' WHERE id = ?", (grandparent,))
+        parent = kb.create_task(conn, title="waits on upstream", completion_contract=pr_url)
+        kb.link_tasks(conn, grandparent, parent)
+        conn.execute("UPDATE tasks SET status = 'todo' WHERE id = ?", (parent,))
+        conn.commit()
+        successor = kb.create_task(conn, title="successor")
+        assert record_parent_rehome(conn, parent, successor, action="rehomed") is True
+        child = kb.create_task(conn, title="downstream child")
+        kb.link_tasks(conn, parent, child)
+        conn.execute("UPDATE tasks SET status = 'ready' WHERE id = ?", (child,))
+        conn.commit()
+        assert kb.complete_task(conn, child, result="should not close") is False
+
+        conn.execute("UPDATE tasks SET status = 'done' WHERE id = ?", (grandparent,))
+        conn.commit()
+        assert kb.complete_task(conn, child, result="upstream done") is True
+
+
 def test_pr_acceptance_system_event_releases_without_completion_contract(kanban_home, monkeypatch):
     pr_url = "https://github.com/acme/app/pull/22"
 
