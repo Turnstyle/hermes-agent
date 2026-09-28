@@ -37,6 +37,19 @@ def kanban_home(tmp_path, monkeypatch):
 # ---------------------------------------------------------------------------
 
 
+def test_create_task_normalizes_nonpositive_goal_turns(kanban_home):
+    with kbc.connect() as conn:
+        for requested, expected in ((5, 5), (0, None), (-2, None)):
+            task_id = kb.create_task(
+                conn, title=f"goal turns {requested}", goal_mode=True,
+                goal_max_turns=requested,
+            )
+            stored = conn.execute(
+                "SELECT goal_max_turns FROM tasks WHERE id=?", (task_id,)
+            ).fetchone()[0]
+            assert stored == expected
+
+
 
 
 

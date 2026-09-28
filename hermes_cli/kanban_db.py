@@ -1369,7 +1369,7 @@ def create_task(
                         _opt_int(max_runtime_seconds),
                         json.dumps(skills_list) if skills_list is not None else None,
                         _opt_int(max_retries), model_override, provider_override, reasoning_effort,
-                        1 if goal_mode else 0, _opt_int(goal_max_turns), session_id, completion_contract,
+                        1 if goal_mode else 0, _positive_int_or_none(goal_max_turns), session_id, completion_contract,
                     ),
                 )
                 for pid in parents:
@@ -1989,6 +1989,12 @@ def _first_line(text: Optional[str], limit: int) -> str:
 def _opt_int(value: Any) -> Optional[int]:
     """``int(value)`` or ``None`` when ``value`` is ``None`` (NULL column passthrough)."""
     return int(value) if value is not None else None
+
+
+def _positive_int_or_none(value: Any) -> Optional[int]:
+    """Persist only a positive goal turn budget; unset and nonpositive mean NULL."""
+    parsed = _opt_int(value)
+    return parsed if parsed is not None and parsed > 0 else None
 
 
 def _json_or_null(obj: Any) -> Optional[str]:
