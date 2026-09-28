@@ -46,6 +46,13 @@ class TurnRetryState:
     auth_failover_attempted: bool = False
     # Post-exhaustion auto-recovery cycles spent on this API call (agent.auto_recovery_cycles caps it).
     auto_recovery_cycles_used: int = 0
+    # 429 with a fallback chain pending: skip the retry-same wait and rotate the pool at once.
+    # Still True when the eager-fallback gate sees the error => that rotation could not recover,
+    # so the chain takes over now instead of sleeping up to 600s per step.
+    pool_rotation_forced: bool = False
+    # Successful rate-limit pool rotations during this API call; an account-level 429 after one
+    # rotation goes straight to the fallback chain (same-account entries share the limit).
+    pool_rotations_this_call: int = 0
 
     # Restart signals (read by the outer loop after the attempt)
     restart_with_compressed_messages: bool = False

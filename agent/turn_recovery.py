@@ -613,6 +613,47 @@ def _recover_welcome_tier(agent: Any, classified: Any, _retry: TurnRetryState) -
     return False
 
 
+# Account-level / plan-quota 429 wording. Every pool entry on the same account shares this limit,
+# so rotating between them cannot recover; a pending fallback chain should take over instead.
+_ACCOUNT_LEVEL_RATE_LIMIT_MARKERS = (
+    "account's rate limit", "account rate limit", "usage limit", "usage_limit",
+    "weekly limit", "weekly usage", "gousagelimit",
+)
+
+
+def _is_account_level_rate_limit(api_error: Exception, error_context: Any) -> bool:
+    parts = [str(api_error)]
+    if isinstance(error_context, dict):
+        parts += [str(error_context.get("reason") or ""), str(error_context.get("message") or "")]
+    haystack = " ".join(parts).lower()
+    return any(marker in haystack for marker in _ACCOUNT_LEVEL_RATE_LIMIT_MARKERS)
+
+
+def _arm_fast_pool_rotation(
+    agent: Any, api_error: Exception, classified: Any, _retry: TurnRetryState, error_context: Any,
+) -> None:
+    """With a fallback chain pending, a 429 rotates the credential pool at once instead of the
+    retry-same step (which waits out Retry-After, up to 600s). ``pool_rotation_forced`` stays set
+    only if that rotation fails, which tells the eager-fallback gate to take the chain now."""
+    from agent.conversation_loop import _ra
+
+    _retry.pool_rotation_forced = False
+    if classified.reason != FailoverReason.rate_limit:
+        return
+    _chain = getattr(agent, "_fallback_chain", None)
+    if not isinstance(_chain, (list, tuple)) or getattr(agent, "_fallback_index", 0) >= len(_chain):
+        return
+    if parse_available_output_tokens_from_error(str(api_error)) is not None:
+        return  # relay-wrapped output-cap 429: the clamp fixes it, not a new credential (#72281)
+    if not _ra()._pool_may_recover_from_rate_limit(getattr(agent, "_credential_pool", None)):
+        return  # single/exhausted pool: the gate already falls back without rotating
+    if _retry.pool_rotations_this_call >= 1 and _is_account_level_rate_limit(api_error, error_context):
+        _retry.pool_rotation_forced = True  # one rotation already hit the same account limit
+        return
+    _retry.has_retried_429 = True
+    _retry.pool_rotation_forced = True
+
+
 def recover_after_classification(
     agent: Any, api_error: Exception, classified: Any, _retry: TurnRetryState, *,
     status_code: Optional[int], error_context: Any, messages: List[Dict[str, Any]],
@@ -649,12 +690,16 @@ def recover_after_classification(
             _vlines(agent, "🔐 Nous paid access verified — refreshed runtime credentials and retrying request...")
             return True, False
 
+    _arm_fast_pool_rotation(agent, api_error, classified, _retry, error_context)
     recovered_with_pool, _retry.has_retried_429 = agent._recover_with_credential_pool(
         status_code=status_code, has_retried_429=_retry.has_retried_429,
         classified_reason=classified.reason, error_context=error_context,
         billing_unverified=classified.billing_unverified,
     )
     if recovered_with_pool:
+        if classified.reason == FailoverReason.rate_limit:
+            _retry.pool_rotations_this_call += 1
+        _retry.pool_rotation_forced = False
         return True, recovered_with_pool
 
     # Shrink oversized native image parts in-place and retry once.
@@ -1880,12 +1925,14 @@ def route_classified_error(
         or (_is_transport_failure and retry_count >= 2)
     )
     if _should_fallback and agent._fallback_index < len(agent._fallback_chain):
-        # No eager fallback while credential pool rotation may recover. Exception: an
-        # upstream-aggregator 429 — the pool can't help, always fall back.
-        # Fixes #11314.
+        # No eager fallback while credential pool rotation may recover. Exceptions: an
+        # upstream-aggregator 429 (the pool can't help), and a 429 whose forced pool rotation
+        # already failed or that hit the same account limit after one rotation — waiting out a
+        # 600s Retry-After per step there only delays the fallback chain. Fixes #11314.
         _is_upstream = classified.reason == FailoverReason.upstream_rate_limit
         pool_may_recover = (
-            False if _is_upstream else _ra()._pool_may_recover_from_rate_limit(agent._credential_pool)
+            False if (_is_upstream or _retry.pool_rotation_forced)
+            else _ra()._pool_may_recover_from_rate_limit(agent._credential_pool)
         )
         if not pool_may_recover:
             agent._buffer_diagnostic_status(_eager_fallback_status(classified, _is_upstream, _is_transport_failure))
