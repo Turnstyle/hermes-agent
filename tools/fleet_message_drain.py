@@ -9,7 +9,7 @@ calls :func:`claim_next`, which runs exactly ONE indexed query:
     (composite index: to ASC, status ASC, created_at ASC)
 
 It never runs while the bot is idle: the post-turn hook is its only caller, so no turn end means no
-Firestore read. Docs whose ``expires_at`` has passed are left alone for the 24h expiry job.
+Firestore read. Expired docs seen in the page are marked expired so they cannot starve fresh docs.
 
 Status transitions this module performs (every write carries an ``updateTime`` precondition, so a
 doc that anyone else touched in between is never overwritten):
@@ -24,6 +24,7 @@ doc that anyone else touched in between is never overwritten):
     read      -> failed      the same, once attempts reaches max_attempts (doc kept, never deleted)
     delivered -> queued      the session got busy between claim and hand-off (no attempt counted)
     queued    -> rejected    the doc is malformed for this reader (unknown kind / missing body)
+    queued    -> expired     its expiry passed before the drain saw it
 
 ``replied`` is left to the reply path: the injected input tells the bot to answer the sender with
 ``message_agent``; a sender-side write may then mark the doc ``replied``.
@@ -70,7 +71,7 @@ TS_FIELDS = frozenset({"created_at", "updated_at", "expires_at", "delivered_at",
                        "done_at", "failed_at", "rejected_at", "expired_at"})
 # The only fields this reader may write. Message content (from/to/body/kind/created_at) is never written.
 WRITABLE_FIELDS = frozenset({"status", "updated_at", "delivered_at", "read_at", "done_at", "failed_at",
-                             "rejected_at", "attempts", "last_error"})
+                             "rejected_at", "expired_at", "attempts", "last_error"})
 MAX_LIMIT = 50
 LAST_ERROR_CHARS = 500
 _SCOPE = "https://www.googleapis.com/auth/datastore"
@@ -322,6 +323,7 @@ class Claimed:
     update_time: str
     me: str
     finished: bool = False
+    pending_fields: Optional[dict] = None
     lock: threading.Lock = dataclasses.field(default_factory=threading.Lock, repr=False)
 
     @property
@@ -336,13 +338,18 @@ def _malformed(fields: dict) -> str:
         return "missing body"
     if not isinstance(fields.get("from"), str) or not fields["from"].strip():
         return "missing from"
+    if parse_ts(fields.get("expires_at")) is None:
+        return "missing or invalid expires_at"
+    attempts = fields.get("attempts")
+    if isinstance(attempts, bool) or not isinstance(attempts, int) or attempts < 0:
+        return "invalid attempts"
     return ""
 
 
 def claim_next(store: Any, me: str, *, limit: int = 10, now: Optional[datetime.datetime] = None) -> Optional[Claimed]:
     """Run the ONE turn-end query and atomically claim the oldest claimable doc (queued -> delivered).
 
-    Skips (and never writes) docs past ``expires_at`` or addressed to anyone else. A doc whose claim
+    Expires docs past ``expires_at`` and skips docs addressed to anyone else. A doc whose claim
     precondition fails was moved by someone else (late sender success, a racing turn end): skipped.
     """
     now = now or utcnow()
@@ -351,9 +358,6 @@ def claim_next(store: Any, me: str, *, limit: int = 10, now: Optional[datetime.d
         fields = row.fields
         if fields.get("to") != me or fields.get("status") != "queued":
             continue  # defense in depth: the query already filters both
-        expires = parse_ts(fields.get("expires_at"))
-        if expires is not None and expires <= now:
-            continue  # the expiry job owns it
         problem = _malformed(fields)
         if problem:
             try:
@@ -363,6 +367,15 @@ def claim_next(store: Any, me: str, *, limit: int = 10, now: Optional[datetime.d
                 pass
             except Exception:
                 logger.warning("fleet message drain: could not reject malformed doc %s", row.doc_id, exc_info=True)
+            continue
+        if parse_ts(fields["expires_at"]) <= now:
+            try:
+                store.update(row.doc_id, {"status": "expired", "expired_at": now_s, "updated_at": now_s},
+                             row.update_time)
+            except PreconditionFailed:
+                pass
+            except Exception:
+                logger.warning("fleet message drain: could not expire doc %s", row.doc_id, exc_info=True)
             continue
         try:
             new_ut = store.update(row.doc_id, {"status": "delivered", "delivered_at": now_s, "updated_at": now_s},
@@ -381,9 +394,33 @@ def _write(store: Any, claimed: Claimed, fields: dict) -> bool:
     try:
         claimed.update_time = store.update(claimed.doc_id, fields, claimed.update_time)
     except PreconditionFailed:
+        row = store.get(claimed.doc_id)
+        if row is not None and all(row.fields.get(key) == value for key, value in fields.items()):
+            claimed.update_time = row.update_time
+            claimed.fields.update(fields)
+            claimed.pending_fields = None
+            return True
         logger.warning("fleet message drain: %s was changed by another writer; leaving it as is", claimed.doc_id)
         return False
+    except Exception:
+        claimed.pending_fields = dict(fields)
+        raise
     claimed.fields.update(fields)
+    claimed.pending_fields = None
+    return True
+
+
+def reconcile_claim(store: Any, claimed: Claimed) -> bool:
+    """Resolve an uncertain pre-dispatch write before returning an unstarted claim to the queue."""
+    row = store.get(claimed.doc_id)
+    if row is None or row.fields.get("to") != claimed.me or row.fields.get("status") not in ("delivered", "read"):
+        return False
+    if claimed.pending_fields and row.update_time != claimed.update_time and not all(
+            row.fields.get(key) == value for key, value in claimed.pending_fields.items()):
+        return False
+    claimed.update_time = row.update_time
+    claimed.fields.update(row.fields)
+    claimed.pending_fields = None
     return True
 
 
@@ -397,8 +434,10 @@ def release(store: Any, claimed: Claimed, now: Optional[datetime.datetime] = Non
     with claimed.lock:
         if claimed.finished:
             return False
+        fields = claimed.pending_fields or {"status": "queued", "updated_at": rfc3339(now or utcnow())}
+        committed = _write(store, claimed, fields)
         claimed.finished = True
-    return _write(store, claimed, {"status": "queued", "updated_at": rfc3339(now or utcnow())})
+        return committed
 
 
 def record_error(store: Any, claimed: Claimed, error: str, *, max_attempts: int,
@@ -408,16 +447,19 @@ def record_error(store: Any, claimed: Claimed, error: str, *, max_attempts: int,
     with claimed.lock:
         if claimed.finished:
             return False
+        fields = claimed.pending_fields
+        if fields is None:
+            now_s = rfc3339(now or utcnow())
+            attempts = claimed.fields["attempts"] + 1
+            fields = {"attempts": attempts, "last_error": str(error or "unknown error")[:LAST_ERROR_CHARS],
+                      "updated_at": now_s}
+            if attempts >= max_attempts:
+                fields.update(status="failed", failed_at=now_s)
+            else:
+                fields["status"] = "queued"
+        committed = _write(store, claimed, fields)
         claimed.finished = True
-    now_s = rfc3339(now or utcnow())
-    attempts = int(claimed.fields.get("attempts") or 0) + 1
-    fields = {"attempts": attempts, "last_error": str(error or "unknown error")[:LAST_ERROR_CHARS],
-              "updated_at": now_s}
-    if attempts >= max_attempts:
-        fields.update(status="failed", failed_at=now_s)
-    else:
-        fields["status"] = "queued"
-    return _write(store, claimed, fields)
+        return committed
 
 
 def finish(store: Any, claimed: Claimed, outcome: dict, *, max_attempts: int,
@@ -431,9 +473,11 @@ def finish(store: Any, claimed: Claimed, outcome: dict, *, max_attempts: int,
     with claimed.lock:
         if claimed.finished:
             return False
+        now_s = rfc3339(now or utcnow())
+        fields = claimed.pending_fields or {"status": "done", "done_at": now_s, "updated_at": now_s}
+        committed = _write(store, claimed, fields)
         claimed.finished = True
-    now_s = rfc3339(now or utcnow())
-    return _write(store, claimed, {"status": "done", "done_at": now_s, "updated_at": now_s})
+        return committed
 
 
 def render_input(claimed: Claimed) -> tuple[str, Optional[dict], dict]:

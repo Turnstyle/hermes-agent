@@ -132,6 +132,69 @@ def test_dispatch_exception_is_recorded_not_lost(env):
     assert env.session["running"] is False
 
 
+@pytest.mark.parametrize("fault", ["status_write", "status_write_committed", "bad_attempts"])
+def test_pre_dispatch_fault_releases_session_and_recovers_message(env, fault):
+    if fault == "bad_attempts":
+        env.store.seed("m-bad", msg(5, attempts="invalid"))
+        turn_end(env)
+        row = env.store.get("m-bad")
+        assert row.fields["status"] == "rejected" and "attempts" in row.fields["last_error"]
+    else:
+        env.store.seed("m-retry", msg(5))
+        update = env.store.update
+        failed = False
+
+        def fail_read_once(doc_id, fields, update_time):
+            nonlocal failed
+            if fields.get("status") == "read" and not failed:
+                failed = True
+                if fault == "status_write_committed":
+                    update(doc_id, fields, update_time)
+                raise TimeoutError("transient status write")
+            return update(doc_id, fields, update_time)
+
+        env.monkeypatch.setattr(env.store, "update", fail_read_once)
+        turn_end(env)
+        row = env.store.get("m-retry")
+        assert row.fields["status"] == "queued" and row.fields["attempts"] == 2
+    assert env.session["running"] is False and not env.submitted
+    if fault == "bad_attempts":
+        env.store.seed("m-good", msg(3))
+    turn_end(env)
+    assert [item.rid for item in env.submitted] == [
+        "__fleet_msg__m-good" if fault == "bad_attempts" else "__fleet_msg__m-retry"]
+    assert env.session["running"] is False
+
+
+@pytest.mark.parametrize("commit_before_timeout", [False, True])
+def test_failed_turn_receipt_retries_without_replaying_the_turn(env, commit_before_timeout):
+    env.store.seed("m-receipt", msg(5))
+    env.outcome = {"status": "failed", "error": "provider unavailable"}
+    update = env.store.update
+    failed = False
+
+    def fail_receipt_once(doc_id, fields, update_time):
+        nonlocal failed
+        if "attempts" in fields and not failed:
+            failed = True
+            if commit_before_timeout:
+                update(doc_id, fields, update_time)
+            raise TimeoutError("receipt acknowledgement lost")
+        return update(doc_id, fields, update_time)
+
+    env.monkeypatch.setattr(env.store, "update", fail_receipt_once)
+    turn_end(env)
+    assert len(env.submitted) == 1
+    assert env.session["running"] is False
+    assert env.store.get("m-receipt").fields["status"] in ("read", "queued")
+    turn_end(env)
+    row = env.store.get("m-receipt")
+    assert row.fields["status"] == "queued" and row.fields["attempts"] == 2
+    assert "provider unavailable" in row.fields["last_error"]
+    assert len(env.submitted) == 1
+    assert "_fleet_drain_pending" not in env.session
+
+
 def test_prompt_that_wins_the_session_after_the_query_gets_the_doc_released(env):
     env.store.seed("m-rel", msg(5))
     real_claim = fmd.claim_next
