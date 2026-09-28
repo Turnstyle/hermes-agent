@@ -527,6 +527,68 @@ def test_deliver_fails_target_busy_after_the_full_turn_wait_budget(home, monkeyp
     assert 1 <= len(calls) <= 30
 
 
+def test_deliver_held_computed_from_final_proc_after_provider_retry(home, monkeypatch):
+    """After a policy-gated retry, ``held`` must reflect the retried proc's stderr — not the first
+    attempt's. A transient provider failure followed by SESSION_NOT_OWNED on the retry must queue
+    behind the busy slice and deliver, not fail as ``unknown``."""
+    from hermes_cli.active_sessions import (
+        SESSION_NOT_OWNED,
+        ActiveSessionRefusal,
+        format_refusal_stderr,
+        session_already_owned_message,
+    )
+    from tools import bot_mode_dm
+
+    sid = "chat"
+    refusal_stderr = format_refusal_stderr(
+        ActiveSessionRefusal(
+            session_already_owned_message(sid, {"surface": "cli", "started_at": time.time()}),
+            SESSION_NOT_OWNED,
+        )
+    )
+    monkeypatch.setattr(bot_relay, "turn_wait_seconds", lambda: 5.0)
+    monkeypatch.setattr(bot_mode_dm, "_BUSY_SLICE_SECONDS", 0.05)
+    monkeypatch.setattr(time, "sleep", lambda *_a, **_k: None)
+    calls = []
+
+    class _Proc:
+        def __init__(self, returncode, stdout="", stderr=""):
+            self.returncode, self.stdout, self.stderr = returncode, stdout, stderr
+
+    def _fake_run(argv, **kwargs):
+        calls.append(list(argv))
+        if len(calls) == 1:
+            return _Proc(1, stdout="Error code: 503 - overloaded")
+        if len(calls) == 2:
+            return _Proc(1, stderr=refusal_stderr)
+        return _Proc(0, stdout="hello")
+
+    monkeypatch.setattr("hermes_cli.quiet_single_query.run_reported_turn", _fake_run)
+    out = _result(srv._methods["bot_relay.deliver"](1, {"profile": "ops", "message": "ping"}))
+    assert "hello" in out["reply"]
+    assert len(calls) == 3
+
+
+def test_deliver_target_profile_wins_over_route_stamped_profile(home, monkeypatch):
+    """Desktop dial wrappers overwrite ``profile`` with the route key; ``target_profile`` names the
+    install that must run the turn."""
+    calls = []
+
+    class _Proc:
+        returncode, stdout, stderr = 0, "pong from ops", ""
+
+    def _fake_run(argv, **kwargs):
+        calls.append(list(argv))
+        return _Proc()
+
+    monkeypatch.setattr("hermes_cli.quiet_single_query.run_reported_turn", _fake_run)
+    out = _result(srv._methods["bot_relay.deliver"](
+        1, {"profile": "default", "target_profile": "ops", "message": "ping"}))
+    assert calls[0][1:3] == ["-p", "ops"]
+    assert out["delivered_profile"] == "ops"
+    assert out["delivered_profile"] != "default"
+
+
 def test_deliver_non_held_failure_path_is_unchanged(home, monkeypatch):
     """A non-held failure (no SESSION_NOT_OWNED refusal) still gets exactly the existing
     policy-gated retry, unaffected by the busy-queue loop around it."""

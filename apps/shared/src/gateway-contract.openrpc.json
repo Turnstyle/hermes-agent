@@ -6612,7 +6612,7 @@
       },
       "BotRelayDeliverParams": {
         "additionalProperties": false,
-        "description": "``profile`` here is the TARGET profile on this gateway (also what the desktop route wrapper adds).",
+        "description": "``profile`` is what the desktop route wrapper stamps (the dialled route's key, which can\ndiffer from the envelope's target). ``target_profile``, when sent, is the authoritative\ntarget the transport never rewrites.",
         "properties": {
           "profile": {
             "title": "Profile",
@@ -6657,6 +6657,18 @@
             ],
             "default": null,
             "title": "From Connection"
+          },
+          "target_profile": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Target Profile"
           }
         },
         "required": [
@@ -6668,10 +6680,59 @@
       },
       "BotRelayDeliverResult": {
         "additionalProperties": false,
+        "description": "``delivered_profile`` is this gateway's attestation of which profile ran the turn.",
         "properties": {
           "reply": {
             "title": "Reply",
             "type": "string"
+          },
+          "delivered_profile": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Delivered Profile"
+          },
+          "requested_profile": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Requested Profile"
+          },
+          "reply_relayed": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Reply Relayed"
+          },
+          "reason": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Reason"
           }
         },
         "required": [
@@ -6770,6 +6831,30 @@
             ],
             "default": null,
             "title": "Reason"
+          },
+          "reply_relayed": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Reply Relayed"
+          },
+          "delivered_profile": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Delivered Profile"
           }
         },
         "required": [

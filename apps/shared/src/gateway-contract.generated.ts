@@ -1603,16 +1603,22 @@ export interface RelayEnvelope {
   message: string
   [key: string]: unknown
 }
-/** ``profile`` here is the TARGET profile on this gateway (also what the desktop route wrapper adds). */
+/** ``profile`` is what the desktop route wrapper stamps (the dialled route's key, which can differ from the envelope's target). ``target_profile``, when sent, is the authoritative target the transport never rewrites. */
 export interface BotRelayDeliverParams {
   profile: string
   message: string
   from_profile?: string | null
   from_handle?: string | null
   from_connection?: string | null
+  target_profile?: string | null
 }
+/** ``delivered_profile`` is this gateway's attestation of which profile ran the turn. */
 export interface BotRelayDeliverResult {
   reply: string
+  delivered_profile?: string | null
+  requested_profile?: string | null
+  reply_relayed?: boolean | null
+  reason?: string | null
 }
 export interface BotRelayReplyParams {
   profile?: string | null
@@ -1620,6 +1626,8 @@ export interface BotRelayReplyParams {
   reply?: string | null
   error?: string | null
   reason?: string | null
+  reply_relayed?: boolean | null
+  delivered_profile?: string | null
 }
 export interface OkResult {
   ok?: boolean

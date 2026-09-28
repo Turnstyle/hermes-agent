@@ -195,6 +195,28 @@ def _single_query_exit_code(result, *, credentials_rate_limited: bool = False) -
     return 1
 
 
+def _durable_row_count(cli) -> int | None:
+    """Stored message count of the one-shot's session, or ``None`` when it cannot be read."""
+    session_id = getattr(cli, "session_id", "") or ""
+    db = getattr(cli, "_session_db", None)
+    if db is None or not session_id:
+        return None
+    try:
+        return db.message_count(session_id)
+    except Exception:
+        logger.debug("one-shot row count for %s unavailable", session_id, exc_info=True)
+        return None
+
+
+def _reclaim_session_for_follow_up(cli, deadline: float) -> bool:
+    """Re-take the chat's lease for a notify follow-up, waiting out another writer's turn until ``deadline``."""
+    while not cli._claim_active_session("cli", silent=True):
+        if time.monotonic() >= deadline:
+            return False
+        time.sleep(1.0)
+    return True
+
+
 def _run_quiet_single_query(cli, effective_query, emitter=None):
     """Quiet (-Q) one-shot turn: run, print the response (stderr for errors/session_id), then sys.exit with the automation exit code.
     With a ``StreamJsonEmitter`` the final answer and the exit line become the terminal ``result`` JSONL record instead.
@@ -202,7 +224,10 @@ def _run_quiet_single_query(cli, effective_query, emitter=None):
     Nested Bot Mode notifies bind this session's key (not the dispatcher's) and resume in-process
     before stdout is printed, so a teammate reply is the quiet run's final answer rather than a
     stranded receipt."""
-    from cli import _emit_interrupted_session_end, _run_kanban_goal_loop_q, _single_query_exit_code, _sync_cli_session_id_from_agent
+    from cli import (
+        _emit_interrupted_session_end, _handed_off_session_ids, _run_kanban_goal_loop_q, _single_query_exit_code,
+        _sync_cli_session_id_from_agent,
+    )
     from agent.interrupt_compat import _accepts_keyword
     from agent.turn_author import take_turn_author_from_env
     from hermes_cli.quiet_single_query import (
@@ -245,18 +270,47 @@ def _run_quiet_single_query(cli, effective_query, emitter=None):
         _report_turn(result)
         if isinstance(result, dict) and not result.get("failed"):
             history = result.get("messages") or cli.conversation_history
+            linger_budget = quiet_notify_linger_seconds()
+            linger_deadline = time.monotonic() + linger_budget
+            # The lease fences transcript WRITERS; the idle linger below writes nothing, so holding
+            # it there refused every other delivery into this chat for the whole linger budget
+            # ("opened by cli 10m ago"). Kanban goal mode keeps it: its loop below runs more turns.
+            idle_release = os.environ.get("HERMES_KANBAN_GOAL_MODE") != "1"
+            rows_at_release = None
+            last_follow = None
+            if idle_release:
+                rows_at_release = _durable_row_count(cli)
+                cli._release_active_session()
 
             def _follow_up(text):
-                nonlocal history
-                follow = cli.agent.run_conversation(
-                    user_message=text, conversation_history=history, **author_kwargs,
-                )
-                if isinstance(follow, dict) and follow.get("messages"):
-                    history = follow["messages"]
-                # Same sync contract as the main turn: a compression rotation during a
-                # follow-up must not leave a stale id on the exit line / drain key.
-                _sync_cli_session_id_from_agent(cli)
-                return follow
+                nonlocal history, rows_at_release, last_follow
+                if idle_release:
+                    if not _reclaim_session_for_follow_up(cli, linger_deadline):
+                        logger.warning("Notify follow-up for session %s not run: another surface held the "
+                                       "chat through the linger budget", getattr(cli, "session_id", "") or "")
+                        return last_follow
+                    rows = _durable_row_count(cli)
+                    if rows is not None and rows_at_release is not None and rows != rows_at_release:
+                        # Another writer's turns landed while this process was idle: continue from the
+                        # stored transcript (the resume path), never the stale in-memory one.
+                        restored = cli._session_db.get_messages_as_conversation(
+                            cli.session_id, repair_alternation=True)
+                        history = [m for m in restored if m.get("role") != "session_meta"] or history
+                try:
+                    follow = cli.agent.run_conversation(
+                        user_message=text, conversation_history=history, **author_kwargs,
+                    )
+                    if isinstance(follow, dict) and follow.get("messages"):
+                        history = follow["messages"]
+                    # Same sync contract as the main turn: a compression rotation during a
+                    # follow-up must not leave a stale id on the exit line / drain key.
+                    _sync_cli_session_id_from_agent(cli)
+                    last_follow = follow
+                    return follow
+                finally:
+                    if idle_release:
+                        rows_at_release = _durable_row_count(cli)
+                        cli._release_active_session()
 
             # One shared linger budget for the whole run: the loop below and the later
             # _wait_for_oneshot_background_completions pass must not each wait the full
@@ -269,10 +323,14 @@ def _run_quiet_single_query(cli, effective_query, emitter=None):
                     getattr(cli, "session_id", "") or "",
                     _follow_up,
                     owns_event=getattr(cli, "_owns_process_notification", None),
-                    linger_budget=quiet_notify_linger_seconds(),
+                    linger_budget=linger_budget,
                 )
             finally:
                 cli._quiet_notify_linger_done = True
+            if idle_release and not cli._claim_active_session("cli", silent=True):
+                # Another writer holds the chat now; ending its row here is the #88234 class
+                # (a leg vanishes from history). That writer's own exit finalizes it.
+                _handed_off_session_ids.add(getattr(cli, "session_id", None))
             if isinstance(continued, dict):
                 result = continued
                 # A teammate's reply displaced the answer this run prints; tell the spawner.

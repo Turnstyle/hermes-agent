@@ -972,11 +972,34 @@ def _persist_reply_when_done(proc_id: str, agent: Any) -> bool:
     return True
 
 
+def _normalize_relay_profile(name: str) -> str:
+    s = str(name or "").strip()
+    if not s:
+        return ""
+    return "default" if s.lower() == "hermes" else s
+
+
+def _reply_attestation(reply_path: str, record: dict) -> tuple[str, str]:
+    from tools.bot_relay import CLAIMED_DIR
+
+    expected = ""
+    claimed_path = Path(reply_path).parent.parent / CLAIMED_DIR / Path(reply_path).name
+    try:
+        with open(claimed_path, encoding="utf-8-sig") as fh:
+            env = json.load(fh)
+        expected = _normalize_relay_profile(str(env.get("target_profile") or ""))
+    except (OSError, json.JSONDecodeError, TypeError, ValueError):
+        expected = ""
+    delivered = _normalize_relay_profile(str(record.get("delivered_profile") or ""))
+    return expected, delivered
+
+
 def _wait_reply_main(reply_path: str, label: str, budget_seconds: str) -> int:
     """The relay reply waiter (``tools/bot_relay.waiter_command``): block until the sender-side
     reply file exists, print it as the completion notification the sender wakes on, exit 1 on a
-    delivery error or when the budget runs out. Stdlib only: this runs as a background process
-    from any bot turn, and the sender's completion notification is exactly its stdout."""
+    delivery error, when the responder is unattested or is not the envelope's target, or when the
+    budget runs out. Stdlib only: this runs as a background process from any bot turn, and the
+    sender's completion notification is exactly its stdout."""
     try:
         deadline = time.time() + float(budget_seconds)
     except ValueError:
@@ -986,11 +1009,35 @@ def _wait_reply_main(reply_path: str, label: str, budget_seconds: str) -> int:
             with open(reply_path, encoding="utf-8-sig") as fh:
                 d = json.load(fh)
             if d.get("error"):
+                from tools.bot_failure_reasons import UNKNOWN, classify_agent_error
+
                 # Typed reason code rides ahead of the free text so the sender can branch on it
                 # without parsing provider prose. See #93091.
                 code = str(d.get("reason") or "").strip()
+                if code in ("", UNKNOWN):
+                    code = classify_agent_error(d["error"])
                 tag = f" [reason: {code}]" if code else ""
                 print(f"Delivery to {label} failed{tag}: {d['error']}")
+                return 1
+            from tools.bot_failure_reasons import TARGET_SCOPE_UNRESOLVED
+
+            expected, delivered = _reply_attestation(reply_path, d)
+            if expected and delivered and expected != delivered:
+                print(
+                    f"Delivery to {label} failed [reason: {TARGET_SCOPE_UNRESOLVED}]: MISROUTED: "
+                    f"the relay delivered this message to @{delivered} instead of @{expected}; "
+                    f"that bot's reply is not {label}'s and is withheld. The message did NOT reach "
+                    f"{label}."
+                )
+                return 1
+            if not delivered or not expected:
+                print(
+                    f"Delivery to {label} UNVERIFIED [reason: {TARGET_SCOPE_UNRESOLVED}]: the relay "
+                    f"did not attest which bot answered (a Desktop or target gateway older than "
+                    f"delivery attestation), so the text below may not be from {label}. Do not "
+                    f"attribute it to {label} and do not resend blindly."
+                )
+                print(d.get("reply") or "(empty reply)")
                 return 1
             print(f"Reply from {label}:")
             print(d.get("reply") or "(empty reply)")

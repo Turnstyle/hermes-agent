@@ -31,6 +31,14 @@ def root(tmp_path):
     return tmp_path
 
 
+def _write_claimed_envelope(root, env: dict, *, target_profile: str) -> None:
+    base = bot_relay.relay_root(root)
+    (base / bot_relay.CLAIMED_DIR).mkdir(parents=True, exist_ok=True)
+    payload = {**env, "target_profile": target_profile}
+    (base / bot_relay.CLAIMED_DIR / f"{env['id']}.json").write_text(
+        json.dumps(payload), encoding="utf-8")
+
+
 def _rows():
     return [
         {
@@ -294,11 +302,23 @@ def test_waiter_prints_the_completion_notification_the_sender_wakes_on(root, cap
 
     env = {"id": "d" * 32, "target_handle": "researcher", "target_connection": "ssh-vps"}
     reply_path = bot_relay.relay_root(root) / bot_relay.REPLIES_DIR / f"{env['id']}.json"
-    reply_path.parent.mkdir(parents=True, exist_ok=True)
+    label = "@researcher on ssh-vps"
     if reply_file is not None:
-        reply_path.write_text(json.dumps(reply_file), encoding="utf-8")
+        if reply_file.get("error"):
+            bot_relay.write_reply(
+                root, env["id"],
+                error=str(reply_file["error"]),
+                reason=str(reply_file.get("reason") or ""),
+            )
+        else:
+            _write_claimed_envelope(root, env, target_profile="researcher")
+            bot_relay.write_reply(
+                root, env["id"],
+                reply=str(reply_file.get("reply") or ""),
+                delivered_profile="researcher",
+            )
 
-    code = bot_mode_dm._delivery_main(["--wait-reply", str(reply_path), "@researcher on ssh-vps", "0.3"])
+    code = bot_mode_dm._delivery_main(["--wait-reply", str(reply_path), label, "0.3"])
 
     out = capsys.readouterr().out
     assert code == expected_code
@@ -306,6 +326,67 @@ def test_waiter_prints_the_completion_notification_the_sender_wakes_on(root, cap
     assert bot_mode_dm._delivery_main(["--wait-reply", str(reply_path)]) == 2
 
 
+def test_wait_reply_main_success_iff_attested_responder_matches_envelope_target(root, capsys):
+    """The sender-side waiter must never treat another bot's ok reply as the envelope target's:
+    success iff delivered_profile attests the same profile as the claimed envelope's target."""
+    from tools import bot_mode_dm
+
+    bot_relay.write_remote_roster(root, [
+        {"profile": "tb-cndr", "handle": "tb-cndr", "connection_id": "relay-conn"},
+    ])
+    roster = bot_relay.read_remote_roster(root)
+    target = bot_relay.resolve_remote_target("tb-cndr", roster)
+    env = bot_relay.enqueue_envelope(
+        root, target=target, message="ping", sender_profile="work", sender_handle="work",
+    )
+    claimed = bot_relay.claim_pending_envelopes(root)
+    assert [e["id"] for e in claimed] == [env["id"]]
+
+    label = "@tb-cndr on relay-conn"
+    reply_path = bot_relay.relay_root(root) / bot_relay.REPLIES_DIR / f"{env['id']}.json"
+    secret = "SECRET-DEFAULT-TEXT"
+
+    misrouted = bot_relay.write_reply(root, env["id"], reply=secret)
+    misrouted_data = json.loads(misrouted.read_text(encoding="utf-8"))
+    misrouted_data["delivered_profile"] = "default"
+    misrouted.write_text(json.dumps(misrouted_data), encoding="utf-8")
+    code = bot_mode_dm._delivery_main(["--wait-reply", str(reply_path), label, "0.3"])
+    out = capsys.readouterr().out
+    assert code == 1
+    assert "MISROUTED" in out and "target_scope_unresolved" in out
+    assert secret not in out
+    assert not out.lstrip().startswith("Reply from")
+
+    reply_path.unlink()
+    attested = bot_relay.write_reply(root, env["id"], reply=secret, delivered_profile="tb-cndr")
+    assert attested == reply_path
+    code = bot_mode_dm._delivery_main(["--wait-reply", str(reply_path), label, "0.3"])
+    out = capsys.readouterr().out
+    assert code == 0
+    assert out.splitlines()[0] == f"Reply from {label}:"
+    assert secret in out
+
+
+def test_wait_reply_main_rejects_unattested_ok_reply(root, capsys):
+    """An ok reply without delivered_profile must not print the trusted 'Reply from' success line."""
+    from tools import bot_mode_dm
+
+    env_id = "e" * 32
+    env = {
+        "id": env_id,
+        "target_handle": "researcher",
+        "target_connection": "ssh-vps",
+        "target_profile": "researcher",
+    }
+    _write_claimed_envelope(root, env, target_profile="researcher")
+    label = "@researcher on ssh-vps"
+    reply_path = bot_relay.relay_root(root) / bot_relay.REPLIES_DIR / f"{env_id}.json"
+    bot_relay.write_reply(root, env_id, reply="maybe-wrong-bot")
+    code = bot_mode_dm._delivery_main(["--wait-reply", str(reply_path), label, "0.3"])
+    out = capsys.readouterr().out
+    assert code == 1
+    assert "UNVERIFIED" in out and "target_scope_unresolved" in out
+    assert not any(line.startswith("Reply from ") for line in out.splitlines())
 
 
 def test_roster_rejects_connection_id_outside_handle_charset(root):
@@ -337,9 +418,8 @@ def test_hostile_roster_fields_ride_as_argv_data(root):
 
     assert "-c" not in parts
     assert parts[4] == f"@researcher on {inj}"
-    reply_path = bot_relay.relay_root(root) / bot_relay.REPLIES_DIR / f"{env['id']}.json"
-    reply_path.parent.mkdir(parents=True, exist_ok=True)
-    reply_path.write_text(json.dumps({"reply": "pong"}), encoding="utf-8")
+    _write_claimed_envelope(root, env, target_profile="researcher")
+    bot_relay.write_reply(root, env["id"], reply="pong", delivered_profile="researcher")
     proc = subprocess.run(parts, capture_output=True, text=True, timeout=30)
 
     assert proc.returncode == 0 and proc.stdout.splitlines() == [f"Reply from @researcher on {inj}:", "pong"]
