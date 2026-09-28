@@ -459,6 +459,61 @@ def test_deliver_non_held_failure_path_is_unchanged(home, monkeypatch):
     assert calls[0] == calls[1], "retry must re-run the SAME session/argv"
 
 
+def test_deliver_cli_response_names_the_resolved_and_requested_profile(home, monkeypatch, caplog):
+    """A misroute can never again be silent: every ok response names which profile actually ran the
+    turn (``delivered_profile``) alongside the raw RPC ask (``requested_profile``), and one INFO log
+    line records the same facts plus the transport path — no message body, no secrets — so a
+    mismatch is provable from this install's own logs even without reproducing it live."""
+    class _Proc:
+        returncode, stdout, stderr = 0, "pong", ""
+
+    monkeypatch.setattr("hermes_cli.quiet_single_query.run_reported_turn", lambda *a, **k: _Proc())
+    with caplog.at_level("INFO", logger="tui_gateway.methods_bot_relay"):
+        # 'hermes' aliases to 'default' (methods_bot_relay.py's only alias): requested and
+        # delivered must differ here, proving the field is the RESOLVED profile, not an echo.
+        out = _result(srv._methods["bot_relay.deliver"](1, {"profile": "hermes", "message": "top secret ping"}))
+    assert out["delivered_profile"] == "default"
+    assert out["requested_profile"] == "hermes"
+    [record] = [r for r in caplog.records if "bot_relay.deliver" in r.getMessage()]
+    line = record.getMessage()
+    assert "requested_profile=hermes" in line
+    assert "delivered_profile=default" in line
+    assert "path=cli" in line
+    assert "top secret ping" not in line
+
+
+def test_deliver_live_sid_response_carries_delivered_profile(home, monkeypatch):
+    """The prompt.submit (live Bot Chat, no mailbox) path names delivered_profile too."""
+    monkeypatch.setattr("hermes_cli.quiet_single_query.run_reported_turn",
+                        lambda *a, **k: pytest.fail("must not spawn the CLI"))
+    monkeypatch.setitem(srv._methods, "prompt.submit",
+                        lambda rid, p: srv._ok(rid, {"status": "streaming"}))
+    monkeypatch.setattr(srv, "_profile_home", lambda name: home / "profiles" / name)
+    monkeypatch.setitem(srv._sessions, "live-ops",
+                        {"profile_home": str(home / "profiles" / "ops"), "pending_title": "Bot Chat", "history": []})
+    out = _result(srv._methods["bot_relay.deliver"](1, {"profile": "ops", "message": "ping"}))
+    assert out["delivered_profile"] == "ops"
+    assert out["requested_profile"] == "ops"
+
+
+def test_deliver_live_owner_settled_response_carries_delivered_profile(home, monkeypatch):
+    """The live-owner mailbox (settled) path names delivered_profile too."""
+    ops_home, lease = _lease_open_bot_chat(home)
+    spawned = []
+    _no_cli_transport(monkeypatch, spawned)
+    monkeypatch.setattr(srv, "_profile_home", lambda name: ops_home)
+    monkeypatch.setattr(srv, "_sessions", {})
+    monkeypatch.setattr("tools.bot_mode_dm._LIVE_WAIT_SECONDS", 5)
+    thread = _owner_settles(ops_home, {"status": "settled", "reply": "pong from the open chat"})
+    try:
+        out = _result(srv._methods["bot_relay.deliver"](1, {"profile": "ops", "message": "ping"}))
+        assert out["delivered_profile"] == "ops"
+        assert out["requested_profile"] == "ops"
+    finally:
+        thread.join(timeout=5)
+        lease.release()
+
+
 def test_reply_roundtrip_and_id_validation(home):
     envelope_id = "c" * 32
     _result(srv._methods["bot_relay.reply"](1, {"id": envelope_id, "reply": "hi"}))
