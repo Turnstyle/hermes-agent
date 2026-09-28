@@ -33,21 +33,32 @@ def _pids_for_home(home: Path, *, active_home: bool) -> set[int]:
         recorded = int(state.get("pid") or 0)
     except (TypeError, ValueError):
         recorded = 0
-    if recorded > 0 and _pid_alive(recorded) and _is_gateway_pid(recorded):
+    if recorded > 0 and _pid_alive(recorded) and _is_gateway_pid(recorded, home):
         pids.add(recorded)
     return pids
 
 
-def _is_gateway_pid(pid: int) -> bool:
-    """A recorded PID counts only if that live process is still a Hermes gateway.
+def _is_gateway_pid(pid: int, home: Path) -> bool:
+    """A recorded PID counts only if that live process is still a Hermes
+    gateway serving *this* home.
 
     ``gateway_state.json`` can outlive its process; the OS may hand the same
-    PID to an unrelated program, which must not look like a restart.
+    PID to an unrelated program, or to another profile's gateway. Match the
+    live command line's ``-p/--profile`` against the home's profile name
+    (root home = no profile flag). Any doubt counts as not observed.
     """
     try:
-        from gateway.status import _looks_like_gateway_process
+        from gateway.status import (
+            _looks_like_gateway_process,
+            _profile_name_for_home,
+            _read_process_cmdline,
+            profile_flag_value,
+        )
 
-        return bool(_looks_like_gateway_process(pid))
+        if not _looks_like_gateway_process(pid):
+            return False
+        cmdline = _read_process_cmdline(pid) or ""
+        return profile_flag_value(cmdline) == _profile_name_for_home(Path(home))
     except Exception:
         return False
 

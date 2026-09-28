@@ -5420,7 +5420,7 @@ def _discard_dead_host_record() -> bool:
         return False
 
 
-def _restart_all(system: bool) -> None:
+def _restart_all(system: bool, before_foreground=None) -> None:
     owner = _host_multiplexer_for_all_verb()
     if owner is not None and not _host_multiplexer_is_ours(owner):
         # `--all` means "restart the ONE host multiplexer" — and this profile does not own it.
@@ -5457,6 +5457,10 @@ def _restart_all(system: bool) -> None:
     # Even without a registered task, gateway_windows.start() uses the detached launcher.
     kind = _installed_service_kind_for(is_windows)
     if kind is None:
+        # Manual foreground start: settle the caller's restart claim first, because
+        # run_gateway may os._exit and skip the caller's context manager.
+        if before_foreground is not None:
+            before_foreground()
         # replace=True: if the old owner is still draining (a long drain, an ineffective SIGKILL, a
         # foreign-home owner the scan never saw), take the host over instead of attaching to it.
         run_gateway(verbose=0, replace=True)
@@ -5527,8 +5531,13 @@ def _cmd_restart(args):
         ):
             return
         if restart_all:
-            _restart_all(system)
-            _keep_restart_claim_if_observed(claim, before, all_profiles=True, signal=None)
+            foreground = []
+            _restart_all(
+                system,
+                before_foreground=lambda: (foreground.append(True), claim.rollback()),
+            )
+            if not foreground:
+                _keep_restart_claim_if_observed(claim, before, all_profiles=True, signal=None)
             return
 
         # The Windows restart path handles both registered installs and detached restarts.
