@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import logging
 import re
+import socket
 from dataclasses import dataclass
 from typing import Optional
 
@@ -336,9 +337,31 @@ def decompose_task(
     return _apply_fanout(task_id, parsed, routing, audit_author)
 
 
-def list_triage_ids(*, tenant: Optional[str] = None) -> list[str]:
-    """Return task ids currently in the triage column."""
+def list_triage_ids(*, tenant: Optional[str] = None, local_only: bool = False) -> list[str]:
+    """Return triage ids; auto-decompose skips cards homed on another node.
+
+    The fleet mapping is optional. Unmapped cards and local-only boards keep
+    their ordinary behaviour; filter before LIMIT so remote cards cannot crowd
+    local work out of the dispatcher's per-tick window.
+    """
     with kbc.connect_closing() as conn:
+        if local_only and conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type = 'table' "
+            "AND name = 'fleet_kanban_issue_map'"
+        ).fetchone():
+            node = socket.gethostname().split(".", 1)[0].lower()
+            tenant_filter = "AND t.tenant = ?" if tenant is not None else ""
+            rows = conn.execute(
+                "SELECT t.id FROM tasks AS t WHERE t.status = 'triage' "
+                f"{tenant_filter} "
+                "AND NOT EXISTS ("
+                "SELECT 1 FROM fleet_kanban_issue_map AS m "
+                "WHERE m.local_task_id = t.id "
+                "AND lower(COALESCE(m.current_node, m.source_node)) != ?"
+                ") ORDER BY t.priority DESC, t.created_at ASC LIMIT 1000",
+                (tenant, node) if tenant is not None else (node,),
+            ).fetchall()
+            return [row["id"] for row in rows]
         rows = kb.list_tasks(conn, status="triage", tenant=tenant, limit=1000)
     return [row.id for row in rows]
 
