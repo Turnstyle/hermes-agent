@@ -7,10 +7,12 @@ through ``~/.hermes/fleet-node-state/fleet_ops.py``. It does not keep a local qu
 
 from __future__ import annotations
 
+import contextlib
 import datetime
 import importlib.util
 import json
 import re
+import sys
 import tempfile
 import urllib.error
 import uuid
@@ -84,7 +86,10 @@ def _default_writer(paths, collection: str, set_by: str) -> int:
     if len(paths) != 1:
         raise FleetEnqueueError("queued DM create writes one document")
     try:
-        return int(module.create_file_if_absent(paths[0], collection, set_by=set_by))
+        # fleet_ops prints an "OK <id> ..." progress line to stdout; the enqueue CLI's stdout
+        # is the one-line JSON contract the delivery runner parses, so divert it to stderr.
+        with contextlib.redirect_stdout(sys.stderr):
+            return int(module.create_file_if_absent(paths[0], collection, set_by=set_by))
     except FleetEnqueueError:
         raise
     except Exception as exc:
@@ -100,7 +105,8 @@ def _default_reader(message_id: str) -> dict | None:
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     try:
-        doc, _ = module.get_doc("fleet_messages_v1", message_id)
+        with contextlib.redirect_stdout(sys.stderr):
+            doc, _ = module.get_doc("fleet_messages_v1", message_id)
         return doc
     except urllib.error.HTTPError as exc:
         if exc.code == 404:
