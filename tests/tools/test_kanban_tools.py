@@ -551,6 +551,25 @@ def test_create_happy_path(worker_env):
         conn.close()
 
 
+def test_create_normalizes_nonpositive_goal_turns(worker_env):
+    from tools import kanban_tools as kt
+    from hermes_cli import kanban_db_connect as kbc
+
+    with kbc.connect() as conn:
+        for requested, expected in ((5, 5), (0, None), (-2, None)):
+            result = json.loads(kt._handle_create({
+                "title": f"goal turns {requested}",
+                "assignee": "peer",
+                "goal_mode": True,
+                "goal_max_turns": requested,
+            }))
+            assert result["ok"] is True, result
+            stored = conn.execute(
+                "SELECT goal_max_turns FROM tasks WHERE id=?", (result["task_id"],)
+            ).fetchone()[0]
+            assert stored == expected
+
+
 @pytest.mark.parametrize("explicit", [{"workspace_kind": "scratch"}, {"project": ""}])
 @pytest.mark.parametrize("target_scoped", [False, True])
 def test_create_explicit_scratch_ignores_ambient_board_project(
