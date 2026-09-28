@@ -493,6 +493,65 @@ def _backdate_comments(conn, tid, seconds=60):
         )
 
 
+def test_active_pr_guard_only_counts_current_assignees_new_pr(
+    kanban_home: Path,
+) -> None:
+    with kbc.connect() as conn:
+        own_id = kb.create_task(conn, title="implement", assignee="worker")
+        kb.add_comment(
+            conn, own_id, author="worker",
+            body="Opened https://github.com/example/repo/pull/123",
+        )
+        assert kbd.check_respawn_guard(conn, own_id) == "active_pr"
+
+        operator_id = kb.create_task(conn, title="install", assignee="worker")
+        kb.add_comment(
+            conn, operator_id, author="operator",
+            body="Install https://github.com/example/repo/pull/528",
+        )
+        assert kbd.check_respawn_guard(conn, operator_id) is None
+
+
+def test_active_pr_guard_ignores_pr_already_named_in_task_body(
+    kanban_home: Path,
+) -> None:
+    with kbc.connect() as conn:
+        tid = kb.create_task(
+            conn, title="merge input PR", assignee="marshal",
+            body="Merge https://GITHUB.com/Example/Repo/pull/00518",
+        )
+        kb.add_comment(
+            conn, tid, author="marshal",
+            body="Review of http://github.com/example/repo/pull/518 is on hold",
+        )
+        assert kbd.check_respawn_guard(conn, tid) is None
+
+
+@pytest.mark.parametrize("requeue_kind", ("status", "promoted", "unblocked"))
+def test_active_pr_guard_lifts_after_deliberate_requeue_but_not_on_tie(
+    kanban_home: Path, requeue_kind: str,
+) -> None:
+    with kbc.connect() as conn:
+        tid = kb.create_task(conn, title="requeued work", assignee="worker")
+        kb.add_comment(
+            conn, tid, author="worker",
+            body="Opened https://github.com/example/repo/pull/123",
+        )
+        _backdate_comments(conn, tid)
+        with kb.write_txn(conn):
+            kb._append_event(conn, tid, requeue_kind)
+        assert kbd.check_respawn_guard(conn, tid) is None
+
+        tied_id = kb.create_task(conn, title="same second", assignee="worker")
+        kb.add_comment(
+            conn, tied_id, author="worker",
+            body="Opened https://github.com/example/repo/pull/124",
+        )
+        with kb.write_txn(conn):
+            kb._append_event(conn, tied_id, requeue_kind)
+        assert kbd.check_respawn_guard(conn, tied_id) == "active_pr"
+
+
 def test_active_pr_guard_lifts_for_profile_handed_the_card_after_the_pr(
     kanban_home: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -535,15 +594,12 @@ def test_active_pr_guard_lifts_for_profile_handed_the_card_after_the_pr(
         assert kbd.check_respawn_guard(conn, closer_id) == "active_pr"
 
 
-def test_active_pr_guard_holds_through_same_profile_reassign_and_unassign(
+def test_active_pr_guard_follows_current_assignee_through_reassignment(
     kanban_home: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Only a handoff to a DIFFERENT profile lifts ``active_pr``.
-
-    A no-op ``assign dev -> dev`` (CLI, dashboard PATCH, ``reassign --reclaim``)
-    and an unassign both record an ``assigned`` event but change no owner; if
-    they counted as handoffs the implementer would be re-spawned against its own
-    PR — the duplicate-work protection #111910 says must survive.
+    """Same-profile reassignment leaves the guard; an unassigned card has no
+    worker to guard until the dispatcher assigns that profile again. A real
+    handoff to a different profile still lifts the guard (#111910).
     """
     import hermes_cli.config as cfgmod
     import hermes_cli.profiles as profmod
@@ -561,8 +617,8 @@ def test_active_pr_guard_holds_through_same_profile_reassign_and_unassign(
         assert kbd.check_respawn_guard(conn, tid) == "active_pr"
 
         assert kb.assign_task(conn, tid, None) is True
-        assert kbd.check_respawn_guard(conn, tid) == "active_pr"
-        # The dispatcher's own default_assignee write is not an operator handoff.
+        assert kbd.check_respawn_guard(conn, tid) is None
+        # The dispatcher's own default_assignee write restores the same worker.
         res = kbd.dispatch_once(conn, dry_run=False, default_assignee="dev")
         assert tid in res.auto_assigned_default
         assert dict(res.respawn_guarded).get(tid) == "active_pr"

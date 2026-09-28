@@ -97,6 +97,12 @@ _RESPAWN_GUARD_PR_URL_RE = re.compile(
     re.IGNORECASE,
 )
 
+
+def _respawn_guard_pr_key(match: re.Match[str]) -> tuple[str, str, int]:
+    """Compare PR links by owner, repo and number, independent of URL spelling."""
+    owner, repo, _, number = match.group(0).casefold().split("github.com/", 1)[1].split("/")
+    return owner, repo, int(number)
+
 # ---------------------------------------------------------------------------
 # Lifecycle-guard fence recognition
 # ---------------------------------------------------------------------------
@@ -1897,7 +1903,7 @@ def check_respawn_guard(
     passes own those.
     """
     row = conn.execute(
-        "SELECT last_failure_error FROM tasks WHERE id = ?",
+        "SELECT last_failure_error, assignee, body FROM tasks WHERE id = ?",
         (task_id,),
     ).fetchone()
     if row is None:
@@ -1982,20 +1988,39 @@ def check_respawn_guard(
         if not requeued_after:
             return "recent_success"
 
-    # 4. GitHub PR URL in a recent comment — prior worker already opened a PR.
+    # 4. A current assignee's new GitHub PR URL in a recent comment — that
+    #    worker may have already opened a PR. Links in the task body are inputs,
+    #    and an explicit re-queue after the comment permits another run.
     #    Exception: a handoff AFTER the newest PR comment (operator reassign,
     #    reviewer changes_requested, review reopen) names the profile that must
     #    now work on THAT PR — a closer or the implementer finishing it, not a
     #    duplicate implementation (#111910). A crash/reclaim is not a handoff,
     #    so the worker that opened the PR is still not re-spawned against it.
     pr_cutoff = now - _RESPAWN_GUARD_PR_WINDOW
+    input_prs = {
+        _respawn_guard_pr_key(match)
+        for match in _RESPAWN_GUARD_PR_URL_RE.finditer(_kb._lossy_text(row["body"]) or "")
+    }
     for c in conn.execute(
-        "SELECT body, created_at FROM task_comments "
+        "SELECT author, body, created_at FROM task_comments "
         "WHERE task_id = ? AND created_at >= ? ORDER BY created_at DESC",
         (task_id, pr_cutoff),
     ).fetchall():
+        if not row["assignee"] or c["author"] != row["assignee"]:
+            continue
         body = _kb._lossy_text(c["body"])
-        if not (body and _RESPAWN_GUARD_PR_URL_RE.search(body)):
+        if not any(
+            _respawn_guard_pr_key(match) not in input_prs
+            for match in _RESPAWN_GUARD_PR_URL_RE.finditer(body)
+        ):
+            continue
+        requeued_after = conn.execute(
+            "SELECT 1 FROM task_events "
+            "WHERE task_id = ? AND created_at > ? "
+            "AND kind IN ('status', 'promoted', 'unblocked') LIMIT 1",
+            (task_id, int(c["created_at"] or 0)),
+        ).fetchone()
+        if requeued_after:
             continue
         events = conn.execute(
             # Strictly after: a same-second tie stays guarded (fail closed).
