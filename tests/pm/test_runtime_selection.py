@@ -64,6 +64,44 @@ def test_boot_uses_one_selected_dependency_tree_in_fresh_process(tmp_path, monke
     assert process.stdout.splitlines() == ["new", "True"]
 
 
+def test_activation_prefers_source_launcher_over_committed_venv(tmp_path, monkeypatch):
+    import os
+    import subprocess
+    import sys
+    from pm import environments
+
+    root = tmp_path / "repo"
+    launcher_dir = root / ".hermes" / "bin"
+    launcher_dir.mkdir(parents=True)
+    (launcher_dir / "hermes").touch()
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path / "home"))
+    state = environments.install_state_dir(root)
+    venv = state / "environments" / "current" / "venv"
+    environments.site_packages(venv).mkdir(parents=True)
+    (venv / "pyvenv.cfg").write_text("home = test\n")
+    venv_bin = environments.venv_bin_dir(venv)
+    venv_bin.mkdir()
+    (state / "facts.json").write_text(json.dumps({"schema": 1, "packages": {
+        "venv": {"environment": str(venv)}
+    }}))
+
+    repo = Path(__file__).resolve().parents[2]
+    code = (
+        "import os, sys; from pathlib import Path; "
+        "sys.path.insert(0, sys.argv[1]); "
+        "from pm.environments import activate_dependencies; "
+        "activate_dependencies(Path(sys.argv[2])); "
+        "print(os.environ['PATH'])"
+    )
+    env = {**os.environ, "PATH": os.pathsep.join((str(venv_bin), str(launcher_dir), "/usr/bin"))}
+    result = subprocess.run([sys.executable, "-c", code, str(repo), str(root)],
+                            env=env, capture_output=True, text=True, timeout=30)
+    assert result.returncode == 0, result.stderr
+    entries = result.stdout.strip().split(os.pathsep)
+    assert entries[:2] == [str(launcher_dir), str(venv_bin)]
+    assert entries.count(str(launcher_dir)) == entries.count(str(venv_bin)) == 1
+
+
 @pytest.mark.parametrize("command,allowed", [(["pm", "install", "--help"], True), (["pm", "doctor"], True),
     (["-p", "default", "pm", "repair"], True), (["chat"], False), (["chat", "pm", "install"], False)])
 def test_broken_environment_keeps_explicit_repair_entry_reachable(tmp_path, monkeypatch, command, allowed):

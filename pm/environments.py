@@ -343,8 +343,16 @@ def activate_dependencies(project_root: Path) -> None:
     os.environ["PYTHONPATH"] = os.pathsep.join([str(project_root.resolve()), str(selected)])
     os.environ.pop("VIRTUAL_ENV", None)
     executable_dir = venv_bin_dir(environment)
+    path_head = []
+    source_launcher_dir = project_root / ".hermes" / "bin"
+    if (source_launcher_dir / "hermes").exists():
+        path_head.append(str(source_launcher_dir))
     if executable_dir.is_dir():
-        os.environ["PATH"] = os.pathsep.join([str(executable_dir), os.environ.get("PATH", "")])
+        path_head.append(str(executable_dir))
+    if path_head:
+        os.environ["PATH"] = os.pathsep.join(dict.fromkeys([
+            *path_head, *[entry for entry in os.environ.get("PATH", "").split(os.pathsep) if entry]
+        ]))
 
 
 def activation_environment(project_root: Path) -> dict[str, str]:
