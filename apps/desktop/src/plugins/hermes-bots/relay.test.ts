@@ -680,6 +680,169 @@ describe('the drain loop wires drain → deliver → reply', () => {
   })
 })
 
+// FORENSIC-default-misroute.md / FORENSIC-multiplex-misroute.md: TurnerBook's multiplexed
+// gateway sometimes ran a relayed DM's turn against the ROOT/default profile instead of the
+// envelope's own target_profile, with nothing telling the sender. The server now reports which
+// profile actually ran the turn (`delivered_profile`, additive); a mismatch must be a LOUD,
+// typed failure — never a reply the sender reads as a normal success from the wrong bot.
+describe('a misroute is never silent', () => {
+  const envelope = {
+    id: 'env-1',
+    message: 'status?',
+    target_connection: 'b',
+    target_profile: 'ops'
+  }
+
+  it('refuses to post the reply as success when delivered_profile differs from the envelope target', async () => {
+    const calls = respondWith(call => {
+      if (call.method === 'bot_relay.outbox.drain') {
+        return { envelopes: call.connectionId === 'a' ? [envelope] : [] }
+      }
+
+      if (call.method === 'bot_relay.deliver') {
+        return { delivered_profile: 'default', reply: 'all green' }
+      }
+
+      return {}
+    })
+
+    const { startBotRelay, stopBotRelay } = await loadRelay()
+
+    startBotRelay()
+    await pushAndSettle()
+
+    const reply = calls.find(call => call.method === 'bot_relay.reply')
+
+    expect(reply?.params.reply).toBeUndefined()
+    expect(reply?.params).toMatchObject({
+      error: 'MISROUTED: delivered to @default instead of @ops',
+      id: 'env-1',
+      reason: 'target_scope_unresolved'
+    })
+    expect(noteBotAttentionMock).toHaveBeenCalledWith('b::ops', 'target_scope_unresolved')
+    expect(clearBotAttentionMock).not.toHaveBeenCalled()
+
+    stopBotRelay()
+  })
+
+  it('posts the normal reply when delivered_profile matches the envelope target', async () => {
+    const calls = respondWith(call => {
+      if (call.method === 'bot_relay.outbox.drain') {
+        return { envelopes: call.connectionId === 'a' ? [envelope] : [] }
+      }
+
+      if (call.method === 'bot_relay.deliver') {
+        return { delivered_profile: 'ops', reply: 'all green' }
+      }
+
+      return {}
+    })
+
+    const { startBotRelay, stopBotRelay } = await loadRelay()
+
+    startBotRelay()
+    await pushAndSettle()
+
+    expect(calls.find(call => call.method === 'bot_relay.reply')?.params).toMatchObject({
+      id: 'env-1',
+      reply: 'all green'
+    })
+    expect(clearBotAttentionMock).toHaveBeenCalledWith('b::ops')
+
+    stopBotRelay()
+  })
+
+  it('normalizes "hermes" to "default" the same way the server does before comparing', async () => {
+    const hermesEnvelope = { ...envelope, target_profile: 'hermes' }
+    const calls = respondWith(call => {
+      if (call.method === 'bot_relay.outbox.drain') {
+        return { envelopes: call.connectionId === 'a' ? [hermesEnvelope] : [] }
+      }
+
+      if (call.method === 'bot_relay.deliver') {
+        return { delivered_profile: 'default', reply: 'all green' }
+      }
+
+      return {}
+    })
+
+    const { startBotRelay, stopBotRelay } = await loadRelay()
+
+    startBotRelay()
+    await pushAndSettle()
+
+    expect(calls.find(call => call.method === 'bot_relay.reply')?.params).toMatchObject({
+      id: 'env-1',
+      reply: 'all green'
+    })
+
+    stopBotRelay()
+  })
+
+  it('treats a response with no delivered_profile (older gateway) as a normal success — compat', async () => {
+    const calls = respondWith(call => {
+      if (call.method === 'bot_relay.outbox.drain') {
+        return { envelopes: call.connectionId === 'a' ? [envelope] : [] }
+      }
+
+      if (call.method === 'bot_relay.deliver') {
+        return { reply: 'all green' }
+      }
+
+      return {}
+    })
+
+    const { startBotRelay, stopBotRelay } = await loadRelay()
+
+    startBotRelay()
+    await pushAndSettle()
+
+    expect(calls.find(call => call.method === 'bot_relay.reply')?.params).toMatchObject({
+      id: 'env-1',
+      reply: 'all green'
+    })
+    expect(clearBotAttentionMock).toHaveBeenCalledWith('b::ops')
+
+    stopBotRelay()
+  })
+
+  it('dials the (connection, profile)-specific route instead of the collapsed representative route', async () => {
+    // The representative route relayConnections() keeps for 'b' is bound to 'default' (as if it
+    // were listed first for a multiplexed connection); a distinct 'ops' route exists too.
+    const representative: ProfileRoute = { connectionId: 'b', mode: 'remote', profile: 'default', targetProfile: 'default' }
+    const opsRoute: ProfileRoute = { connectionId: 'b', mode: 'remote', profile: 'ops', targetProfile: 'ops' }
+
+    hostMock.profileRoutes = vi.fn(async () => [route('a'), representative, opsRoute])
+
+    const deliverRoutes: ProfileRoute[] = []
+
+    ;(hostMock.requestProfile as ReturnType<typeof vi.fn>).mockImplementation(
+      async (target: ProfileRoute, method: string) => {
+        if (method === 'bot_relay.outbox.drain') {
+          return { envelopes: target.connectionId === 'a' ? [envelope] : [] }
+        }
+
+        if (method === 'bot_relay.deliver') {
+          deliverRoutes.push(target)
+
+          return { delivered_profile: 'ops', reply: 'ok' }
+        }
+
+        return {}
+      }
+    )
+
+    const { startBotRelay, stopBotRelay } = await loadRelay()
+
+    startBotRelay()
+    await pushAndSettle()
+
+    expect(deliverRoutes).toEqual([opsRoute])
+
+    stopBotRelay()
+  })
+})
+
 describe('stop halts both loops', () => {
   it('leaves no timer able to reach the gateway after teardown', async () => {
     const calls = respondWith(() => ({ envelopes: [] }))
