@@ -471,3 +471,163 @@ def test_near_future_slack_timestamp_still_enforces_budget(tmp_path):
     allowed, minutes = evaluate_restart_budget(now=now, home=tmp_path)
     assert not allowed
     assert minutes is not None
+
+
+def _bind_restart_cli(monkeypatch, gw, tmp_path):
+    """Point the budget at ``tmp_path`` and skip guards that run before a backend."""
+    monkeypatch.setattr("hermes_constants.get_hermes_home", lambda: tmp_path)
+    monkeypatch.setattr(gw, "get_hermes_home", lambda: tmp_path)
+    monkeypatch.setattr(gw, "_refuse_from_inside_gateway", lambda *a, **k: None)
+    monkeypatch.setattr(
+        "hermes_cli.gateway_profile_lifecycle.profile_lifecycle", lambda *a, **k: False
+    )
+    monkeypatch.setattr(gw, "_guard_named_profile_under_multiplexer", lambda **k: None)
+
+
+def _assert_retry_then_consume(monkeypatch, gw, tmp_path, retry):
+    """The failed attempt left the hour free; ``retry`` may take it."""
+    t0 = 1_700_000_000.0
+    allowed, _ = evaluate_restart_budget(now=t0, home=tmp_path)
+    assert allowed
+    monkeypatch.setattr("hermes_cli.restart_budget.time.time", lambda: t0)
+    retry()
+    allowed2, _ = evaluate_restart_budget(now=t0 + 120, home=tmp_path)
+    assert not allowed2
+
+
+def test_empty_s6_all_restart_allows_immediate_retry(tmp_path, monkeypatch):
+    """s6 ``--all`` with no registered gateways must not keep the hour."""
+    from hermes_cli import gateway as gw
+
+    _bind_restart_cli(monkeypatch, gw, tmp_path)
+    monkeypatch.setattr(
+        "hermes_cli.service_manager.detect_service_manager", lambda: "s6"
+    )
+
+    class _Empty:
+        def list_profile_gateways(self):
+            return []
+
+        def restart(self, name):
+            raise AssertionError(name)
+
+    monkeypatch.setattr(
+        "hermes_cli.service_manager.get_service_manager", lambda: _Empty()
+    )
+    gw._cmd_restart(SimpleNamespace(system=False, all=True, force=False))
+
+    restarted = []
+
+    class _One:
+        def list_profile_gateways(self):
+            return ["coder"]
+
+        def restart(self, name):
+            restarted.append(name)
+
+    monkeypatch.setattr(
+        "hermes_cli.service_manager.get_service_manager", lambda: _One()
+    )
+
+    def retry():
+        gw._cmd_restart(SimpleNamespace(system=False, all=True, force=False))
+
+    _assert_retry_then_consume(monkeypatch, gw, tmp_path, retry)
+    assert restarted == ["gateway-coder"]
+
+
+def test_systemd_start_limit_allows_immediate_retry(tmp_path, monkeypatch, capsys):
+    """A start-limit rejection from ``_systemd_reset_and_run`` must not keep the hour."""
+    import subprocess
+
+    from hermes_cli import gateway as gw
+
+    _bind_restart_cli(monkeypatch, gw, tmp_path)
+    monkeypatch.setattr(gw, "_dispatch_all_via_service_manager_if_s6", lambda *a, **k: False)
+    monkeypatch.setattr(gw, "_dispatch_via_service_manager_if_s6", lambda *a, **k: False)
+    monkeypatch.setattr(gw, "_installed_service_kind_for", lambda *a, **k: "systemd")
+    monkeypatch.setattr(gw, "_systemd_scope_preamble", lambda *a, **k: False)
+    monkeypatch.setattr(gw, "refresh_systemd_unit_if_needed", lambda **k: None)
+    monkeypatch.setattr("gateway.status.get_running_pid", lambda *a, **k: None)
+    monkeypatch.setattr(gw, "_systemd_main_pid", lambda **k: None)
+    monkeypatch.setattr(gw, "_recover_pending_systemd_restart", lambda **k: False)
+    monkeypatch.setattr(gw, "get_service_name", lambda: "hermes-gateway")
+    monkeypatch.setattr(gw, "_wait_for_systemd_service_restart", lambda **k: True)
+
+    def reject_restart(args, **kwargs):
+        if args and args[0] == "reset-failed":
+            return subprocess.CompletedProcess(args, 0, "", "")
+        raise subprocess.CalledProcessError(
+            1, ["systemctl", *args], stderr="start-limit-hit"
+        )
+
+    monkeypatch.setattr(gw, "_run_systemctl", reject_restart)
+    gw._cmd_restart(SimpleNamespace(system=False, all=False, force=False))
+    assert "rate-limited" in capsys.readouterr().out
+
+    started = []
+
+    def accept_restart(args, **kwargs):
+        started.append(list(args))
+        return subprocess.CompletedProcess(args, 0, "", "")
+
+    monkeypatch.setattr(gw, "_run_systemctl", accept_restart)
+
+    def retry():
+        gw._cmd_restart(SimpleNamespace(system=False, all=False, force=False))
+
+    _assert_retry_then_consume(monkeypatch, gw, tmp_path, retry)
+    assert ["restart", "hermes-gateway"] in started
+
+
+def test_launchd_rejected_kickstart_allows_immediate_retry(tmp_path, monkeypatch):
+    """launchd has no success-without-a-restart return. A kickstart ``CalledProcessError``
+    that is neither an unloaded job nor a domain-unsupported fallback still rolls the hour
+    back, so a retry immediately afterward is allowed and then consumes it.
+    """
+    import subprocess
+
+    from hermes_cli import gateway as gw
+    import hermes_cli.gateway_launchd as launchd
+
+    plist = tmp_path / "ai.hermes.gateway.plist"
+    plist.write_text("<plist/>", encoding="utf-8")
+    _bind_restart_cli(monkeypatch, gw, tmp_path)
+    monkeypatch.setattr(gw, "_dispatch_all_via_service_manager_if_s6", lambda *a, **k: False)
+    monkeypatch.setattr(gw, "_dispatch_via_service_manager_if_s6", lambda *a, **k: False)
+    monkeypatch.setattr(gw, "_installed_service_kind_for", lambda *a, **k: "launchd")
+    monkeypatch.setattr(gw, "refresh_launchd_plist_if_needed", lambda: True)
+    monkeypatch.setattr(gw, "get_launchd_label", lambda: "ai.hermes.gateway")
+    monkeypatch.setattr(gw, "_launchd_domain", lambda: "gui/501")
+    monkeypatch.setattr(gw, "get_launchd_plist_path", lambda: plist)
+    monkeypatch.setattr(gw, "_wait_for_api_server_port_free", lambda: None)
+    monkeypatch.setattr(gw, "_clear_launchd_unsupported_marker", lambda: None)
+    monkeypatch.setattr("gateway.status.get_running_pid", lambda *a, **k: None)
+
+    calls = []
+
+    def failing_launchctl(cmd, check=False, timeout=None, **kwargs):
+        calls.append(list(cmd))
+        if check and cmd[:2] == ["launchctl", "kickstart"]:
+            raise subprocess.CalledProcessError(1, cmd, stderr="launchctl failed")
+        return subprocess.CompletedProcess(cmd, 0, "", "")
+
+    monkeypatch.setattr(launchd.subprocess, "run", failing_launchctl)
+    with pytest.raises(SystemExit) as exc:
+        gw._cmd_restart(SimpleNamespace(system=False, all=False, force=False))
+    assert exc.value.code == 1
+    assert any(cmd[:2] == ["launchctl", "kickstart"] for cmd in calls)
+
+    calls.clear()
+
+    def accepting_launchctl(cmd, check=False, timeout=None, **kwargs):
+        calls.append(list(cmd))
+        return subprocess.CompletedProcess(cmd, 0, "", "")
+
+    monkeypatch.setattr(launchd.subprocess, "run", accepting_launchctl)
+
+    def retry():
+        gw._cmd_restart(SimpleNamespace(system=False, all=False, force=False))
+
+    _assert_retry_then_consume(monkeypatch, gw, tmp_path, retry)
+    assert any(cmd[:3] == ["launchctl", "kickstart", "-k"] for cmd in calls)

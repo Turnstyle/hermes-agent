@@ -12,6 +12,7 @@ prior restart.
 
 from __future__ import annotations
 
+import enum
 import json
 import logging
 import math
@@ -32,6 +33,33 @@ except ImportError:  # pragma: no cover - Windows
 
 RESTART_BUDGET_SECONDS = 60 * 60
 CRASH_RECOVERY_BYPASS = "crash_recovery"
+
+
+class RestartSignal(enum.Enum):
+    """What a backend actually did with a restart request.
+
+    ``INITIATED`` is the only value that may keep the hour claim. ``NOOP`` means
+    the helper returned without asking any supervisor to restart. ``REJECTED``
+    means the supervisor refused (start-limit, every service call failed).
+    Members stay truthy so existing "this backend handled the verb" checks
+    still skip the host fallback.
+    """
+
+    INITIATED = "initiated"
+    NOOP = "noop"
+    REJECTED = "rejected"
+
+
+def restart_signal_was_initiated(outcome) -> bool:
+    """True when ``outcome`` reports that a restart was actually started.
+
+    ``None`` and ``True`` are the legacy "helper returned normally / dispatched"
+    results. An explicit noop or rejection is not initiated. ``False`` means the
+    helper did not handle the verb at all.
+    """
+    if outcome is False or outcome is RestartSignal.NOOP or outcome is RestartSignal.REJECTED:
+        return False
+    return True
 FUTURE_TIMESTAMP_SLACK_SECONDS = 120
 _HEALTH_FAILED = frozenset({
     "failed",

@@ -809,6 +809,16 @@ def _wait_for_launchd_service_pid(
 
 
 def launchd_restart():
+    """Restart the LaunchAgent. Returns :class:`RestartSignal`.
+
+    Every normal return is ``INITIATED``: kickstart, bootstrap, SIGUSR1, a
+    self-restart request, or the detached fallback actually spawned a process.
+    A kickstart that raises still propagates (or ``sys.exit``), which rolls the
+    hour claim back. There is no launchd path that returns success after
+    sending no restart, so there is no ``NOOP``/``REJECTED`` return here.
+    """
+    from hermes_cli.restart_budget import RestartSignal
+
     label = _gw().get_launchd_label()
     domain = _gw()._launchd_domain()
     target = f"{domain}/{label}"
@@ -834,7 +844,7 @@ def launchd_restart():
         pid = get_running_pid()
         if pid is not None and _gw()._request_gateway_self_restart(pid):
             _launchd_ok("✓ Service restart requested")
-            return
+            return RestartSignal.INITIATED
         if pid is not None and _gw().probe_gateway_loop_liveness(pid) == _gw().GATEWAY_LOOP_WEDGED:
             # Event loop provably dead: it can't process a graceful shutdown, so a full drain wait
             # only stalls the restart (and `hermes update`). Bounded SIGTERM → SIGKILL, ~10s.
@@ -853,7 +863,7 @@ def launchd_restart():
                 # but a clean exit doesn't prove supervision, so verify a replacement PID appears first.
                 if _gw()._wait_for_launchd_service_pid(label, pid, timeout=15.0, domain=domain):
                     _launchd_ok("✓ Service restart requested")
-                    return
+                    return RestartSignal.INITIATED
                 print("⚠ launchd did not revive the gateway after its graceful exit — forcing restart")
             else:
                 print(f"⚠ Gateway drain timed out after {wait_budget:.0f}s — forcing launchd restart")
@@ -869,16 +879,20 @@ def launchd_restart():
             subprocess.run(["launchctl", "bootstrap", _gw()._launchd_domain(), plist_path], check=True, timeout=30)
             subprocess.run(["launchctl", "kickstart", target], check=True, timeout=30)
             _launchd_ok("✓ Service restarted")
-            return
+            return RestartSignal.INITIATED
         # Captured: an unloaded job (3/113/125) is the expected case below, which
         # prints its own ↻ line — and e.stderr feeds the update_cmd failure diagnostic.
         _gw()._wait_for_api_server_port_free()
         subprocess.run(["launchctl", "kickstart", "-k", target], check=True, timeout=90, **_gw()._CAPTURE_TEXT)
         _launchd_ok("✓ Service restarted")
+        return RestartSignal.INITIATED
     except subprocess.CalledProcessError as e:
         if not _launchd_error_indicates_unloaded(e):
+            # Domain-unsupported errors spawn the detached fallback before this
+            # returns; that spawn is a real start. A hard launchctl error raises
+            # instead, so the caller does not keep the hour.
             _gw()._launchd_degrade_or_raise(e, "launchctl kickstart")
-            return
+            return RestartSignal.INITIATED
         # Job not loaded — bootstrap and start fresh
         print("↻ launchd job was unloaded; reloading")
         try:
@@ -891,8 +905,9 @@ def launchd_restart():
             subprocess.run(["launchctl", "kickstart", target], check=True, timeout=30)
         except subprocess.CalledProcessError as e2:
             _gw()._launchd_degrade_or_raise(e2, "launchctl")
-            return
+            return RestartSignal.INITIATED
         _launchd_ok("✓ Service restarted")
+        return RestartSignal.INITIATED
 
 
 # KeepAlive relaunches at most ~once per 10s, so a self-restart leaves the label pid-less that long.
