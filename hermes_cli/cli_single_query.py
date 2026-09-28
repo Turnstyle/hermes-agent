@@ -231,8 +231,9 @@ def _run_quiet_single_query(cli, effective_query, emitter=None):
     from agent.interrupt_compat import _accepts_keyword
     from agent.turn_author import take_turn_author_from_env
     from hermes_cli.quiet_single_query import (
-        adopt_unanswered_turn, bind_quiet_session_key, continue_quiet_notify_completions,
-        exit_single_query, quiet_notify_linger_seconds, take_turn_report_path, write_turn_report,
+        FOLLOW_UP_NOT_ACCEPTED, adopt_unanswered_turn, bind_quiet_session_key,
+        continue_quiet_notify_completions, exit_single_query, quiet_notify_linger_seconds,
+        take_turn_report_path, write_turn_report,
     )
 
     author = take_turn_author_from_env()
@@ -288,7 +289,7 @@ def _run_quiet_single_query(cli, effective_query, emitter=None):
                     if not _reclaim_session_for_follow_up(cli, linger_deadline):
                         logger.warning("Notify follow-up for session %s not run: another surface held the "
                                        "chat through the linger budget", getattr(cli, "session_id", "") or "")
-                        return last_follow
+                        return FOLLOW_UP_NOT_ACCEPTED
                     rows = _durable_row_count(cli)
                     if rows is not None and rows_at_release is not None and rows != rows_at_release:
                         # Another writer's turns landed while this process was idle: continue from the
