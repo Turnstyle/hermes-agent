@@ -1603,16 +1603,25 @@ export interface RelayEnvelope {
   message: string
   [key: string]: unknown
 }
-/** ``profile`` here is the TARGET profile on this gateway (also what the desktop route wrapper adds). */
+/** ``profile`` is what the desktop route wrapper stamps (the dialled route's key, which can differ from the envelope's target). ``target_profile``, when sent, is the authoritative target the transport never rewrites. */
 export interface BotRelayDeliverParams {
   profile: string
   message: string
   from_profile?: string | null
   from_handle?: string | null
   from_connection?: string | null
+  target_profile?: string | null
+  envelope_id?: string | null
 }
+/** ``delivered_profile`` is this gateway's attestation of which profile ran the turn. */
 export interface BotRelayDeliverResult {
   reply: string
+  delivered_profile?: string | null
+  requested_profile?: string | null
+  reply_relayed?: boolean | null
+  reason?: string | null
+  status?: string | null
+  message_id?: string | null
 }
 export interface BotRelayReplyParams {
   profile?: string | null
@@ -1620,6 +1629,10 @@ export interface BotRelayReplyParams {
   reply?: string | null
   error?: string | null
   reason?: string | null
+  reply_relayed?: boolean | null
+  delivered_profile?: string | null
+  status?: string | null
+  message_id?: string | null
 }
 export interface OkResult {
   ok?: boolean
@@ -2452,6 +2465,7 @@ export interface PromptSubmitParams {
 /** ``status`` is absent only on the typed-stop-phrase reply (``voice_stopped``). After a truncation the survivor row ids let the client rebind its cached ``rowId``s (``None`` map entries: drop the cached id). ``turn_isolation`` marks a compute-host dispatch. */
 export interface PromptSubmitResult {
   status?: PromptSubmitStatus | null
+  behind?: 'bot' | null
   voice_stopped?: boolean | null
   user_row_id?: number | null
   survivor_user_row_ids?: (number | null)[] | null

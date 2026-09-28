@@ -9,6 +9,7 @@ turns once the gateway starts draining.
 
 import asyncio
 import hashlib
+import json
 import threading
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -230,6 +231,38 @@ class TestDrainAdmission:
                     assert response.status == 503
                     assert response.headers["Retry-After"] == "1"
                     assert payload["error"]["code"] == "gateway_draining"
+
+    @pytest.mark.asyncio
+    async def test_draining_session_chat_is_queued_not_503(self):
+        """A text bot DM during drain is accepted into the restart spool, not 503."""
+        from hermes_constants import get_hermes_home
+
+        adapter = APIServerAdapter(PlatformConfig(enabled=True))
+        runner = SimpleNamespace(_draining=True, _external_drain_active=False)
+
+        def _queue_during_drain_enabled(mode=None):
+            return True
+
+        runner._queue_during_drain_enabled = _queue_during_drain_enabled
+        app = _make_admission_app(adapter)
+
+        with patch("gateway.run._gateway_runner_ref", lambda: runner):
+            async with TestClient(TestServer(app)) as client:
+                response = await client.post(
+                    "/api/sessions/bot-chat/chat",
+                    json={"message": "deliver me after restart"},
+                )
+                payload = await response.json()
+
+        assert response.status == 202
+        assert payload["status"] == "queued"
+        assert payload["object"] == "hermes.session.chat.queued"
+        spool = list((get_hermes_home() / "pending_messages").glob("*.json"))
+        assert len(spool) == 1
+        saved = json.loads(spool[0].read_text(encoding="utf-8"))
+        assert saved["data"]["text"] == "deliver me after restart"
+        assert saved["data"]["session_id"] == "bot-chat"
+        assert saved["reason"] == "gateway_draining"
 
 
 # ---------------------------------------------------------------------------

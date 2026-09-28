@@ -912,8 +912,9 @@ class HermesCLI(CLIInitMixin, CLITuiRuntimeMixin, CLIProcessNotificationsMixin, 
         self._init_runtime_state(resume)
 
 
-    def _claim_active_session(self, surface: str = "cli", *, stderr: bool = False) -> bool:
-        """Claim a global active-session slot for this CLI process."""
+    def _claim_active_session(self, surface: str = "cli", *, stderr: bool = False, silent: bool = False) -> bool:
+        """Claim a global active-session slot for this CLI process. ``silent`` skips the refusal
+        print for callers that retry the claim in a poll loop (one-shot idle linger, turn-end drain)."""
         if self._active_session_lease is not None:
             return True
         try:
@@ -933,7 +934,8 @@ class HermesCLI(CLIInitMixin, CLITuiRuntimeMixin, CLIProcessNotificationsMixin, 
         if message:
             # Kept so a one-shot Kanban worker can map a capacity refusal to its exit code.
             self._active_session_refusal_reason = getattr(message, "reason", "")
-            print(format_refusal_stderr(message), file=sys.stderr) if stderr else self._console_print(f"[bold red]{message}[/]")
+            if not silent:
+                print(format_refusal_stderr(message), file=sys.stderr) if stderr else self._console_print(f"[bold red]{message}[/]")
             return False
         self._active_session_lease = lease
         with suppress(Exception):

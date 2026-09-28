@@ -67,6 +67,9 @@ def _run_stream_json_chat(monkeypatch, capsys, run_conversation, credentials_ok=
         def _claim_active_session(self, *_a, **_k):
             return True
 
+        def _release_active_session(self):
+            pass
+
         def _ensure_runtime_credentials(self):
             return credentials_ok
 

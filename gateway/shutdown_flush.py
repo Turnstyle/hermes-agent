@@ -27,6 +27,7 @@ logger = logging.getLogger(__name__)
 # operation. Payloads carry the full transcript message dict for verbatim replay.
 # See #78182.
 TRANSCRIPT_CAP_DROP_REASON = "transcript_cap_drop"
+GATEWAY_DRAINING_REASON = "gateway_draining"
 # Monotonic tiebreaker so same-second spool files replay in drop order.
 _TRANSCRIPT_SPOOL_SEQ = itertools.count()
 
@@ -250,9 +251,63 @@ def recover_pending_to_db(session_db=None, *, session_resolver=None) -> int:
     return recovered
 
 
+async def recover_gateway_draining_session_chats(runner) -> int:
+    """Replay drain-spooled session chat turns via the API server; delete each spool on dispatch success."""
+    from gateway.config import Platform
+
+    api = (getattr(runner, "adapters", None) or {}).get(Platform.API_SERVER)
+    dispatch = getattr(api, "dispatch_session_chat_turn", None)
+    if not callable(dispatch):
+        return 0
+    replayed = 0
+    for path in sorted(_get_flush_dir().glob("*.json")):
+        try:
+            payload = json.loads(path.read_text(encoding="utf-8-sig"))
+        except Exception as exc:
+            logger.warning("Failed to read gateway-draining spool %s: %s", path, exc)
+            continue
+        if payload.get("reason") != GATEWAY_DRAINING_REASON:
+            continue
+        data = payload.get("data") or {}
+        session_id = str(data.get("session_id") or "")
+        message = data.get("text") or ""
+        if not session_id or not isinstance(message, str) or not message.strip():
+            logger.warning(
+                "Cannot replay structurally invalid gateway-draining spool %s; preserved",
+                path,
+            )
+            continue
+        try:
+            accepted = await dispatch(session_id=session_id, message=message)
+        except Exception:
+            logger.warning(
+                "Gateway-draining session chat replay failed for %s (%s); spool preserved",
+                session_id,
+                path,
+                exc_info=True,
+            )
+            continue
+        if not accepted:
+            logger.warning(
+                "Gateway-draining session chat dispatch refused for %s (%s); spool preserved",
+                session_id,
+                path,
+            )
+            continue
+        path.unlink(missing_ok=True)
+        replayed += 1
+    if replayed:
+        logger.info("Replayed %d gateway-draining session chat turn(s) after restart", replayed)
+    return replayed
+
+
 def _recover_one_payload(session_db, path: Path, payload: Dict[str, Any], *,
                          session_resolver=None) -> bool:
     """Append one flush payload to ``session_db``; False (file kept) when structurally invalid."""
+    if payload.get("reason") == GATEWAY_DRAINING_REASON:
+        # Drain-queued session chat is replayed through the API session-chat turn path after startup,
+        # not as a transcript-only append (#63529).
+        return False
     # Cap-dropped transcript payloads carry the full message dict keyed by session_id — replay directly
     # (#78182). This handles spool files that were never drained before a restart.
     if payload.get("reason") == TRANSCRIPT_CAP_DROP_REASON:

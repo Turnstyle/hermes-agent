@@ -38,7 +38,11 @@ def _run(monkeypatch, env_value, run_conversation=None):
 
     agent = SimpleNamespace(run_conversation=run_conversation or record, session_id="s-1")
     with pytest.raises(SystemExit) as exc:
-        cli._run_quiet_single_query(SimpleNamespace(agent=agent, conversation_history=[], session_id="s-1"), "hello")
+        cli._run_quiet_single_query(
+            SimpleNamespace(agent=agent, conversation_history=[], session_id="s-1",
+                            _claim_active_session=lambda *a, **k: True, _release_active_session=lambda: None),
+            "hello",
+        )
     assert exc.value.code == 0
     return recorded
 
@@ -94,7 +98,8 @@ def test_quiet_one_shot_resumes_nested_notify_on_this_session_not_parent(monkeyp
     try:
         with pytest.raises(SystemExit) as exc:
             cli._run_quiet_single_query(
-                SimpleNamespace(agent=agent, conversation_history=[], session_id="session-B"),
+                SimpleNamespace(agent=agent, conversation_history=[], session_id="session-B",
+                                _claim_active_session=lambda *a, **k: True, _release_active_session=lambda: None),
                 "ask C",
             )
         assert exc.value.code == 0

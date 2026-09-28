@@ -55,8 +55,10 @@ _LIVE_WAIT_SECONDS = 300
 _LOCAL_LIVE_WAIT_SECONDS: Optional[float] = None
 # While waiting on a live owner's receipt, re-check that the owner lease still exists this often.
 _OWNER_CHECK_SECONDS = 15.0
-# A local delivery re-probes for a live owner between turn-lock attempts of this length.
+# Relay still uses this slice. Local bot DMs fast-ack instead of looping it.
 _BUSY_SLICE_SECONDS = 15.0
+# Busy fast-ack budget. The registry write returns well inside this; the lock probe must too.
+_FAST_ACK_SECONDS = 2.0
 
 # '<peer>/<agent>' — peer names are lowercase (``hermes peer`` normalizes them).
 _PEER_TARGET_RE = re.compile(r"^([a-z0-9][a-z0-9_-]{0,63})/([a-zA-Z0-9][a-zA-Z0-9_-]{0,63})$")
@@ -676,6 +678,61 @@ def _local_delivery_home(argv: list[str]) -> Path | None:
     return dict(_roster(_hermes_root(Path(_default_home())))).get(argv[2])
 
 
+def _busy_sender(author: Optional[dict]) -> str:
+    """tb-king: the fleet handle is the author id with a leading ``bot:`` stripped.
+
+    A missing or non-bot author still queues, under the ``sender`` fallback, so a failed write
+    stays an immediate ``target_busy`` rather than a wait loop.
+    """
+    author_id = str((author or {}).get("id") or "") if isinstance(author, dict) else ""
+    if author_id.startswith("bot:"):
+        sender = author_id.removeprefix("bot:").split(":", 1)[0]
+        if sender:
+            return sender
+    if isinstance(author, dict):
+        from tools.fleet_message_enqueue import fleet_handle
+        return fleet_handle(author.get("name") or author.get("id"), fallback="sender")
+    return "sender"
+
+
+def _recipient_admits_queue(profile: str, home: Path | None) -> bool | None:
+    """True when that profile drains, False when it does not, None when this interpreter cannot read config.
+
+    The delivery runner is sometimes the bare store python (no yaml). A failed import is not
+    "drain disabled": the checkout launcher decides admission. A readable config that is off is
+    an honest ``target_busy`` and does not start the enqueue subprocess.
+    """
+    try:
+        from hermes_cli.config import read_user_config_raw  # noqa: F401
+    except ImportError:
+        return None
+    if home is None:
+        return False
+    from tools.fleet_message_drain import recipient_drain_enabled
+    return recipient_drain_enabled(profile, profile_home=home)
+
+
+def _drain_enqueue_command(cli: str, sender: str, home: Path, dm_file: str,
+                           message_id: str | None = None) -> list[str]:
+    """Run the Firestore write under the Hermes runtime of the SAME source tree this runner runs from.
+
+    The runner itself runs under the bare store python (no yaml / google.auth). The install venv's
+    python is not usable either: it imports the editable ``environments/*/workspace`` copy, which can
+    lag this checkout and lack ``tools.fleet_message_drain`` entirely. The checkout's own bootstrap
+    launcher (``<root>/.hermes/bin/hermes --run-module``) activates the dependency env and imports this
+    tree; fall back to the delivery CLI's launcher only when that file is absent.
+
+    ``message_id`` is the relay envelope id (create-only: an existing doc is not reset to queued).
+    """
+    source_launcher = Path(__file__).resolve().parents[1] / ".hermes" / "bin" / "hermes"
+    launcher = str(source_launcher) if source_launcher.is_file() else cli
+    argv = [launcher, "--run-module", "tools.fleet_message_drain",
+            "enqueue", "--from", sender, "--to-home", str(home), "--body-file", dm_file]
+    if message_id:
+        argv.extend(["--message-id", message_id])
+    return argv
+
+
 @contextlib.contextmanager
 def _dm_runner_lock(dm_file: str):
     """One runner per DM file for its whole lifecycle (live admission, owner_gone re-admission, CLI fallback).
@@ -716,14 +773,16 @@ def _run_delivery_locked(argv: list[str], dm_file: str, *, stdin_file: bool,
                          profile_home: Path | None = None, author: Optional[dict] = None) -> int:
     """Route to the live owner before attempting a CLI transport. Live deliveries
     retain their intent/payload and immutable receipt; only CLI/peer payloads are
-    removed after consumption. The CLI turn window holds the profile lock, so two
-    deliveries into one profile queue; a bounded wait ends in a 'target_busy' refusal.
+    removed after consumption. When the profile lock or Bot Chat is busy, the message
+    is written to fleet_messages_v1 and the sender is acked in under 5s.
     ``author`` rides to the child as HERMES_TURN_AUTHOR; ``hermes peer dm`` forwards it in the request body.
 
     Local (query-file) turns get one policy-gated retry (#93091 item 5): transient failures re-run the same
     session; a context_overflow re-run lets the retried turn's pre-API compaction pass compact the Bot Chat
     transcript first (agent/conversation_loop.py) — the sanctioned compression lever; no fresh session is
-    ever minted. Auth/quota/config failures never retry. Peer transports (stdin mode) retry on their own
+    ever minted. Auth/quota/config failures never retry. A busy target is not retried for
+    dm_queue_wait_seconds: it is written to fleet_messages_v1 and the sender is told
+    ``queued (<message_id>)`` within the fast-ack budget. Peer transports (stdin mode) retry on their own
     gateway's deliver path, not here.
     """
     # The live consumer owns turn admission; never compete for its CLI lease.
@@ -772,44 +831,63 @@ def _run_delivery_locked(argv: list[str], dm_file: str, *, stdin_file: bool,
                 with open(dm_file, "r", encoding="utf-8-sig") as stream:
                     # Passing the file descriptor as stdin bypasses the BOM-aware decoder.
                     return subprocess.run(argv, input=stream.read().encode("utf-8"), check=False, env=env).returncode
-        # Queue behind the recipient's running turn instead of failing target_busy after the short relay
-        # budget: this runner is a detached process that wakes the sender on exit (t_78c79c6b). Between
-        # lock attempts, re-probe for a live Bot Chat owner that opened meanwhile and hand off to it.
-        started = time.monotonic()
-        deadline = started + dm_queue_wait_seconds()
-        # ``home`` is a known local profile: only then is there a mailbox worth queueing behind, so an
-        # instant SESSION_NOT_OWNED refusal from the CLI (another surface holds the live session, not
-        # our own lock) is retried too — not just a lock-wait timeout. Without a resolvable profile
-        # (stdin/peer shapes, or a transport this module doesn't own) that refusal stays a hard failure.
+        # A busy target is a fast-ack, not an 1800s blind wait. One short lock probe, then
+        # the checkout launcher writes fleet_messages_v1. Under 5s.
+        from tools.fleet_message_enqueue import queued_ack
+
         can_queue = home is not None
-        first = True
-        while True:
-            if not first:
-                rc = _via_live_owner()
-                if rc is not None:
-                    keep_dm_file = True  # the live path owns its intent/evidence files from here
-                    return rc
-            first = False
-            remaining = max(0.0, deadline - time.monotonic())
-            final = remaining <= _BUSY_SLICE_SECONDS
+        probe = min(_FAST_ACK_SECONDS, dm_queue_wait_seconds())
+        try:
+            with _delivery_lock(argv, stdin_file=False, timeout_seconds=probe):
+                return _run_local_turn(argv, dm_file, env=env, busy_raises=can_queue)
+        except (_session_held_cls(), TurnBusyError) as exc:
+            if not can_queue:
+                raise
+            from tools.bot_mode_probe import _default_home, _hermes_root, _roster
+
+            recipient_home = home
+            if recipient_home is None:
+                recipient_home = dict(_roster(_hermes_root(Path(_default_home())))).get(exc.profile)
+            admits = _recipient_admits_queue(exc.profile, recipient_home)
+            if admits is False or recipient_home is None:
+                print(json.dumps({
+                    "error": (f"Delivery failed: @{exc.profile}'s Bot Chat is busy and the recipient "
+                              "does not drain queued fleet messages at turn end."),
+                    "reason": "target_busy",
+                    "reply_relayed": False,
+                }))
+                return 1
+            sender = _busy_sender(author)
+            envelope_id = _generation_delivery_id(dm_file, _read_generation(dm_file))
             try:
-                with _delivery_lock(argv, stdin_file=False,
-                                    timeout_seconds=remaining if final else _BUSY_SLICE_SECONDS):
-                    return _run_local_turn(argv, dm_file, env=env, busy_raises=can_queue)
-            except _session_held_cls() as exc:
-                if final:
-                    waited = time.monotonic() - started
-                    print(json.dumps({
-                        "error": f"Delivery failed: @{exc.profile}'s Bot Chat is open on another surface "
-                                 f"right now, so your message was NOT delivered after queuing ~{int(round(waited))}s. "
-                                 "Try again later.",
-                        "reason": "target_busy",
-                    }))
-                    return 1
-                time.sleep(min(_BUSY_SLICE_SECONDS, remaining))
-            except TurnBusyError as exc:
-                if final:
-                    raise TurnBusyError(exc.profile, time.monotonic() - started) from None
+                result = subprocess.run(
+                    _drain_enqueue_command(argv[0], sender, recipient_home, dm_file, envelope_id),
+                    check=False, stdin=subprocess.DEVNULL, capture_output=True,
+                    text=True, encoding="utf-8", errors="replace", timeout=5, env=env)
+                if result.returncode != 0:
+                    detail = (result.stderr or "").strip() or f"enqueue exited {result.returncode}"
+                    raise ValueError(detail.splitlines()[0])
+                child = json.loads(result.stdout)
+                if child.get("status") != "queued":
+                    raise ValueError(str(child.get("status") or "not queued"))
+                message_id = child.get("message_id")
+                if not isinstance(message_id, str) or not message_id:
+                    raise ValueError("missing queue message id")
+            except Exception as write_exc:
+                logger.warning("fleet message drain: enqueue failed", exc_info=True)
+                print(json.dumps({
+                    "error": f"Delivery failed: could not queue for @{exc.profile}: {write_exc}",
+                    "reason": "target_busy",
+                    "reply_relayed": False,
+                }))
+                return 1
+            print(json.dumps({
+                "status": "queued",
+                "message_id": message_id,
+                "reply_relayed": False,
+                "reply": queued_ack(message_id),
+            }))
+            return 0
     finally:
         if not keep_dm_file:
             _unlink_dm_artifacts(dm_file)
@@ -972,11 +1050,37 @@ def _persist_reply_when_done(proc_id: str, agent: Any) -> bool:
     return True
 
 
+def _normalize_relay_profile(name: str) -> str:
+    s = str(name or "").strip()
+    if not s:
+        return ""
+    return "default" if s.lower() == "hermes" else s
+
+
+def _reply_attestation(reply_path: str, record: dict) -> tuple[str, str]:
+    from tools.bot_relay import CLAIMED_DIR
+
+    expected = ""
+    claimed_path = Path(reply_path).parent.parent / CLAIMED_DIR / Path(reply_path).name
+    try:
+        with open(claimed_path, encoding="utf-8-sig") as fh:
+            env = json.load(fh)
+        expected = _normalize_relay_profile(str(env.get("target_profile") or ""))
+    except (OSError, json.JSONDecodeError, TypeError, ValueError):
+        expected = ""
+    delivered = _normalize_relay_profile(str(record.get("delivered_profile") or ""))
+    return expected, delivered
+
+
 def _wait_reply_main(reply_path: str, label: str, budget_seconds: str) -> int:
     """The relay reply waiter (``tools/bot_relay.waiter_command``): block until the sender-side
     reply file exists, print it as the completion notification the sender wakes on, exit 1 on a
-    delivery error or when the budget runs out. Stdlib only: this runs as a background process
-    from any bot turn, and the sender's completion notification is exactly its stdout."""
+    delivery error, when the responder is unattested or is not the envelope's target, or when the
+    budget runs out. An attested ok reply with ``reply_not_relayed`` (or ``reply_relayed: false``)
+    exits 0 with a typed flag and is not the trusted ``Reply from`` line: the message will run, so
+    a resend would duplicate it, but the prose is not that bot's answer. Stdlib only: this runs as a
+    background process from any bot turn, and the
+    sender's completion notification is exactly its stdout."""
     try:
         deadline = time.time() + float(budget_seconds)
     except ValueError:
@@ -986,12 +1090,54 @@ def _wait_reply_main(reply_path: str, label: str, budget_seconds: str) -> int:
             with open(reply_path, encoding="utf-8") as fh:
                 d = json.load(fh)
             if d.get("error"):
+                from tools.bot_failure_reasons import UNKNOWN, classify_agent_error
+
                 # Typed reason code rides ahead of the free text so the sender can branch on it
                 # without parsing provider prose. See #93091.
                 code = str(d.get("reason") or "").strip()
+                if code in ("", UNKNOWN):
+                    code = classify_agent_error(d["error"])
                 tag = f" [reason: {code}]" if code else ""
                 print(f"Delivery to {label} failed{tag}: {d['error']}")
                 return 1
+            from tools.bot_failure_reasons import REPLY_NOT_RELAYED, TARGET_SCOPE_UNRESOLVED
+
+            expected, delivered = _reply_attestation(reply_path, d)
+            if expected and delivered and expected != delivered:
+                print(
+                    f"Delivery to {label} failed [reason: {TARGET_SCOPE_UNRESOLVED}]: MISROUTED: "
+                    f"the relay delivered this message to @{delivered} instead of @{expected}; "
+                    f"that bot's reply is not {label}'s and is withheld. The message did NOT reach "
+                    f"{label}."
+                )
+                return 1
+            if not delivered or not expected:
+                print(
+                    f"Delivery to {label} UNVERIFIED [reason: {TARGET_SCOPE_UNRESOLVED}]: the relay "
+                    f"did not attest which bot answered (a Desktop or target gateway older than "
+                    f"delivery attestation), so the reply text is withheld. Do not attribute it to "
+                    f"{label} and do not resend blindly."
+                )
+                return 1
+            status = str(d.get("status") or "").strip()
+            if status == "queued":
+                from tools.bot_relay import relay_queued_sender_text
+
+                print(relay_queued_sender_text(delivered or expected))
+                return 0
+            reason = str(d.get("reason") or "").strip()
+            relayed = d.get("reply_relayed")
+            # An admitted-but-unrelayed ok reply is not the target's answer. Exit 0 so the sender
+            # does not resend a message that will run; the typed flag is what stops it booking the
+            # prose as "Reply from {label}".
+            if reason == REPLY_NOT_RELAYED or relayed is False:
+                flag = "true" if relayed is True else "false"
+                print(
+                    f"Delivery to {label} admitted "
+                    f"[reason: {reason or REPLY_NOT_RELAYED}, reply_relayed: {flag}]: "
+                    f"{d.get('reply') or '(empty reply)'}"
+                )
+                return 0
             print(f"Reply from {label}:")
             print(d.get("reply") or "(empty reply)")
             return 0

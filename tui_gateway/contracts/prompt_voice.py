@@ -7,6 +7,8 @@ and voice / wake-word control (``methods_voice.py``).
 
 from __future__ import annotations
 
+from typing import Literal
+
 from pydantic import Field
 
 from .base import JsonValue, Params, Result, WireEnum
@@ -64,6 +66,8 @@ class PromptSubmitResult(Result):
     entries: drop the cached id). ``turn_isolation`` marks a compute-host dispatch."""
 
     status: PromptSubmitStatus | None = None
+    behind: Literal["bot"] | None = Field(
+        default=None, description="Set when a human send waited on a bot CLI lease instead of taking the chat.")
     voice_stopped: bool | None = None
     # The row written for THIS accepted input, captured before the worker can consume it.
     # Absent on queued/steered/redirected inputs and whenever persistence is not yet proven.

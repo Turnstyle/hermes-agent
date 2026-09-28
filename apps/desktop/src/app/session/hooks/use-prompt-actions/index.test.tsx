@@ -5852,3 +5852,33 @@ describe('usePromptActions live-owner refusal (#106217)', () => {
     expect(requestGateway.mock.calls.map(c => c[0])).toEqual(['prompt.submit'])
   })
 })
+
+describe('human send behind a bot CLI lease', () => {
+  afterEach(() => {
+    cleanup()
+    $notifications.set([])
+  })
+
+  it('shows queued behind a bot message and does not stamp SESSION_NOT_OWNED', async () => {
+    const requestGateway = vi.fn(async () => ({ status: 'queued', behind: 'bot' }) as never)
+    const seeds: Record<string, unknown>[] = []
+    let handle: HarnessHandle | null = null
+
+    await actRender(
+      <Harness
+        onReady={h => (handle = h)}
+        onSeedState={state => seeds.push(state)}
+        refreshSessions={async () => undefined}
+        requestGateway={requestGateway}
+      />
+    )
+
+    expect(await handle!.submitText('while the bot is talking')).toBe(true)
+    expect(
+      $notifications.get().some(note => note.kind === 'info' && note.message === 'Queued behind a bot message.')
+    ).toBe(true)
+    const last = seeds.at(-1) as { busy?: boolean; messages?: { errorSurface?: unknown }[] } | undefined
+    expect(last?.busy).toBe(false)
+    expect(last?.messages?.some(message => message.errorSurface)).toBe(false)
+  })
+})

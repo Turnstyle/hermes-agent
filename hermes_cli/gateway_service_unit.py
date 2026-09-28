@@ -73,6 +73,15 @@ def _build_service_path_dirs(project_root: Path | None = None) -> list[str]:
             return False
 
     candidates = []
+    # Prefer a source-tree launcher (bootstrap symlink/shim) over the venv, so a "gateway run"
+    # spawned in the source layout resolves the same `hermes` the operator ran to install it.
+    source_launcher = project_root / ".hermes" / "bin" / "hermes"
+    try:
+        if source_launcher.is_file():
+            candidates.append(str(source_launcher.parent))
+    except OSError:
+        pass
+
     venv_bin = project_root / "venv" / "bin"
     if _is_dir(venv_bin):
         candidates.append(str(venv_bin))

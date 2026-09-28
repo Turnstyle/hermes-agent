@@ -4365,6 +4365,7 @@ export interface Translations {
     sessionUnavailable: string
     createSessionFailed: string
     promptFailed: string
+    queuedBehindBotMessage: string
     providerCredentialRequired: string
     emptySlashCommand: string
     desktopCommands: string

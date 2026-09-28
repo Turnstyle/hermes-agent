@@ -11,12 +11,20 @@ from __future__ import annotations
 
 import json
 import subprocess
-import sys
+import time
 
 import pytest
 
+import tui_gateway.server as srv
+from hermes_cli.active_sessions import (
+    SESSION_NOT_OWNED,
+    ActiveSessionRefusal,
+    format_refusal_stderr,
+    session_already_owned_message,
+)
 from tools import bot_failure_reasons as bfr
 from tools import bot_relay
+from tui_gateway.contracts import registry as contracts
 
 
 @pytest.fixture
@@ -59,7 +67,7 @@ def test_write_reply_classifies_when_reason_omitted(home):
 def _run_waiter(home, envelope):
     cmd = bot_relay.waiter_command(home, envelope)
     return subprocess.run(
-        ["bash", "-c", cmd], capture_output=True, text=True, timeout=30
+        ["bash", "-c", cmd], capture_output=True, text=True, timeout=30, cwd=home,
     )
 
 
@@ -68,7 +76,9 @@ def _envelope(home):
         "profile": "scout",
         "handle": "scout",
         "connection_id": "cloud-1",
-        "connection_label": "",
+        # A hostile connection_label must stay data, never shell text, through waiter_command's
+        # shlex-quoted argv (see tools/bot_relay.py::waiter_command).
+        "connection_label": "hostile ' $(touch injected-by-label) ; label",
         "title": "",
         "description": "",
     }
@@ -79,6 +89,61 @@ def _envelope(home):
         sender_profile="default",
         sender_handle="hermes",
     )
+
+
+def _claimed_envelope(home):
+    env = _envelope(home)
+    claimed = bot_relay.claim_pending_envelopes(home)
+    assert [e["id"] for e in claimed] == [env["id"]]
+    return env
+
+
+def _rpc_reply(params):
+    out = srv._methods["bot_relay.reply"](1, params)
+    assert "error" not in out, out
+    return out
+
+
+def test_reply_rpc_reclassifies_stale_unknown_reason_for_session_not_owned(home, monkeypatch):
+    """Desktop used to forward reason=unknown for SESSION_NOT_OWNED; bot_relay.reply must re-classify
+    from the delivery error text so the reply file and waiter carry target_busy."""
+    monkeypatch.setattr(bot_relay, "_target_liveness", lambda *a, **k: True)
+    env = _claimed_envelope(home)
+    sid = "a" * 32
+    refusal_text = session_already_owned_message(
+        sid, {"surface": "cli", "started_at": time.time()},
+    )
+    refusal = ActiveSessionRefusal(refusal_text, SESSION_NOT_OWNED)
+    raw_error = "delivery turn failed: " + format_refusal_stderr(refusal)
+    _rpc_reply({"id": env["id"], "error": raw_error, "reason": bfr.UNKNOWN})
+    data = json.loads(_reply_file(home, env["id"]).read_text(encoding="utf-8"))
+    assert data["reason"] == "target_busy"
+    proc = _run_waiter(home, env)
+    assert proc.returncode == 1
+    assert "[reason: target_busy]" in proc.stdout
+    assert not (home / "injected-by-label").exists()
+
+
+def test_desktop_success_reply_contract_and_attested_waiter(home, monkeypatch):
+    """The Desktop success payload (reply + delivered_profile + reply_relayed) validates and the
+    sender-side waiter accepts the attested reply from the envelope target."""
+    monkeypatch.setattr(bot_relay, "_target_liveness", lambda *a, **k: True)
+    env = _claimed_envelope(home)
+    payload = {
+        "id": env["id"],
+        "reply": "hi",
+        "delivered_profile": "scout",
+        "reply_relayed": True,
+    }
+    contract = contracts.METHODS["bot_relay.reply"]
+    _, problem = contracts.validate_params(contract, payload)
+    assert problem is None
+    _rpc_reply(payload)
+    proc = _run_waiter(home, env)
+    assert proc.returncode == 0
+    assert "Reply from" in proc.stdout
+    assert "hi" in proc.stdout
+    assert "[reason:" not in proc.stdout
 
 
 def test_waiter_surfaces_reason_tag_to_sending_agent(home, monkeypatch):
@@ -95,13 +160,16 @@ def test_waiter_surfaces_reason_tag_to_sending_agent(home, monkeypatch):
     proc = _run_waiter(home, env)
     assert proc.returncode == 1
     assert f"[reason: {bfr.PROVIDER_RATE_LIMIT}]" in proc.stdout
+    assert not (home / "injected-by-label").exists()
 
 
 def test_waiter_healthy_reply_has_no_reason_tag(home, monkeypatch):
-    """Success path unchanged: no reason tag noise on good replies."""
+    """Success path: attested reply from the envelope target, no reason tag noise."""
     monkeypatch.setattr(bot_relay, "_target_liveness", lambda *a, **k: True)
-    env = _envelope(home)
-    bot_relay.write_reply(home, env["id"], reply="pong")
+    env = _claimed_envelope(home)
+    bot_relay.write_reply(
+        home, env["id"], reply="pong", delivered_profile="scout",
+    )
     proc = _run_waiter(home, env)
     assert proc.returncode == 0
     assert "pong" in proc.stdout

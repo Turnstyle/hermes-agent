@@ -4875,6 +4875,7 @@ export const zh = defineLocale({
     sessionUnavailable: '会话不可用',
     createSessionFailed: '无法创建新会话',
     promptFailed: '提示词发送失败',
+    queuedBehindBotMessage: '已排在一条机器人消息之后。',
     providerCredentialRequired: '发送第一条消息前请先添加提供方凭据。',
     emptySlashCommand: '空 slash 命令',
     desktopCommands: '桌面端命令',
