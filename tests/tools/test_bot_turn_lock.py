@@ -281,9 +281,8 @@ def test_relay_deliver_returns_target_busy_error(tmp_path, monkeypatch):
     # deliver handler uses. A global subprocess.run patch also intercepts
     # unrelated gateway-init calls (git rev-parse / ls-remote in CI), so
     # never fuzzy-match argv — mark the delivery command itself.
-    monkeypatch.setattr(
-        bot_relay, "local_delivery_command", lambda prof, tmp: ["__delivery__", prof]
-    )
+    monkeypatch.setattr(bot_relay, "local_delivery_command", lambda prof, tmp: ["__delivery__", prof])
+    monkeypatch.setattr("tools.fleet_message_enqueue.enqueue_busy_dm", lambda **kwargs: "fm-lock")
 
     def _fake_run(argv, **kwargs):
         argv = list(argv or [])
@@ -308,10 +307,9 @@ def test_relay_deliver_returns_target_busy_error(tmp_path, monkeypatch):
     assert held.wait(timeout=5)
     try:
         out = srv._methods["bot_relay.deliver"](1, {"profile": "ops", "message": "x"})
-        assert "error" in out
-        assert out["error"]["code"] == 5096
-        assert "target_busy" in out["error"]["message"]
-        assert out["error"]["data"]["reason"] == "target_busy"
+        assert "error" not in out, out
+        assert out["result"]["reply"] == "queued (fm-lock)"
+        assert out["result"]["status"] == "queued"
         assert not spawned, "turn must not spawn while the profile is busy"
     finally:
         release.set()
@@ -363,14 +361,13 @@ class _WithReason(RuntimeError):
 @pytest.mark.parametrize(
     ("failure", "code", "reason"),
     [
-        (TurnBusyError("ops", 0.2), 5096, "target_busy"),
         (subprocess.TimeoutExpired(["hermes"], 600), 5093, "delivery_timeout"),
         (RuntimeError("Error code: 401 - invalid api key"), 5094, "provider_auth_or_access"),
         (RuntimeError("something nobody has a rule for"), 5094, "unknown"),
         (_WithReason("CERTIFICATE_VERIFY_FAILED", "ssl handshake failed"), 5094, "unknown"),
         (_WithReason("provider_quota_limit", "quota exhausted"), 5094, "provider_quota_limit"),
     ],
-    ids=["busy", "turn-timed-out", "classifiable-failure", "unclassifiable-failure",
+    ids=["turn-timed-out", "classifiable-failure", "unclassifiable-failure",
          "reason-outside-the-vocabulary", "reason-inside-the-vocabulary"],
 )
 def test_every_relay_refusal_carries_its_typed_reason(tmp_path, monkeypatch, failure, code, reason):

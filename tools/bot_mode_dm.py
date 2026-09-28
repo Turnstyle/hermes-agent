@@ -55,8 +55,10 @@ _LIVE_WAIT_SECONDS = 300
 _LOCAL_LIVE_WAIT_SECONDS: Optional[float] = None
 # While waiting on a live owner's receipt, re-check that the owner lease still exists this often.
 _OWNER_CHECK_SECONDS = 15.0
-# A local delivery re-probes for a live owner between turn-lock attempts of this length.
+# Relay still uses this slice. Local bot DMs fast-ack instead of looping it.
 _BUSY_SLICE_SECONDS = 15.0
+# Busy fast-ack budget. The registry write returns well inside this; the lock probe must too.
+_FAST_ACK_SECONDS = 2.0
 
 # '<peer>/<agent>' — peer names are lowercase (``hermes peer`` normalizes them).
 _PEER_TARGET_RE = re.compile(r"^([a-z0-9][a-z0-9_-]{0,63})/([a-zA-Z0-9][a-zA-Z0-9_-]{0,63})$")
@@ -716,14 +718,16 @@ def _run_delivery_locked(argv: list[str], dm_file: str, *, stdin_file: bool,
                          profile_home: Path | None = None, author: Optional[dict] = None) -> int:
     """Route to the live owner before attempting a CLI transport. Live deliveries
     retain their intent/payload and immutable receipt; only CLI/peer payloads are
-    removed after consumption. The CLI turn window holds the profile lock, so two
-    deliveries into one profile queue; a bounded wait ends in a 'target_busy' refusal.
+    removed after consumption. When the profile lock or Bot Chat is busy, the message
+    is written to fleet_messages_v1 and the sender is acked in under 5s.
     ``author`` rides to the child as HERMES_TURN_AUTHOR; ``hermes peer dm`` forwards it in the request body.
 
     Local (query-file) turns get one policy-gated retry (#93091 item 5): transient failures re-run the same
     session; a context_overflow re-run lets the retried turn's pre-API compaction pass compact the Bot Chat
     transcript first (agent/conversation_loop.py) — the sanctioned compression lever; no fresh session is
-    ever minted. Auth/quota/config failures never retry. Peer transports (stdin mode) retry on their own
+    ever minted. Auth/quota/config failures never retry. A busy target is not retried for
+    dm_queue_wait_seconds: it is written to fleet_messages_v1 and the sender is told
+    ``queued (<message_id>)`` within the fast-ack budget. Peer transports (stdin mode) retry on their own
     gateway's deliver path, not here.
     """
     # The live consumer owns turn admission; never compete for its CLI lease.
@@ -772,44 +776,33 @@ def _run_delivery_locked(argv: list[str], dm_file: str, *, stdin_file: bool,
                 with open(dm_file, "r", encoding="utf-8-sig") as stream:
                     # Passing the file descriptor as stdin bypasses the BOM-aware decoder.
                     return subprocess.run(argv, input=stream.read().encode("utf-8"), check=False, env=env).returncode
-        # Queue behind the recipient's running turn instead of failing target_busy after the short relay
-        # budget: this runner is a detached process that wakes the sender on exit (t_78c79c6b). Between
-        # lock attempts, re-probe for a live Bot Chat owner that opened meanwhile and hand off to it.
-        started = time.monotonic()
-        deadline = started + dm_queue_wait_seconds()
-        # ``home`` is a known local profile: only then is there a mailbox worth queueing behind, so an
-        # instant SESSION_NOT_OWNED refusal from the CLI (another surface holds the live session, not
-        # our own lock) is retried too — not just a lock-wait timeout. Without a resolvable profile
-        # (stdin/peer shapes, or a transport this module doesn't own) that refusal stays a hard failure.
+        # A busy target is a fast-ack, not an 1800s blind wait. One short lock probe, then
+        # the message lands in fleet_messages_v1 for the recipient drain. Under 5s.
+        from tools.fleet_message_enqueue import FleetEnqueueError, enqueue_busy_dm, fleet_handle, queued_ack
+
         can_queue = home is not None
-        first = True
-        while True:
-            if not first:
-                rc = _via_live_owner()
-                if rc is not None:
-                    keep_dm_file = True  # the live path owns its intent/evidence files from here
-                    return rc
-            first = False
-            remaining = max(0.0, deadline - time.monotonic())
-            final = remaining <= _BUSY_SLICE_SECONDS
+        probe = min(_FAST_ACK_SECONDS, dm_queue_wait_seconds())
+        try:
+            with _delivery_lock(argv, stdin_file=False, timeout_seconds=probe):
+                return _run_local_turn(argv, dm_file, env=env, busy_raises=can_queue)
+        except (_session_held_cls(), TurnBusyError) as exc:
+            if not can_queue:
+                raise
             try:
-                with _delivery_lock(argv, stdin_file=False,
-                                    timeout_seconds=remaining if final else _BUSY_SLICE_SECONDS):
-                    return _run_local_turn(argv, dm_file, env=env, busy_raises=can_queue)
-            except _session_held_cls() as exc:
-                if final:
-                    waited = time.monotonic() - started
-                    print(json.dumps({
-                        "error": f"Delivery failed: @{exc.profile}'s Bot Chat is open on another surface "
-                                 f"right now, so your message was NOT delivered after queuing ~{int(round(waited))}s. "
-                                 "Try again later.",
-                        "reason": "target_busy",
-                    }))
-                    return 1
-                time.sleep(min(_BUSY_SLICE_SECONDS, remaining))
-            except TurnBusyError as exc:
-                if final:
-                    raise TurnBusyError(exc.profile, time.monotonic() - started) from None
+                body = Path(dm_file).read_text(encoding="utf-8")
+                sender = "sender"
+                if isinstance(author, dict):
+                    sender = fleet_handle(author.get("name") or author.get("id"), fallback="sender")
+                recipient = fleet_handle(exc.profile, fallback="recipient")
+                message_id = enqueue_busy_dm(sender=sender, recipient=recipient, body=body)
+            except (FleetEnqueueError, OSError, ValueError) as write_exc:
+                print(json.dumps({
+                    "error": f"Delivery failed: could not queue for @{exc.profile}: {write_exc}",
+                    "reason": "target_busy",
+                }))
+                return 1
+            print(queued_ack(message_id))
+            return 0
     finally:
         if not keep_dm_file:
             _unlink_dm_artifacts(dm_file)
