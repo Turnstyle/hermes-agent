@@ -53,6 +53,18 @@ def _run_delivery(profile: str, tmp: str, env: dict | None = None, *,
             os.unlink(report)
 
 
+def _live_wait_budget_seconds() -> float:
+    """Worst-case hold the CLI transport below may take inside the Desktop deliver deadline
+    (``TURN_ATTEMPT_TIMEOUT_SECONDS * TURN_MAX_ATTEMPTS``) — the live-owner branch waits up to this
+    much for settlement too, instead of the much shorter budget that used to make it post a canned
+    "Queued..." reply as the terminal answer and silently drop the real one. A plain module-level
+    function (not a bare in-handler reference) so it survives ``HandlerRegistry.install()``'s
+    globals rebind and stays monkeypatchable in tests via ``tools.bot_relay``'s own constants,
+    matching this file's ``_root``/``_run``/``_failure_reason``/``_log_deliver`` idiom."""
+    from tools.bot_relay import TURN_ATTEMPT_TIMEOUT_SECONDS, TURN_MAX_ATTEMPTS
+    return TURN_ATTEMPT_TIMEOUT_SECONDS * TURN_MAX_ATTEMPTS
+
+
 def _log_deliver(requested: str, resolved: str, path: str, profile_home) -> None:
     """One structured line per ``bot_relay.deliver`` call, so a misroute (a turn run against a
     DIFFERENT profile than the one the RPC named — see ``delivered_profile`` on the ok response
@@ -86,11 +98,13 @@ def _(rid, params: dict, _root=_relay_root) -> dict:
 
 @method("bot_relay.deliver")
 def _(rid, params: dict, _root=_relay_root, _run=_run_delivery,
-      _failure_reason=delivery_failure_reason, _log_deliver=_log_deliver) -> dict:
+      _failure_reason=delivery_failure_reason, _log_deliver=_log_deliver,
+      _live_wait_budget_seconds=_live_wait_budget_seconds) -> dict:
     """Deliver a relayed DM (``profile``, attribution-prefixed ``message``) into a Bot Chat ON THIS
     GATEWAY via the one-turn ``hermes -p <profile> chat -c "Bot Chat"`` transport local DMs use →
     ``{reply}``. Blocking by design (Desktop relay worker; the RPC pool keeps it off the reader)."""
     import tempfile
+    handler_started = time.monotonic()
     profile = str(params.get("profile") or "").strip()
     message = str(params.get("message") or "").strip()
     if not profile or not message:
@@ -155,23 +169,37 @@ def _(rid, params: dict, _root=_relay_root, _run=_run_delivery,
         # receipt (_wait_live_dm); so does this relay, on the same budget, so the sender gets the
         # target's answer rather than a receipt when its Bot Chat happens to be open.
         from tools.bot_live_delivery import await_delivery, deliver_to_live_owner, find_canonical_live_owner
-        from tools.bot_mode_dm import _LIVE_WAIT_SECONDS
         owner_home = live_home if live_home is not None else Path(_hermes_home)
         owner = find_canonical_live_owner(owner_home)
         if owner is not None:
             record = deliver_to_live_owner(owner_home, owner, message, author=author)
-            record = await_delivery(owner_home, record["delivery_id"], _LIVE_WAIT_SECONDS) or record
+            # Wait up to the SAME worst-case budget the CLI transport below may hold inside the
+            # Desktop deliver deadline (TURN_ATTEMPT_TIMEOUT_SECONDS * TURN_MAX_ATTEMPTS), minus
+            # whatever this handler already spent — never longer than the CLI path could have held
+            # the caller. A canned "Queued..." reply posted as the terminal answer after a much
+            # shorter budget silently drops the real reply (AGY-DELIVERY-STATE-MACHINE.md Forensic
+            # 2); waiting this long first makes that outcome rare, and the flag below (when it still
+            # happens) makes it loud instead of a fake answer the sender books as the real one.
+            live_wait_budget = max(0.0, _live_wait_budget_seconds() - (time.monotonic() - handler_started))
+            record = await_delivery(owner_home, record["delivery_id"], live_wait_budget) or record
             if record["status"] == "settled":
                 from tui_gateway.prompt_turn import _bot_mode_delivery_text
                 _log_deliver(profile, resolved, "live_owner", owner_home)
                 return _ok(rid, {"reply": _bot_mode_delivery_text((record.get("reply") or "").strip(), successful=True),
                                  "delivered_profile": resolved, "requested_profile": profile})
             if record["status"] in ("queued", "claimed"):
-                # Admitted but not answered within the budget: the receipt stays, the turn still runs.
-                reply = (f"Queued for @{resolved}'s open Bot Chat; it runs as that chat's next turn and the reply "
-                         "will appear there. Do not resend.")
+                # Admitted and WILL run as that chat's next turn (never a failure — resending would
+                # duplicate it), but not settled inside even the extended budget: the real answer can
+                # only ever reach @resolved's own Bot Chat on this machine, never this reply. Loud and
+                # machine-readable instead of the old "Queued..." text the sender used to book as the
+                # final answer.
+                from tools.bot_failure_reasons import REPLY_NOT_RELAYED
+                reply = (f"REPLY NOT RELAYED: @{resolved}'s Bot Chat is still open; your message will run as "
+                         f"its next turn, but the answer will appear only in @{resolved}'s own Bot Chat on "
+                         "this machine, not here. Do not resend.")
                 _log_deliver(profile, resolved, "live_owner", owner_home)
-                return _ok(rid, {"reply": reply, "delivered_profile": resolved, "requested_profile": profile})
+                return _ok(rid, {"reply": reply, "delivered_profile": resolved, "requested_profile": profile,
+                                 "reply_relayed": False, "reason": REPLY_NOT_RELAYED})
             from tools.bot_failure_reasons import CANCELLED, classify_agent_error
             error = str(record.get("error") or f"Bot Chat delivery {record['status']}")
             reason = record.get("reason") or (CANCELLED if record["status"] == "cancelled" else classify_agent_error(error))
