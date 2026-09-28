@@ -639,65 +639,68 @@ def _run_single_query_mode(cli, query, image, quiet, oneshot, stream_json: bool 
     # isn't engaged) and takes the deterministic approvals.single_query_mode path instead of waiting the
     # full timeout. See #86878.
     os.environ["HERMES_SINGLE_QUERY_SESSION"] = "1"
-    from hermes_cli.quiet_single_query import exit_single_query, write_worker_busy_marker
-    if not cli._claim_active_session("cli", stderr=bool(quiet)):
-        refusal_code = _session_refusal_exit_code(cli)
-        if refusal_code != 1:
-            # Capacity refusal only: the dispatcher books this run ``profile_busy`` (t_76b0d62d).
-            write_worker_busy_marker(getattr(cli, "_active_session_refusal_reason", ""))
-        exit_single_query(refusal_code)
-    try:
-        query, single_query_images = _collect_query_images(query, image)
-        single_query_image_urls = _collect_kanban_task_images(single_query_images)
-        if quiet:
-            # Quiet mode: suppress banner, spinner, tool previews.
-            cli.tool_progress_mode = "off"
-            emitter = None
-            if stream_json:
-                # Built BEFORE credentials/agent init so a failed start still closes the protocol
-                # (init + result) instead of exiting 1 with an empty stdout.
-                from hermes_cli.stream_json import StreamJsonEmitter
-                emitter = StreamJsonEmitter(model=getattr(cli, "model", "") or "", session_id=cli.session_id or "")
-            if cli._ensure_runtime_credentials():
-                effective_query: Any = _route_single_query_images(
-                    cli, query, query, single_query_images, single_query_image_urls
-                )
-                turn_route = cli._resolve_turn_agent_config(effective_query)
-                if turn_route["signature"] != cli._active_agent_route_signature:
-                    cli.agent = None
-                if cli._init_agent(
-                    model_override=turn_route["model"],
-                    runtime_override=turn_route["runtime"],
-                    request_overrides=turn_route.get("request_overrides"),
-                ):
-                    _configure_quiet_agent(cli.agent)
-                    if emitter is not None:
-                        emitter.attach(cli.agent)
-                    _run_quiet_single_query(cli, effective_query, emitter=emitter)
+    from hermes_cli.quiet_single_query import exit_single_query, kanban_worker_hard_exit, write_worker_busy_marker
+    # Kanban workers leave via os._exit once cleanup ran: interpreter teardown can block forever
+    # on the import lock held by a background thread (hung rc=75 workers, Sheldon 2026-09-28).
+    with kanban_worker_hard_exit():
+        if not cli._claim_active_session("cli", stderr=bool(quiet)):
+            refusal_code = _session_refusal_exit_code(cli)
+            if refusal_code != 1:
+                # Capacity refusal only: the dispatcher books this run ``profile_busy`` (t_76b0d62d).
+                write_worker_busy_marker(getattr(cli, "_active_session_refusal_reason", ""))
+            exit_single_query(refusal_code)
+        try:
+            query, single_query_images = _collect_query_images(query, image)
+            single_query_image_urls = _collect_kanban_task_images(single_query_images)
+            if quiet:
+                # Quiet mode: suppress banner, spinner, tool previews.
+                cli.tool_progress_mode = "off"
+                emitter = None
+                if stream_json:
+                    # Built BEFORE credentials/agent init so a failed start still closes the protocol
+                    # (init + result) instead of exiting 1 with an empty stdout.
+                    from hermes_cli.stream_json import StreamJsonEmitter
+                    emitter = StreamJsonEmitter(model=getattr(cli, "model", "") or "", session_id=cli.session_id or "")
+                if cli._ensure_runtime_credentials():
+                    effective_query: Any = _route_single_query_images(
+                        cli, query, query, single_query_images, single_query_image_urls
+                    )
+                    turn_route = cli._resolve_turn_agent_config(effective_query)
+                    if turn_route["signature"] != cli._active_agent_route_signature:
+                        cli.agent = None
+                    if cli._init_agent(
+                        model_override=turn_route["model"],
+                        runtime_override=turn_route["runtime"],
+                        request_overrides=turn_route.get("request_overrides"),
+                    ):
+                        _configure_quiet_agent(cli.agent)
+                        if emitter is not None:
+                            emitter.attach(cli.agent)
+                        _run_quiet_single_query(cli, effective_query, emitter=emitter)
 
-            fail_code = _single_query_exit_code(
-                None, credentials_rate_limited=getattr(cli, "_credentials_rate_limited", False))
-            if emitter is not None:
-                emitter.emit_result({"failed": True, "error": "credentials or agent init failed"},
-                                    session_id=cli.session_id or "", exit_code=fail_code)
-            exit_single_query(fail_code)  # credentials or agent init failed
-        # No welcome banner (~420 ms cold); session id / resume hint come from _print_exit_summary().
-        _query_label = query or ("[image attached]" if single_query_images else "")
-        if _query_label:
-            cli.console.print(f"[bold blue]Query:[/] {_query_label}")
-        cli._show_security_advisories()
-        response = cli.chat(query, images=single_query_images or None)
-        # Kanban goal_mode on the `-q` path: same judge loop as `-Q`, but each follow-up turn
-        # runs through cli.chat so the worker log keeps its live tool feed (the dispatcher
-        # used to force -Q here, which left goal_mode cards with a blank Worker log).
-        if os.environ.get("HERMES_KANBAN_GOAL_MODE") == "1":
-            try:
-                _run_kanban_goal_loop_chat(cli, response or "")
-            except Exception as _goal_exc:
-                logger.debug("kanban goal loop failed: %s", _goal_exc)
-        cli._print_exit_summary(clear_screen=False)
-        # Same exit contract as `-Q`: scripts and the Kanban dispatcher read the outcome from
-        # the exit code. This path used to fall through to an implicit 0 for every outcome.
-        exit_single_query(_single_query_exit_code(cli._last_turn_result))
-    finally:
-        _finalize_single_query(cli)
+                fail_code = _single_query_exit_code(
+                    None, credentials_rate_limited=getattr(cli, "_credentials_rate_limited", False))
+                if emitter is not None:
+                    emitter.emit_result({"failed": True, "error": "credentials or agent init failed"},
+                                        session_id=cli.session_id or "", exit_code=fail_code)
+                exit_single_query(fail_code)  # credentials or agent init failed
+            # No welcome banner (~420 ms cold); session id / resume hint come from _print_exit_summary().
+            _query_label = query or ("[image attached]" if single_query_images else "")
+            if _query_label:
+                cli.console.print(f"[bold blue]Query:[/] {_query_label}")
+            cli._show_security_advisories()
+            response = cli.chat(query, images=single_query_images or None)
+            # Kanban goal_mode on the `-q` path: same judge loop as `-Q`, but each follow-up turn
+            # runs through cli.chat so the worker log keeps its live tool feed (the dispatcher
+            # used to force -Q here, which left goal_mode cards with a blank Worker log).
+            if os.environ.get("HERMES_KANBAN_GOAL_MODE") == "1":
+                try:
+                    _run_kanban_goal_loop_chat(cli, response or "")
+                except Exception as _goal_exc:
+                    logger.debug("kanban goal loop failed: %s", _goal_exc)
+            cli._print_exit_summary(clear_screen=False)
+            # Same exit contract as `-Q`: scripts and the Kanban dispatcher read the outcome from
+            # the exit code. This path used to fall through to an implicit 0 for every outcome.
+            exit_single_query(_single_query_exit_code(cli._last_turn_result))
+        finally:
+            _finalize_single_query(cli)
