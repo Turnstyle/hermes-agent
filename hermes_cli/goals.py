@@ -1565,9 +1565,10 @@ KANBAN_GOAL_CONTINUATION_TEMPLATE = (
     "Take the next concrete step toward completing the task. When the work "
     "is genuinely finished, call kanban_complete with a summary. If it is a "
     "code change that needs same-card review before counting as done, call "
-    "kanban_request_review with a summary instead. If you are blocked and "
-    "need human input, call kanban_block with a reason. Do not stop without "
-    "calling one of them."
+    "kanban_request_review with a summary instead. A future time gate or a "
+    "tool timeout is not kanban_block — continue the rest of the card. If "
+    "you are blocked on a real external hold and need human input, call "
+    "kanban_block with a reason. Do not stop without calling one of them."
 )
 
 # Judge says done but the worker never made a terminal board call
@@ -1603,6 +1604,8 @@ def run_kanban_goal_loop(
     max_turns: int = DEFAULT_MAX_TURNS,
     first_response: str = "",
     log=None,
+    block_reason_unchanged_fn=None,
+    block_is_bookkeeping_fn=None,
 ) -> Dict[str, Any]:
     """Drive a kanban worker through a Ralph-style goal loop.
 
@@ -1643,12 +1646,40 @@ def run_kanban_goal_loop(
             _log(f"kanban goal loop: status check failed ({exc}); stopping")
             return _result("stopped", "status check failed")
 
-        terminal = _KANBAN_TERMINAL_STATUSES.get(status)
-        if terminal is not None:
-            outcome, reason, log_fmt = terminal
-            _log("kanban goal loop: " + log_fmt.format(task_id=task_id, turns=turns_used))
-            return _result(outcome, reason)
-        if status not in ("running", "ready"):
+        bookkeeping_continue = False
+        if status == "blocked":
+            bookkeeping = False
+            if block_is_bookkeeping_fn is not None:
+                try:
+                    bookkeeping = bool(block_is_bookkeeping_fn())
+                except Exception as exc:
+                    _log(f"kanban goal loop: block_is_bookkeeping_fn failed ({exc})")
+            if bookkeeping:
+                bookkeeping_continue = True
+            else:
+                unchanged = False
+                if block_reason_unchanged_fn is not None:
+                    try:
+                        unchanged = bool(block_reason_unchanged_fn())
+                    except Exception as exc:
+                        _log(f"kanban goal loop: block_reason_unchanged_fn failed ({exc})")
+                if unchanged:
+                    _log(
+                        f"kanban goal loop: task {task_id} blocked with unchanged reason "
+                        f"after {turns_used} turn(s)"
+                    )
+                    return _result("unchanged_block", "worker blocked with unchanged reason")
+                terminal = _KANBAN_TERMINAL_STATUSES["blocked"]
+                outcome, reason, log_fmt = terminal
+                _log("kanban goal loop: " + log_fmt.format(task_id=task_id, turns=turns_used))
+                return _result(outcome, reason)
+        else:
+            terminal = _KANBAN_TERMINAL_STATUSES.get(status)
+            if terminal is not None:
+                outcome, reason, log_fmt = terminal
+                _log("kanban goal loop: " + log_fmt.format(task_id=task_id, turns=turns_used))
+                return _result(outcome, reason)
+        if status not in ("running", "ready") and not bookkeeping_continue:
             # Reclaimed / archived / unexpected — let the dispatcher own it.
             _log(f"kanban goal loop: task {task_id} status={status!r}; stopping")
             return _result("stopped", f"status={status}")
@@ -1701,8 +1732,17 @@ def run_kanban_goal_loop(
         try:
             last_response = run_turn(prompt) or ""
         except Exception as exc:
-            _log(f"kanban goal loop: run_turn failed ({exc}); stopping")
-            return _result("stopped", f"run_turn error: {type(exc).__name__}")
+            _log(f"kanban goal loop: run_turn failed ({exc}); retrying once")
+            try:
+                last_response = run_turn(prompt) or ""
+            except Exception as exc2:
+                logger.warning(
+                    "kanban goal loop: run_turn failed after retry for task %s (%s)",
+                    task_id,
+                    exc2,
+                )
+                _log(f"kanban goal loop: run_turn failed after retry ({exc2}); stopping")
+                return _result("stopped", f"run_turn error: {type(exc2).__name__}")
         turns_used += 1
 
 
