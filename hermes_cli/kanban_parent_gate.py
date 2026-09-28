@@ -112,10 +112,16 @@ def _parent_release(
     allow_network: bool,
 ) -> bool:
     from hermes_cli.kanban_db import _has_sticky_block
+    from hermes_cli.kanban_db import unsatisfied_parents as unsatisfied_parents_of
 
     if status not in _REHOME_RELEASE_STATUSES:
         return False
     if _has_sticky_block(conn, parent_id):
+        return False
+    # A dependency_wait parent sits in ``todo`` while its own prerequisites are
+    # open; rehome or merged-PR evidence on it must not skip those upstream
+    # dependencies (r4 HIGH). Any open grandparent keeps the gate closed.
+    if unsatisfied_parents_of(conn, parent_id):
         return False
     if _verified_parent_rehome(conn, parent_id):
         return True
