@@ -5925,15 +5925,27 @@ async def start_gateway(config: Optional[GatewayConfig] = None, replace: bool = 
         _shutdown_gateway_health_export(runner)
         return False
 
-    def _recover_pending() -> None:
-        from gateway.shutdown_flush import recover_pending_to_db
+    async def _recover_pending() -> None:
+        from gateway.shutdown_flush import (
+            recover_gateway_draining_session_chats,
+            recover_pending_to_db,
+        )
         recovered = recover_pending_to_db(
             session_resolver=runner.session_store.resolve_session_id_for_key,
         )
         if recovered:
             logger.info("Recovered %d pending message(s) from shutdown flush", recovered)
+        drain_replayed = await recover_gateway_draining_session_chats(runner)
+        if drain_replayed:
+            logger.info(
+                "Replayed %d gateway-draining session chat turn(s) from shutdown flush",
+                drain_replayed,
+            )
 
-    _best_effort(_recover_pending)
+    try:
+        await _recover_pending()
+    except Exception as exc:
+        logger.debug("Pending message recovery failed: %s", exc)
     if runner.should_exit_cleanly:
         _shutdown_gateway_health_export(runner)
         if runner.exit_reason:

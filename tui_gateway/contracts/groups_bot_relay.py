@@ -550,10 +550,18 @@ class BotRelayDeliverParams(Params):
     from_profile: str | None = None
     from_handle: str | None = None
     from_connection: str | None = None
+    target_profile: str | None = None
+    envelope_id: str | None = None
 
 
 class BotRelayDeliverResult(Result):
     reply: str
+    delivered_profile: str | None = None
+    requested_profile: str | None = None
+    reply_relayed: bool | None = None
+    reason: str | None = None
+    status: str | None = None
+    message_id: str | None = None
 
 
 method("bot_relay.deliver", params=BotRelayDeliverParams, result=BotRelayDeliverResult,
@@ -565,6 +573,10 @@ class BotRelayReplyParams(ProfileParams):
     reply: str | None = None
     error: str | None = None
     reason: str | None = None
+    reply_relayed: bool | None = None
+    delivered_profile: str | None = None
+    status: str | None = None
+    message_id: str | None = None
 
 
 method("bot_relay.reply", params=BotRelayReplyParams, result=OkResult,

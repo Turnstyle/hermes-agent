@@ -806,17 +806,26 @@ def _run_delivery_locked(argv: list[str], dm_file: str, *, stdin_file: bool,
         from tools.fleet_message_enqueue import FleetEnqueueError, enqueue_busy_dm, fleet_handle, queued_ack
 
         can_queue = home is not None
-        first = True
-        while True:
-            first_attempt = first
-            if not first:
-                rc = _via_live_owner()
-                if rc is not None:
-                    keep_dm_file = True  # the live path owns its intent/evidence files from here
-                    return rc
-            first = False
-            remaining = max(0.0, deadline - time.monotonic())
-            final = remaining <= _BUSY_SLICE_SECONDS
+        probe = min(_FAST_ACK_SECONDS, dm_queue_wait_seconds())
+        try:
+            with _delivery_lock(argv, stdin_file=False, timeout_seconds=probe):
+                return _run_local_turn(argv, dm_file, env=env, busy_raises=can_queue)
+        except (_session_held_cls(), TurnBusyError) as exc:
+            if not can_queue:
+                raise
+            from tools.bot_mode_probe import _default_home, _hermes_root, _roster
+            from tools.fleet_message_drain import recipient_drain_enabled
+
+            recipient_home = home
+            if recipient_home is None:
+                recipient_home = dict(_roster(_hermes_root(Path(_default_home())))).get(exc.profile)
+            if not recipient_drain_enabled(exc.profile, profile_home=recipient_home):
+                print(json.dumps({
+                    "error": (f"Delivery failed: @{exc.profile}'s Bot Chat is busy and the recipient "
+                              "does not drain queued fleet messages at turn end."),
+                    "reason": "target_busy",
+                }))
+                return 1
             try:
                 with _delivery_lock(argv, stdin_file=False,
                                     timeout_seconds=(min(0.1, remaining) if first_attempt and queue_config
@@ -1045,6 +1054,12 @@ def _wait_reply_main(reply_path: str, label: str, budget_seconds: str) -> int:
                     f"{label} and do not resend blindly."
                 )
                 return 1
+            status = str(d.get("status") or "").strip()
+            if status == "queued":
+                from tools.bot_relay import relay_queued_sender_text
+
+                print(relay_queued_sender_text(delivered or expected))
+                return 0
             reason = str(d.get("reason") or "").strip()
             relayed = d.get("reply_relayed")
             # An admitted-but-unrelayed ok reply is not the target's answer. Exit 0 so the sender

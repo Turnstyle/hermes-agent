@@ -249,6 +249,71 @@ def _single_query_exit_code(result, *, credentials_rate_limited: bool = False) -
     return 1
 
 
+def _durable_row_count(cli) -> int | None:
+    """Stored message count of the one-shot's session, or ``None`` when it cannot be read."""
+    session_id = getattr(cli, "session_id", "") or ""
+    db = getattr(cli, "_session_db", None)
+    if db is None or not session_id:
+        return None
+    try:
+        return db.message_count(session_id)
+    except Exception:
+        logger.debug("one-shot row count for %s unavailable", session_id, exc_info=True)
+        return None
+
+
+def _reclaim_session_for_follow_up(cli, deadline: float) -> bool:
+    """Re-take the chat's lease for a notify follow-up, waiting out another writer's turn until ``deadline``."""
+    while not cli._claim_active_session("cli", silent=True):
+        if time.monotonic() >= deadline:
+            return False
+        time.sleep(1.0)
+    return True
+
+
+def _run_single_query_fleet_turn_end_drain(cli) -> None:
+    """Turn-end ``fleet_messages_v1`` query for ``-Q`` Bot Chat (same entry as the TUI post-turn hook)."""
+    from hermes_constants import get_hermes_home
+    from tools import fleet_message_drain as fmd
+
+    triplet = fmd.turn_end_drain_query(get_hermes_home())
+    if triplet is None:
+        return
+    config, store, claimed = triplet
+    if claimed is None:
+        return
+    from agent.interrupt_compat import _accepts_keyword
+
+    if not fmd.mark_read(store, claimed):
+        return
+    text, author, _meta = fmd.render_input(claimed)
+    author_kwargs = (
+        {"turn_author": author}
+        if author is not None and _accepts_keyword(cli.agent.run_conversation, "turn_author")
+        else {}
+    )
+    if not cli._claim_active_session("cli", silent=True):
+        fmd.release(store, claimed)
+        return
+    try:
+        result = cli.agent.run_conversation(
+            user_message=text, conversation_history=cli.conversation_history, **author_kwargs,
+        )
+        if isinstance(result, dict) and result.get("failed"):
+            fmd.finish(
+                store, claimed,
+                {"status": "failed", "error": str(result.get("error") or "failed")},
+                max_attempts=config.max_attempts,
+            )
+        else:
+            fmd.finish(store, claimed, {"status": "settled"}, max_attempts=config.max_attempts)
+    except Exception as exc:
+        fmd.record_error(store, claimed, str(exc), max_attempts=config.max_attempts)
+        raise
+    finally:
+        cli._release_active_session()
+
+
 def _run_quiet_single_query(cli, effective_query, emitter=None):
     """Quiet (-Q) one-shot turn: run, print the response (stderr for errors/session_id), then sys.exit with the automation exit code.
     With a ``StreamJsonEmitter`` the final answer and the exit line become the terminal ``result`` JSONL record instead.
@@ -380,6 +445,11 @@ def _run_quiet_single_query(cli, effective_query, emitter=None):
 
     if emitter is None:
         print(f"\nsession_id: {cli.session_id}", file=sys.stderr)
+
+    try:
+        _run_single_query_fleet_turn_end_drain(cli)
+    except Exception:
+        logger.warning("fleet message drain at -Q exit failed", exc_info=True)
 
     _exit_code = _single_query_exit_code(result)
     if emitter is not None:

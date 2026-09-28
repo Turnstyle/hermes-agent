@@ -263,55 +263,55 @@ def _(rid, params: dict, _root=_relay_root, _run=_run_delivery,
             # One short lock probe. A busy target is written to fleet_messages_v1 and
             # acked in under 5s; the recipient drain delivers it. Not an 1800s wait.
             from tools.bot_mode_dm import _FAST_ACK_SECONDS, refused_not_owned
-            from tools.bot_relay import TurnBusyError, turn_wait_seconds
-            from tools.fleet_message_enqueue import FleetEnqueueError, enqueue_busy_dm, queued_ack
+            from tools.bot_relay import TurnBusyError, relay_queued_sender_text, turn_wait_seconds
+            from tools.fleet_message_drain import recipient_drain_enabled
+            from tools.fleet_message_enqueue import FleetEnqueueError, enqueue_busy_dm
 
-            started = time.monotonic()
-            deadline = started + turn_wait_seconds()
-            first_attempt = True
-            while True:
-                remaining = max(0.0, deadline - time.monotonic())
-                try:
-                    with acquire_turn_lock(root, resolved,
-                                           min(0.1, remaining) if first_attempt and queue_config else remaining):
-                        proc = _run(resolved, tmp, turn_env)
-                        held = proc.returncode != 0 and refused_not_owned(proc.stderr or "")
-                        if proc.returncode != 0 and not held:
-                            # Retry policy: transient classes re-run the SAME session once; context_overflow
-                            # too — the retried turn's pre-API compaction pass compacts the over-threshold
-                            # transcript first (no fresh session is minted). Auth/quota/config never retry.
-                            # See #93091.
-                            from tools.bot_failure_reasons import (
-                                RETRY_NONE, classify_agent_error, retry_action)
-                            if retry_action(classify_agent_error(_detail(proc))) != RETRY_NONE:
-                                # The failed attempt already persisted the DM; the re-run resumes that row.
-                                from tools.bot_relay import retry_turn_env
-                                proc = _run(resolved, tmp, retry_turn_env(turn_env))
-                except TurnBusyError:
-                    queued = _queue_busy() if first_attempt else None
-                    if queued is not None:
-                        return queued
-                    if queue_config is None:
-                        raise
-                    queue_config = None  # enqueue failed: use the original full lock wait
-                    first_attempt = False
-                    continue
-                if not held:
-                    break
-                queued = _queue_busy() if first_attempt else None
-                if queued is not None:
-                    return queued
-                first_attempt = False
-                # Held: leave the lock (already released above) before sleeping, so a live owner or
-                # another delivery can still get in — then retry, bounded by the shared deadline.
-                remaining = max(0.0, deadline - time.monotonic())
-                if remaining <= 0:
-                    waited = time.monotonic() - started
+            relay_envelope_id = str(params.get("envelope_id") or "").strip() or None
+
+            def _fast_ack_busy() -> dict:
+                sender = "sender"
+                if isinstance(author, dict):
+                    sender = str(author.get("name") or author.get("id") or sender)
+                recipient_home = _profile_home(resolved)
+                if not recipient_drain_enabled(resolved, profile_home=recipient_home):
                     return _err(rid, 5092,
-                        f"delivery turn failed: @{resolved}'s Bot Chat is open on another surface "
-                        f"right now; NOT delivered after queuing ~{int(round(waited))}s.",
-                        data={"reason": "target_busy"})
-                time.sleep(min(_BUSY_SLICE_SECONDS, remaining))
+                                f"delivery turn failed: @{resolved}'s Bot Chat is busy and fleet drain is disabled",
+                                data={"reason": "target_busy"})
+                try:
+                    body = Path(tmp).read_text(encoding="utf-8")
+                    enqueue_kwargs = {"sender": sender, "recipient": resolved, "body": body}
+                    if relay_envelope_id:
+                        enqueue_kwargs["message_id"] = relay_envelope_id
+                    message_id = enqueue_busy_dm(**enqueue_kwargs)
+                except (FleetEnqueueError, OSError, ValueError) as exc:
+                    return _err(rid, 5092, f"delivery turn failed: could not queue for @{resolved}: {exc}",
+                                data={"reason": "target_busy"})
+                _log_deliver(profile, resolved, "fleet_queued", want_home)
+                return _ok(rid, {"reply": relay_queued_sender_text(resolved), "message_id": message_id,
+                                 "status": "queued", "delivered_profile": resolved,
+                                 "requested_profile": profile, "reply_relayed": False})
+
+            try:
+                with acquire_turn_lock(root, resolved, min(_FAST_ACK_SECONDS, turn_wait_seconds())):
+                    proc = _run(resolved, tmp, turn_env)
+                    # Team 1: the refusal marker can ride the combined turn text, not stderr alone.
+                    if proc.returncode != 0 and not refused_not_owned(_detail(proc)):
+                        # Retry policy: transient classes re-run the SAME session once; context_overflow
+                        # too — the retried turn's pre-API compaction pass compacts the over-threshold
+                        # transcript first (no fresh session is minted). Auth/quota/config never retry.
+                        # See #93091.
+                        from tools.bot_failure_reasons import (
+                            RETRY_NONE, classify_agent_error, retry_action)
+                        if retry_action(classify_agent_error(_detail(proc))) != RETRY_NONE:
+                            # The failed attempt already persisted the DM; the re-run resumes that row.
+                            from tools.bot_relay import retry_turn_env
+                            proc = _run(resolved, tmp, retry_turn_env(turn_env))
+                    # Busy is decided on the proc we will actually stop on, including a retry.
+                    if proc.returncode != 0 and refused_not_owned(_detail(proc)):
+                        return _fast_ack_busy()
+            except TurnBusyError:
+                return _fast_ack_busy()
         finally:
             with contextlib.suppress(OSError):
                 os.unlink(tmp)
@@ -367,8 +367,11 @@ def _(rid, params: dict, _root=_relay_root) -> dict:
         # the signature the classifier keys on, and the Desktop only forwards `reason`.
         write_reply(root, envelope_id, reply=str(params.get("reply") or ""),
                     error=relayed_failure_error(raw_error, read_claimed_envelope(root, envelope_id)),
-                    reason=str(params.get("reason") or "") or (classify_agent_error(raw_error) if raw_error else ""),
-                    reply_relayed=reply_relayed if isinstance(reply_relayed, bool) else None)
+                    reason=code,
+                    delivered_profile=str(params.get("delivered_profile") or "").strip() or None,
+                    reply_relayed=reply_relayed if isinstance(reply_relayed, bool) else None,
+                    status=str(params.get("status") or "").strip() or None,
+                    message_id=str(params.get("message_id") or "").strip() or None)
         return _ok(rid, {"ok": True})
     except ValueError as e:
         return _err(rid, 4094, str(e))

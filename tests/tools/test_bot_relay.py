@@ -360,6 +360,47 @@ def test_wait_reply_main_success_iff_attested_responder_matches_envelope_target(
     assert secret in out
 
 
+def test_wait_reply_main_queued_admit_is_not_labeled_as_reply_from(root, capsys):
+    """A queued fast-ack is admitted (exit 0) but must not print the trusted Reply from line."""
+    from tools import bot_mode_dm
+    from tools.bot_relay import relay_queued_sender_text
+    from tui_gateway.contracts.groups_bot_relay import BotRelayDeliverResult
+
+    parsed = BotRelayDeliverResult(
+        reply=relay_queued_sender_text("ops"),
+        status="queued",
+        message_id="fm-queued",
+        reply_relayed=False,
+        delivered_profile="ops",
+    )
+    assert parsed.status == "queued" and parsed.message_id == "fm-queued"
+
+    env_id = "a" * 32
+    env = {
+        "id": env_id,
+        "target_handle": "ops-bot",
+        "target_connection": "cloud-1",
+        "target_profile": "ops",
+    }
+    _write_claimed_envelope(root, env, target_profile="ops")
+    label = "@ops-bot on cloud-1"
+    reply_path = bot_relay.relay_root(root) / bot_relay.REPLIES_DIR / f"{env_id}.json"
+    bot_relay.write_reply(
+        root,
+        env_id,
+        reply=relay_queued_sender_text("ops"),
+        delivered_profile="ops",
+        reply_relayed=False,
+        status="queued",
+        message_id="fm-queued",
+    )
+    code = bot_mode_dm._delivery_main(["--wait-reply", str(reply_path), label, "0.3"])
+    out = capsys.readouterr().out
+    assert code == 0
+    assert "Queued for" in out and "not yet answered" in out
+    assert "Reply from" not in out
+
+
 def test_waiter_unrelayed_ok_reply_is_not_booked_as_the_targets_answer(root, capsys):
     """An admitted ok reply whose answer stayed in the target chat (reply_not_relayed) must not
     print the trusted 'Reply from' line. The sender's completion carries a stable typed flag and

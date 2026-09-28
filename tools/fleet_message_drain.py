@@ -78,10 +78,11 @@ DEFAULT_PROJECT = "mission-control-444444"
 DEFAULT_DATABASE = "fleet-operations"
 KINDS = frozenset({"dm", "notify_wake"})
 TS_FIELDS = frozenset({"created_at", "updated_at", "expires_at", "delivered_at", "read_at", "replied_at",
-                       "done_at", "failed_at", "rejected_at", "expired_at"})
+                       "done_at", "failed_at", "rejected_at", "expired_at", "sender_notice_at"})
 # The only fields this reader may write. Message content (from/to/body/kind/created_at) is never written.
 WRITABLE_FIELDS = frozenset({"status", "updated_at", "delivered_at", "read_at", "done_at", "failed_at",
-                             "rejected_at", "expired_at", "attempts", "last_error"})
+                             "rejected_at", "expired_at", "attempts", "last_error", "sender_notice",
+                             "sender_notice_at"})
 MAX_LIMIT = 50
 LAST_ERROR_CHARS = 500
 _SCOPE = "https://www.googleapis.com/auth/datastore"
@@ -140,14 +141,32 @@ def drain_config(cfg: Optional[dict] = None) -> Optional[DrainConfig]:
                        limit=limit, max_attempts=max_attempts, timeout_seconds=timeout)
 
 
-def drain_config_for_home(profile_home: Path | str) -> Optional[DrainConfig]:
-    """Resolve a recipient's opt-in from its own profile, without changing process env."""
-    from hermes_constants import reset_hermes_home_override, set_hermes_home_override
-    token = set_hermes_home_override(profile_home)
+def _config_for_profile_home(profile_home: Path) -> Optional[dict]:
+    path = profile_home / "config.yaml"
+    if not path.is_file():
+        return None
     try:
-        return drain_config()
-    finally:
-        reset_hermes_home_override(token)
+        from hermes_cli.config import read_user_config_raw
+        return read_user_config_raw(path)
+    except Exception:
+        logger.debug("fleet message drain: could not read %s", path, exc_info=True)
+        return None
+
+
+def recipient_drain_enabled(profile_name: str, *, profile_home: Path | str | None = None) -> bool:
+    """True when the named recipient profile has a usable turn-end drain (not the sender process config)."""
+    home: Path | None
+    if profile_home is not None:
+        home = Path(profile_home)
+    else:
+        from tools.bot_mode_probe import _default_home, _hermes_root, _roster
+        home = dict(_roster(_hermes_root(Path(_default_home())))).get(profile_name)
+    if home is None or not home.is_dir():
+        return False
+    cfg = _config_for_profile_home(home)
+    if cfg is None:
+        return False
+    return drain_config(cfg) is not None
 
 
 def bot_identity(profile_home: Path | str) -> str:
@@ -450,6 +469,12 @@ def _malformed(fields: dict) -> str:
     return ""
 
 
+def _expire_sender_notice(doc_id: str, recipient: Any) -> str:
+    label = str(recipient or "recipient")
+    return (f"Queued message {doc_id} to @{label} expired after 24 hours without delivery — "
+            "it was NOT delivered.")
+
+
 def claim_next(store: Any, me: str, *, limit: int = 10, now: Optional[datetime.datetime] = None) -> Optional[Claimed]:
     """Run the ONE turn-end query and atomically claim the oldest claimable doc (queued -> delivered).
 
@@ -473,8 +498,10 @@ def claim_next(store: Any, me: str, *, limit: int = 10, now: Optional[datetime.d
                 logger.warning("fleet message drain: could not reject malformed doc %s", row.doc_id, exc_info=True)
             continue
         if parse_ts(fields["expires_at"]) <= now:
+            notice = _expire_sender_notice(row.doc_id, fields.get("to"))
             try:
-                store.update(row.doc_id, {"status": "expired", "expired_at": now_s, "updated_at": now_s},
+                store.update(row.doc_id, {"status": "expired", "expired_at": now_s, "updated_at": now_s,
+                                          "sender_notice": notice, "sender_notice_at": now_s},
                              row.update_time)
             except PreconditionFailed:
                 pass
@@ -491,6 +518,37 @@ def claim_next(store: Any, me: str, *, limit: int = 10, now: Optional[datetime.d
         claimed.fields.update(status="delivered", delivered_at=now_s)
         return claimed
     return None
+
+
+def turn_end_drain_query(
+    profile_home: Path | str,
+    cfg: Optional[dict] = None,
+) -> Optional[tuple[DrainConfig, Any, Optional[Claimed]]]:
+    """The turn-end Firestore query (expire + claim). Shared by the TUI hook and ``-Q`` exit.
+
+    Returns ``(config, store, claimed)`` when drain is enabled (``claimed`` may be None after the
+    query). Returns ``None`` when :func:`drain_config` is disabled for this profile."""
+    config = drain_config(cfg)
+    if config is None:
+        return None
+    store = store_for(config)
+    claimed = claim_next(store, bot_identity(profile_home), limit=config.limit)
+    return config, store, claimed
+
+
+def sender_delivery_status(store: Any, sender: str, message_id: str) -> Optional[dict]:
+    """Status the original ``from`` handle may read for a message it queued (including expiry notices)."""
+    row = store.get(message_id)
+    if row is None or row.fields.get("from") != sender:
+        return None
+    fields = row.fields
+    out: dict[str, Any] = {"message_id": message_id, "status": fields.get("status")}
+    notice = fields.get("sender_notice")
+    if isinstance(notice, str) and notice.strip():
+        out["notice"] = notice
+    if fields.get("sender_notice_at"):
+        out["notice_at"] = fields["sender_notice_at"]
+    return out
 
 
 def _write(store: Any, claimed: Claimed, fields: dict) -> bool:

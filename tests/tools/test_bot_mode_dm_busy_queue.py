@@ -72,6 +72,12 @@ def test_message_agent_fast_acks_a_held_session(tmp_path, monkeypatch, capsys):
     from tools.fleet_message_enqueue import queued_ack
 
     home, dm_file = _setup(tmp_path, monkeypatch, queue_wait=30.0)
+    ops = home / "profiles" / "ops"
+    ops.mkdir(parents=True)
+    (ops / "config.yaml").write_text(
+        "fleet_messages:\n  drain_on_turn_end: true\n  emulator_host: 127.0.0.1:1\n",
+        encoding="utf-8",
+    )
     monkeypatch.setattr(live, "find_canonical_live_owner", lambda h: None)
     seen = {}
 
@@ -110,6 +116,12 @@ def test_message_agent_does_not_claim_queued_when_the_registry_write_fails(tmp_p
     from tools.fleet_message_enqueue import FleetEnqueueError
 
     home, dm_file = _setup(tmp_path, monkeypatch, queue_wait=30.0)
+    ops = home / "profiles" / "ops"
+    ops.mkdir(parents=True)
+    (ops / "config.yaml").write_text(
+        "fleet_messages:\n  drain_on_turn_end: true\n  emulator_host: 127.0.0.1:1\n",
+        encoding="utf-8",
+    )
     monkeypatch.setattr(live, "find_canonical_live_owner", lambda h: None)
 
     def fake_enqueue(**kwargs):

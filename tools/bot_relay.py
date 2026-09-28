@@ -481,8 +481,19 @@ def target_scope_refusal(profile: str, home: "str | Path | None" = None) -> str:
     )
 
 
+def relay_queued_sender_text(target_profile: str) -> str:
+    """Sender-visible text when a busy target admits a DM without a settled turn answer."""
+    name = str(target_profile or "").strip()
+    if not name:
+        return "Queued for @target, not yet answered"
+    if name.lower() == "hermes":
+        name = "default"
+    return f"Queued for @{name}, not yet answered"
+
+
 def write_reply(root: Path | str, envelope_id: str, *, reply: str = "", error: str = "", reason: str = "",
-                reply_relayed: bool | None = None) -> Path:
+                reply_relayed: bool | None = None, delivered_profile: str | None = None,
+                status: str | None = None, message_id: str | None = None) -> Path:
     """Persist the relayed reply (or delivery error) for the waiter. ``reason`` (typed
     code, ``tools.bot_failure_reasons``) is classified from ``error`` when omitted. ``reply_relayed``
     is the relay's own machine-readable flag for an otherwise-ok reply whose real answer never made
@@ -511,6 +522,12 @@ def write_reply(root: Path | str, envelope_id: str, *, reply: str = "", error: s
     record = {"id": safe, "at": int(time.time()), "reply": str(reply or ""), "error": err, "reason": code}
     if reply_relayed is not None:
         record["reply_relayed"] = bool(reply_relayed)
+    if delivered_profile:
+        record["delivered_profile"] = str(delivered_profile)
+    if status:
+        record["status"] = str(status)
+    if message_id:
+        record["message_id"] = str(message_id)
     _atomic_write_json(path, record)
     return path
 

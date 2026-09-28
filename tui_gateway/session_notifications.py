@@ -706,8 +706,10 @@ def _drain_fleet_messages_once(sid: str, session: dict) -> bool:
     home = _session_home(session)
     if not _fleet_drain_session_is_canonical(sid, session, home):
         return False
-    store = fmd.store_for(config)
-    claimed = fmd.claim_next(store, fmd.bot_identity(home), limit=config.limit)
+    triplet = fmd.turn_end_drain_query(home)
+    if triplet is None:
+        return False
+    config, store, claimed = triplet
     if claimed is None:
         return False
     # The query ran outside the admission lock; a user prompt that arrived meanwhile wins the session.
