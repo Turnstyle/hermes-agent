@@ -2323,9 +2323,10 @@ def _resolve_runtime_agent_kwargs() -> dict:
 
     if fallback_entry is not None:
         # The entry's model is the one this agent must send (#112600). Carry the fallback notice so the
-        # gateway can surface a user-visible provider switch (#74349); the caller must pop
-        # ``_fallback_notice`` before forwarding kwargs to AIAgent.
+        # gateway can surface a user-visible provider switch (#74349). Callers must pop both
+        # private fallback keys before forwarding kwargs to AIAgent.
         return {**_runtime_agent_kwargs(runtime), "model": fallback_entry["model"],
+                "_fallback_entry": dict(fallback_entry),
                 "_fallback_notice": pre_agent_fallback_notice(
                     _primary_provider, _primary_model,
                     runtime.get("provider") or fallback_entry.get("provider") or "unknown",
