@@ -843,6 +843,78 @@ describe('a misroute is never silent', () => {
   })
 })
 
+// The gateway's REPLY NOT RELAYED ok replies (pairs 9-12) carry reply_relayed/reason alongside the
+// prose so a waiter or telemetry can classify them without re-parsing text; the Desktop hop must
+// not silently drop those fields, the same way it already forwards MISROUTED's reason.
+describe('a REPLY NOT RELAYED reason survives the Desktop hop', () => {
+  const envelope = {
+    id: 'env-1',
+    message: 'status?',
+    target_connection: 'b',
+    target_profile: 'ops'
+  }
+
+  it('forwards reply_relayed and reason when the gateway flags REPLY NOT RELAYED', async () => {
+    const calls = respondWith(call => {
+      if (call.method === 'bot_relay.outbox.drain') {
+        return { envelopes: call.connectionId === 'a' ? [envelope] : [] }
+      }
+
+      if (call.method === 'bot_relay.deliver') {
+        return {
+          delivered_profile: 'ops',
+          reason: 'reply_not_relayed',
+          reply: 'REPLY NOT RELAYED: ...',
+          reply_relayed: false
+        }
+      }
+
+      return {}
+    })
+
+    const { startBotRelay, stopBotRelay } = await loadRelay()
+
+    startBotRelay()
+    await pushAndSettle()
+
+    expect(calls.find(call => call.method === 'bot_relay.reply')?.params).toMatchObject({
+      id: 'env-1',
+      reason: 'reply_not_relayed',
+      reply: 'REPLY NOT RELAYED: ...',
+      reply_relayed: false
+    })
+
+    stopBotRelay()
+  })
+
+  it('omits reply_relayed/reason from the forwarded reply for an ordinary success', async () => {
+    const calls = respondWith(call => {
+      if (call.method === 'bot_relay.outbox.drain') {
+        return { envelopes: call.connectionId === 'a' ? [envelope] : [] }
+      }
+
+      if (call.method === 'bot_relay.deliver') {
+        return { delivered_profile: 'ops', reply: 'all green' }
+      }
+
+      return {}
+    })
+
+    const { startBotRelay, stopBotRelay } = await loadRelay()
+
+    startBotRelay()
+    await pushAndSettle()
+
+    const replyParams = calls.find(call => call.method === 'bot_relay.reply')?.params
+
+    expect(replyParams).toMatchObject({ id: 'env-1', reply: 'all green' })
+    expect(replyParams).not.toHaveProperty('reply_relayed')
+    expect(replyParams).not.toHaveProperty('reason')
+
+    stopBotRelay()
+  })
+})
+
 describe('stop halts both loops', () => {
   it('leaves no timer able to reach the gateway after teardown', async () => {
     const calls = respondWith(() => ({ envelopes: [] }))

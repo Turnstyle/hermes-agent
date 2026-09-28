@@ -175,6 +175,22 @@ def test_write_reply_reason_passthrough_and_classification(root):
     assert data["reason"] == "" and data["reply"] == "ok"
 
 
+def test_write_reply_persists_reply_relayed_when_given(root):
+    """A relay hop's reply_relayed flag (#reply_not_relayed) must survive the write, not be
+    silently dropped — the waiter/telemetry needs it to classify a REPLY NOT RELAYED ok reply the
+    same way it classifies a typed error's reason."""
+    path = bot_relay.write_reply(root, "f" * 32, reply="REPLY NOT RELAYED: ...",
+                                 reason="reply_not_relayed", reply_relayed=False)
+    data = json.loads(Path(path).read_text(encoding="utf-8"))
+    assert data["reply_relayed"] is False
+    assert data["reason"] == "reply_not_relayed"
+    # Omitted entirely (not persisted as null/false) for an ordinary reply — additive, so an older
+    # reader that never heard of the field sees the exact same record it always did.
+    path = bot_relay.write_reply(root, "1" * 32, reply="ok")
+    data = json.loads(Path(path).read_text(encoding="utf-8"))
+    assert "reply_relayed" not in data
+
+
 def test_target_scope_error_from_a_connection_target_is_rewritten_to_name_it(root):
     """A target-scope refusal that came back FROM a relay target must not keep the generic "run
     `hermes gateway restart`" advice — the delivery turn ran and failed on THAT install, so the
