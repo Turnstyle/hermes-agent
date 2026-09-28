@@ -49,7 +49,9 @@ def test_busy_opted_in_target_is_enqueued_on_first_attempt(tmp_path, monkeypatch
                                    profile_home=target, author={"id": "bot:tb-cndr", "name": "tb-cndr"})
     assert rc == 0 and time.monotonic() - started < 5
     assert len(calls) == 1 and len(enqueue_calls) == 1 and len(writes) == 1
-    assert enqueue_calls[0][0][:3] == ["hermes", "--run-module", "tools.fleet_message_drain"]
+    source_launcher = Path(bot_mode_dm.__file__).resolve().parents[1] / ".hermes" / "bin" / "hermes"
+    expected_launcher = str(source_launcher) if source_launcher.is_file() else "hermes"
+    assert enqueue_calls[0][0][:3] == [expected_launcher, "--run-module", "tools.fleet_message_drain"]
     payload = json.loads(capsys.readouterr().out)
     doc_id, fields, config = writes[0]
     assert payload["status"] == "queued" and payload["message_id"] == doc_id
