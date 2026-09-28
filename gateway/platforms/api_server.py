@@ -1947,6 +1947,11 @@ class APIServerAdapter(OpenAICompatRoutesMixin, BasePlatformAdapter):
         stored = session.get("model") if isinstance(session, dict) else None
         if not stored or stored == self._model_name:
             return None
+        config = self._parse_session_model_config(session.get("model_config"))
+        gateway_runtime = config.get("gateway_runtime")
+        if isinstance(gateway_runtime, dict) and gateway_runtime.get("fallback_active"):
+            logger.info("session row model skipped: fallback_active")
+            return None
         return stored
 
     @staticmethod

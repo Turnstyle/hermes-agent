@@ -181,8 +181,9 @@ class GatewayTurnMixin:
         skey = self._resolve_session_key_or_none(source, session_key)
         # Every exit path starts clean: the /model-override fast path returns before the pop below,
         # and hygiene/inbound callers resolve without a turn runner consuming the stash — a stale
-        # notice must never attach to another session's next turn (#74349).
+        # notice or fallback entry must never attach to another session's next turn (#74349).
         self._pre_agent_fallback_notice = None
+        self._pre_agent_fallback_entry = None
 
         model = _resolve_gateway_model(user_config)
         if skey:
@@ -239,7 +240,7 @@ class GatewayTurnMixin:
         # Private notice metadata must never reach an ``AIAgent(**runtime_kwargs)`` spread; the turn
         # runner surfaces it through the agent's one-shot fallback notice (#74349).
         self._pre_agent_fallback_notice = runtime_kwargs.pop("_fallback_notice", None)
-        runtime_kwargs.pop("_fallback_entry", None)
+        self._pre_agent_fallback_entry = runtime_kwargs.pop("_fallback_entry", None)
         runtime_model = runtime_kwargs.pop("model", None)
         if runtime_model:
             logger.info("Runtime provider supplied explicit model override: %s -> %s", model, runtime_model)
@@ -351,7 +352,9 @@ class GatewayTurnMixin:
         if not model:
             return
         runtime = {k: getattr(agent, k, None) for k in ("provider", "base_url", "api_mode")}
-        runtime["fallback_active"] = bool(getattr(agent, "_fallback_activated", False))
+        runtime["fallback_active"] = bool(
+            getattr(agent, "_fallback_activated", False)
+            or getattr(agent, "_pre_agent_fallback_active", False))
         runtime = {k: v for k, v in runtime.items() if v not in (None, "")}
         try:
             db = self._session_db._db

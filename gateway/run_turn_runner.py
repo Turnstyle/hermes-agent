@@ -1913,6 +1913,8 @@ class TurnRunner:
             # fallback was resolved before any agent exists (#74349); one-shot per turn.
             pending_fallback_notice = getattr(runner, "_pre_agent_fallback_notice", None)
             runner._pre_agent_fallback_notice = None
+            pre_agent_fallback_entry = getattr(runner, "_pre_agent_fallback_entry", None)
+            runner._pre_agent_fallback_entry = None
             logger.debug(
                 "run_agent resolved: model=%s provider=%s session=%s",
                 model, runtime_kwargs.get("provider"), ctx.session_key or "",
@@ -1943,6 +1945,7 @@ class TurnRunner:
         agent, reused_cached_agent = self._resolve_turn_agent(
             turn_route, platform_key, combined_ephemeral, max_iterations, reasoning_config, pr,
         )
+        agent._pre_agent_fallback_active = bool(pre_agent_fallback_entry)
         if pending_fallback_notice:
             # Reuse the in-agent one-shot notice so the pre-agent provider switch is user-visible too.
             agent._pending_fallback_notice = pending_fallback_notice

@@ -4,11 +4,14 @@ user-visible notice through the agent's one-shot fallback-notice mechanism (#743
 Drives the production entry point — ``GatewayTurnMixin._resolve_session_agent_runtime`` bound to the
 runner, then ``TurnRunner.run_sync`` — so the pop in run_turn.py and the attach in run_turn_runner.py
 are both pinned (a helper-only test stays green with either removed)."""
+import json
 import types
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 from gateway.run_turn import GatewayTurnMixin
+from gateway.config import PlatformConfig
+from gateway.platforms.api_server import APIServerAdapter
 from gateway.session import Platform, SessionSource
 from gateway.turn_context import TurnContext
 from hermes_cli.auth import AuthError
@@ -107,3 +110,63 @@ def test_model_override_fast_path_clears_stale_notice():
         model, runtime = runner._resolve_session_agent_runtime(session_key="test-session-key")
     assert (model, runtime["provider"]) == ("claude-sonnet-5", "anthropic")
     assert runner._pre_agent_fallback_notice is None
+
+
+def test_same_provider_pre_agent_fallback_does_not_pin_next_bot_chat_turn(monkeypatch):
+    """The row records the model used, while a healthy next turn returns to the primary."""
+    from gateway.run_turn_runner import TurnRunner
+
+    row = {"model": "gpt-6-sol", "model_config": "{}"}
+
+    class SessionDB:
+        def get_session(self, _session_id):
+            return row
+
+        def update_session_meta(self, _session_id, model_config, *, model):
+            row.update(model=model, model_config=model_config)
+
+    runner = _runner_with_real_runtime_resolution()
+    runner._session_db = SimpleNamespace(_db=SessionDB())
+    runner._sync_session_model_from_agent = types.MethodType(GatewayTurnMixin._sync_session_model_from_agent, runner)
+    ctx = TurnContext(
+        source=SessionSource(platform=Platform.LOCAL, chat_id="c", user_id="u"),
+        message="hi", history=[], session_id="sid", session_key="test-session-key", user_config={},
+        AIAgent=_RecordingAgent, resolve_display_setting=lambda *_a: False, _run_still_current=lambda: True,
+        _hooks_ref=SimpleNamespace(loaded_hooks=False),
+    )
+    fallback = {"provider": "openai-codex", "model": "gpt-6-luna", "api_key": "k", "base_url": "u"}
+
+    def primary_auth_fails(**kw):
+        if kw.get("requested") is None:
+            raise AuthError("expired")
+        return dict(fallback)
+
+    with patch("hermes_cli.runtime_provider.resolve_runtime_provider", side_effect=primary_auth_fails), \
+         patch("hermes_cli.runtime_provider._get_model_config",
+               return_value={"provider": "openai-codex", "default": "gpt-6-sol"}), \
+         patch("gateway.run._load_gateway_config",
+               return_value={"fallback_providers": [{"provider": "openai-codex", "model": "gpt-6-luna"}]}), \
+         patch("gateway.run._resolve_gateway_model", return_value="gpt-6-sol"), \
+         patch("gateway.run._get_channel_override", return_value=None):
+        assert TurnRunner(runner, ctx).run_sync()["final_response"] == "ok"
+
+    assert row["model"] == "gpt-6-luna"
+    assert json.loads(row["model_config"])["gateway_runtime"]["fallback_active"] is True
+    assert "_fallback_entry" not in _RecordingAgent.built_kwargs
+
+    # Bot Chat's next API request reads the persisted row after primary auth recovers.
+    adapter = APIServerAdapter(PlatformConfig(enabled=True))
+    monkeypatch.setattr("run_agent.AIAgent", _RecordingAgent)
+    monkeypatch.setattr("gateway.run._resolve_runtime_agent_kwargs", lambda: {
+        "provider": "openai-codex", "api_key": "healthy", "base_url": "u"})
+    monkeypatch.setattr("gateway.run._resolve_gateway_model", lambda: "gpt-6-sol")
+    monkeypatch.setattr("gateway.run._load_gateway_config", lambda: {})
+    monkeypatch.setattr("gateway.run.GatewayRunner._load_reasoning_config", staticmethod(lambda model="": {}))
+    monkeypatch.setattr("gateway.run.GatewayRunner._load_fallback_model", staticmethod(lambda: None))
+    monkeypatch.setattr("gateway.run._current_max_iterations", lambda: 90)
+    monkeypatch.setattr("hermes_cli.tools_config._get_platform_tools", lambda *_: set())
+    monkeypatch.setattr(adapter, "_ensure_session_db", lambda: None)
+    monkeypatch.setattr(adapter, "_session_model_override_for", lambda *_: None)
+    assert adapter._stored_session_model(row) is None
+    next_agent = adapter._create_agent(session_id="sid", session_model=adapter._stored_session_model(row))
+    assert next_agent.model == "gpt-6-sol"
