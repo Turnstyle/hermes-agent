@@ -303,6 +303,10 @@ def test_idle_post_turn_linger_does_not_hold_the_session_lease(monkeypatch):
     monkeypatch.delenv("HERMES_KANBAN_TASK", raising=False)
     monkeypatch.setattr(cli.atexit, "register", lambda *_a, **_k: None)
     monkeypatch.setattr(cli, "_handed_off_session_ids", set())
+    monkeypatch.setattr("hermes_cli.cli_single_query._drain_quiet_bot_chat",
+                        lambda *_a: pytest.fail("handed-off writer must not drain"))
+    logged = []
+    monkeypatch.setattr("hermes_cli.cli_single_query.logger.info", lambda *a: logged.append(a))
 
     session_id = "bot-chat-shared"
     the_cli = _quiet_cli_with_real_session_lease(session_id)
@@ -344,6 +348,67 @@ def test_idle_post_turn_linger_does_not_hold_the_session_lease(monkeypatch):
     assert session_id in cli._handed_off_session_ids, (
         "the lingerer must not finalize a Bot Chat another writer holds (#88234)"
     )
+    assert ("fleet message drain skipped for handed-off session %s", session_id) in logged
+
+
+@pytest.mark.parametrize("row_counts, should_reload", [([1, 2], True), ([1, 1], False)])
+def test_end_of_linger_drain_uses_current_owned_history(monkeypatch, tmp_path, row_counts, should_reload):
+    from hermes_cli import quiet_single_query as qsq
+
+    home = tmp_path / "profiles" / "ops"
+    home.mkdir(parents=True)
+    monkeypatch.setenv("HERMES_HOME", str(home))
+    monkeypatch.delenv("HERMES_KANBAN_GOAL_MODE", raising=False)
+    monkeypatch.setattr(qsq, "continue_quiet_notify_completions", lambda *a, **kw: None)
+    monkeypatch.setattr(fmd, "drain_config", lambda: fmd.DrainConfig(target="emulator", emulator_host="unused"))
+    monkeypatch.setattr(fmd, "store_for", lambda _: object())
+    queued = [SimpleNamespace(doc_id="queued", pending_fields=None)]
+    monkeypatch.setattr(fmd, "claim_next", lambda *a, **kw: queued.pop() if queued else None)
+    monkeypatch.setattr(fmd, "mark_read", lambda *a: True)
+    monkeypatch.setattr(fmd, "render_input", lambda *a: ("queued message", None, {}))
+    finished = []
+    monkeypatch.setattr(fmd, "finish", lambda *a, **kw: finished.append(a))
+
+    stale = [{"role": "assistant", "content": "first answer"}]
+    other_writer = {"role": "assistant", "content": "other writer's answer"}
+    restored = [{"role": "session_meta", "content": "metadata"}, *stale, other_writer]
+
+    class SessionDb:
+        def __init__(self):
+            self.counts = iter(row_counts)
+            self.reloads = 0
+
+        def message_count(self, sid):
+            assert sid == "bot-chat-shared"
+            return next(self.counts)
+
+        def get_messages_as_conversation(self, sid, repair_alternation=True):
+            assert sid == "bot-chat-shared" and repair_alternation is True
+            self.reloads += 1
+            return restored
+
+    session_db = SessionDb()
+    calls = []
+
+    def run_conversation(**kwargs):
+        calls.append(kwargs)
+        if len(calls) == 1:
+            return {"final_response": "first answer", "messages": stale}
+        return {"final_response": "drained answer", "messages": [*stale, other_writer]}
+
+    the_cli = SimpleNamespace(
+        agent=SimpleNamespace(run_conversation=run_conversation, session_id="bot-chat-shared",
+                              _session_title_hint="Bot Chat"),
+        conversation_history=[], session_id="bot-chat-shared", _session_db=session_db,
+        _release_active_session=lambda: None,
+        _claim_active_session=lambda *a, **kw: True,
+    )
+    with pytest.raises(SystemExit) as exc:
+        cli._run_quiet_single_query(the_cli, "first")
+    assert exc.value.code == 0
+    assert len(calls) == 2 and len(finished) == 1
+    assert calls[1]["conversation_history"] == (stale + [other_writer] if should_reload else stale)
+    assert session_db.reloads == int(should_reload)
 
 
 def test_follow_up_turn_holds_lease_and_reloads_stored_transcript(monkeypatch):

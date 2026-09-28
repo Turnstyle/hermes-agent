@@ -366,6 +366,7 @@ def _run_quiet_single_query(cli, effective_query, emitter=None):
             )
 
         _report_turn(result)
+        drain_owned = True
         if isinstance(result, dict) and not result.get("failed"):
             history = result.get("messages") or cli.conversation_history
             linger_budget = quiet_notify_linger_seconds()
@@ -425,16 +426,24 @@ def _run_quiet_single_query(cli, effective_query, emitter=None):
                 )
             finally:
                 cli._quiet_notify_linger_done = True
-            if idle_release and not cli._claim_active_session("cli", silent=True):
-                # Another writer holds the chat now; ending its row here is the #88234 class
-                # (a leg vanishes from history). That writer's own exit finalizes it.
-                _handed_off_session_ids.add(getattr(cli, "session_id", None))
+            if idle_release:
+                drain_owned = cli._claim_active_session("cli", silent=True)
+                if drain_owned:
+                    rows = _durable_row_count(cli)
+                    if rows is not None and rows_at_release is not None and rows != rows_at_release:
+                        restored = cli._session_db.get_messages_as_conversation(
+                            cli.session_id, repair_alternation=True)
+                        history = [m for m in restored if m.get("role") != "session_meta"] or history
+                else:
+                    # Another writer owns the chat and will run its own exit drain.
+                    _handed_off_session_ids.add(getattr(cli, "session_id", None))
+                    logger.info("fleet message drain skipped for handed-off session %s", cli.session_id)
             if isinstance(continued, dict):
                 result = continued
                 # A teammate's reply displaced the answer this run prints; tell the spawner.
                 _report_turn(result)
         response = result.get("final_response", "") if isinstance(result, dict) else str(result)
-        if _single_query_exit_code(result) == 0:
+        if drain_owned and _single_query_exit_code(result) == 0:
             try:
                 _drain_quiet_bot_chat(cli, history)
             except Exception as exc:
