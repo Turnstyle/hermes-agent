@@ -149,11 +149,39 @@ def _run_kanban_goal_loop_q(cli: "HermesCLI", first_response: str, run_turn=None
         with _kbc.connect_closing() as c:
             _kb.block_task(c, task_id, reason=reason, expected_run_id=worker_run_id)
 
+    def _blocked_payload_rows(conn, limit: int):
+        return conn.execute(
+            "SELECT payload FROM task_events WHERE task_id = ? AND kind = 'blocked' "
+            "ORDER BY id DESC LIMIT ?",
+            (task_id, int(limit)),
+        ).fetchall()
+
+    def _block_is_bookkeeping() -> bool:
+        with _kbc.connect_closing() as c:
+            row = _blocked_payload_rows(c, 1)
+            if not row:
+                return False
+            payload = _kb._json_dict(row[0]["payload"])
+            if payload.get("reason") == "initial_status":
+                return True
+            return bool(payload.get("bookkeeping"))
+
+    def _block_reason_unchanged() -> bool:
+        with _kbc.connect_closing() as c:
+            rows = _blocked_payload_rows(c, 2)
+            if len(rows) < 2:
+                return False
+            r0 = str(_kb._json_dict(rows[0]["payload"]).get("reason") or "")
+            r1 = str(_kb._json_dict(rows[1]["payload"]).get("reason") or "")
+            return bool(r0) and r0 == r1
+
     _run_loop(
         task_id=task_id, goal_text=goal_text, run_turn=run_turn or _quiet_turn,
         task_status_fn=_task_status, block_fn=_block,
         max_turns=task.goal_max_turns or _DEF_TURNS, first_response=first_response or "",
         log=log or (lambda m: logger.info("%s", m)),
+        block_is_bookkeeping_fn=_block_is_bookkeeping,
+        block_reason_unchanged_fn=_block_reason_unchanged,
     )
 
 
