@@ -9,6 +9,7 @@ server.py's globals (method_ctx.py) and reference ``_ok``/``_err`` bare."""
 import contextlib
 import os
 import subprocess
+import time
 from pathlib import Path
 
 # Defined beside the sender-side waiter budget so the two Python sides cannot drift (#93911).
@@ -187,24 +188,47 @@ def _(rid, params: dict, _root=_relay_root, _run=_run_delivery,
             with os.fdopen(fd, "w", encoding="utf-8") as f:
                 f.write(message)
             # Per-profile turn lock serializes with any other delivery turn into this profile and
-            # covers only the turn window. Worst-case hold is lock wait (bot_mode.turn_wait_seconds,
-            # default 120s) + the 600s turn timeout, doubled on one retry — callers tolerate ~1320s.
-            # Worst-case handler hold is lock wait (bot_mode.turn_wait_seconds, default 120s) + the 600s
-            # turn timeout below — doubled when the retry policy grants one bounded re-run — so clients
-            # calling bot_relay.deliver must tolerate ~1320s before assuming failure. See #93091.
-            with acquire_turn_lock(root, resolved):
-                proc = _run(resolved, tmp, turn_env)
-                if proc.returncode != 0:
-                    # Retry policy: transient classes re-run the SAME session once; context_overflow
-                    # too — the retried turn's pre-API compaction pass compacts the over-threshold
-                    # transcript first (no fresh session is minted). Auth/quota/config never retry.
-                    # See #93091.
-                    from tools.bot_failure_reasons import (
-                        RETRY_NONE, classify_agent_error, retry_action)
-                    if retry_action(classify_agent_error(_detail(proc))) != RETRY_NONE:
-                        # The failed attempt already persisted the DM; the re-run resumes that row.
-                        from tools.bot_relay import retry_turn_env
-                        proc = _run(resolved, tmp, retry_turn_env(turn_env))
+            # covers only the turn window. ONE shared deadline (bot_mode.turn_wait_seconds) covers
+            # BOTH the lock wait and retries behind a SESSION_NOT_OWNED refusal (another surface —
+            # plain `hermes chat`, a gateway bridge turn — holds the target's live Bot Chat right
+            # now, distinct from this handler's own turn lock) so the two waits can never stack:
+            # worst-case handler hold stays lock-wait-budget + the 600s turn timeout, doubled on one
+            # policy-gated retry — clients calling bot_relay.deliver must tolerate ~1320s before
+            # assuming failure. See #93091 and tools/bot_mode_dm.py::_run_delivery_locked (the local
+            # message_agent runner's own queue loop against the same refusal).
+            from tools.bot_mode_dm import _BUSY_SLICE_SECONDS, refused_not_owned
+            from tools.bot_relay import turn_wait_seconds
+
+            started = time.monotonic()
+            deadline = started + turn_wait_seconds()
+            while True:
+                remaining = max(0.0, deadline - time.monotonic())
+                with acquire_turn_lock(root, resolved, remaining):
+                    proc = _run(resolved, tmp, turn_env)
+                    held = proc.returncode != 0 and refused_not_owned(proc.stderr or "")
+                    if proc.returncode != 0 and not held:
+                        # Retry policy: transient classes re-run the SAME session once; context_overflow
+                        # too — the retried turn's pre-API compaction pass compacts the over-threshold
+                        # transcript first (no fresh session is minted). Auth/quota/config never retry.
+                        # See #93091.
+                        from tools.bot_failure_reasons import (
+                            RETRY_NONE, classify_agent_error, retry_action)
+                        if retry_action(classify_agent_error(_detail(proc))) != RETRY_NONE:
+                            # The failed attempt already persisted the DM; the re-run resumes that row.
+                            from tools.bot_relay import retry_turn_env
+                            proc = _run(resolved, tmp, retry_turn_env(turn_env))
+                if not held:
+                    break
+                # Held: leave the lock (already released above) before sleeping, so a live owner or
+                # another delivery can still get in — then retry, bounded by the shared deadline.
+                remaining = max(0.0, deadline - time.monotonic())
+                if remaining <= 0:
+                    waited = time.monotonic() - started
+                    return _err(rid, 5092,
+                        f"delivery turn failed: @{resolved}'s Bot Chat is open on another surface "
+                        f"right now; NOT delivered after queuing ~{int(round(waited))}s.",
+                        data={"reason": "target_busy"})
+                time.sleep(min(_BUSY_SLICE_SECONDS, remaining))
         finally:
             with contextlib.suppress(OSError):
                 os.unlink(tmp)

@@ -425,6 +425,20 @@ def _delivery_lock(argv: list[str], *, stdin_file: bool, timeout_seconds: Option
     return acquire_turn_lock(_hermes_root(Path(_default_home())), argv[2], timeout_seconds)
 
 
+def refused_not_owned(stderr_text: str) -> bool:
+    """True when ``stderr_text`` carries the CLI's SESSION_NOT_OWNED refusal: a live single-owner
+    lease already holds the target's Bot Chat elsewhere (another surface — plain ``hermes chat``, a
+    gateway bridge turn). The ``hermes-refusal-reason:`` marker wins over prose, including unknown
+    codes from newer CLIs; only older CLIs without a marker need the historical wording fallback.
+    Shared by the local runner (``_run_local_turn``) and the relay's ``bot_relay.deliver`` CLI
+    transport (``tui_gateway/methods_bot_relay.py``) so both retry the SAME refusal the SAME way."""
+    stderr_text = stderr_text or ""
+    reason = next((line.removeprefix("hermes-refusal-reason: ").strip()
+                   for line in stderr_text.splitlines()
+                   if line.startswith("hermes-refusal-reason: ")), None)
+    return reason == "SESSION_NOT_OWNED" if reason is not None else "already has a live owner" in stderr_text
+
+
 def _session_held_cls() -> type:
     """Lazily-defined, module-cached ``TurnBusyError`` subclass marking an INSTANT SESSION_NOT_OWNED
     refusal (the target's Bot Chat is held by another surface right now) as distinct from a lock-wait
@@ -466,15 +480,7 @@ def _run_local_turn(argv: list[str], dm_file: str, *, env: Optional[dict[str, st
         # user row, so the retried process is told to resume it (RESUME_UNANSWERED_TURN_ENV).
         if retry_action(classify_agent_error(turn_failure_text(proc.stdout, proc.stderr))) != RETRY_NONE:
             proc = _turn(retry_turn_env(env))
-    stderr_text = proc.stderr or ""
-    reason = next((line.removeprefix("hermes-refusal-reason: ").strip()
-                   for line in stderr_text.splitlines()
-                   if line.startswith("hermes-refusal-reason: ")), None)
-    # A code wins over prose, including unknown codes from newer CLIs.
-    # Only older CLIs without a marker need the historical wording fallback.
-    refused_not_owned = (reason == "SESSION_NOT_OWNED" if reason is not None
-                         else "already has a live owner" in stderr_text)
-    if proc.returncode != 0 and refused_not_owned:
+    if proc.returncode != 0 and refused_not_owned(proc.stderr or ""):
         # The target's Bot Chat is held live by another surface (Desktop); the turn
         # never ran — tell the sender plainly instead of leaking a raw lease error.
         # See #100523.
