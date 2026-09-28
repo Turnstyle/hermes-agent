@@ -31,6 +31,8 @@ doc that anyone else touched in between is never overwritten):
 
 One message is handed over per turn end. Its own turn end runs the next query, so ordering holds,
 nothing is claimed that is not about to run, and a crash leaves at most one doc in delivered/read.
+The separate ``reclaim-stale`` maintenance command recovers those claims after the age threshold;
+it does not add a read to the turn-end path.
 
 The feature is dark by default. Config (profile ``config.yaml``)::
 
@@ -50,12 +52,14 @@ the real boundary; this module never deletes and never writes message content.
 """
 from __future__ import annotations
 
+import argparse
 import dataclasses
 import datetime
 import json
 import logging
 import re
 import subprocess
+import sys
 import threading
 import time
 import urllib.error
@@ -218,8 +222,8 @@ class Row:
 
 
 class FirestoreStore:
-    """Firestore REST transport locked to ``fleet_messages_v1``: one query shape (a recipient's own
-    queued docs) and precondition-guarded field updates. ``reads``/``commits`` count calls."""
+    """Firestore REST transport locked to ``fleet_messages_v1`` with guarded field updates.
+    ``reads``/``commits`` count calls."""
 
     def __init__(self, *, base_url: str, project: str, database: str,
                  token_fn: Callable[[], str], timeout: float = 5.0):
@@ -250,6 +254,23 @@ class FirestoreStore:
         query = {"from": [{"collectionId": COLLECTION}], "where": where,
                  "orderBy": [{"field": {"fieldPath": "created_at"}, "direction": "ASCENDING"}],
                  "limit": max(1, min(MAX_LIMIT, int(limit)))}
+        self.reads += 1
+        rows = []
+        for item in self._req(self.query_url, "POST", {"structuredQuery": query}):
+            doc = item.get("document")
+            if doc:
+                rows.append(Row(doc["name"].rsplit("/", 1)[1],
+                                {k: dec(v) for k, v in doc.get("fields", {}).items()}, doc.get("updateTime", "")))
+        return rows
+
+    def query_status(self, status: str, limit: int) -> list[Row]:
+        """Maintenance query by status alone; no composite index or recipient scope."""
+        if status not in ("delivered", "read"):
+            raise Refused(f"unsupported claim status {status!r}")
+        query = {"from": [{"collectionId": COLLECTION}],
+                 "where": {"fieldFilter": {"field": {"fieldPath": "status"},
+                                           "op": "EQUAL", "value": enc(status)}},
+                 "limit": max(1, int(limit))}
         self.reads += 1
         rows = []
         for item in self._req(self.query_url, "POST", {"structuredQuery": query}):
@@ -554,6 +575,92 @@ def finish(store: Any, claimed: Claimed, outcome: dict, *, max_attempts: int,
         return committed
 
 
+def reclaim_stale(store: Any, *, older_than_seconds: int = 1800, max_attempts: int = 5,
+                  now: Optional[datetime.datetime] = None, limit: int = 200,
+                  dry_run: bool = False) -> dict:
+    """Recover stale delivered/read claims outside the turn-end path.
+
+    Delivery is at least once: a reclaimed ``read`` claim may run its turn twice. Run this
+    from a no-model maintenance job; it performs two status queries and no turn-end reads.
+    In dry-run mode, transition counts describe what would be written.
+    """
+    if older_than_seconds < 0 or max_attempts < 1 or limit < 1:
+        raise ValueError("older_than_seconds must be nonnegative; max_attempts and limit must be positive")
+    now = now or utcnow()
+    now_s = rfc3339(now)
+    cutoff = now - datetime.timedelta(seconds=older_than_seconds)
+    counts = {"scanned": 0, "fresh": 0, "requeued": 0, "failed": 0,
+              "expired": 0, "conflicts": 0, "dry_run": dry_run}
+    for status in ("delivered", "read"):
+        for row in store.query_status(status, limit):
+            counts["scanned"] += 1
+            fields = row.fields
+            updated_at = parse_ts(fields.get("updated_at"))
+            if fields.get("status") != status or updated_at is None or updated_at >= cutoff:
+                counts["fresh"] += 1
+                continue
+            attempts = fields["attempts"] + 1
+            expiry = parse_ts(fields.get("expires_at"))
+            changes = {"attempts": attempts, "updated_at": now_s,
+                       "last_error": (f"reclaimed stale {status} claim after {older_than_seconds}s "
+                                      "(claimer died or store failed; a 'read' claim's turn may already have run)")}
+            if expiry is not None and expiry <= now:
+                outcome = "expired"
+                changes.update(status=outcome, expired_at=now_s)
+            elif attempts >= max_attempts:
+                outcome = "failed"
+                changes.update(status=outcome, failed_at=now_s)
+            else:
+                outcome = "requeued"
+                changes["status"] = "queued"
+            if not dry_run:
+                try:
+                    store.update(row.doc_id, changes, row.update_time)
+                except PreconditionFailed:
+                    counts["conflicts"] += 1
+                    continue
+            counts[outcome] += 1
+    return counts
+
+
+def main(argv: Optional[list[str]] = None) -> int:
+    parser = argparse.ArgumentParser(description="Fleet message maintenance")
+    subparsers = parser.add_subparsers(dest="command", required=True)
+    reclaim = subparsers.add_parser("reclaim-stale", help="requeue stale delivered/read claims")
+    reclaim.add_argument("--older-than", type=int, default=1800, metavar="SECONDS")
+    reclaim.add_argument("--target", choices=("live", "emulator"))
+    reclaim.add_argument("--dry-run", action="store_true")
+    args = parser.parse_args(argv)
+    # This standalone cron command owns its stderr contract even if the credential
+    # fallback or config loader logs a warning before raising.
+    prior_log_level = logging.root.manager.disable
+    logging.disable(logging.CRITICAL)
+    try:
+        from hermes_cli.config import load_config
+        section = (load_config() or {}).get("fleet_messages") or {}
+        target = args.target or section.get("target") or "live"
+        if target not in ("live", "emulator"):
+            raise ValueError(f"unsupported target {target!r}")
+        host = str(section.get("emulator_host") or "").strip()
+        if target == "emulator" and not host:
+            raise ValueError("emulator target requires fleet_messages.emulator_host")
+        config = DrainConfig(target=target, emulator_host=host,
+                             project=str(section.get("project") or DEFAULT_PROJECT),
+                             database=str(section.get("database") or DEFAULT_DATABASE),
+                             max_attempts=int(section.get("max_attempts", 5)),
+                             timeout_seconds=float(section.get("timeout_seconds", 5)))
+        counts = reclaim_stale(store_for(config), older_than_seconds=args.older_than,
+                               max_attempts=config.max_attempts, dry_run=args.dry_run)
+    except Exception as exc:
+        reason = str(exc).splitlines()
+        print(f"fleet message reclaim-stale: {reason[0] if reason else type(exc).__name__}", file=sys.stderr)
+        return 1
+    finally:
+        logging.disable(prior_log_level)
+    print(json.dumps(counts, sort_keys=True))
+    return 0
+
+
 def render_input(claimed: Claimed) -> tuple[str, Optional[dict], dict]:
     """(text, turn_author, display_metadata) for the injected turn.
 
@@ -576,3 +683,7 @@ def render_input(claimed: Claimed) -> tuple[str, Optional[dict], dict]:
     text = body if body.lstrip().startswith("Message from ") else f"Message from 🤖 {sender} (@{sender}): {body}"
     author = {"id": f"bot:{sender}", "name": sender, "is_bot": True}
     return f"{header}\n{text}", author, {}
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
