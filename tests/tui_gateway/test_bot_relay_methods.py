@@ -635,6 +635,19 @@ def test_reply_roundtrip_and_id_validation(home):
     assert "error" in err
 
 
+def test_reply_forwards_reply_relayed_instead_of_dropping_it(home):
+    """The Desktop forwards reply_relayed/reason for a REPLY NOT RELAYED ok reply (pairs 9-12); this
+    RPC must not silently drop it on the floor — the waiter/telemetry needs it persisted the same
+    way an error's typed reason already is."""
+    envelope_id = "d" * 32
+    _result(srv._methods["bot_relay.reply"](1, {
+        "id": envelope_id, "reply": "REPLY NOT RELAYED: ...", "reason": "reply_not_relayed", "reply_relayed": False}))
+    path = bot_relay.relay_root(home) / bot_relay.REPLIES_DIR / f"{envelope_id}.json"
+    data = json.loads(path.read_text(encoding="utf-8"))
+    assert data["reply_relayed"] is False
+    assert data["reason"] == "reply_not_relayed"
+
+
 def test_reply_rewrites_a_target_scope_error_that_came_back_from_a_connection(home):
     """End-to-end through the RPC. The sender's gateway is the last place that knows BOTH the failure
     text and which target produced it, so the honest copy has to land here — in the reply file the
