@@ -267,8 +267,30 @@ def _flush_one_shot_session_store(cli) -> None:
         db.flush_token_counts()
     except Exception:
         logger.debug("one-shot token-count drain failed", exc_info=True)
-    if not (getattr(cli, "_bot_chat_delivery_lease_released", False)
-            and getattr(cli, "_active_session_lease", None) is None):
+    released_delivery = (getattr(cli, "_bot_chat_delivery_lease_released", False)
+                         and getattr(cli, "_active_session_lease", None) is None)
+    if released_delivery:
+        from pathlib import Path
+        from hermes_constants import get_hermes_home
+        from hermes_cli.active_sessions import try_acquire_active_session
+        from tools.bot_mode_probe import _hermes_root
+        from tools.bot_relay import acquire_turn_lock
+        from tools.fleet_message_drain import bot_identity
+
+        home = Path(get_hermes_home())
+        try:
+            with acquire_turn_lock(_hermes_root(home), bot_identity(home), 0):
+                lease, refusal = try_acquire_active_session(
+                    session_id=session_id, surface="cli", config=cli.config,
+                    metadata={"live_session_id": str(session_id)})
+                if refusal is None:
+                    try:
+                        db.end_session(session_id, "cli_close")
+                    finally:
+                        lease.release()
+        except Exception:
+            logger.debug("one-shot Bot Chat end_session skipped: locks unavailable", exc_info=True)
+    else:
         try:
             db.end_session(session_id, "cli_close")
         except Exception:

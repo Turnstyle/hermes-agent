@@ -133,6 +133,8 @@ def test_quiet_notify_loop_shares_one_linger_budget(monkeypatch):
     monkeypatch.setattr(qsq.time, "monotonic", lambda: next(clock))
     monkeypatch.setattr(pr.process_registry, "wait_for_pending_completions", fake_wait)
     monkeypatch.setattr(pr.process_registry, "drain_notifications", fake_drain)
+    monkeypatch.setattr(pr.process_registry, "pending_owned_notifications",
+                        lambda **_k: [event for event, _text in rounds[0]] if rounds else [])
 
     calls = []
     result = qsq.continue_quiet_notify_completions(
@@ -159,6 +161,8 @@ def test_quiet_notify_loop_stops_after_timeout_with_drained_texts(monkeypatch):
         pr.process_registry, "drain_notifications",
         lambda *a, **k: [({"type": "completion", "session_key": "session-B"}, "[IMPORTANT: reply from C]")],
     )
+    monkeypatch.setattr(pr.process_registry, "pending_owned_notifications",
+                        lambda **_k: [{"type": "completion", "session_key": "session-B"}])
     monkeypatch.setattr(qsq.time, "monotonic", lambda: 100.0)
 
     calls = []
@@ -207,6 +211,8 @@ def test_quiet_notify_loop_injects_owned_async_delegation_events(monkeypatch):
         return [events.pop(0)] if events else []
 
     monkeypatch.setattr(pr.process_registry, "drain_notifications", fake_drain)
+    monkeypatch.setattr(pr.process_registry, "pending_owned_notifications",
+                        lambda **_k: [event for event, _text in events])
 
     seen = []
     result = qsq.continue_quiet_notify_completions(
@@ -223,6 +229,8 @@ def _quiet_drain(monkeypatch, events):
     queue = list(events)
     monkeypatch.setattr(pr.process_registry, "drain_notifications",
                         lambda *a, **k: [queue.pop(0)] if queue else [])
+    monkeypatch.setattr(pr.process_registry, "pending_owned_notifications",
+                        lambda **_k: [event for event, _text in queue])
 
 
 def _quiet_policy(tmp_path, monkeypatch, setting):

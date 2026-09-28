@@ -7,6 +7,7 @@ the re-run resumes that row instead of appending a second copy of the DM.
 
 from __future__ import annotations
 
+import contextlib
 import os
 import datetime
 from types import SimpleNamespace
@@ -128,6 +129,111 @@ def test_busy_follow_up_does_not_pop_notifications(monkeypatch, tmp_path, caplog
     assert "Bot Chat follow-up skipped" in caplog.text
     assert "child_pid=" in caplog.text and "delivery_pid=" in caplog.text
     assert "event-1" in caplog.text and "proc-1" in caplog.text
+
+
+@pytest.mark.parametrize("route", ("live", "queue", "warning", "live_error", "queue_error"))
+def test_refused_follow_up_hands_off_before_consuming(tmp_path, monkeypatch, caplog, route):
+    from hermes_cli import quiet_single_query as qsq
+    from tools import bot_live_delivery, fleet_message_drain as fmd
+    from tools.process_registry import process_registry
+
+    home = tmp_path / "profiles" / "ops"
+    home.mkdir(parents=True)
+    monkeypatch.setenv("HERMES_HOME", str(home))
+    events = [{"type": "completion", "id": "event-1", "session_id": "proc-1", "session_key": "s-1",
+               "command": "echo reply", "exit_code": 0, "output": "teammate reply"}]
+    actions = []
+    monkeypatch.setattr(process_registry, "wait_for_pending_completions",
+                        lambda *_a, **_k: {"timed_out": False})
+    monkeypatch.setattr(process_registry, "pending_owned_notifications", lambda **_k: list(events))
+
+    def drain(**_kw):
+        actions.append("pop")
+        return [(events.pop(0), "formatted")]
+
+    monkeypatch.setattr(process_registry, "drain_notifications", drain)
+    monkeypatch.setattr("tools.async_delegation.claim_event_delivery",
+                        lambda event, consumer: actions.append("claim") or "claim-token")
+    monkeypatch.setattr("tools.async_delegation.complete_event_delivery",
+                        lambda event, claim: actions.append("complete"))
+    owner = {"profile_home": str(home), "session_id": "s-1", "lease_id": "lease",
+             "live_session_id": "s-1"}
+    monkeypatch.setattr(bot_live_delivery, "find_canonical_live_owner",
+                        lambda _home: owner if route in ("live", "live_error") else None)
+    ids = []
+
+    def deliver(_home, _owner, message, *, delivery_id):
+        actions.append("live")
+        ids.append(delivery_id)
+        assert "teammate reply" in message and not actions.count("pop")
+        if route == "live_error":
+            raise RuntimeError("owner disappeared")
+        return {"status": "queued"}
+
+    monkeypatch.setattr(bot_live_delivery, "deliver_to_live_owner", deliver)
+    monkeypatch.setattr(fmd, "drain_config_for_home",
+                        lambda _home: object() if route in ("queue", "live_error", "queue_error") else None)
+
+    def enqueue(sender, recipient, message, *, config):
+        actions.append("queue")
+        assert sender == recipient == "ops" and "teammate reply" in message
+        assert "pop" not in actions
+        if route == "queue_error":
+            raise RuntimeError("queue unavailable")
+        return "queued-1"
+
+    monkeypatch.setattr(fmd, "enqueue_message", enqueue)
+    result = qsq.continue_quiet_notify_completions(
+        "s-1", lambda _text: pytest.fail("follow-up ran"), max_rounds=1, linger_budget=0,
+        turn_guard=lambda: contextlib.nullcontext(False))
+    assert result is None
+    if route in ("warning", "queue_error"):
+        assert actions == (["queue"] if route == "queue_error" else []) and events
+        assert "event-1" in caplog.text and "lost at child exit" in caplog.text
+    else:
+        assert actions[-3:] == ["pop", "claim", "complete"]
+        assert ("live" in actions) == (route in ("live", "live_error"))
+        assert ("queue" in actions) == (route in ("queue", "live_error"))
+        assert ("route=live_owner" if route == "live" else "route=fleet_queue") in caplog.text
+        if route == "live":
+            import hashlib
+            assert ids == [hashlib.sha256(b'["s-1",["event-1"]]').hexdigest()]
+
+
+def test_refused_follow_up_reaches_real_live_owner_mailbox(tmp_path, monkeypatch):
+    from hermes_cli import quiet_single_query as qsq
+    from hermes_cli.active_sessions import try_acquire_active_session
+    from hermes_state import SessionDB
+    from tools import bot_live_delivery as mailbox
+    from tools.process_registry import process_registry
+
+    home = tmp_path / "profiles" / "ops"
+    home.mkdir(parents=True)
+    monkeypatch.setenv("HERMES_HOME", str(home))
+    db = SessionDB(db_path=home / "state.db")
+    db.create_session("s-1", source="desktop")
+    db.set_session_title("s-1", "Bot Chat")
+    db.close()
+    lease, refusal = try_acquire_active_session(
+        session_id="s-1", surface="desktop", config={}, registry_home=home,
+        metadata={"live_session_id": "ui-1", "bot_live_delivery_consumer": True})
+    assert refusal is None
+    event = {"type": "completion", "id": "event-1", "session_id": "proc-1", "session_key": "s-1",
+             "command": "echo reply", "exit_code": 0, "output": "teammate reply"}
+    queued = [event]
+    monkeypatch.setattr(process_registry, "wait_for_pending_completions", lambda *_a, **_k: {"timed_out": False})
+    monkeypatch.setattr(process_registry, "pending_owned_notifications", lambda **_k: list(queued))
+    monkeypatch.setattr(process_registry, "drain_notifications", lambda **_k: [(queued.pop(), "text")])
+    try:
+        qsq.continue_quiet_notify_completions(
+            "s-1", lambda _text: pytest.fail("follow-up ran"), max_rounds=1, linger_budget=0,
+            turn_guard=lambda: contextlib.nullcontext(False))
+        owner = mailbox.find_canonical_live_owner(home)
+        claimed = mailbox.claim_pending_delivery(home, owner)
+        assert claimed is not None and "teammate reply" in claimed["message"]
+        assert queued == []
+    finally:
+        lease.release()
 
 
 def test_no_pending_notify_does_not_wait_for_held_flock(tmp_path, monkeypatch):

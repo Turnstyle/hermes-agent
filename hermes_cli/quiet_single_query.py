@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import contextlib
 import contextvars
+import hashlib
 import json
 import logging
 import os
@@ -285,6 +286,55 @@ def quiet_notify_linger_seconds() -> float:
     return ProcessRegistry._oneshot_completion_wait_seconds()
 
 
+def _handoff_refused_notify_events(process_registry, key: str, owns_event, pending: list[dict]) -> bool:
+    """Durably admit refused Bot Chat notices before removing them from this child."""
+    from pathlib import Path
+    from hermes_constants import get_hermes_home
+    from tools.process_registry_notifications import format_process_notification
+    from tools import bot_live_delivery, fleet_message_drain as fmd
+    from tools.async_delegation import claim_event_delivery, complete_event_delivery
+
+    event_ids = [str(event.get("delegation_id") or event.get("id") or hashlib.sha256(
+        json.dumps(event, sort_keys=True, default=str).encode()).hexdigest()) for event in pending]
+    texts = [text for event in pending if (text := format_process_notification(event))]
+    if not texts:
+        return False
+    message = "\n\n".join(texts)
+    home = Path(get_hermes_home()).resolve()
+    route = None
+    try:
+        owner = bot_live_delivery.find_canonical_live_owner(home)
+        if owner is not None:
+            delivery_id = hashlib.sha256(json.dumps([key, event_ids], separators=(",", ":")).encode()).hexdigest()
+            record = bot_live_delivery.deliver_to_live_owner(home, owner, message, delivery_id=delivery_id)
+            if record.get("status") not in ("queued", "claimed", "settled"):
+                raise RuntimeError(f"live-owner delivery was {record.get('status')}")
+            route = f"live_owner delivery_id={delivery_id}"
+    except Exception:
+        logger.warning("Bot Chat notify live-owner handoff failed: event_ids=%s", event_ids, exc_info=True)
+    if route is None:
+        try:
+            config = fmd.drain_config_for_home(home)
+            if config is not None:
+                bot = fmd.bot_identity(home)
+                message_id = fmd.enqueue_message(bot, bot, message, config=config)
+                route = f"fleet_queue message_id={message_id}"
+        except Exception:
+            logger.warning("Bot Chat notify fleet-queue handoff failed: event_ids=%s", event_ids, exc_info=True)
+    if route is None:
+        return False
+    try:
+        for event, _text in process_registry.drain_notifications(session_key=key, owns_event=owns_event):
+            claim = claim_event_delivery(event, "cli-quiet")
+            if claim is not None:
+                complete_event_delivery(event, claim)
+    except Exception:
+        logger.warning("Bot Chat notify handoff admitted but event cleanup failed: event_ids=%s", event_ids,
+                       exc_info=True)
+    logger.info("Bot Chat notify handoff route=%s event_ids=%s", route, event_ids)
+    return True
+
+
 def continue_quiet_notify_completions(
     session_id: str,
     run_turn: Callable[[str], Any],
@@ -318,6 +368,11 @@ def continue_quiet_notify_completions(
         guard = turn_guard() if turn_guard is not None else contextlib.nullcontext(True)
         with guard as acquired:
             if not acquired:
+                try:
+                    if _handoff_refused_notify_events(process_registry, key, owns_event, pending):
+                        return last
+                except Exception:
+                    logger.warning("Bot Chat notify handoff could not be prepared", exc_info=True)
                 logger.warning("Bot Chat notify events lost at child exit after lock refusal: "
                                "event_ids=%s process_ids=%s",
                                [event.get("delegation_id") or event.get("id") or event.get("session_id")
