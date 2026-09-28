@@ -299,8 +299,8 @@ def _peer_spark(monkeypatch, url, author_env):
 
 
 @pytest.mark.parametrize("author_env, expected_body", [
-    ({**AUTHOR, "x": 1}, {"message": "ping", "author": AUTHOR}),
-    (None, {"message": "ping"}),
+    ({**AUTHOR, "x": 1}, {"message": "ping", "on_busy": "queue", "author": AUTHOR}),
+    (None, {"message": "ping", "on_busy": "queue"}),
 ], ids=["author from env", "no env"])
 def test_dm_body_carries_author_only_from_env(monkeypatch, fake_peer_server, author_env, expected_body):
     _peer_spark(monkeypatch, fake_peer_server, author_env)

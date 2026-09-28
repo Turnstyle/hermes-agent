@@ -348,7 +348,7 @@ def _peer_dm(args, message: str, peer_name: str, profile: str | None, base: str,
         session_id = _ensure_bot_chat(base, key)
         result = _request(
             f"{base}/api/sessions/{urllib.parse.quote(session_id, safe='')}/chat", key,
-            method="POST", body=_turn_body(message, message_key="message"), timeout=DM_TIMEOUT_S)
+            method="POST", body=_turn_body(message, message_key="message", on_busy="queue"), timeout=DM_TIMEOUT_S)
     except RuntimeError as exc:
         print(f"Peer '{peer_name}': {exc}", file=sys.stderr)
         return 1
@@ -359,20 +359,29 @@ def _peer_dm(args, message: str, peer_name: str, profile: str | None, base: str,
         # and deliver it twice. urllib raises that timeout bare; one it wraps in URLError hit while
         # connecting or sending, so the request never arrived and "could not reach" is the truth.
         if session_id and isinstance(exc, TimeoutError):
-            print(f"Peer '{peer_name}' accepted the message but its turn is still running after "
-                  f"{DM_TIMEOUT_S}s: the message is already in its Bot Chat (session {session_id}) "
-                  "and will be answered there. The reply cannot come back on this call. Do NOT resend.",
-                  file=sys.stderr)
-            return 1
+            return _emit(args, {"peer": peer_name, "profile": profile, "session_id": session_id,
+                                "status": "queued", "reason": "timeout_after_send",
+                                "delivery_id": None, "message_id": None},
+                         [f"Peer '{peer_name}' accepted the message but its turn is still running after "
+                          f"{DM_TIMEOUT_S}s: the message is already in its Bot Chat (session {session_id}) "
+                          "and will be answered there. The reply cannot come back on this call. Do NOT resend."])
         return _peer_failure(peer_name, exc)
     if result.get("object") == "hermes.session.chat.queued":
-        # The peer's Bot Chat is open in its Desktop and that turn outlasted the peer's wait: the
-        # message is in the open chat and is answered there, so a resend would run it twice.
+        # A queued receipt is durable in either the live owner's mailbox or the fleet drain.
         queued_in = result.get("session_id") or session_id
+        delivery_id = result.get("delivery_id")
+        message_id = result.get("message_id")
+        queue_id = message_id or delivery_id
+        if result.get("reason") == "target_busy" or not delivery_id:
+            notice = (f"Peer '{peer_name}' is busy; the message is queued ({queue_id}) and will be "
+                      "delivered when its current turn ends. The reply cannot come back on this call. Do NOT resend.")
+        else:
+            notice = (f"Peer '{peer_name}' has its Bot Chat open, so the message went into that chat "
+                      f"(session {queued_in}) and is answered there. The reply cannot come back on this call. "
+                      "Do NOT resend.")
         return _emit(args, {"peer": peer_name, "profile": profile, "session_id": queued_in,
-                            "status": result.get("status") or "queued", "delivery_id": result.get("delivery_id")},
-                     [f"Peer '{peer_name}' has its Bot Chat open, so the message went into that chat (session "
-                      f"{queued_in}) and is answered there. The reply cannot come back on this call. Do NOT resend."])
+                            "status": "queued", "delivery_id": delivery_id,
+                            "message_id": message_id}, [notice])
     msg = result.get("message")
     reply = str(msg.get("content") or "") if isinstance(msg, dict) else ""
     # A successful bare silence marker is a delivery decision, not a message:

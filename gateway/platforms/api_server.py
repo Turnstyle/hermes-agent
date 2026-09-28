@@ -3474,7 +3474,15 @@ class APIServerAdapter(OpenAICompatRoutesMixin, BasePlatformAdapter):
         admitted = await self._admit_to_live_bot_chat(session_id, ctx["user_message"], ctx["run_kwargs"]["turn_author"])
         if admitted is None:
             return None
-        record = await self._await_live_bot_chat_receipt(*admitted)
+        if ctx["body"].get("on_busy") == "queue":
+            from tools.bot_mode_dm import _FAST_ACK_SECONDS, _LIVE_WAIT_SECONDS
+            started = time.monotonic()
+            record = await self._await_live_bot_chat_receipt(*admitted, wait_seconds=_FAST_ACK_SECONDS)
+            if record["status"] == "claimed":
+                record = await self._await_live_bot_chat_receipt(
+                    admitted[0], record, wait_seconds=max(0.0, _LIVE_WAIT_SECONDS - (time.monotonic() - started)))
+        else:
+            record = await self._await_live_bot_chat_receipt(*admitted)
         delivery_id = record["delivery_id"]
         headers = self._session_headers(session_id, ctx["gateway_session_key"])
         if record["status"] == "settled":
@@ -3489,14 +3497,15 @@ class APIServerAdapter(OpenAICompatRoutesMixin, BasePlatformAdapter):
         return _error_response(record.get("error") or f"Bot Chat delivery {record['status']}", 502,
                                code=record.get("reason") or record["status"], headers=headers)
 
-    async def _await_live_bot_chat_receipt(self, home: Path, record: Dict[str, Any], *, keepalive=None) -> Dict[str, Any]:
+    async def _await_live_bot_chat_receipt(self, home: Path, record: Dict[str, Any], *, keepalive=None,
+                                           wait_seconds: Optional[float] = None) -> Dict[str, Any]:
         """Wait on the owner's mailbox record through the shared ``await_delivery_async`` primitive until it
         settles or the local DM budget runs out; ``keepalive`` (async) is called every SSE keepalive interval
         so a streaming caller's proxy keeps the socket."""
         from tools.bot_live_delivery import await_delivery_async
         from tools.bot_mode_dm import _LIVE_WAIT_SECONDS
         delivery_id = record["delivery_id"]
-        deadline = time.monotonic() + _LIVE_WAIT_SECONDS
+        deadline = time.monotonic() + (_LIVE_WAIT_SECONDS if wait_seconds is None else wait_seconds)
         while record["status"] in ("queued", "claimed"):
             remaining = deadline - time.monotonic()
             if remaining <= 0:
@@ -3506,6 +3515,52 @@ class APIServerAdapter(OpenAICompatRoutesMixin, BasePlatformAdapter):
             if keepalive is not None and record["status"] in ("queued", "claimed"):
                 await keepalive()
         return record
+
+    async def _queue_busy_peer_dm(self, ctx: Dict[str, Any]) -> Optional["web.Response"]:
+        """Fast-ack an opted-in peer only after the turn lease proves its target is busy."""
+        from tools.bot_mode_dm import _FAST_ACK_SECONDS, _busy_sender, enqueue_busy_peer_dm
+        from tools.fleet_message_drain import bot_identity, recipient_drain_enabled
+
+        try:
+            deadline = time.monotonic() + _FAST_ACK_SECONDS
+            db = await asyncio.wait_for(self._ensure_session_db_async(), _FAST_ACK_SECONDS)
+            if db is None:
+                return None
+            held = False
+            while True:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    if held:
+                        break
+                    return None
+                holder = await asyncio.wait_for(
+                    asyncio.to_thread(db.session_turn_lease_holder, ctx["session_id"]), remaining)
+                if not holder:
+                    return None
+                held = True
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    break
+                await asyncio.sleep(min(0.2, remaining))
+        except Exception:
+            logger.warning("Busy peer DM lease probe failed; running the turn normally", exc_info=True)
+            return None
+
+        home = Path(db.db_path).parent
+        try:
+            recipient = bot_identity(home)
+            if not await asyncio.to_thread(recipient_drain_enabled, recipient, profile_home=home):
+                return None
+            sender = _busy_sender(ctx["run_kwargs"]["turn_author"])
+            message_id = await asyncio.to_thread(enqueue_busy_peer_dm, home, sender, ctx["user_message"])
+        except Exception:
+            logger.warning("Busy peer DM enqueue failed; running the turn normally", exc_info=True)
+            return None
+        return web.json_response(
+            {"object": "hermes.session.chat.queued", "session_id": ctx["session_id"],
+             "status": "queued", "message_id": message_id, "delivery_id": message_id,
+             "reason": "target_busy"}, status=202,
+            headers=self._session_headers(ctx["session_id"], ctx["gateway_session_key"]))
 
     async def _stream_through_live_bot_chat(self, request: "web.Request", ctx: Dict[str, Any]) -> Optional["web.StreamResponse"]:
         """``_answer_through_live_bot_chat`` for the SSE sibling route: the owner's settled receipt is
@@ -3565,6 +3620,10 @@ class APIServerAdapter(OpenAICompatRoutesMixin, BasePlatformAdapter):
         handed_off = await self._answer_through_live_bot_chat(ctx)
         if handed_off is not None:
             return handed_off
+        if ctx["body"].get("on_busy") == "queue":
+            queued = await self._queue_busy_peer_dm(ctx)
+            if queued is not None:
+                return queued
         gateway_session_key = ctx["gateway_session_key"]
         session_id = ctx["session_id"]
         history = await self._conversation_history_for_session(session_id)

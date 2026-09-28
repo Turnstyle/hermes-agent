@@ -541,6 +541,21 @@ class SessionCompressionMixin:
             )[0]
         return bool(self._execute_write(_do, patience_s=patience_s))
 
+    def session_turn_lease_holder(self, session_id: str) -> Optional[str]:
+        """Read the live holder without acquiring the turn lease or changing its expiry."""
+        from hermes_state import _compression_lock_holder_process_is_dead
+        if not session_id:
+            return None
+        with self._read_ctx() as conn:
+            conversation_id = self._session_turn_lease_key_on_conn(conn, session_id)
+            row = conn.execute(
+                "SELECT holder, expires_at FROM session_turn_leases WHERE conversation_id = ?",
+                (conversation_id,)).fetchone()
+        if row is None or float(row["expires_at"]) <= time.time():
+            return None
+        holder = str(row["holder"])
+        return None if _compression_lock_holder_process_is_dead(holder) else holder
+
     def acquire_session_turn_lease(
         self, session_id: str, holder: str, *, ttl_seconds: float = 300.0,
         wait_seconds: float = 1800.0, poll_interval_seconds: float = 1.0, on_wait=None,

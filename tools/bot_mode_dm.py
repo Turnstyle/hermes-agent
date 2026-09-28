@@ -734,6 +734,35 @@ def _drain_enqueue_command(cli: str, sender: str, home: Path, dm_file: str,
     return [cli, "--run-module", "tools.fleet_message_drain", *args]
 
 
+def enqueue_busy_peer_dm(home: Path, sender: str, message: str) -> str:
+    """Use the local runner's queue command for a busy peer; return its durable message id."""
+    import shutil
+    from tools.environments.local import served_profile_child_env
+
+    fd, body_file = tempfile.mkstemp(prefix="peer-dm-", suffix=".txt", dir=_dm_dir(), text=True)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as stream:
+            stream.write(message)
+        cli = shutil.which("hermes") or sys.executable
+        command = _drain_enqueue_command(cli, sender, home, body_file)
+        if command[0] == sys.executable:
+            command[1:3] = ["-m", "tools.fleet_message_drain"]
+        result = subprocess.run(
+            command, check=False, stdin=subprocess.DEVNULL, capture_output=True,
+            text=True, encoding="utf-8", errors="replace", timeout=5,
+            env=served_profile_child_env(target_home=home, inherit_credentials=True))
+        if result.returncode != 0:
+            detail = (result.stderr or "").strip() or f"enqueue exited {result.returncode}"
+            raise ValueError(detail.splitlines()[0])
+        payload = json.loads(result.stdout)
+        message_id = payload.get("message_id")
+        if payload.get("status") != "queued" or not isinstance(message_id, str) or not message_id:
+            raise ValueError("enqueue did not return a queued message id")
+        return message_id
+    finally:
+        _unlink_dm_file(body_file)
+
+
 @contextlib.contextmanager
 def _dm_runner_lock(dm_file: str):
     """One runner per DM file for its whole lifecycle (live admission, owner_gone re-admission, CLI fallback).
