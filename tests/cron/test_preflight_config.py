@@ -21,6 +21,8 @@ import sys
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
+import pytest
+
 sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 
 import cron.jobs as cron_jobs
@@ -159,6 +161,85 @@ class TestMissingProviderKeyBlocks:
             f"expected exactly one alert across two ticks, got {len(deliveries)}: "
             f"{deliveries!r}"
         )
+
+    def test_pinned_local_block_alert_reaches_own_bot_chat_once(self, tmp_path):
+        """The one preflight alert uses a real own-profile target and books its delivery."""
+        from cron.executions import get_execution
+
+        job = _job(provider="anthropic", model="claude-sonnet-5", deliver="local")
+        targets_seen = []
+        outcomes = []
+
+        def missing_anthropic(**kwargs):
+            assert kwargs.get("requested") == "anthropic"
+            from hermes_cli.auth import AuthError
+            raise AuthError("no key")
+
+        def capture_targets(delivery_job, content, adapters=None, loop=None, **kwargs):
+            assert kwargs["for_failure"] is True
+            targets_seen.append(sched._resolve_delivery_targets(delivery_job, for_failure=True))
+            assert "did not run" in content.lower()
+            return None
+
+        with cron_jobs.use_cron_store(tmp_path):
+            cron_jobs.save_jobs([job])
+            for _ in range(2):
+                fresh = cron_jobs.get_job(job["id"])
+                with patch("cron.scheduler._hermes_home", tmp_path), \
+                     patch("cron.scheduler_delivery._resolve_origin", return_value=None), \
+                     patch("hermes_cli.env_loader.load_hermes_dotenv"), \
+                     patch("hermes_cli.env_loader.reset_secret_source_cache"), \
+                     patch("hermes_state_registry.acquire", return_value=MagicMock()), \
+                     patch("tools.mcp_tool_discovery.discover_mcp_tools", return_value=[]), \
+                     patch("hermes_cli.runtime_provider.resolve_runtime_provider",
+                           side_effect=missing_anthropic), \
+                     patch.object(sched, "_deliver_result", side_effect=capture_targets), \
+                     patch("run_agent.AIAgent") as mock_agent_cls:
+                    assert sched.run_one_job(fresh) is True
+                    assert mock_agent_cls.called is False
+                outcomes.append(get_execution(fresh["execution_id"])["delivery_outcome"])
+            stored = cron_jobs.get_job(job["id"])
+
+        assert stored["last_status"] == "blocked_config"
+        assert stored["deliver"] == "local"
+        assert stored.get("failure_deliver") is None
+        assert targets_seen == [[{"platform": "bot-chat", "chat_id": "", "thread_id": None}]]
+        assert outcomes == ["delivered", "suppressed"]
+
+    @pytest.mark.parametrize("local_lane", ["local", None, "", [], "none"])
+    def test_blocked_config_local_lanes_resolve_to_own_bot_chat(self, local_lane):
+        job = _job(deliver=local_lane)
+        delivery_job = sched._blocked_config_delivery_job(job, blocked_config=True)
+        assert sched._resolve_delivery_targets(delivery_job, for_failure=True) == [
+            {"platform": "bot-chat", "chat_id": "", "thread_id": None}]
+        assert job["deliver"] == local_lane
+        assert job.get("failure_deliver") is None
+
+    def test_blocked_config_configured_lane_keeps_its_only_target(self):
+        job = _job(deliver="telegram")
+        with patch("cron.scheduler_delivery._get_home_target_chat_id", return_value="123"), \
+             patch("cron.scheduler_delivery._get_home_target_thread_id", return_value=None), \
+             patch("cron.scheduler_delivery._is_known_delivery_platform", return_value=True), \
+             patch("cron.scheduler_delivery._resolve_origin", return_value=None):
+            targets = sched._resolve_delivery_targets(
+                sched._blocked_config_delivery_job(job, blocked_config=True), for_failure=True)
+        assert len(targets) == 1
+        assert targets[0]["platform"] == "telegram"
+        assert not any(target["platform"] == "bot-chat" for target in targets)
+
+    def test_blocked_config_local_failure_override_uses_own_bot_chat(self):
+        job = _job(deliver="telegram", failure_deliver="local")
+        delivery_job = sched._blocked_config_delivery_job(job, blocked_config=True)
+        assert sched._resolve_delivery_targets(delivery_job, for_failure=True) == [
+            {"platform": "bot-chat", "chat_id": "", "thread_id": None}]
+        assert job["deliver"] == "telegram"
+        assert job["failure_deliver"] == "local"
+
+    def test_ordinary_local_failure_stays_local(self):
+        job = _job(deliver="local")
+        delivery_job = sched._blocked_config_delivery_job(job, blocked_config=False)
+        assert delivery_job is job
+        assert sched._resolve_delivery_targets(delivery_job, for_failure=True) == []
 
     def test_fallback_chain_rescues_missing_primary_key(self, tmp_path):
         """A configured fallback chain means a missing primary key does NOT
