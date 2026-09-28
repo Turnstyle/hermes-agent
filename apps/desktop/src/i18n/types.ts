@@ -4500,6 +4500,7 @@ export interface Translations {
     staleSessionTitle: string
     staleSessionBody: string
     staleSessionMerged: string
+    queuedBehindBotMessage: string
     providerCredentialRequired: string
     emptySlashCommand: string
     desktopCommands: string

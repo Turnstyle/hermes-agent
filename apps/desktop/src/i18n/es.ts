@@ -5893,6 +5893,7 @@ export const esOverrides = {
     staleSessionBody:
       'Esta ventana estaba detrás de otra vista del mismo chat. Se cargaron los mensajes más recientes. Envía de nuevo si aún quieres.',
     staleSessionMerged: 'Los mensajes nuevos se fusionaron en este chat. Enviando el tuyo.',
+    queuedBehindBotMessage: 'En cola detrás de un mensaje de bot.',
     providerCredentialRequired: 'Añade una credencial de proveedor antes de enviar tu primer mensaje.',
     emptySlashCommand: 'comando slash vacío',
     desktopCommands: 'Comandos de escritorio',

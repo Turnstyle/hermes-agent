@@ -3516,6 +3516,7 @@ export const ar = defineLocale({
     staleSessionBody:
       'كانت هذه النافذة متأخرة عن عرض آخر لنفس المحادثة. تم تحميل أحدث الرسائل. أعد الإرسال إذا كنت لا تزال تريد ذلك.',
     staleSessionMerged: 'دُمجت الرسائل الأحدث في هذه الدردشة. جارٍ إرسال رسالتك.',
+    queuedBehindBotMessage: 'وُضع في الانتظار خلف رسالة بوت.',
     providerCredentialRequired: 'مطلوب اعتماد المزود',
     emptySlashCommand: 'أمر slash فارغ',
     desktopCommands: 'أوامر سطح المكتب',

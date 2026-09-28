@@ -5411,6 +5411,7 @@ export const en: Translations = {
     staleSessionBody:
       'This window was behind another view of the same chat. Latest messages were loaded. Send again if you still want to.',
     staleSessionMerged: 'Latest messages were merged into this chat. Sending yours.',
+    queuedBehindBotMessage: 'Queued behind a bot message.',
     providerCredentialRequired: 'Add a provider credential before sending your first message.',
     emptySlashCommand: 'empty slash command',
     desktopCommands: 'Desktop commands',

@@ -610,7 +610,11 @@ def _(rid, params: dict) -> dict:
     if (limit_message := _ensure_active_session_slot(sid, session)) is not None:
         # Refused HERE — before the busy queue, db row and agent build — so a refusal
         # leaves the session untouched.  The reason travels as machine-readable data.
+        # A bot one-shot CLI holding Bot Chat is the exception: the human send waits
+        # on the same queue a busy Desktop turn uses, and the CLI is not interrupted.
         reason = getattr(limit_message, "reason", None)
+        if reason == "SESSION_NOT_OWNED" and _foreign_cli_holds_session(session):
+            return _queue_human_send_behind_cli(rid, sid, session, text)
         return _err(rid, 4090, str(limit_message), {"reason": reason} if reason else None)
     # Rewritten every submit: a session alternates app window / HUD / live voice; a stale value misinforms.
     session["client_surface"] = params.get("surface") if params.get("surface") in _CLIENT_SURFACES else ""

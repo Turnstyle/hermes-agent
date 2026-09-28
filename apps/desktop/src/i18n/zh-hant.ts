@@ -4175,6 +4175,7 @@ export const zhHant = defineLocale({
     staleSessionTitle: '對話已過期',
     staleSessionBody: '此視窗落後於同一對話的其他視窗。已載入最新訊息。若仍要傳送請再試一次。',
     staleSessionMerged: '較新的訊息已併入此對話。正在傳送你的訊息。',
+    queuedBehindBotMessage: '已排在一則機器人訊息之後。',
     providerCredentialRequired: '傳送第一則訊息前請先新增提供方憑證。',
     emptySlashCommand: '空的斜線指令',
     desktopCommands: '桌面端指令',
