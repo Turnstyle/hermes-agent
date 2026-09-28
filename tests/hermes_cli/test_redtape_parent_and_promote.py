@@ -9,6 +9,7 @@ import pytest
 
 from hermes_cli import kanban_db as kb
 from hermes_cli import kanban_db_connect as kbc
+from hermes_cli.kanban_parent_gate import clear_pr_merge_cache, record_parent_rehome
 
 
 @pytest.fixture
@@ -30,82 +31,309 @@ def _newest_event_payload(conn, task_id: str) -> dict:
     return json.loads(row["payload"] or "{}") if row else {}
 
 
-def test_complete_task_rehome_bypasses_parent_gate(kanban_home):
+@pytest.fixture(autouse=True)
+def _clear_pr_merge_cache_each_test():
+    clear_pr_merge_cache()
+    yield
+    clear_pr_merge_cache()
+
+
+def _open_parent_and_ready_child(conn, parent_title: str = "open parent"):
+    parent = kb.create_task(conn, title=parent_title)
+    conn.execute("UPDATE tasks SET status = 'todo' WHERE id = ?", (parent,))
+    conn.commit()
+    child = kb.create_task(conn, title="child")
+    kb.link_tasks(conn, parent, child)
+    conn.execute("UPDATE tasks SET status = 'ready' WHERE id = ?", (child,))
+    conn.commit()
+    return parent, child
+
+
+def test_free_text_on_child_status_keeps_parent_gate(kanban_home):
     with kbc.connect() as conn:
-        parent = kb.create_task(conn, title="parent still open")
-        conn.execute("UPDATE tasks SET status = 'todo' WHERE id = ?", (parent,))
-        conn.commit()
+        parent, child = _open_parent_and_ready_child(conn)
+        kb._append_event(
+            conn,
+            child,
+            "status",
+            {"note": "not rehomed; hold for review"},
+        )
+        assert kb.complete_task(conn, child, result="should not close") is False
+        assert kb.get_task(conn, child).status == "ready"
         assert kb.get_task(conn, parent).status == "todo"
 
-        rehomed_child = kb.create_task(conn, title="rehomed child")
-        kb.link_tasks(conn, parent, rehomed_child)
-        conn.execute("UPDATE tasks SET status = 'ready' WHERE id = ?", (rehomed_child,))
-        conn.commit()
-        kb._append_event(
-            conn,
-            rehomed_child,
-            "status",
-            {"note": "REHOMED: superseded by t_abc"},
-        )
-        assert kb.complete_task(conn, rehomed_child, result="closed copy") is True
-        assert kb.get_task(conn, rehomed_child).status == "done"
 
-        blocked_child = kb.create_task(conn, title="blocked child")
-        kb.link_tasks(conn, parent, blocked_child)
-        conn.execute("UPDATE tasks SET status = 'blocked' WHERE id = ?", (blocked_child,))
-        conn.commit()
-        kb._append_event(
-            conn, blocked_child, "blocked", {"reason": "need a credential"},
-        )
-        before = kb.get_task(conn, blocked_child).status
-        assert kb.complete_task(conn, blocked_child, result="should not close") is False
-        assert kb.get_task(conn, blocked_child).status == before
-
-
-def test_complete_task_merge_parent_todo_with_merged_pr_evidence(kanban_home):
+def test_free_text_on_parent_events_keeps_parent_gate(kanban_home):
     with kbc.connect() as conn:
-        merge_parent = kb.create_task(
-            conn, title="Merge the PR", body="bookkeeping",
+        parent, child = _open_parent_and_ready_child(conn)
+        kb._append_event(
+            conn,
+            parent,
+            "status",
+            {"note": "not rehomed; hold for review"},
         )
-        conn.execute("UPDATE tasks SET status = 'todo' WHERE id = ?", (merge_parent,))
-        conn.commit()
-        merge_child = kb.create_task(conn, title="merge child")
-        kb.link_tasks(conn, merge_parent, merge_child)
+        assert kb.complete_task(conn, child, result="nope") is False
+        assert kb.get_task(conn, child).status == "ready"
+
         kb.add_comment(
             conn,
-            merge_parent,
+            parent,
             "reviewer",
-            "https://github.com/acme/app/pull/15 merged",
+            "not rehomed; hold for review",
         )
-        conn.execute("UPDATE tasks SET status = 'ready' WHERE id = ?", (merge_child,))
-        conn.commit()
-        assert kb.complete_task(conn, merge_child, result="shipped") is True
-        assert kb.get_task(conn, merge_child).status == "done"
+        assert kb.complete_task(conn, child, result="nope") is False
+        assert kb.get_task(conn, child).status == "ready"
 
-        plain_parent = kb.create_task(conn, title="Implement the feature")
-        conn.execute("UPDATE tasks SET status = 'todo' WHERE id = ?", (plain_parent,))
-        conn.commit()
-        plain_child = kb.create_task(conn, title="plain child")
-        kb.link_tasks(conn, plain_parent, plain_child)
-        conn.execute("UPDATE tasks SET status = 'ready' WHERE id = ?", (plain_child,))
-        conn.commit()
-        assert kb.complete_task(conn, plain_child, result="nope") is False
-        assert kb.get_task(conn, plain_child).status == "ready"
+        kb._append_event(
+            conn,
+            parent,
+            "rehomed",
+            {"successor_id": "t_does_not_exist"},
+        )
+        assert kb.complete_task(conn, child, result="nope") is False
+        assert kb.get_task(conn, child).status == "ready"
 
-        running_merge_parent = kb.create_task(conn, title="Merge the PR", body="bookkeeping")
+
+def test_record_parent_rehome_releases_only_that_parent(kanban_home):
+    with kbc.connect() as conn:
+        parent, child = _open_parent_and_ready_child(conn)
+        successor = kb.create_task(conn, title="successor")
+        assert record_parent_rehome(conn, parent, successor, action="rehomed") is True
+        assert kb.complete_task(conn, child, result="closed copy") is True
+        assert kb.get_task(conn, child).status == "done"
+
+        parent_a = kb.create_task(conn, title="parent A rehomed")
+        parent_b = kb.create_task(conn, title="parent B open")
+        conn.execute(
+            "UPDATE tasks SET status = 'todo' WHERE id IN (?, ?)",
+            (parent_a, parent_b),
+        )
+        conn.commit()
+        dual_child = kb.create_task(conn, title="two-parent child")
+        kb.link_tasks(conn, parent_a, dual_child)
+        kb.link_tasks(conn, parent_b, dual_child)
+        successor_a = kb.create_task(conn, title="successor A")
+        assert record_parent_rehome(conn, parent_a, successor_a, action="rehomed") is True
+        conn.execute("UPDATE tasks SET status = 'ready' WHERE id = ?", (dual_child,))
+        conn.commit()
+        assert kb.complete_task(conn, dual_child, result="nope") is False
+        assert kb.get_task(conn, dual_child).status == "ready"
+
+        successor_b = kb.create_task(conn, title="successor B")
+        assert record_parent_rehome(conn, parent_b, successor_b, action="rehomed") is True
+        assert kb.complete_task(conn, dual_child, result="both parents satisfied") is True
+        assert kb.get_task(conn, dual_child).status == "done"
+
+
+def test_record_parent_superseded_releases_child(kanban_home):
+    with kbc.connect() as conn:
+        parent, child = _open_parent_and_ready_child(conn)
+        successor = kb.create_task(conn, title="replacement")
+        assert record_parent_rehome(conn, parent, successor, action="superseded") is True
+        assert kb.complete_task(conn, child, result="done") is True
+        assert kb.get_task(conn, child).status == "done"
+
+
+def test_human_hold_keeps_gate_despite_recorded_rehome(kanban_home):
+    with kbc.connect() as conn:
+        parent = kb.create_task(conn, title="held parent")
+        conn.execute("UPDATE tasks SET status = 'ready' WHERE id = ?", (parent,))
+        conn.commit()
+        kb.claim_task(conn, parent)
+        kb.block_task(
+            conn,
+            parent,
+            reason="review-required: human",
+            expected_run_id=kb.get_task(conn, parent).current_run_id,
+        )
+        successor = kb.create_task(conn, title="successor")
+        assert record_parent_rehome(conn, parent, successor, action="rehomed") is True
+        child = kb.create_task(conn, title="child under hold")
+        kb.link_tasks(conn, parent, child)
+        conn.execute("UPDATE tasks SET status = 'ready' WHERE id = ?", (child,))
+        conn.commit()
+        assert kb.complete_task(conn, child, result="should not close") is False
+        assert kb.get_task(conn, child).status == "ready"
+
+
+def test_unmerged_pr_comment_text_keeps_gate_without_gh(kanban_home, monkeypatch):
+    gh_calls: list[str] = []
+
+    def _forbidden_query(_url: str):
+        gh_calls.append(_url)
+        return {"state": "MERGED", "mergedAt": "2026-01-01T00:00:00Z"}
+
+    monkeypatch.setattr(
+        "hermes_cli.kanban_parent_gate.query_pr_merge_state",
+        _forbidden_query,
+    )
+    with kbc.connect() as conn:
+        parent = kb.create_task(conn, title="Merge the PR")
+        conn.execute("UPDATE tasks SET status = 'todo' WHERE id = ?", (parent,))
+        conn.commit()
+        child = kb.create_task(conn, title="merge child")
+        kb.link_tasks(conn, parent, child)
         kb.add_comment(
             conn,
-            running_merge_parent,
+            parent,
             "reviewer",
-            "https://github.com/acme/app/pull/99 merged",
+            "PR not merged; https://github.com/acme/app/pull/15 remains open",
         )
-        running_merge_child = kb.create_task(conn, title="running merge child")
-        kb.link_tasks(conn, running_merge_parent, running_merge_child)
-        conn.execute("UPDATE tasks SET status = 'ready' WHERE id = ?", (running_merge_child,))
+        conn.execute("UPDATE tasks SET status = 'ready' WHERE id = ?", (child,))
         conn.commit()
-        kb.claim_task(conn, running_merge_parent)
-        assert kb.get_task(conn, running_merge_parent).status == "running"
-        assert kb.complete_task(conn, running_merge_child, result="blocked") is False
+        assert kb.complete_task(conn, child, result="nope") is False
+        assert kb.get_task(conn, child).status == "ready"
+        assert gh_calls == []
+
+
+def test_completion_contract_unmerged_pr_keeps_gate(kanban_home, monkeypatch):
+    pr_url = "https://github.com/acme/app/pull/15"
+
+    def _open(_url: str):
+        return {"state": "OPEN", "mergedAt": None}
+
+    monkeypatch.setattr(
+        "hermes_cli.kanban_parent_gate.query_pr_merge_state",
+        _open,
+    )
+    with kbc.connect() as conn:
+        parent = kb.create_task(
+            conn,
+            title="Merge the PR",
+            completion_contract=pr_url,
+        )
+        conn.execute("UPDATE tasks SET status = 'todo' WHERE id = ?", (parent,))
+        conn.commit()
+        child = kb.create_task(conn, title="child")
+        kb.link_tasks(conn, parent, child)
+        conn.execute("UPDATE tasks SET status = 'ready' WHERE id = ?", (child,))
+        conn.commit()
+        assert kb.complete_task(conn, child, result="nope") is False
+        assert kb.get_task(conn, child).status == "ready"
+
+
+def test_completion_contract_gh_failure_keeps_gate(kanban_home, monkeypatch):
+    pr_url = "https://github.com/acme/app/pull/16"
+
+    monkeypatch.setattr(
+        "hermes_cli.kanban_parent_gate.query_pr_merge_state",
+        lambda _url: None,
+    )
+    with kbc.connect() as conn:
+        parent = kb.create_task(
+            conn,
+            title="Merge the PR",
+            completion_contract=pr_url,
+        )
+        conn.execute("UPDATE tasks SET status = 'todo' WHERE id = ?", (parent,))
+        conn.commit()
+        child = kb.create_task(conn, title="child")
+        kb.link_tasks(conn, parent, child)
+        conn.execute("UPDATE tasks SET status = 'ready' WHERE id = ?", (child,))
+        conn.commit()
+        assert kb.complete_task(conn, child, result="nope") is False
+        assert kb.get_task(conn, child).status == "ready"
+
+
+def test_verified_merged_pr_releases_child_other_parent_still_blocks(kanban_home, monkeypatch):
+    pr_url = "https://github.com/acme/app/pull/20"
+
+    monkeypatch.setattr(
+        "hermes_cli.kanban_parent_gate.query_pr_merge_state",
+        lambda _url: {"state": "MERGED", "mergedAt": "2026-09-28T12:00:00Z"},
+    )
+    with kbc.connect() as conn:
+        merged_parent = kb.create_task(
+            conn,
+            title="Merge the PR",
+            completion_contract=pr_url,
+        )
+        conn.execute("UPDATE tasks SET status = 'todo' WHERE id = ?", (merged_parent,))
+        conn.commit()
+        merged_child = kb.create_task(conn, title="merged child")
+        kb.link_tasks(conn, merged_parent, merged_child)
+        conn.execute("UPDATE tasks SET status = 'ready' WHERE id = ?", (merged_child,))
+        conn.commit()
+        assert kb.complete_task(conn, merged_child, result="shipped") is True
+        assert kb.get_task(conn, merged_child).status == "done"
+
+        parent_a = kb.create_task(
+            conn,
+            title="Merge the PR A",
+            completion_contract=pr_url,
+        )
+        parent_b = kb.create_task(conn, title="Implement the feature B")
+        conn.execute(
+            "UPDATE tasks SET status = 'todo' WHERE id IN (?, ?)",
+            (parent_a, parent_b),
+        )
+        conn.commit()
+        dual_child = kb.create_task(conn, title="two-parent merge child")
+        kb.link_tasks(conn, parent_a, dual_child)
+        kb.link_tasks(conn, parent_b, dual_child)
+        conn.execute("UPDATE tasks SET status = 'ready' WHERE id = ?", (dual_child,))
+        conn.commit()
+        assert kb.complete_task(conn, dual_child, result="nope") is False
+        assert kb.get_task(conn, dual_child).status == "ready"
+
+        conn.execute("UPDATE tasks SET status = 'done' WHERE id = ?", (parent_b,))
+        conn.commit()
+        assert kb.complete_task(conn, dual_child, result="shipped") is True
+        assert kb.get_task(conn, dual_child).status == "done"
+
+
+def test_human_hold_keeps_gate_despite_verified_merged_pr(kanban_home, monkeypatch):
+    pr_url = "https://github.com/acme/app/pull/21"
+
+    monkeypatch.setattr(
+        "hermes_cli.kanban_parent_gate.query_pr_merge_state",
+        lambda _url: {"state": "MERGED", "mergedAt": "2026-09-28T12:00:00Z"},
+    )
+    with kbc.connect() as conn:
+        parent = kb.create_task(
+            conn,
+            title="Merge the PR",
+            completion_contract=pr_url,
+        )
+        conn.execute("UPDATE tasks SET status = 'ready' WHERE id = ?", (parent,))
+        conn.commit()
+        kb.claim_task(conn, parent)
+        kb.block_task(
+            conn,
+            parent,
+            reason="review-required: human",
+            expected_run_id=kb.get_task(conn, parent).current_run_id,
+        )
+        child = kb.create_task(conn, title="child under human hold")
+        kb.link_tasks(conn, parent, child)
+        conn.execute("UPDATE tasks SET status = 'ready' WHERE id = ?", (child,))
+        conn.commit()
+        assert kb.complete_task(conn, child, result="should not close") is False
+        assert kb.get_task(conn, child).status == "ready"
+
+
+def test_pr_acceptance_system_event_releases_without_completion_contract(kanban_home, monkeypatch):
+    pr_url = "https://github.com/acme/app/pull/22"
+
+    monkeypatch.setattr(
+        "hermes_cli.kanban_parent_gate.query_pr_merge_state",
+        lambda url: (
+            {"state": "MERGED", "mergedAt": "2026-09-28T12:00:00Z"}
+            if url == pr_url
+            else None
+        ),
+    )
+    with kbc.connect() as conn:
+        parent = kb.create_task(conn, title="Merge the PR")
+        conn.execute("UPDATE tasks SET status = 'todo' WHERE id = ?", (parent,))
+        conn.commit()
+        kb._append_event(conn, parent, "pr_acceptance", {"pr_url": pr_url})
+        child = kb.create_task(conn, title="child")
+        kb.link_tasks(conn, parent, child)
+        conn.execute("UPDATE tasks SET status = 'ready' WHERE id = ?", (child,))
+        conn.commit()
+        assert kb.complete_task(conn, child, result="shipped") is True
+        assert kb.get_task(conn, child).status == "done"
 
 
 def test_create_task_blocked_initial_status_bookkeeping_flag(kanban_home):
