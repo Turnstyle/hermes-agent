@@ -1038,10 +1038,15 @@ def _terminate_reclaimed_worker(
     if exited:
         info["terminated"] = True
         return info
-    if _worker_alive(pid, started_at):
+    # SIGKILL needs EXACT identity, re-checked now: the grace poll only asks liveness, which a
+    # start time that drifted (or a PID recycled) within tolerance still satisfies (Codex R2 HIGH,
+    # t_b0e7b8ed). Such a process is held (claim kept) and never signalled.
+    if _kb._pid_alive(pid) and not _pid_recycled(pid, started_at):
         if not _sigkill(kill, pid):
             return info
         info["sigkill"] = True
+    elif _worker_alive(pid, started_at):
+        info["signal_refused"] = True
     info["terminated"] = not _worker_alive(pid, started_at)
     return info
 

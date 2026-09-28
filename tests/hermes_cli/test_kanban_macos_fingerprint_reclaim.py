@@ -128,6 +128,38 @@ def test_drifted_worker_is_held_but_never_signalled(macos_epoch, monkeypatch, de
     assert kbd._worker_leads_own_group(os.getpid(), recorded, None) is False
 
 
+@pytest.mark.parametrize("delta", [100, 0])
+def test_start_time_changing_after_sigterm_gets_no_sigkill(macos_epoch, monkeypatch, delta):
+    """Codex R2 HIGH: identity is exact at SIGTERM, then the PID's start time drifts (or a stranger
+    takes the PID inside tolerance) during the grace poll. SIGKILL must re-check EXACT identity.
+    ``delta=0`` is the control: the same process that ignores SIGTERM still gets SIGKILL."""
+    real = gw_status.get_process_start_time(os.getpid())
+    recorded = f"|{real}"
+    current = {"start": real}
+    monkeypatch.setattr(
+        gw_status, "get_process_start_time",
+        lambda pid: current["start"] if pid == os.getpid() else None,
+    )
+    monkeypatch.setattr(kbd.time, "sleep", lambda s: None)
+    sent: list = []
+
+    def hook(pid, sig):
+        sent.append(sig)
+        current["start"] = real + delta  # the change lands right after SIGTERM
+
+    info = kbd._terminate_reclaimed_worker(
+        os.getpid(), f"{kb._host_prefix()}1", signal_fn=hook, started_at=recorded,
+    )
+    import signal as _signal
+    if delta:
+        assert sent == [_signal.SIGTERM]
+        assert info["sigkill"] is False and info["signal_refused"] is True
+        assert info["terminated"] is False
+    else:
+        assert sent == [_signal.SIGTERM, getattr(_signal, "SIGKILL", _signal.SIGTERM)]
+        assert info["sigkill"] is True
+
+
 @pytest.mark.parametrize("recorded_fmt", ["| {}", "|{} ", "|+{}", "|{}.0"])
 def test_malformed_start_is_never_drift(macos_epoch, recorded_fmt):
     """Checker R1: ``| 10000`` parsed as numeric under int(); it must stay foreign, not drift."""
