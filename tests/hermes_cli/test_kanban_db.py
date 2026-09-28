@@ -1451,6 +1451,55 @@ def test_unlink_tasks_triggers_recompute_ready(kanban_home):
         )
 
 
+@pytest.mark.parametrize(
+    "hold, dependency_release, operator_release",
+    [
+        ("needs_input", "unlink", "unblock"),
+        ("title_marker", "complete", "promote"),
+    ],
+)
+def test_turner_hold_in_todo_requires_explicit_release(
+    kanban_home, hold, dependency_release, operator_release,
+):
+    """Neither dependency-release path may promote a Turner-held todo card."""
+    with kbc.connect() as conn:
+        parent = kb.create_task(conn, title="open-parent")
+        title = "hOlD fOr TuRnEr: awaiting answer" if hold == "title_marker" else "held card"
+        held = kb.create_task(conn, title=title, parents=[parent])
+        if hold == "needs_input":
+            with kb.write_txn(conn):
+                conn.execute(
+                    "UPDATE tasks SET block_kind = 'needs_input' WHERE id = ?", (held,),
+                )
+                kb._append_event(conn, held, "block_loop_detected", {"kind": "needs_input"})
+        assert kb.get_task(conn, held).status == "todo"
+
+        if dependency_release == "unlink":
+            assert kb.unlink_tasks(conn, parent, held) is True
+        else:
+            assert kb.complete_task(conn, parent, result="done") is True
+        assert kb.get_task(conn, held).status == "todo"
+        kb.recompute_ready(conn)
+        assert kb.get_task(conn, held).status == "todo"
+
+        if operator_release == "unblock":
+            assert kb.unblock_task(conn, held) is True
+            release_kind = "unblocked"
+        else:
+            assert kb.promote_task(conn, held, actor="Turner") == (True, None)
+            release_kind = "promoted_manual"
+        assert release_kind in [event.kind for event in kb.list_events(conn, held)]
+        kb.recompute_ready(conn)
+        assert kb.get_task(conn, held).status == "ready"
+
+        # A later dependency gate must still honor the operator's release.
+        another_parent = kb.create_task(conn, title="another open parent")
+        assert kb.link_tasks(conn, another_parent, held) is True
+        assert kb.get_task(conn, held).status == "todo"
+        assert kb.unlink_tasks(conn, another_parent, held) is True
+        assert kb.get_task(conn, held).status == "ready"
+
+
 
 # ---------------------------------------------------------------------------
 # _add_column_if_missing / _migrate_add_optional_columns idempotency (#21708)
