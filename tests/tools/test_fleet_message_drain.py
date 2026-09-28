@@ -180,12 +180,24 @@ def test_foreign_or_non_queued_rows_are_never_written():
     assert s.commits == 0
 
 
-def test_expired_docs_are_left_for_the_expiry_job(store):
+def test_expired_docs_are_moved_out_of_the_queued_page(store):
     old, fresh = uid("old"), uid("fresh")
     store.seed(old, msg(25 * 60))     # expires_at is 1h in the past
     store.seed(fresh, msg(3))
     assert drain_all(store) == [fresh]
-    assert store.get(old).fields["status"] == "queued"
+    assert store.get(old).fields["status"] == "expired"
+
+
+def test_full_expired_page_cannot_starve_a_fresh_message(store):
+    limit = 10
+    for index in range(limit):
+        store.seed(uid(f"expired-{index}"), msg(26 * 60 + index))
+    fresh = uid("fresh")
+    store.seed(fresh, msg(3))
+    assert fmd.claim_next(store, ME, limit=limit, now=NOW) is None
+    claimed = fmd.claim_next(store, ME, limit=limit, now=NOW)
+    assert claimed is not None and claimed.doc_id == fresh
+    assert store.reads == 2
 
 
 # ---------- atomic claim / races ----------
@@ -292,12 +304,19 @@ def test_release_returns_an_unstarted_claim_without_an_attempt(store):
 
 
 def test_malformed_doc_is_rejected_not_run(store):
-    bad, good = uid("bad"), uid("good")
+    bad, missing, invalid, good = uid("bad"), uid("missing"), uid("invalid"), uid("good")
     store.seed(bad, msg(20, kind="carrier_pigeon"))
+    without_expiry = msg(19)
+    without_expiry.pop("expires_at")
+    store.seed(missing, without_expiry)
+    store.seed(invalid, msg(18, expires_at="not-a-timestamp"))
     store.seed(good, msg(10))
     assert drain_all(store) == [good]
     row = store.get(bad)
     assert row.fields["status"] == "rejected" and "unknown kind" in row.fields["last_error"]
+    for doc_id in (missing, invalid):
+        row = store.get(doc_id)
+        assert row.fields["status"] == "rejected" and "expires_at" in row.fields["last_error"]
 
 
 # ---------- rendering ----------
