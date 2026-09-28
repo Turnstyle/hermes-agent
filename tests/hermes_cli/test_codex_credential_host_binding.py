@@ -74,6 +74,29 @@ def _write_singleton(home: Path, token: str) -> None:
     }))
 
 
+def test_codex_fallback_resolves_pooled_credential_benched_for_other_model(monkeypatch):
+    home = _home(monkeypatch)
+    _write_config(home)
+    _write_pool(home, OPAQUE)
+    from agent.credential_pool import load_pool
+    from agent.auxiliary_client import resolve_provider_client
+
+    pool = load_pool("openai-codex")
+    pool.mark_exhausted_and_rotate(
+        status_code=400, failure_reason="model_entitlement",
+        model="claude-opus-5-5", credential_id="gw",
+    )
+
+    client, model = resolve_provider_client(
+        "openai-codex", model="gpt-6-sol-900k", raw_codex=True)
+    assert client is not None
+    assert client.api_key == OPAQUE
+    assert model == "gpt-6-sol-900k"
+    benched_client, _ = resolve_provider_client(
+        "openai-codex", model="claude-opus-5-5", raw_codex=True)
+    assert benched_client is None
+
+
 def _authorized_hosts(seen) -> set:
     return {urlparse(url).hostname for url, auth in seen if auth}
 
