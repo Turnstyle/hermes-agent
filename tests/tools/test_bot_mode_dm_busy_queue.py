@@ -63,7 +63,8 @@ def test_message_agent_queues_behind_a_held_session_then_delivers(tmp_path, monk
 def test_message_agent_fails_loudly_after_the_full_queue_wait(tmp_path, monkeypatch, capsys):
     """(b) Held for the whole budget: a LOUD target_busy refusal, mentioning how long it queued,
     after a bounded number of attempts — not hundreds — and at least the configured wait."""
-    home, dm_file = _setup(tmp_path, monkeypatch, slice_seconds=0.05, queue_wait=0.3)
+    slice_seconds, queue_wait = 0.05, 0.3
+    home, dm_file = _setup(tmp_path, monkeypatch, slice_seconds=slice_seconds, queue_wait=queue_wait)
     monkeypatch.setattr(live, "find_canonical_live_owner", lambda h: None)
 
     calls = []
@@ -85,7 +86,9 @@ def test_message_agent_fails_loudly_after_the_full_queue_wait(tmp_path, monkeypa
     payload = json.loads(capsys.readouterr().out)
     assert payload["reason"] == "target_busy"
     assert "queu" in payload["error"].lower()
-    assert elapsed >= 0.3
+    # The final slice doesn't sleep before giving up, so elapsed may fall a bit short of the full
+    # budget (by at most one slice) — never far short, and never long past it.
+    assert queue_wait - slice_seconds <= elapsed < queue_wait + 2.0
     # ~ queue_wait / slice_seconds = 6 attempts; generous bound rules out a hot loop.
     assert 1 <= len(calls) <= 30
     assert not dm_file.exists()
