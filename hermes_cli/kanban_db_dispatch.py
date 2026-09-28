@@ -1896,9 +1896,9 @@ def check_respawn_guard(
     (quota/auth pattern; the breaker still trips eventually), then for the
     ready lane only ``"recent_success"`` (completed run within the window, unless
     a re-queue event arrived after it — a deliberate re-run) and ``"active_pr"``
-    (PR URL in a recent comment; re-spawning risks a duplicate PR — unless a
-    handoff event followed the comment: the named profile must work on that
-    PR). The review lane skips the last two: they are the *inputs* to a review
+    (current assignee's new PR URL in a recent comment; re-spawning risks a
+    duplicate PR — unless an explicit unblock or handoff followed the comment).
+    The review lane skips the last two: they are the *inputs* to a review
     handoff. Stale / dead claim locks are NOT a guard reason — the reclaim
     passes own those.
     """
@@ -1990,7 +1990,9 @@ def check_respawn_guard(
 
     # 4. A current assignee's new GitHub PR URL in a recent comment — that
     #    worker may have already opened a PR. Links in the task body are inputs,
-    #    and an explicit re-queue after the comment permits another run.
+    #    and an explicit unblock after the comment permits another run.
+    #    Automatic 'promoted' and 'status' events do not authorize a duplicate
+    #    implementation: they can follow recovery or descendant invalidation.
     #    Exception: a handoff AFTER the newest PR comment (operator reassign,
     #    reviewer changes_requested, review reopen) names the profile that must
     #    now work on THAT PR — a closer or the implementer finishing it, not a
@@ -2017,7 +2019,7 @@ def check_respawn_guard(
         requeued_after = conn.execute(
             "SELECT 1 FROM task_events "
             "WHERE task_id = ? AND created_at > ? "
-            "AND kind IN ('status', 'promoted', 'unblocked') LIMIT 1",
+            "AND kind = 'unblocked' LIMIT 1",
             (task_id, int(c["created_at"] or 0)),
         ).fetchone()
         if requeued_after:

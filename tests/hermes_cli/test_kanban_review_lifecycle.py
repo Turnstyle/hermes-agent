@@ -527,9 +527,12 @@ def test_active_pr_guard_ignores_pr_already_named_in_task_body(
         assert kbd.check_respawn_guard(conn, tid) is None
 
 
-@pytest.mark.parametrize("requeue_kind", ("status", "promoted", "unblocked"))
-def test_active_pr_guard_lifts_after_deliberate_requeue_but_not_on_tie(
-    kanban_home: Path, requeue_kind: str,
+@pytest.mark.parametrize(
+    ("event_kind", "expected_guard"),
+    (("status", "active_pr"), ("promoted", "active_pr"), ("unblocked", None)),
+)
+def test_active_pr_guard_only_lifts_after_explicit_unblock_not_on_tie(
+    kanban_home: Path, event_kind: str, expected_guard: str | None,
 ) -> None:
     with kbc.connect() as conn:
         tid = kb.create_task(conn, title="requeued work", assignee="worker")
@@ -539,8 +542,8 @@ def test_active_pr_guard_lifts_after_deliberate_requeue_but_not_on_tie(
         )
         _backdate_comments(conn, tid)
         with kb.write_txn(conn):
-            kb._append_event(conn, tid, requeue_kind)
-        assert kbd.check_respawn_guard(conn, tid) is None
+            kb._append_event(conn, tid, event_kind)
+        assert kbd.check_respawn_guard(conn, tid) == expected_guard
 
         tied_id = kb.create_task(conn, title="same second", assignee="worker")
         kb.add_comment(
@@ -548,7 +551,7 @@ def test_active_pr_guard_lifts_after_deliberate_requeue_but_not_on_tie(
             body="Opened https://github.com/example/repo/pull/124",
         )
         with kb.write_txn(conn):
-            kb._append_event(conn, tied_id, requeue_kind)
+            kb._append_event(conn, tied_id, event_kind)
         assert kbd.check_respawn_guard(conn, tied_id) == "active_pr"
 
 
