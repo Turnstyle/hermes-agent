@@ -11,6 +11,7 @@ was never injected as a follow-up.
 from __future__ import annotations
 
 import contextlib
+import contextvars
 import json
 import logging
 import os
@@ -102,6 +103,16 @@ def kanban_worker_hard_exit():
 # contract as HERMES_TURN_AUTHOR): nothing the turn spawns inherits it, and a nested one-shot
 # never writes over its host's report — the record also carries the writer's pid.
 TURN_REPORT_FILE_ENV = "HERMES_QUIET_TURN_REPORT_FILE"
+_report_callback = contextvars.ContextVar("quiet_turn_report_callback", default=None)
+
+
+@contextlib.contextmanager
+def release_lock_at_report(callback):
+    token = _report_callback.set(callback)
+    try:
+        yield
+    finally:
+        _report_callback.reset(token)
 
 
 def take_turn_report_path(environ: MutableMapping[str, str] = os.environ) -> str | None:
@@ -141,7 +152,7 @@ def read_turn_report(path: str, pid: int) -> dict | None:
 REPORTED_TURN_EXIT_GRACE_SECONDS = 2.0
 
 
-def run_reported_turn(argv: list, *, env: MutableMapping[str, str], report_path: str, timeout: float,
+def run_reported_turn(argv: list, *, env: MutableMapping[str, str], report_path: str, timeout: float | None,
                       exit_grace: float | None = REPORTED_TURN_EXIT_GRACE_SECONDS, cwd: str | None = None,
                       encoding: str | None = None) -> subprocess.CompletedProcess:
     """Run one ``hermes chat -Q`` delivery child; *timeout* bounds the TURN, not the process.
@@ -182,7 +193,7 @@ def run_reported_turn(argv: list, *, env: MutableMapping[str, str], report_path:
 
     drain = threading.Thread(target=_drain, name=f"quiet-turn-drain-{proc.pid}", daemon=True)
     drain.start()
-    deadline = time.monotonic() + timeout
+    deadline = time.monotonic() + timeout if timeout is not None else None
     report = None
     while True:
         drain.join(timeout=exit_grace if report is not None and exit_grace is not None else 0.25)
@@ -191,8 +202,13 @@ def run_reported_turn(argv: list, *, env: MutableMapping[str, str], report_path:
         if report is not None and exit_grace is not None:
             break
         # Re-read while waiting for the cap: a follow-up turn rewrites the report with its answer.
-        report = read_turn_report(report_path, proc.pid) or report
-        if time.monotonic() >= deadline:
+        current = read_turn_report(report_path, proc.pid)
+        if current is not None and report is None and current.get("exit_code") == 0:
+            callback = _report_callback.get()
+            if callback is not None:
+                callback()
+        report = current or report
+        if deadline is not None and time.monotonic() >= deadline:
             if report is not None:
                 break
             proc.kill()

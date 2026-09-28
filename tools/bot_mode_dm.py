@@ -16,6 +16,7 @@ local → ``hermes -p <name> chat --in ~ -c "Bot Chat" --create-if-missing -Q
 from __future__ import annotations
 
 import contextlib
+from contextlib import ExitStack
 import hashlib
 import json
 import logging
@@ -532,7 +533,7 @@ def _session_held_cls() -> type:
 
 
 def _run_local_turn(argv: list[str], dm_file: str, *, env: Optional[dict[str, str]] = None,
-                    busy_raises: bool = False) -> int:
+                    busy_raises: bool = False, retry_lock=None) -> int:
     """One Bot Chat turn via ``--query-file`` (plus one policy-gated retry); re-emits
     the transport's streams and returns its exit code. Transient failures re-run the
     same session; a context_overflow re-run lets the retried turn's pre-API compaction
@@ -543,8 +544,19 @@ def _run_local_turn(argv: list[str], dm_file: str, *, env: Optional[dict[str, st
     printed refusal byte-identical for every direct/legacy caller."""
 
     def _turn(turn_env=env):
-        return subprocess.run([*argv, "--query-file", dm_file], check=False, stdin=subprocess.DEVNULL,
-                              capture_output=True, text=True, encoding="utf-8", errors="replace", env=turn_env)
+        from tools.bot_relay import BOT_CHAT_TURN_ARGS
+        if len(argv) < 3 or argv[1] != "-p" or tuple(argv[3:]) != BOT_CHAT_TURN_ARGS:
+            return subprocess.run([*argv, "--query-file", dm_file], check=False, stdin=subprocess.DEVNULL,
+                                  capture_output=True, text=True, encoding="utf-8", errors="replace", env=turn_env)
+        from hermes_cli.quiet_single_query import run_reported_turn
+        report = f"{dm_file}.turn.json"
+        try:
+            return run_reported_turn(
+                [*argv, "--query-file", dm_file], env=os.environ if turn_env is None else turn_env,
+                report_path=report, timeout=None, exit_grace=None, encoding="utf-8")
+        finally:
+            with contextlib.suppress(OSError):
+                os.unlink(report)
 
     proc = _turn()
     if proc.returncode != 0:
@@ -554,6 +566,8 @@ def _run_local_turn(argv: list[str], dm_file: str, *, env: Optional[dict[str, st
         # The re-run replays the same session and payload; the failed attempt already persisted the
         # user row, so the retried process is told to resume it (RESUME_UNANSWERED_TURN_ENV).
         if retry_action(classify_agent_error(turn_failure_text(proc.stdout, proc.stderr))) != RETRY_NONE:
+            if retry_lock is not None:
+                retry_lock()
             proc = _turn(retry_turn_env(env))
     if proc.returncode != 0 and refused_not_owned(proc.stderr or ""):
         # The target's Bot Chat is held live by another surface (Desktop); the turn
@@ -942,8 +956,24 @@ def _run_delivery_locked(argv: list[str], dm_file: str, *, stdin_file: bool,
         can_queue = home is not None
         probe = min(_FAST_ACK_SECONDS, dm_queue_wait_seconds())
         try:
-            with _delivery_lock(argv, stdin_file=False, timeout_seconds=probe):
-                return _run_local_turn(argv, dm_file, env=env, busy_raises=can_queue)
+            from hermes_cli.quiet_single_query import release_lock_at_report
+            with ExitStack() as lock_stack:
+                lock_stack.enter_context(_delivery_lock(argv, stdin_file=False, timeout_seconds=probe))
+                released = False
+
+                def _release_reported_lock():
+                    nonlocal released
+                    lock_stack.close()
+                    released = True
+
+                def _retry_lock():
+                    if released:
+                        lock_stack.enter_context(_delivery_lock(
+                            argv, stdin_file=False, timeout_seconds=probe))
+
+                with release_lock_at_report(_release_reported_lock):
+                    return _run_local_turn(
+                        argv, dm_file, env=env, busy_raises=can_queue, retry_lock=_retry_lock)
         except (_session_held_cls(), TurnBusyError) as exc:
             if not can_queue:
                 raise
