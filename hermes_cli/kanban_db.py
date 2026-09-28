@@ -1399,7 +1399,12 @@ def create_task(
                         conn,
                         task_id,
                         "blocked",
-                        {"reason": "initial_status", "status": "blocked", "actor": created_by or "user"},
+                        {
+                            "reason": "initial_status",
+                            "status": "blocked",
+                            "actor": created_by or "user",
+                            "bookkeeping": True,
+                        },
                     )
                 if task_status == "todo":
                     # Parked behind an open parent: record why, exactly as
@@ -2310,6 +2315,18 @@ def recompute_ready(conn: sqlite3.Connection, failure_limit: int = None) -> int:
             ):
                 # Human hold parked in todo; only unblock/promote may release it.
                 continue
+            if cur_status == "blocked":
+                unchanged_reason = _unchanged_blocked_reason(conn, task_id)
+                if unchanged_reason:
+                    latest = conn.execute(
+                        "SELECT kind FROM task_events WHERE task_id = ? ORDER BY id DESC LIMIT 1",
+                        (task_id,),
+                    ).fetchone()
+                    if latest is None or latest["kind"] != "unchanged_block":
+                        _append_event(
+                            conn, task_id, "unchanged_block", {"reason": unchanged_reason},
+                        )
+                    continue
             parents = conn.execute(
                 "SELECT t.status FROM tasks t "
                 "JOIN task_links l ON l.parent_id = t.id "
@@ -2356,6 +2373,83 @@ def _parents_satisfied(conn: sqlite3.Connection, task_id: str) -> bool:
         "WHERE l.child_id = ? "
         "AND p.status NOT IN ('done', 'archived') LIMIT 1", (task_id,),
     ).fetchone() is None
+
+
+_REHOMED_OR_SUPERSEDED_RE = re.compile(r"\b(rehomed|superseded)\b", re.IGNORECASE)
+_GITHUB_PULL_URL_RE = re.compile(r"github\.com/.+/pull/\d+", re.IGNORECASE)
+_MERGE_WORD_RE = re.compile(r"\bmerge\b", re.IGNORECASE)
+_MERGED_WORD_RE = re.compile(r"\bmerged\b", re.IGNORECASE)
+
+
+def _newest_event_text(conn: sqlite3.Connection, task_id: str) -> str:
+    row = conn.execute(
+        "SELECT kind, payload FROM task_events WHERE task_id = ? ORDER BY id DESC LIMIT 1",
+        (task_id,),
+    ).fetchone()
+    if not row:
+        return ""
+    payload = row["payload"] if row["payload"] is not None else ""
+    return f"{row['kind']} {payload}"
+
+
+def _child_rehomed_supersedes_parent_gate(conn: sqlite3.Connection, task_id: str) -> bool:
+    return bool(_REHOMED_OR_SUPERSEDED_RE.search(_newest_event_text(conn, task_id)))
+
+
+def _merge_parent_allows_child_completion(conn: sqlite3.Connection, parent_id: str) -> bool:
+    row = conn.execute(
+        "SELECT status, title, body FROM tasks WHERE id = ?", (parent_id,),
+    ).fetchone()
+    if row is None or row["status"] != "todo":
+        return False
+    title_body = f"{row['title'] or ''} {row['body'] or ''}"
+    if not _MERGE_WORD_RE.search(title_body):
+        return False
+    comment_rows = conn.execute(
+        "SELECT body FROM task_comments WHERE task_id = ?", (parent_id,),
+    ).fetchall()
+    combined = title_body + " " + " ".join(c["body"] or "" for c in comment_rows)
+    return bool(_GITHUB_PULL_URL_RE.search(combined) and _MERGED_WORD_RE.search(combined))
+
+
+def _parent_gate_allows_completion(conn: sqlite3.Connection, task_id: str) -> bool:
+    if _parents_satisfied(conn, task_id):
+        return True
+    if _child_rehomed_supersedes_parent_gate(conn, task_id):
+        _log.warning(
+            "kanban complete_task: completing %s despite open parents "
+            "(newest event indicates rehomed/superseded)",
+            task_id,
+        )
+        return True
+    for parent_id, _status in unsatisfied_parents(conn, task_id):
+        if not _merge_parent_allows_child_completion(conn, parent_id):
+            return False
+    _log.warning(
+        "kanban complete_task: completing %s despite open merge-bookkeeping parent(s)",
+        task_id,
+    )
+    return True
+
+
+def _blocked_event_reason(payload: Any) -> str:
+    return str(_json_dict(payload).get("reason") or "").strip()
+
+
+def _unchanged_blocked_reason(conn: sqlite3.Connection, task_id: str) -> Optional[str]:
+    """When the two newest ``blocked`` events share a non-empty reason, return it."""
+    rows = conn.execute(
+        "SELECT payload FROM task_events WHERE task_id = ? AND kind = 'blocked' "
+        "ORDER BY id DESC LIMIT 2",
+        (task_id,),
+    ).fetchall()
+    if len(rows) < 2:
+        return None
+    first = _blocked_event_reason(rows[0]["payload"])
+    second = _blocked_event_reason(rows[1]["payload"])
+    if not first or first != second:
+        return None
+    return first
 
 
 def unsatisfied_parents(conn: sqlite3.Connection, task_id: str) -> list[tuple[str, str]]:
@@ -2923,7 +3017,7 @@ def complete_task(
     """
     now = int(time.time())
     # Cheap pre-check; re-checked inside the txn to close the parent-reopen race.
-    if not _parents_satisfied(conn, task_id):
+    if not _parent_gate_allows_completion(conn, task_id):
         return False
     from hermes_cli.kanban_pr_acceptance_store import prepare_acceptance, record_acceptance
     verified_cards = _gate_created_cards(conn, task_id, created_cards, summary or result)
@@ -2938,7 +3032,7 @@ def complete_task(
     with write_txn(conn):
         # Hard invariant even for human review approval: a parent may have
         # reopened while this task waited.
-        if not _parents_satisfied(conn, task_id):
+        if not _parent_gate_allows_completion(conn, task_id):
             return False
         if acceptance is not None and not record_acceptance(conn, task_id, acceptance):
             return False
