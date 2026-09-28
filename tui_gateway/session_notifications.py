@@ -662,6 +662,113 @@ def _poll_bot_live_delivery_once(sid: str, session: dict) -> bool:
     return started
 
 
+def _fleet_drain_session_is_canonical(sid: str, session: dict, home) -> bool:
+    """True when ``session`` is idle and holds the canonical Bot Chat live lease of ``home``. Local only
+    (state.db + registry lock): the Firestore query is never reached for any other session."""
+    from tools.bot_live_delivery import find_canonical_live_owner
+
+    with _session_turn_admission(session) as admitted:
+        if not admitted or any(session.get(key) for key in (
+                "running", "_closing", "_finalized", "queued_prompt", "queued_prompts",
+                "_auto_continue_scheduled")) or session.get("agent") is None:
+            return False
+        lease = session.get("active_session_lease")
+        if lease is None or getattr(lease, "released", False):
+            return False
+    owner = find_canonical_live_owner(home)
+    return bool(owner and owner.get("lease_id") == lease.lease_id and owner.get("live_session_id") == sid
+                and owner.get("session_id") == session.get("session_key"))
+
+
+def _drain_fleet_messages_once(sid: str, session: dict) -> bool:
+    """Turn-end drain of this bot's queued ``fleet_messages_v1`` docs (tools/fleet_message_drain.py).
+
+    Called ONLY from the post-turn follow-ups, never from the idle poller loop, so an idle bot makes no
+    Firestore read. Runs one indexed query, claims the oldest doc (queued -> delivered, updateTime
+    precondition), then runs it as this Bot Chat's next turn (-> read -> done, or requeue/failed with
+    attempts + last_error). True when a turn was started (the caller then skips its lower-priority work;
+    that turn's own end drains the next doc)."""
+    from tools import fleet_message_drain as fmd
+
+    pending = session.get("_fleet_drain_pending")
+    if pending is not None:
+        try:
+            pending()
+        except Exception:
+            logger.warning("fleet message drain: outcome write still pending", exc_info=True)
+        else:
+            session.pop("_fleet_drain_pending", None)
+        return False  # Resolve the prior receipt without replaying its completed turn.
+
+    config = fmd.drain_config()
+    if config is None:
+        return False
+    home = _session_home(session)
+    if not _fleet_drain_session_is_canonical(sid, session, home):
+        return False
+    store = fmd.store_for(config)
+    claimed = fmd.claim_next(store, fmd.bot_identity(home), limit=config.limit)
+    if claimed is None:
+        return False
+    # The query ran outside the admission lock; a user prompt that arrived meanwhile wins the session.
+    if not _notif_claim_turn(session):
+        def release() -> None:
+            fmd.release(store, claimed)  # delivered -> queued, no attempt counted
+        try:
+            release()
+        except Exception:
+            session["_fleet_drain_pending"] = release
+            logger.warning("fleet message drain: claim release pending for %s", claimed.doc_id, exc_info=True)
+        return False
+
+    def receipt(outcome: dict) -> None:
+        def settle() -> None:
+            fmd.finish(store, claimed, outcome, max_attempts=config.max_attempts)
+        try:
+            settle()
+        except Exception:
+            logger.warning("fleet message drain: could not record the outcome of %s", claimed.doc_id, exc_info=True)
+            session["_fleet_drain_pending"] = settle
+
+    started = False
+    read_attempted = False
+    try:
+        if any(session.get(key) for key in (
+                "_closing", "_finalized", "queued_prompt", "queued_prompts", "_auto_continue_scheduled")):
+            fmd.release(store, claimed)
+            return False
+        read_attempted = True
+        if not fmd.mark_read(store, claimed):
+            return False  # Another writer moved the doc after our claim.
+        text, author, display_metadata = fmd.render_input(claimed)
+        started = _run_prompt_submit(f"__fleet_msg__{claimed.doc_id}", sid, session, text, image_paths=[],
+                                     terminal_callback=receipt, turn_author=author,
+                                     **({"display_metadata": display_metadata} if display_metadata else {}))
+        if not started:
+            fmd.record_error(store, claimed, "live Bot Chat could not start the turn",
+                             max_attempts=config.max_attempts)
+        return started
+    except Exception as exc:
+        # No worker owns this admission. Keep a retryable status write if the store is unavailable.
+        error = f"turn dispatch failed: {exc}"
+        def recover() -> None:
+            if read_attempted and claimed.pending_fields and claimed.pending_fields.get("status") == "read":
+                if not fmd.reconcile_claim(store, claimed):
+                    return
+            fmd.record_error(store, claimed, error,
+                             max_attempts=config.max_attempts)
+        try:
+            recover()
+        except Exception:
+            session["_fleet_drain_pending"] = recover
+            logger.warning("fleet message drain: unstarted claim recovery pending for %s", claimed.doc_id,
+                           exc_info=True)
+        raise
+    finally:
+        if not started:
+            _notif_release_turn(session)
+
+
 # A failing mailbox poll (typically the active-session registry lock unavailable under contention) is
 # retried on the next ``_BOT_DELIVERY_POLL_SECONDS`` pass; log the failure once per window, not per attempt.
 _BOT_POLL_WARN_INTERVAL_S = 60.0
