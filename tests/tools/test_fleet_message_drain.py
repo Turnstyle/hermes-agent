@@ -91,6 +91,12 @@ class MemoryStore:
         rows.sort(key=lambda r: fmd.parse_ts(r.fields["created_at"]))
         return rows[:limit]
 
+    def query_status(self, status, limit):
+        with self.lock:
+            self.reads += 1
+            return [fmd.Row(k, dict(v), self.ut[k]) for k, v in self.docs.items()
+                    if v.get("status") == status][:limit]
+
     def get(self, doc_id):
         with self.lock:
             return fmd.Row(doc_id, dict(self.docs[doc_id]), self.ut[doc_id]) if doc_id in self.docs else None
@@ -319,6 +325,80 @@ def test_repeated_failures_end_in_failed_not_deleted(store):
     assert row.fields["status"] == "failed" and row.fields["attempts"] == 3
     assert row.fields["failed_at"] and "cancelled" in row.fields["last_error"]
     assert fmd.claim_next(store, ME, now=NOW) is None
+
+
+def test_reclaimer_requeues_stale_claims_and_fails_at_attempt_limit():
+    store = MemoryStore()
+    store.seed("stale-read", msg(40, status="read", attempts=1))
+    store.seed("stale-delivered", msg(40, status="delivered", attempts=2))
+    store.seed("fresh-delivered", msg(2, status="delivered", attempts=1))
+    store.seed("last-attempt", msg(40, status="read", attempts=4))
+    store.seed("expired", msg(40, status="delivered", attempts=1,
+                              expires_at=fmd.rfc3339(NOW - datetime.timedelta(seconds=1))))
+
+    counts = fmd.reclaim_stale(store, now=NOW)
+
+    assert counts == {"scanned": 5, "fresh": 1, "requeued": 2, "failed": 1,
+                      "expired": 1, "conflicts": 0, "dry_run": False}
+    for doc_id, attempts in (("stale-read", 2), ("stale-delivered", 3)):
+        fields = store.get(doc_id).fields
+        assert fields["status"] == "queued" and fields["attempts"] == attempts
+        assert fields["updated_at"] == fmd.rfc3339(NOW)
+        assert "claimer died or store failed" in fields["last_error"]
+        assert "may already have run" in fields["last_error"]
+    assert store.get("fresh-delivered").fields["status"] == "delivered"
+    assert store.get("last-attempt").fields["status"] == "failed"
+    assert store.get("last-attempt").fields["failed_at"] == fmd.rfc3339(NOW)
+    assert store.get("expired").fields["status"] == "expired"
+    assert store.get("expired").fields["expired_at"] == fmd.rfc3339(NOW)
+
+
+def test_reclaimer_skips_conflicts_and_cli_dry_run_never_writes(monkeypatch, capsys):
+    store = MemoryStore()
+    store.seed("conflict", msg(40, status="read"))
+    store.seed("dry", msg(40, status="delivered"))
+    query = store.query_status
+
+    def racing_query(status, limit):
+        rows = query(status, limit)
+        if status == "read":
+            store.outside_write("conflict", {"status": "done"})
+        return rows
+
+    store.query_status = racing_query
+    counts = fmd.reclaim_stale(store, now=NOW)
+    assert counts["conflicts"] == 1
+    assert store.get("conflict").fields["status"] == "done"
+
+    store.seed("dry", msg(40, status="delivered"))
+    before = store.get("dry")
+    commits = store.commits
+    monkeypatch.setattr("hermes_cli.config.load_config", lambda: {"fleet_messages": {"target": "live"}})
+    monkeypatch.setattr(fmd, "store_for", lambda config: store)
+    monkeypatch.setattr(fmd, "utcnow", lambda: NOW)
+    assert fmd.main(["reclaim-stale", "--dry-run"]) == 0
+    printed = json.loads(capsys.readouterr().out)
+    assert printed["dry_run"] is True and printed["requeued"] == 1
+    assert store.commits == commits and store.get("dry") == before
+
+    transport = fmd.FirestoreStore(base_url="http://unused", project="p", database="d",
+                                   token_fn=lambda: "unused")
+    request = []
+    monkeypatch.setattr(transport, "_req", lambda url, method, body: request.append(body) or [])
+    assert transport.query_status("read", 200) == []
+    structured = request[0]["structuredQuery"]
+    assert structured["where"] == {"fieldFilter": {"field": {"fieldPath": "status"},
+                                                  "op": "EQUAL", "value": fmd.enc("read")}}
+    assert "orderBy" not in structured and structured["limit"] == 200
+
+    def unavailable(config):
+        raise fmd.NoGoogleCredentials("ADC expired and gcloud token failed")
+
+    monkeypatch.setattr(fmd, "store_for", unavailable)
+    assert fmd.main(["reclaim-stale"]) == 1
+    output = capsys.readouterr()
+    assert output.out == ""
+    assert output.err == "fleet message reclaim-stale: ADC expired and gcloud token failed\n"
 
 
 def test_terminal_outcome_is_recorded_once(store):
