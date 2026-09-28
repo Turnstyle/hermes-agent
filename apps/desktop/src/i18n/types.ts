@@ -4499,6 +4499,7 @@ export interface Translations {
     promptFailed: string
     staleSessionTitle: string
     staleSessionBody: string
+    staleSessionMerged: string
     providerCredentialRequired: string
     emptySlashCommand: string
     desktopCommands: string

@@ -5921,7 +5921,7 @@ describe('usePromptActions stale multi-window guard (#65047)', () => {
     setSessions(() => [])
   })
 
-  it('refuses prompt.submit when the local transcript is behind and refreshes it', async () => {
+  it('merges a newer server transcript and still submits', async () => {
     const storedId = 'stored-stale-submit'
     setSessions(() => [sessionInfo({ id: storedId, profile: 'work-vps', title: 'Remote chat' })])
     vi.mocked(getLatestSessionMessages).mockResolvedValue({
@@ -5952,15 +5952,14 @@ describe('usePromptActions stale multi-window guard (#65047)', () => {
       />
     )
 
-    expect(await handle!.submitText('stale send from secondary window')).toBe(false)
+    expect(await handle!.submitText('stale send from secondary window')).toBe(true)
     expect(getLatestSessionMessages).toHaveBeenCalledWith(storedId, 'work-vps')
-    expect(requestGateway).not.toHaveBeenCalledWith('prompt.submit', expect.anything(), expect.anything())
+    expect(requestGateway).toHaveBeenCalledWith('prompt.submit', expect.anything(), expect.anything())
 
-    const last = seeds.at(-1) as { awaitingResponse?: boolean; busy?: boolean; messages?: unknown[] } | undefined
-    expect(last?.busy).toBe(false)
-    expect(last?.awaitingResponse).toBe(false)
-    expect(last?.messages).toHaveLength(4)
-    expect($notifications.get().some(note => note.kind === 'warning')).toBe(true)
+    const last = seeds.at(-1) as { messages?: unknown[] } | undefined
+    expect(last?.messages?.length).toBeGreaterThanOrEqual(4)
+    expect($notifications.get().some(note => note.kind === 'warning' && note.title)).toBe(false)
+    expect($notifications.get().some(note => note.kind === 'info')).toBe(true)
   })
 
   it('allows prompt.submit when the authoritative transcript is not ahead', async () => {

@@ -573,7 +573,7 @@ describe('useSessionTileDelegate stale multi-window guard (#65047)', () => {
     $notifications.set([])
   })
 
-  it('refuses submitToSession when a peer window advanced the transcript', async () => {
+  it('merges a newer transcript and still submits', async () => {
     setSessions([row({ id: storedId, profile: 'work-vps' })])
     vi.mocked(getLatestSessionMessages).mockResolvedValue({
       session_id: storedId,
@@ -611,17 +611,16 @@ describe('useSessionTileDelegate stale multi-window guard (#65047)', () => {
     await sessionTileDelegate()!.submitToSession(runtimeId, 'stale tile send')
 
     expect(getLatestSessionMessages).toHaveBeenCalledWith(storedId, 'work-vps')
-    expect(requestGateway).not.toHaveBeenCalledWith('prompt.submit', expect.anything(), expect.anything())
-    expect(requestGatewayForProfile).not.toHaveBeenCalledWith(
+    expect(requestGatewayForProfile).toHaveBeenCalledWith(
       'work-vps',
       'prompt.submit',
-      expect.anything(),
-      expect.anything(),
-      expect.anything()
+      { session_id: runtimeId, text: 'stale tile send' },
+      1_800_000,
+      undefined
     )
-    expect(seeds.at(-1)).toEqual(expect.objectContaining({ busy: false, messages: expect.any(Array) }))
     expect((seeds.at(-1) as { messages: unknown[] }).messages).toHaveLength(4)
-    expect($notifications.get().some(note => note.kind === 'warning')).toBe(true)
+    expect($notifications.get().some(note => note.kind === 'warning')).toBe(false)
+    expect($notifications.get().some(note => note.kind === 'info')).toBe(true)
   })
 
   it('allows submitToSession when the authoritative transcript is not ahead', async () => {
