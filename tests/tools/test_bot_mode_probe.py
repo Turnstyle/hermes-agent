@@ -334,6 +334,19 @@ def test_peer_paragraph_lists_registered_peers(tmp_path):
 
     section = bot_mode_probe.get_bot_mode_protocol_section(home)
     assert "`homelab`" in section and "`spark`" in section
+    # Cross-node rules ride with the peer roster (Turner order 2026-09-25).
+    assert "hermes peer run <peer> --idempotency-key" in section
+    assert "hermes peer status <peer> <run_id>" in section
+    assert "`hermes peer dm`" in section
+    assert 'Never run `hermes -p <teammate> chat -c "Bot Chat"`' in section
+
+
+def test_peer_rules_absent_without_peers(tmp_path):
+    home = tmp_path / ".hermes"
+    home.mkdir()
+    _make_bot_profile(home, "researcher", managed=True)
+    section = bot_mode_probe.get_bot_mode_protocol_section(home)
+    assert "hermes peer run" not in section
 
 
 def test_fingerprint_changes_when_a_peer_is_registered(tmp_path):

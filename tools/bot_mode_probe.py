@@ -261,7 +261,15 @@ def _peer_paragraph(root: Path) -> str:
         f"registered ({listed}). Message an agent on a peer the same way — "
         'message_agent with target "<peer>/<agent-name>" (or "<peer>" alone '
         "for the peer's main agent). Run `hermes peer list` for the live "
-        "peer list."
+        "peer list. For LONG cross-machine work use `hermes peer run <peer> "
+        "--idempotency-key <card-or-ticket-id>` (message on stdin), then poll "
+        "`hermes peer status <peer> <run_id>`: a retry with the same key returns "
+        "the same run instead of starting the work twice. Keep `hermes peer dm` "
+        "for short asks and receipts. A busy peer Bot Chat is not a failure: the "
+        "message waits for the running turn and then runs in order, so never "
+        "resend it. Never run `hermes -p <teammate> chat -c \"Bot Chat\"` "
+        "through the terminal to reach a teammate — that bypasses durable "
+        "delivery and fights the chat's owner (SESSION_NOT_OWNED)."
     )
 
 
@@ -422,7 +430,7 @@ def capability_fingerprint(home: str | os.PathLike | None = None) -> str:
         surface["roster"] = []
     # Protocol-text version salt: bumping it refreshes every eternal Bot Chat
     # prompt ONCE so existing bots adopt a new protocol section.
-    surface["protocol_version"] = 2
+    surface["protocol_version"] = 3  # 3: peer run/dm + no terminal Bot Chat hijack rules
     # Peer gateways and the Desktop relay roster are part of the messaging
     # surface too: registering a peer or (dis)connecting a machine must show up.
     surface["peers"] = _peers(root)
