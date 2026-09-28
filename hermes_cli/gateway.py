@@ -5464,20 +5464,38 @@ def _restart_all(system: bool) -> None:
         _service_call(kind, "start", system)
 
 
-def _settle_restart_claim(claim, outcome) -> bool:
-    """Keep the hour only when ``outcome`` says a restart was initiated.
+def _settle_restart_claim(outcome) -> bool:
+    """Return True when ``outcome`` means this backend handled the restart verb.
 
-    Returns True when this backend handled the attempt and the caller should
-    stop. ``False`` means the helper declined the verb (not this service
-    manager), so a later backend may still run. ``NOOP`` and ``REJECTED`` are
-    handled attempts that roll the claim back.
+    ``False`` means the helper declined the verb (not this service manager), so
+    a later backend may still run. ``NOOP``, ``REJECTED``, and ``INITIATED`` are
+    all handled attempts; the caller must observe a new live PID before keeping
+    the hour claim.
     """
-    from hermes_cli.restart_budget import restart_signal_was_initiated
+    return outcome is not False
 
-    if outcome is False:
-        return False
-    if restart_signal_was_initiated(outcome):
+
+def _keep_restart_claim_if_observed(claim, before, *, all_profiles: bool, signal) -> None:
+    from hermes_cli.gateway_restart_observe import replacement_was_observed
+    from hermes_cli.restart_budget import RestartSignal
+
+    if replacement_was_observed(before, all_profiles=all_profiles):
         claim.keep()
+        return
+    hint = ""
+    if signal is RestartSignal.INITIATED:
+        hint = " (supervisor reported restart initiated)"
+    elif signal is RestartSignal.REJECTED:
+        hint = " (supervisor rejected the restart)"
+    elif signal is RestartSignal.NOOP:
+        hint = " (no supervisor action ran)"
+    print(f"No restart was observed.{hint}")
+
+
+def _finish_restart_attempt(claim, before, outcome, *, all_profiles: bool) -> bool:
+    if not _settle_restart_claim(outcome):
+        return False
+    _keep_restart_claim_if_observed(claim, before, all_profiles=all_profiles, signal=outcome)
     return True
 
 
@@ -5492,18 +5510,25 @@ def _cmd_restart(args):
     from hermes_cli.restart_budget import restart_budget_session
 
     with restart_budget_session(force=force) as claim:
+        from hermes_cli.gateway_restart_observe import snapshot_gateway_pids
+
+        before = snapshot_gateway_pids(all_profiles=restart_all)
         # `--all` targets the ONE host multiplexer and _restart_all does its own ownership check with
         # the right one-liner; running the generic named-profile guard first made that branch
         # unreachable for `-p X gateway restart --all` (it printed a bare `gateway restart` instead).
         if not restart_all:
             _guard_named_profile_under_multiplexer(force=force)
-        if restart_all and _settle_restart_claim(claim, _dispatch_all_via_service_manager_if_s6("restart")):
+        if restart_all and _finish_restart_attempt(
+            claim, before, _dispatch_all_via_service_manager_if_s6("restart"), all_profiles=True
+        ):
             return
-        if not restart_all and _settle_restart_claim(claim, _dispatch_via_service_manager_if_s6("restart")):
+        if not restart_all and _finish_restart_attempt(
+            claim, before, _dispatch_via_service_manager_if_s6("restart"), all_profiles=False
+        ):
             return
         if restart_all:
             _restart_all(system)
-            claim.keep()
+            _keep_restart_claim_if_observed(claim, before, all_profiles=True, signal=None)
             return
 
         # The Windows restart path handles both registered installs and detached restarts.
@@ -5516,7 +5541,9 @@ def _cmd_restart(args):
             except (subprocess.CalledProcessError, *swallow):
                 pass
             else:
-                if _settle_restart_claim(claim, service_outcome):
+                if _finish_restart_attempt(
+                    claim, before, service_outcome, all_profiles=False
+                ):
                     return
 
         # Linger only explains a FAILED systemd unit restart. Without an installed unit the
@@ -5552,16 +5579,18 @@ def _cmd_restart(args):
         supervised_pid = get_running_pid()
         if supervised_pid and gateway_declares_external_supervisor(supervised_pid):
             restart_externally_supervised_gateway(supervised_pid)
-            claim.keep()
+            _keep_restart_claim_if_observed(claim, before, all_profiles=False, signal=None)
             return
 
+        # Manual interactive start (no installed service): not a supervised restart, so do not
+        # consume the hourly budget. run_gateway may os._exit and skip the session context.
+        claim.rollback()
         if stop_profile_gateway():
             print("✓ Stopped gateway for this profile")
         _wait_for_gateway_exit(timeout=10.0, force_after=5.0)
         _wait_for_api_server_port_free()
         print("Starting gateway...")
         run_gateway(verbose=0, force=force)
-        claim.keep()
 
 
 # ``hermes gateway status`` hints for a manually-run / stopped gateway, keyed by host kind.

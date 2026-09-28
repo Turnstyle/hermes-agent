@@ -3,8 +3,10 @@
 State lives at ``<HERMES_HOME>/gateway/restart_budget.json``. Check and claim are one
 step under a process-shared ``fcntl.flock`` on the sidecar lock file
 ``gateway/restart_budget.lock`` plus an in-process lock (BSD flock does not exclude
-threads). The claim is recorded when the slot is taken and rolled back if the caller
-does not keep it after a successful restart signal. Crash recovery, a wedged live
+threads). The claim is recorded when the slot is taken and rolled back unless the
+caller keeps it after a post-check observes a new live gateway PID (see
+``hermes_cli.gateway_restart_observe``). ``RestartSignal`` from a backend is only a
+hint for messaging; it does not keep the hour. Crash recovery, a wedged live
 event loop, a health-check-failed runtime state, and ``--force`` bypass the window.
 Non-finite, negative, or far-future timestamps and unreadable files count as no
 prior restart.
@@ -38,8 +40,10 @@ CRASH_RECOVERY_BYPASS = "crash_recovery"
 class RestartSignal(enum.Enum):
     """What a backend actually did with a restart request.
 
-    ``INITIATED`` is the only value that may keep the hour claim. ``NOOP`` means
-    the helper returned without asking any supervisor to restart. ``REJECTED``
+    These values classify the supervisor outcome for CLI messaging and for
+    deciding that a backend handled the verb. They do not keep the hourly
+    restart budget; only an observed new live PID does. ``NOOP`` means the
+    helper returned without asking any supervisor to restart. ``REJECTED``
     means the supervisor refused (start-limit, every service call failed).
     Members stay truthy so existing "this backend handled the verb" checks
     still skip the host fallback.
@@ -406,7 +410,7 @@ def begin_restart_budget(
     """Atomically check and claim. SystemExit(1) when the window is closed.
 
     The stamp is written before return so a concurrent contender sees it. The caller
-    rolls the claim back when the restart signal is not sent.
+    rolls the claim back unless it keeps the stamp after observing a new live PID.
     """
     if home is None:
         from hermes_constants import get_hermes_home
