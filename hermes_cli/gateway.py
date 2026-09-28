@@ -5412,74 +5412,80 @@ def _cmd_restart(args):
     system = getattr(args, "system", False)
     restart_all = getattr(args, "all", False)
     force = getattr(args, "force", False)
-    from hermes_cli.restart_budget import guard_cli_gateway_restart
+    from hermes_cli.restart_budget import restart_budget_session
 
-    guard_cli_gateway_restart(force=force)
-    # `--all` targets the ONE host multiplexer and _restart_all does its own ownership check with
-    # the right one-liner; running the generic named-profile guard first made that branch
-    # unreachable for `-p X gateway restart --all` (it printed a bare `gateway restart` instead).
-    if not restart_all:
-        _guard_named_profile_under_multiplexer(force=force)
-    if restart_all and _dispatch_all_via_service_manager_if_s6("restart"):
-        return
-    if not restart_all and _dispatch_via_service_manager_if_s6("restart"):
-        return
-    if restart_all:
-        _restart_all(system)
-        return
-
-    # The Windows restart path handles both registered installs and detached restarts.
-    kind = _installed_service_kind_for(is_windows)
-    service_configured = kind is not None and (kind != "windows" or _gw_windows().is_installed())
-    if kind is not None:
-        swallow = (RuntimeError, OSError) if kind == "windows" else ()
-        try:
-            _service_call(kind, "restart", system)
+    with restart_budget_session(force=force) as claim:
+        # `--all` targets the ONE host multiplexer and _restart_all does its own ownership check with
+        # the right one-liner; running the generic named-profile guard first made that branch
+        # unreachable for `-p X gateway restart --all` (it printed a bare `gateway restart` instead).
+        if not restart_all:
+            _guard_named_profile_under_multiplexer(force=force)
+        if restart_all and _dispatch_all_via_service_manager_if_s6("restart"):
+            claim.keep()
             return
-        except (subprocess.CalledProcessError, *swallow):
-            pass
+        if not restart_all and _dispatch_via_service_manager_if_s6("restart"):
+            claim.keep()
+            return
+        if restart_all:
+            _restart_all(system)
+            claim.keep()
+            return
 
-    # Linger only explains a FAILED systemd unit restart. Without an installed unit the
-    # detached run below is the restart; bailing here left `hermes gateway restart` a
-    # silent exit-0 no-op on any Linux login session (Desktop read it as success).
-    if kind == "systemd" and supports_systemd_services():
-        linger_ok, _detail = get_systemd_linger_status()
-        if linger_ok is not True:
-            import getpass
+        # The Windows restart path handles both registered installs and detached restarts.
+        kind = _installed_service_kind_for(is_windows)
+        service_configured = kind is not None and (kind != "windows" or _gw_windows().is_installed())
+        if kind is not None:
+            swallow = (RuntimeError, OSError) if kind == "windows" else ()
+            try:
+                _service_call(kind, "restart", system)
+                claim.keep()
+                return
+            except (subprocess.CalledProcessError, *swallow):
+                pass
+
+        # Linger only explains a FAILED systemd unit restart. Without an installed unit the
+        # detached run below is the restart; bailing here left `hermes gateway restart` a
+        # silent exit-0 no-op on any Linux login session (Desktop read it as success).
+        if kind == "systemd" and supports_systemd_services():
+            linger_ok, _detail = get_systemd_linger_status()
+            if linger_ok is not True:
+                import getpass
+                _print_lines(
+                    "", "⚠ Cannot restart gateway as a service — linger is not enabled.",
+                    "  The gateway user service requires linger to function on headless servers.", "",
+                    f"  Run:  sudo loginctl enable-linger {getpass.getuser()}", "",
+                    "  Then restart the gateway:", "    hermes gateway restart",
+                )
+                return
+
+        if service_configured:
             _print_lines(
-                "", "⚠ Cannot restart gateway as a service — linger is not enabled.",
-                "  The gateway user service requires linger to function on headless servers.", "",
-                f"  Run:  sudo loginctl enable-linger {getpass.getuser()}", "",
-                "  Then restart the gateway:", "    hermes gateway restart",
+                "", "✗ Gateway service restart failed.",
+                "  The service definition exists, but the service manager did not recover it.",
+                "  Fix the service, then retry: hermes gateway start",
             )
+            sys.exit(1)
+
+        # A gateway that declares an external supervisor (custom launchd agent / unit running
+        # `gateway run --external-supervisor`) restarts by exiting back to it: the stop + foreground
+        # run below would stamp this CLI's PID as the gateway and wedge every respawn (#110637).
+        from gateway.status import get_running_pid
+        from hermes_cli.gateway_supervised_restart import (
+            gateway_declares_external_supervisor, restart_externally_supervised_gateway,
+        )
+        supervised_pid = get_running_pid()
+        if supervised_pid and gateway_declares_external_supervisor(supervised_pid):
+            restart_externally_supervised_gateway(supervised_pid)
+            claim.keep()
             return
 
-    if service_configured:
-        _print_lines(
-            "", "✗ Gateway service restart failed.",
-            "  The service definition exists, but the service manager did not recover it.",
-            "  Fix the service, then retry: hermes gateway start",
-        )
-        sys.exit(1)
-
-    # A gateway that declares an external supervisor (custom launchd agent / unit running
-    # `gateway run --external-supervisor`) restarts by exiting back to it: the stop + foreground
-    # run below would stamp this CLI's PID as the gateway and wedge every respawn (#110637).
-    from gateway.status import get_running_pid
-    from hermes_cli.gateway_supervised_restart import (
-        gateway_declares_external_supervisor, restart_externally_supervised_gateway,
-    )
-    supervised_pid = get_running_pid()
-    if supervised_pid and gateway_declares_external_supervisor(supervised_pid):
-        restart_externally_supervised_gateway(supervised_pid)
-        return
-
-    if stop_profile_gateway():
-        print("✓ Stopped gateway for this profile")
-    _wait_for_gateway_exit(timeout=10.0, force_after=5.0)
-    _wait_for_api_server_port_free()
-    print("Starting gateway...")
-    run_gateway(verbose=0, force=force)
+        if stop_profile_gateway():
+            print("✓ Stopped gateway for this profile")
+        _wait_for_gateway_exit(timeout=10.0, force_after=5.0)
+        _wait_for_api_server_port_free()
+        print("Starting gateway...")
+        run_gateway(verbose=0, force=force)
+        claim.keep()
 
 
 # ``hermes gateway status`` hints for a manually-run / stopped gateway, keyed by host kind.
