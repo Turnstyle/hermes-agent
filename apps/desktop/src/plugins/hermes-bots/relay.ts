@@ -178,6 +178,15 @@ function releaseRelayRetention() {
   relayRouteRetentions.clear()
 }
 
+/** connectionId::targetProfile -> its own route. `relayConnections()` below still collapses to
+ *  ONE representative route per connectionId (retention and outbox-draining are connection-level,
+ *  not profile-level), but a delivery must be dialed against the profile it actually targets — on
+ *  a multiplexed connection the representative route can be pinned to a DIFFERENT profile's socket
+ *  (typically the primary/default, listed first by the host) than the one an envelope names, which
+ *  silently ran the turn on the wrong profile. Refreshed on every `relayConnections()` call (each
+ *  drain cycle); see `relayRouteForTarget` below. */
+let relayProfileRoutes = new Map<string, ProfileRoute>()
+
 /** One representative route per reachable connection id. */
 async function relayConnections(): Promise<RelayConnection[]> {
   if (typeof host.profileRoutes !== 'function' || typeof host.requestProfile !== 'function') {
@@ -187,6 +196,7 @@ async function relayConnections(): Promise<RelayConnection[]> {
   try {
     const routes = await host.profileRoutes()
     const byConnection = new Map<string, ProfileRoute>()
+    const byConnectionAndProfile = new Map<string, ProfileRoute>()
 
     for (const route of Array.isArray(routes) ? routes : []) {
       const id = String(route?.connectionId || '')
@@ -194,7 +204,13 @@ async function relayConnections(): Promise<RelayConnection[]> {
       if (id && !byConnection.has(id)) {
         byConnection.set(id, route)
       }
+
+      if (id) {
+        byConnectionAndProfile.set(`${id}::${String(route?.targetProfile || '')}`, route)
+      }
     }
+
+    relayProfileRoutes = byConnectionAndProfile
 
     return [...byConnection.entries()].map(([id, route]) => ({
       id,
@@ -203,6 +219,13 @@ async function relayConnections(): Promise<RelayConnection[]> {
   } catch {
     return []
   }
+}
+
+/** The (connectionId, targetProfile)-specific route seen by the latest `relayConnections()` call,
+ *  or `fallback` (the collapsed representative route) when none exists — an older gateway that
+ *  doesn't advertise per-profile routes yet, or a genuinely single-profile connection. */
+function relayRouteForTarget(connectionId: string, targetProfile: string, fallback: ProfileRoute): ProfileRoute {
+  return relayProfileRoutes.get(`${connectionId}::${targetProfile}`) ?? fallback
 }
 
 /** Human label per connection id, from the registry — the only place that has one.
@@ -485,6 +508,10 @@ async function deliverRelayEnvelope(
 ) {
   const envelopeId = String(envelope?.id || '')
   const target = byId.get(String(envelope?.target_connection || ''))
+  const requestedProfile = String(envelope?.target_profile || '')
+  // Same alias the server applies (tui_gateway/methods_bot_relay.py) before comparing against
+  // what it reports it actually ran.
+  const normalizedRequestedProfile = requestedProfile.toLowerCase() === 'hermes' ? 'default' : requestedProfile
 
   const postReply = async (payload: { error?: string; reason?: string; reply?: string }) => {
     try {
@@ -514,11 +541,11 @@ async function deliverRelayEnvelope(
   const attentionKey = `${target.id}::${String(envelope?.target_profile || '')}`
 
   try {
-    const res = await host.requestProfile<{ reply?: string }>(
-      target.route,
+    const res = await host.requestProfile<{ reply?: string; delivered_profile?: string }>(
+      relayRouteForTarget(target.id, requestedProfile, target.route),
       'bot_relay.deliver',
       {
-        profile: String(envelope?.target_profile || ''),
+        profile: requestedProfile,
         message: String(envelope?.message || ''),
         from_profile: String(envelope?.from_profile || ''),
         from_handle: String(envelope?.from_handle || ''),
@@ -526,6 +553,21 @@ async function deliverRelayEnvelope(
       },
       RELAY_DELIVER_TIMEOUT_MS
     )
+
+    // A misroute can never be silent (FORENSIC-default-misroute.md,
+    // FORENSIC-multiplex-misroute.md): the gateway now names which profile actually ran the
+    // turn. Older gateways omit the field — compat, treated as a normal success below.
+    const deliveredProfile = typeof res?.delivered_profile === 'string' ? res.delivered_profile : undefined
+
+    if (deliveredProfile && deliveredProfile !== normalizedRequestedProfile) {
+      noteBotAttention(attentionKey, 'target_scope_unresolved')
+      await postReply({
+        error: `MISROUTED: delivered to @${deliveredProfile} instead of @${normalizedRequestedProfile}`,
+        reason: 'target_scope_unresolved' // tools/bot_failure_reasons.py: TARGET_SCOPE_UNRESOLVED
+      })
+
+      return
+    }
 
     clearBotAttention(attentionKey)
     await postReply({
