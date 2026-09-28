@@ -313,6 +313,11 @@ def decompose_task(
     task, reason = _load_triage_task(task_id)
     if task is None:
         return DecomposeOutcome(task_id, False, reason)
+    with kbc.connect_closing() as conn:
+        installed = kb._fleet_adapter_installed_node_id(conn)
+        if kb._is_foreign_fleet_mirror(conn, task_id, installed):
+            logger.debug("decompose: skipping foreign Fleet mirror %s", task_id)
+            return DecomposeOutcome(task_id, False, "foreign Fleet mirror owned by another node")
 
     routing = _load_routing(root_assignee=task.assignee)
     raw, reason = _call_aux(
@@ -418,7 +423,12 @@ def list_triage_ids(*, tenant: Optional[str] = None) -> list[str]:
     """Return task ids currently in the triage column (excluding protected Fleet mirrors)."""
     with kbc.connect_closing() as conn:
         rows = kb.list_tasks(conn, status="triage", tenant=tenant, limit=1000)
-        return [row.id for row in rows if not _is_protected_fleet_mirror(conn, row.id)]
+        installed = kb._fleet_adapter_installed_node_id(conn)
+        return [
+            row.id for row in rows
+            if not kb._is_foreign_fleet_mirror(conn, row.id, installed)
+            and not _is_protected_fleet_mirror(conn, row.id)
+        ]
 
 
 # ---- BEGIN PLUGIN-COMPAT (revert-scheduled; see COMPAT_MANIFEST.md) ----
