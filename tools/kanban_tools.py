@@ -393,6 +393,11 @@ def _opt_int(value: Any, default: Optional[int] = None) -> Optional[int]:
     return int(value) if value is not None else default
 
 
+def _positive_int_or_none(value: Any) -> Optional[int]:
+    parsed = _opt_int(value)
+    return parsed if parsed is not None and parsed > 0 else None
+
+
 _TASK_FIELDS = tuple(
     "id title body assignee status tenant priority workspace_kind workspace_path created_by "
     "created_at started_at completed_at result current_run_id model_override "
@@ -1063,7 +1068,7 @@ def _handle_create(args: dict, **kw) -> str:
             idempotency_key=args.get("idempotency_key"),
             max_runtime_seconds=_opt_int(args.get("max_runtime_seconds")), skills=skills,
             model_override=model_override, provider_override=provider_override,
-            goal_mode=goal_mode, goal_max_turns=_opt_int(args.get("goal_max_turns")),
+            goal_mode=goal_mode, goal_max_turns=_positive_int_or_none(args.get("goal_max_turns")),
             completion_contract=args.get("completion_contract"),
             initial_status=str(args.get("initial_status") or "running"),
             created_by=_persisted_identity(), session_id=session_id)
