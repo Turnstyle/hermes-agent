@@ -33,9 +33,23 @@ def _pids_for_home(home: Path, *, active_home: bool) -> set[int]:
         recorded = int(state.get("pid") or 0)
     except (TypeError, ValueError):
         recorded = 0
-    if recorded > 0 and _pid_alive(recorded):
+    if recorded > 0 and _pid_alive(recorded) and _is_gateway_pid(recorded):
         pids.add(recorded)
     return pids
+
+
+def _is_gateway_pid(pid: int) -> bool:
+    """A recorded PID counts only if that live process is still a Hermes gateway.
+
+    ``gateway_state.json`` can outlive its process; the OS may hand the same
+    PID to an unrelated program, which must not look like a restart.
+    """
+    try:
+        from gateway.status import _looks_like_gateway_process
+
+        return bool(_looks_like_gateway_process(pid))
+    except Exception:
+        return False
 
 
 def _current_live_pids(*, all_profiles: bool) -> frozenset[int]:
