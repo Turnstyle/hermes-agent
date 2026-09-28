@@ -464,11 +464,8 @@ def _run_quiet_single_query(cli, effective_query, emitter=None):
     if emitter is None:
         print(f"\nsession_id: {cli.session_id}", file=sys.stderr)
 
-    try:
-        _run_single_query_fleet_turn_end_drain(cli)
-    except Exception:
-        logger.warning("fleet message drain at -Q exit failed", exc_info=True)
-
+    # The live -Q drain is _drain_quiet_bot_chat above (up to five docs, reconcile an
+    # uncertain mark_read). A second exit query would claim the same queue again.
     _exit_code = _single_query_exit_code(result)
     if emitter is not None:
         _exit_code = emitter.emit_result(result, session_id=cli.session_id or "", exit_code=_exit_code)
