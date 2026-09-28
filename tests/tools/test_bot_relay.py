@@ -367,6 +367,38 @@ def test_wait_reply_main_success_iff_attested_responder_matches_envelope_target(
     assert secret in out
 
 
+def test_waiter_unrelayed_ok_reply_is_not_booked_as_the_targets_answer(root, capsys):
+    """An admitted ok reply whose answer stayed in the target chat (reply_not_relayed) must not
+    print the trusted 'Reply from' line. The sender's completion carries a stable typed flag and
+    keeps the do-not-resend prose; exit 0 because the message will run and a resend would duplicate it."""
+    from tools import bot_mode_dm
+
+    env_id = "f" * 32
+    env = {
+        "id": env_id,
+        "target_handle": "tb-cndr",
+        "target_connection": "turnerbook",
+        "target_profile": "tb-cndr",
+    }
+    _write_claimed_envelope(root, env, target_profile="tb-cndr")
+    label = "@tb-cndr on turnerbook"
+    reply_path = bot_relay.relay_root(root) / bot_relay.REPLIES_DIR / f"{env_id}.json"
+    prose = (
+        "REPLY NOT RELAYED: @tb-cndr's Bot Chat is still open; your message will run as its next "
+        "turn. Do not resend."
+    )
+    bot_relay.write_reply(
+        root, env_id, reply=prose, delivered_profile="tb-cndr",
+        reason="reply_not_relayed", reply_relayed=False,
+    )
+    code = bot_mode_dm._delivery_main(["--wait-reply", str(reply_path), label, "0.3"])
+    out = capsys.readouterr().out
+    assert code == 0
+    assert "[reason: reply_not_relayed, reply_relayed: false]" in out
+    assert prose in out
+    assert not out.lstrip().startswith("Reply from")
+
+
 def test_wait_reply_main_rejects_unattested_ok_reply(root, capsys):
     """An ok reply without delivered_profile must not print the trusted 'Reply from' success line."""
     from tools import bot_mode_dm

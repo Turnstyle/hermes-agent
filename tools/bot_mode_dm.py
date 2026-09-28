@@ -998,7 +998,10 @@ def _wait_reply_main(reply_path: str, label: str, budget_seconds: str) -> int:
     """The relay reply waiter (``tools/bot_relay.waiter_command``): block until the sender-side
     reply file exists, print it as the completion notification the sender wakes on, exit 1 on a
     delivery error, when the responder is unattested or is not the envelope's target, or when the
-    budget runs out. Stdlib only: this runs as a background process from any bot turn, and the
+    budget runs out. An attested ok reply with ``reply_not_relayed`` (or ``reply_relayed: false``)
+    exits 0 with a typed flag and is not the trusted ``Reply from`` line: the message will run, so
+    a resend would duplicate it, but the prose is not that bot's answer. Stdlib only: this runs as a
+    background process from any bot turn, and the
     sender's completion notification is exactly its stdout."""
     try:
         deadline = time.time() + float(budget_seconds)
@@ -1019,7 +1022,7 @@ def _wait_reply_main(reply_path: str, label: str, budget_seconds: str) -> int:
                 tag = f" [reason: {code}]" if code else ""
                 print(f"Delivery to {label} failed{tag}: {d['error']}")
                 return 1
-            from tools.bot_failure_reasons import TARGET_SCOPE_UNRESOLVED
+            from tools.bot_failure_reasons import REPLY_NOT_RELAYED, TARGET_SCOPE_UNRESOLVED
 
             expected, delivered = _reply_attestation(reply_path, d)
             if expected and delivered and expected != delivered:
@@ -1039,6 +1042,19 @@ def _wait_reply_main(reply_path: str, label: str, budget_seconds: str) -> int:
                 )
                 print(d.get("reply") or "(empty reply)")
                 return 1
+            reason = str(d.get("reason") or "").strip()
+            relayed = d.get("reply_relayed")
+            # An admitted-but-unrelayed ok reply is not the target's answer. Exit 0 so the sender
+            # does not resend a message that will run; the typed flag is what stops it booking the
+            # prose as "Reply from {label}".
+            if reason == REPLY_NOT_RELAYED or relayed is False:
+                flag = "true" if relayed is True else "false"
+                print(
+                    f"Delivery to {label} admitted "
+                    f"[reason: {reason or REPLY_NOT_RELAYED}, reply_relayed: {flag}]: "
+                    f"{d.get('reply') or '(empty reply)'}"
+                )
+                return 0
             print(f"Reply from {label}:")
             print(d.get("reply") or "(empty reply)")
             return 0
