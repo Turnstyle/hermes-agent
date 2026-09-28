@@ -124,3 +124,23 @@ def test_concurrent_enqueues_of_one_envelope_leave_one_doc():
     assert third == envelope_id
     assert store[envelope_id]["status"] == "delivered"
     assert store[envelope_id]["body"] == "concurrent body"
+
+
+def test_default_writer_keeps_fleet_ops_progress_off_stdout(tmp_path, monkeypatch, capsys):
+    """The enqueue CLI's stdout is the JSON line the delivery runner parses; fleet_ops's
+    "OK <id> ..." progress print must land on stderr, or every busy DM fails to queue."""
+    import tools.fleet_message_enqueue as enq
+
+    fake = tmp_path / "fleet_ops.py"
+    fake.write_text(
+        "def create_file_if_absent(path, collection, set_by):\n"
+        "    print('OK fake-id progress line')\n"
+        "    return 0\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(enq, "_FLEET_OPS", fake)
+    message_id = enqueue_busy_dm(sender="scout", recipient="target", body="hi")
+    out, err = capsys.readouterr()
+    assert out == ""
+    assert "OK fake-id progress line" in err
+    assert message_id
