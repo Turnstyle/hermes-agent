@@ -275,6 +275,19 @@ def test_waiter_outlives_the_desktop_deliver_deadline():
     assert bot_relay.REPLY_WAIT_SECONDS > bot_relay.REOFFER_AFTER_SECONDS + desktop_budget_s
 
 
+def test_turn_wait_seconds_clamps_above_the_desktop_deadline(monkeypatch):
+    """A configured wait above the Desktop lock-wait mirror must not let the backend
+    outlive RELAY_DELIVER_TIMEOUT_MS. The handler spends this wait, then two attempts."""
+    monkeypatch.setattr(
+        "hermes_cli.config.load_config",
+        lambda: {"bot_mode": {"turn_wait_seconds": 2400}},
+    )
+    waited = bot_relay.turn_wait_seconds()
+    assert waited == float(bot_relay.TURN_WAIT_SECONDS_FALLBACK)
+    backend_total = waited + bot_relay.TURN_ATTEMPT_TIMEOUT_SECONDS * bot_relay.TURN_MAX_ATTEMPTS
+    assert backend_total < bot_relay.DESKTOP_DELIVER_TIMEOUT_SECONDS
+
+
 @pytest.mark.parametrize(
     ("reply_file", "expected_code", "expected_tokens"),
     [
@@ -399,6 +412,33 @@ def test_wait_reply_main_rejects_unattested_ok_reply(root, capsys):
     assert code == 1
     assert "UNVERIFIED" in out and "target_scope_unresolved" in out
     assert not any(line.startswith("Reply from ") for line in out.splitlines())
+
+
+def test_wait_reply_main_withholds_unattested_reply_body(root, capsys):
+    """Unattested ok replies must not disclose the body; the on-disk copy stays for diagnosis."""
+    import json
+
+    from tools import bot_mode_dm
+
+    env_id = "e" * 32
+    env = {
+        "id": env_id,
+        "target_handle": "researcher",
+        "target_connection": "ssh-vps",
+        "target_profile": "researcher",
+    }
+    _write_claimed_envelope(root, env, target_profile="researcher")
+    label = "@researcher on ssh-vps"
+    reply_path = bot_relay.relay_root(root) / bot_relay.REPLIES_DIR / f"{env_id}.json"
+    secret = "WRONG-PROFILE-PRIVATE-ANSWER"
+    bot_relay.write_reply(root, env_id, reply=secret)
+    code = bot_mode_dm._delivery_main(["--wait-reply", str(reply_path), label, "0.3"])
+    out = capsys.readouterr().out
+    assert code == 1
+    assert secret not in out
+    assert "UNVERIFIED" in out
+    with open(reply_path, encoding="utf-8-sig") as fh:
+        assert json.load(fh)["reply"] == secret
 
 
 def test_roster_rejects_connection_id_outside_handle_charset(root):

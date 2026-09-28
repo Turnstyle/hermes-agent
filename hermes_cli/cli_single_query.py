@@ -206,8 +206,9 @@ def _run_quiet_single_query(cli, effective_query, emitter=None):
     from agent.interrupt_compat import _accepts_keyword
     from agent.turn_author import take_turn_author_from_env
     from hermes_cli.quiet_single_query import (
-        adopt_unanswered_turn, bind_quiet_session_key, continue_quiet_notify_completions,
-        exit_single_query, quiet_notify_linger_seconds, take_turn_report_path, write_turn_report,
+        FOLLOW_UP_NOT_ACCEPTED, adopt_unanswered_turn, bind_quiet_session_key,
+        continue_quiet_notify_completions, exit_single_query, quiet_notify_linger_seconds,
+        take_turn_report_path, write_turn_report,
     )
 
     author = take_turn_author_from_env()
@@ -247,16 +248,34 @@ def _run_quiet_single_query(cli, effective_query, emitter=None):
             history = result.get("messages") or cli.conversation_history
 
             def _follow_up(text):
-                nonlocal history
-                follow = cli.agent.run_conversation(
-                    user_message=text, conversation_history=history, **author_kwargs,
-                )
-                if isinstance(follow, dict) and follow.get("messages"):
-                    history = follow["messages"]
-                # Same sync contract as the main turn: a compression rotation during a
-                # follow-up must not leave a stale id on the exit line / drain key.
-                _sync_cli_session_id_from_agent(cli)
-                return follow
+                nonlocal history, rows_at_release, last_follow
+                if idle_release:
+                    if not _reclaim_session_for_follow_up(cli, linger_deadline):
+                        logger.warning("Notify follow-up for session %s not run: another surface held the "
+                                       "chat through the linger budget", getattr(cli, "session_id", "") or "")
+                        return FOLLOW_UP_NOT_ACCEPTED
+                    rows = _durable_row_count(cli)
+                    if rows is not None and rows_at_release is not None and rows != rows_at_release:
+                        # Another writer's turns landed while this process was idle: continue from the
+                        # stored transcript (the resume path), never the stale in-memory one.
+                        restored = cli._session_db.get_messages_as_conversation(
+                            cli.session_id, repair_alternation=True)
+                        history = [m for m in restored if m.get("role") != "session_meta"] or history
+                try:
+                    follow = cli.agent.run_conversation(
+                        user_message=text, conversation_history=history, **author_kwargs,
+                    )
+                    if isinstance(follow, dict) and follow.get("messages"):
+                        history = follow["messages"]
+                    # Same sync contract as the main turn: a compression rotation during a
+                    # follow-up must not leave a stale id on the exit line / drain key.
+                    _sync_cli_session_id_from_agent(cli)
+                    last_follow = follow
+                    return follow
+                finally:
+                    if idle_release:
+                        rows_at_release = _durable_row_count(cli)
+                        cli._release_active_session()
 
             # One shared linger budget for the whole run: the loop below and the later
             # _wait_for_oneshot_background_completions pass must not each wait the full

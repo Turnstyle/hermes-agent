@@ -722,9 +722,16 @@ class TurnBusyError(RuntimeError):
 
 
 def turn_wait_seconds() -> float:
-    """Wait budget for a queued delivery turn (config, lazily read)."""
+    """Wait budget for a queued delivery turn (config, lazily read).
+
+    Capped at ``TURN_WAIT_SECONDS_FALLBACK``: the Desktop deliver RPC deadline is
+    built from that fallback plus attempt timeouts and settlement margin, and the
+    handler consumes this wait before those attempts — an uncapped config would
+    let delivery succeed after Desktop has already failed the call.
+    """
     val = _bot_mode_cfg("turn_wait_seconds", loader="load_config")
-    return float(TURN_WAIT_SECONDS_FALLBACK) if val is None else max(0.0, float(val))
+    raw = float(TURN_WAIT_SECONDS_FALLBACK) if val is None else max(0.0, float(val))
+    return min(raw, float(TURN_WAIT_SECONDS_FALLBACK))
 
 
 DM_QUEUE_WAIT_SECONDS_FALLBACK = 1800

@@ -38,6 +38,9 @@ KANBAN_WORKER_EXIT_TRAILER = "[kanban-worker-exit] rc="
 # without changing the dispatcher's reader on every node in the same carry.
 KANBAN_WORKER_BUSY_MARKER = "[kanban-worker-busy] reason="
 
+# Returned by a quiet notify follow-up when the session lease could not be reclaimed in time.
+FOLLOW_UP_NOT_ACCEPTED = object()
+
 
 def write_worker_busy_marker(reason: str) -> None:
     """Write the run-bound busy marker for a Kanban worker; a no-op outside one (or without a run id)."""
@@ -224,7 +227,7 @@ def continue_quiet_notify_completions(
     budget handshake below).
     """
     from tools.process_registry import process_registry
-    from tools.async_delegation import claim_event_delivery, complete_event_delivery
+    from tools.async_delegation import claim_event_delivery, complete_event_delivery, release_event_delivery
 
     last: Any = None
     key = session_id or ""
@@ -234,6 +237,7 @@ def continue_quiet_notify_completions(
     for _ in range(max_rounds):
         wait = process_registry.wait_for_pending_completions(None, timeout=max(deadline - time.monotonic(), 0.0))
         drained = []
+        claimed: list[tuple[Any, str]] = []
         for event, text in process_registry.drain_notifications(session_key=key, owns_event=owns_event):
             # Durable async_delegation events carry a delivery ledger: without the
             # claim/complete handshake the row stays delivery_state='pending' and
@@ -242,20 +246,34 @@ def continue_quiet_notify_completions(
             claim = claim_event_delivery(event, "cli-quiet")
             if claim is None:
                 continue
-            complete_event_delivery(event, claim)
             drained.append((event, text))
+            claimed.append((event, claim))
         # Every drained event type carries formatted text (completions, watch matches,
         # async_delegation results): drain_notifications POPS owned events off the queue,
         # so filtering by type here would consume-and-silently-drop owned
         # async_delegation results. Keep everything that rendered.
         texts = [text for _event, text in drained if text]
         if texts:
-            follow = run_turn("\n\n".join(texts))
-            # Same admission rule as the interactive CLI turn: a wake made ONLY of automatic
-            # diagnostics (early failure / watch notices) still runs, but under suppression its
-            # reply never displaces the requested one-shot answer on stdout.
-            if not _diagnostic_only_wake_muted([event for event, text in drained if text]):
-                last = follow
+            try:
+                follow = run_turn("\n\n".join(texts))
+            except Exception:
+                for event, claim in claimed:
+                    release_event_delivery(event, claim)
+                raise
+            if follow is FOLLOW_UP_NOT_ACCEPTED:
+                for event, claim in claimed:
+                    release_event_delivery(event, claim)
+            else:
+                for event, claim in claimed:
+                    complete_event_delivery(event, claim)
+                # Same admission rule as the interactive CLI turn: a wake made ONLY of automatic
+                # diagnostics (early failure / watch notices) still runs, but under suppression its
+                # reply never displaces the requested one-shot answer on stdout.
+                if not _diagnostic_only_wake_muted([event for event, text in drained if text]):
+                    last = follow
+        else:
+            for event, claim in claimed:
+                complete_event_delivery(event, claim)
         if wait.get("timed_out"):
             break
         if not texts:

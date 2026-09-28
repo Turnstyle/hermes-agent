@@ -1004,10 +1004,9 @@ def _wait_reply_main(reply_path: str, label: str, budget_seconds: str) -> int:
                 print(
                     f"Delivery to {label} UNVERIFIED [reason: {TARGET_SCOPE_UNRESOLVED}]: the relay "
                     f"did not attest which bot answered (a Desktop or target gateway older than "
-                    f"delivery attestation), so the text below may not be from {label}. Do not "
-                    f"attribute it to {label} and do not resend blindly."
+                    f"delivery attestation), so the reply text is withheld. Do not attribute it to "
+                    f"{label} and do not resend blindly."
                 )
-                print(d.get("reply") or "(empty reply)")
                 return 1
             reason = str(d.get("reason") or "").strip()
             relayed = d.get("reply_relayed")
