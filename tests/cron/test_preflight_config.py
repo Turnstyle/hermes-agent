@@ -109,6 +109,35 @@ def _run_job_patched(job, tmp_path, *, resolve=None, skill_view=None):
     return success, output, final_response, error, agent_constructed
 
 
+def _run_mcp_tick(job, tmp_path, *, deliver=None):
+    """Run one cron tick with a configured MCP server that discovers no tools."""
+    with patch("cron.scheduler._hermes_home", tmp_path), \
+         patch("cron.scheduler_delivery._resolve_origin", return_value=None), \
+         patch("hermes_cli.env_loader.load_hermes_dotenv"), \
+         patch("hermes_cli.env_loader.reset_secret_source_cache"), \
+         patch("hermes_state_registry.acquire", return_value=MagicMock()), \
+         patch("tools.mcp_tool_discovery.discover_mcp_tools", return_value=[]), \
+         patch("hermes_cli.runtime_provider.resolve_runtime_provider",
+               return_value=dict(_RUNTIME)), \
+         patch("run_agent.AIAgent") as agent_cls:
+        agent_cls.return_value.run_conversation.return_value = {"final_response": "ok"}
+        if deliver is not None:
+            with patch.object(sched, "_deliver_result", side_effect=deliver):
+                assert sched.run_one_job(job) is True
+        else:
+            assert sched.run_one_job(job) is True
+        return agent_cls.called
+
+
+def _configure_empty_mcp_server(tmp_path):
+    from tools.registry import registry
+
+    (tmp_path / "config.yaml").write_text(
+        "model:\n  default: test-model\nmcp_servers:\n  notion:\n"
+        "    url: https://mcp.invalid\n", encoding="utf-8")
+    registry.register_toolset_alias("notion", "mcp-notion")
+
+
 class TestMissingProviderKeyBlocks:
     def test_missing_key_blocked_config_no_agent(self, tmp_path):
         """Missing provider key (AuthError, no fallback chain) → blocked_config,
@@ -205,6 +234,41 @@ class TestMissingProviderKeyBlocks:
         assert stored.get("failure_deliver") is None
         assert targets_seen == [[{"platform": "bot-chat", "chat_id": "", "thread_id": None}]]
         assert outcomes == ["delivered", "suppressed"]
+
+    def test_empty_mcp_toolset_local_alert_reaches_own_bot_chat_once(self, tmp_path):
+        """Three blocked ticks retain one marker and send one own-profile Bot Chat alert."""
+        _configure_empty_mcp_server(tmp_path)
+        job = _job(enabled_toolsets=["terminal", "notion"], deliver="local")
+        targets_seen = []
+
+        def capture_targets(delivery_job, _content, adapters=None, loop=None, **kwargs):
+            assert kwargs["for_failure"] is True
+            targets_seen.append(sched._resolve_delivery_targets(delivery_job, for_failure=True))
+            return None
+
+        with cron_jobs.use_cron_store(tmp_path):
+            cron_jobs.save_jobs([job])
+            for _ in range(3):
+                fresh = cron_jobs.get_job(job["id"])
+                assert _run_mcp_tick(fresh, tmp_path, deliver=capture_targets) is False
+            stored = cron_jobs.get_job(job["id"])
+
+        assert stored["last_status"] == "blocked_config"
+        assert stored.get("preflight_alerted") is True
+        assert targets_seen == [[{"platform": "bot-chat", "chat_id": "", "thread_id": None}]]
+
+    def test_empty_mcp_toolset_recovery_clears_alert_marker(self, tmp_path):
+        """A healthy tick after an MCP block re-arms the alert for a future break."""
+        _configure_empty_mcp_server(tmp_path)
+        job = _job(enabled_toolsets=["terminal", "notion"])
+        with cron_jobs.use_cron_store(tmp_path):
+            cron_jobs.save_jobs([job])
+            assert _run_mcp_tick(cron_jobs.get_job(job["id"]), tmp_path) is False
+            assert cron_jobs.get_job(job["id"]).get("preflight_alerted") is True
+
+            cron_jobs.update_job(job["id"], {"enabled_toolsets": ["terminal"]})
+            assert _run_mcp_tick(cron_jobs.get_job(job["id"]), tmp_path) is True
+            assert not cron_jobs.get_job(job["id"]).get("preflight_alerted")
 
     @pytest.mark.parametrize("local_lane", ["local", None, "", [], "none"])
     def test_blocked_config_local_lanes_resolve_to_own_bot_chat(self, local_lane):
@@ -332,8 +396,28 @@ class TestHealthyJobUnaffected:
             stored = [j for j in cron_jobs.load_jobs() if j["id"] == job["id"]][0]
             assert not stored.get("preflight_alerted")
 
+    def test_fail_open_validator_keeps_alert_marker(self, tmp_path):
+        job = _job(preflight_alerted=True)
+        with cron_jobs.use_cron_store(tmp_path):
+            cron_jobs.save_jobs([job])
+            with patch("cron.scheduler._preflight_job_config", side_effect=RuntimeError("probe failed")):
+                success, *_rest, agent_constructed = _run_job_patched(job, tmp_path)
+            assert cron_jobs.get_job(job["id"]).get("preflight_alerted") is True
+        assert success is True
+        assert agent_constructed is True
+
 
 class TestOptOut:
+    def test_preflight_false_keeps_existing_alert_marker(self, tmp_path):
+        (tmp_path / "config.yaml").write_text("cron:\n  preflight: false\n", encoding="utf-8")
+        job = _job(preflight_alerted=True)
+        with cron_jobs.use_cron_store(tmp_path):
+            cron_jobs.save_jobs([job])
+            success, *_rest, agent_constructed = _run_job_patched(job, tmp_path)
+            assert cron_jobs.get_job(job["id"]).get("preflight_alerted") is True
+        assert success is True
+        assert agent_constructed is True
+
     def test_preflight_false_restores_old_behavior(self, tmp_path):
         """cron.preflight: false → job proceeds to resolution and fails the
         old way (error status, re-alerts every tick, no blocked_config)."""

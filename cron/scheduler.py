@@ -1660,11 +1660,12 @@ def _load_prefill_messages(cfg: dict, job_id: str) -> Optional[list]:
         return None
 
 
-def _preflight_or_block(job: dict, job_id: str, job_name: str, cfg: dict) -> Optional[tuple]:
+def _preflight_or_block(job: dict, job_id: str, job_name: str, cfg: dict) -> tuple[Optional[tuple], bool]:
     """Pre-dispatch config validation: refuse unrunnable jobs (missing key, unready skill,
     unconfigured delivery) BEFORE AIAgent is built. run_one_job keys off BLOCKED_CONFIG_MARKER to
     record blocked_config and alert once (`preflight_alerted` bit). Must run after the wake gate so
-    silent ticks stay silent. Opt-out: `cron.preflight: false`. Returns failure tuple or None.
+    silent ticks stay silent. Opt-out: `cron.preflight: false`. Returns the failure tuple (or None)
+    and whether the enabled validator completed without finding a block.
     """
     # --------------------------------------------------------------- Pre-dispatch configuration validation
     # (T1-26). A job whose configuration cannot possibly produce a successful run — missing provider API key
@@ -1675,20 +1676,16 @@ def _preflight_or_block(job: dict, job_id: str, job_name: str, cfg: dict) -> Opt
     # job's `preflight_alerted` bit — the #73506 alert-once shape).
     _pf_reason = None
     try:
-        if _cron_preflight_enabled(cfg):
+        preflight_enabled = _cron_preflight_enabled(cfg)
+        if preflight_enabled:
             _pf_reason = _preflight_job_config(job, cfg)
-            if not _pf_reason and job.get("preflight_alerted"):
-                # Config healthy again: clear alert-once marker so a future break re-alerts.
-                with contextlib.suppress(Exception):
-                    from cron.jobs import clear_preflight_alerted
-                    clear_preflight_alerted(job_id)
     except Exception:
         # Fail open: the validator must never take down a runnable job.
         logger.debug("Job '%s': preflight validation errored — failing open", job_id, exc_info=True)
-        _pf_reason = None
+        return None, False
     if not _pf_reason:
-        return None
-    return _blocked_config_result(job_id, job_name, _pf_reason)
+        return None, preflight_enabled
+    return _blocked_config_result(job_id, job_name, _pf_reason), False
 
 
 def _blocked_config_result(job_id: str, job_name: str, _pf_reason: str) -> tuple:
@@ -2381,7 +2378,7 @@ def _resolve_cron_agent_setup(job: dict, job_id: str, job_name: str, jc) -> _Cro
     # that would ship a stored credential off-host; hand-written jobs bypass create-time checks.
     _guard_job_credential_exfil(job)
 
-    setup.blocked = _preflight_or_block(job, job_id, job_name, _cfg)
+    setup.blocked, preflight_healthy = _preflight_or_block(job, job_id, job_name, _cfg)
     if setup.blocked is not None:
         return setup
 
@@ -2402,6 +2399,11 @@ def _resolve_cron_agent_setup(job: dict, job_id: str, job_name: str, jc) -> _Cro
         _mcp_reason = _empty_requested_mcp_toolsets(job, _cfg)
         if _mcp_reason:
             setup.blocked = _blocked_config_result(job_id, job_name, _mcp_reason)
+        elif preflight_healthy and job.get("preflight_alerted"):
+            # All pre-dispatch checks passed: re-arm the alert for a future break.
+            with contextlib.suppress(Exception):
+                from cron.jobs import clear_preflight_alerted
+                clear_preflight_alerted(job_id)
     return setup
 
 
