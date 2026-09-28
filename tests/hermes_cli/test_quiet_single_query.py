@@ -52,7 +52,9 @@ def test_delivery_linger_releases_lease_then_reacquires_both_and_reloads(monkeyp
         return {"final_response": "first reply" if len(seen) == 1 else "follow reply",
                 "messages": fresh if len(seen) > 1 else fresh[:2]}
 
-    agent = SimpleNamespace(run_conversation=run_conversation, session_id="s-1", _session_db=DB())
+    agent = SimpleNamespace(run_conversation=run_conversation, session_id="s-1", _session_db=DB(),
+                            _session_title_hint="Bot Chat")
+    monkeypatch.setattr(fmd, "drain_config", lambda: fmd.DrainConfig(target="emulator", emulator_host="unused"))
 
     class CLI:
         config = {}
@@ -115,6 +117,8 @@ def test_busy_follow_up_does_not_pop_notifications(monkeypatch, tmp_path, caplog
     popped = []
     monkeypatch.setattr("tools.process_registry.process_registry.drain_notifications",
                         lambda **_k: popped.append(True))
+    monkeypatch.setattr("tools.process_registry.process_registry.pending_owned_notifications",
+                        lambda **_k: [{"id": "event-1", "session_id": "proc-1"}])
     owner = SimpleNamespace(agent=SimpleNamespace(_session_db=object()), session_id="s-1", config={})
     with acquire_turn_lock(tmp_path, "ops", 0.5):
         result = qsq.continue_quiet_notify_completions(
@@ -123,6 +127,70 @@ def test_busy_follow_up_does_not_pop_notifications(monkeypatch, tmp_path, caplog
     assert result is None and popped == []
     assert "Bot Chat follow-up skipped" in caplog.text
     assert "child_pid=" in caplog.text and "delivery_pid=" in caplog.text
+    assert "event-1" in caplog.text and "proc-1" in caplog.text
+
+
+def test_no_pending_notify_does_not_wait_for_held_flock(tmp_path, monkeypatch):
+    from hermes_cli import quiet_single_query as qsq
+    from tools.bot_relay import acquire_turn_lock
+
+    home = tmp_path / "profiles" / "ops"
+    home.mkdir(parents=True)
+    monkeypatch.setenv("HERMES_HOME", str(home))
+    from tools.process_registry import process_registry
+    monkeypatch.setattr(process_registry, "wait_for_pending_completions", lambda *_a, **_k: {"timed_out": True})
+    monkeypatch.setattr(process_registry, "pending_owned_notifications", lambda **_k: [])
+    owner = SimpleNamespace(agent=SimpleNamespace(_session_db=object()), session_id="s-1", config={})
+    with acquire_turn_lock(tmp_path, "ops", 0.5):
+        start = time.monotonic()
+        result = qsq.continue_quiet_notify_completions(
+            "s-1", lambda _text: pytest.fail("follow-up ran"), max_rounds=1, linger_budget=0,
+            turn_guard=lambda: qsq.bot_chat_follow_up_lock(owner, "ops", time.monotonic() + 2.0))
+        assert time.monotonic() - start < 0.5
+    assert result is None
+
+
+def test_refused_lease_does_not_hold_profile_flock(tmp_path, monkeypatch):
+    import subprocess
+    import sys
+    import threading
+    from hermes_cli import quiet_single_query as qsq
+    from tools.bot_relay import acquire_turn_lock
+
+    home = tmp_path / "profiles" / "ops"
+    home.mkdir(parents=True)
+    monkeypatch.setenv("HERMES_HOME", str(home))
+    holder = subprocess.Popen([sys.executable, "-c", (
+        "import time\n"
+        "from hermes_cli.active_sessions import try_acquire_active_session\n"
+        "lease, refusal = try_acquire_active_session(session_id='s-1', surface='desktop', config={}, "
+        "metadata={'live_session_id': 's-1'})\n"
+        "print('ok' if refusal is None else 'refused', flush=True)\n"
+        "input()\n")], stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True,
+        env={**os.environ, "HERMES_HOME": str(home)})
+    try:
+        assert holder.stdout.readline().strip() == "ok"
+        owner = SimpleNamespace(agent=SimpleNamespace(_session_db=SimpleNamespace(
+            resolve_resume_session_id=lambda sid: sid)), session_id="s-1", config={})
+        outcome = []
+
+        def follow_up():
+            with qsq.bot_chat_follow_up_lock(owner, "ops", time.monotonic() + 1.5) as acquired:
+                outcome.append(acquired)
+
+        worker = threading.Thread(target=follow_up)
+        worker.start()
+        try:
+            time.sleep(0.3)
+            with acquire_turn_lock(tmp_path, "ops", 0.5):
+                assert worker.is_alive()
+        finally:
+            worker.join(timeout=3)
+        assert outcome == [False]
+    finally:
+        holder.stdin.write("\n")
+        holder.stdin.flush()
+        holder.wait(timeout=5)
 
 
 def test_personal_quiet_run_does_not_release_active_session(monkeypatch):
@@ -138,6 +206,29 @@ def test_personal_quiet_run_does_not_release_active_session(monkeypatch):
     with pytest.raises(SystemExit):
         cli._run_quiet_single_query(owner, "hi")
     assert released == []
+
+
+def test_partial_failed_delivery_keeps_lease_through_notify_wait(monkeypatch):
+    from hermes_cli import quiet_single_query as qsq
+
+    monkeypatch.setenv(qsq.BOT_CHAT_DELIVERY_PROFILE_ENV, "ops")
+    monkeypatch.setattr(qsq, "quiet_notify_linger_seconds", lambda: 0)
+    released = []
+    owner = SimpleNamespace(
+        agent=SimpleNamespace(run_conversation=lambda **_k: {"partial": True, "final_response": ""},
+                              session_id="s-1"),
+        session_id="s-1", conversation_history=[], config={},
+        _release_active_session=lambda: released.append(True))
+
+    def linger(_sid, _turn, **kwargs):
+        assert "turn_guard" not in kwargs
+        assert released == []
+        return None
+
+    monkeypatch.setattr(qsq, "continue_quiet_notify_completions", linger)
+    with pytest.raises(SystemExit) as exc:
+        cli._run_quiet_single_query(owner, "hi")
+    assert exc.value.code == 1 and released == []
 
 
 def test_bot_chat_quiet_turn_drains_one_message_without_changing_stdout(monkeypatch, capsys, tmp_path):

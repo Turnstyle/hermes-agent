@@ -267,10 +267,12 @@ def _flush_one_shot_session_store(cli) -> None:
         db.flush_token_counts()
     except Exception:
         logger.debug("one-shot token-count drain failed", exc_info=True)
-    try:
-        db.end_session(session_id, "cli_close")
-    except Exception:
-        logger.debug("one-shot end_session failed", exc_info=True)
+    if not (getattr(cli, "_bot_chat_delivery_lease_released", False)
+            and getattr(cli, "_active_session_lease", None) is None):
+        try:
+            db.end_session(session_id, "cli_close")
+        except Exception:
+            logger.debug("one-shot end_session failed", exc_info=True)
 
 
 def _wait_for_oneshot_background_completions(cli) -> None:

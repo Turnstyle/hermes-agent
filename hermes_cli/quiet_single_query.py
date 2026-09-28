@@ -82,7 +82,7 @@ def release_lock_at_report(callback):
 
 
 @contextlib.contextmanager
-def bot_chat_follow_up_lock(cli, profile: str, deadline: float):
+def bot_chat_follow_up_lock(cli, profile: str, deadline: float, *, skip_log_level: int = logging.WARNING):
     """Admit a delivery follow-up under both cross-process locks and fresh DB history."""
     from hermes_constants import get_hermes_home
     from hermes_cli import active_sessions
@@ -97,15 +97,17 @@ def bot_chat_follow_up_lock(cli, profile: str, deadline: float):
     try:
         if db is None:
             raise RuntimeError("session DB unavailable")
-        stack.enter_context(acquire_turn_lock(_hermes_root(Path(get_hermes_home())), profile,
-                                              max(0.0, deadline - time.monotonic())))
         while True:
+            stack.enter_context(acquire_turn_lock(_hermes_root(Path(get_hermes_home())), profile,
+                                                  max(0.0, deadline - time.monotonic())))
             session_id = db.resolve_resume_session_id(cli.session_id) or cli.session_id
             lease, refusal = active_sessions.try_acquire_active_session(
                 session_id=session_id, surface="cli", config=cli.config,
                 metadata={"live_session_id": str(session_id)})
             if refusal is None:
                 break
+            stack.close()
+            stack = contextlib.ExitStack()
             if time.monotonic() >= deadline:
                 raise RuntimeError(f"active-session lease refused: {getattr(refusal, 'reason', refusal)}")
             time.sleep(min(0.1, max(0.0, deadline - time.monotonic())))
@@ -124,8 +126,9 @@ def bot_chat_follow_up_lock(cli, profile: str, deadline: float):
         with contextlib.suppress(Exception):
             owner_pids = [entry.get("pid") for entry in active_sessions._read_entries(
                 active_sessions._state_path()) if entry.get("session_id") == cli.session_id]
-        logger.warning("Bot Chat follow-up skipped: child_pid=%s delivery_pid=%s holder_pids=%s profile=%s: %s",
-                       os.getpid(), os.getppid(), owner_pids, profile, exc)
+        logger.log(skip_log_level,
+                   "Bot Chat follow-up skipped: child_pid=%s delivery_pid=%s holder_pids=%s profile=%s: %s",
+                   os.getpid(), os.getppid(), owner_pids, profile, exc)
         yield False
         return
     try:
@@ -227,7 +230,7 @@ def run_reported_turn(argv: list, *, env: MutableMapping[str, str], report_path:
         current = read_turn_report(report_path, proc.pid)
         if current is not None and report is None:
             callback = _report_callback.get()
-            if callback is not None:
+            if callback is not None and current.get("exit_code") == 0:
                 callback()
         report = current or report
         if deadline is not None and time.monotonic() >= deadline:
@@ -309,9 +312,17 @@ def continue_quiet_notify_completions(
     deadline = time.monotonic() + max(float(linger_budget), 0.0)
     for _ in range(max_rounds):
         wait = process_registry.wait_for_pending_completions(None, timeout=max(deadline - time.monotonic(), 0.0))
+        pending = process_registry.pending_owned_notifications(session_key=key, owns_event=owns_event)
+        if not pending:
+            return last
         guard = turn_guard() if turn_guard is not None else contextlib.nullcontext(True)
         with guard as acquired:
             if not acquired:
+                logger.warning("Bot Chat notify events lost at child exit after lock refusal: "
+                               "event_ids=%s process_ids=%s",
+                               [event.get("delegation_id") or event.get("id") or event.get("session_id")
+                                for event in pending],
+                               [event.get("session_id") for event in pending])
                 return last
             drained = []
             for event, text in process_registry.drain_notifications(session_key=key, owns_event=owns_event):

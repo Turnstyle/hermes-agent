@@ -1836,6 +1836,25 @@ class ProcessRegistry(ProcessCheckpointMixin):
         # ownership, so leave them for the owner.
         return not (is_async_delegation and evt.get("restored"))
 
+    def pending_owned_notifications(self, session_key: str = "", owns_event=None) -> "list[dict]":
+        """Snapshot events this session could drain, without removing them."""
+        with self.completion_queue.mutex:
+            queued = list(self.completion_queue.queue)
+        pending = []
+        for evt in queued:
+            is_async_delegation = evt.get("type") == "async_delegation"
+            if not self._owns_event(evt, session_key, owns_event, is_async_delegation):
+                continue
+            if evt.get("type") == "completion" and self._drain_should_skip(evt.get("session_id", ""),
+                                                                                 skip_poll_observed=True):
+                continue
+            task_id = str(evt.get("owner_task_id") or evt.get("task_id") or "")
+            if (not is_async_delegation and task_id.startswith("sa-")
+                    and not self._surface_child_process_notifications()):
+                continue
+            pending.append(evt)
+        return pending
+
     def drain_notifications(
         self, session_key: str = "", owns_event=None, *, skip_poll_observed: bool = True,
     ) -> "list[tuple[dict, str]]":

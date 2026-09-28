@@ -298,8 +298,10 @@ def _run_quiet_single_query(cli, effective_query, emitter=None):
                 reply=res.get("final_response", "") if isinstance(res, dict) else str(res),
             )
 
-        if delivery_profile:
+        released_delivery_lease = bool(delivery_profile and _single_query_exit_code(result) == 0)
+        if released_delivery_lease:
             cli._release_active_session()
+            cli._bot_chat_delivery_lease_released = True
         _report_turn(result)
         linger_deadline = time.monotonic() + quiet_notify_linger_seconds() if delivery_profile else None
         if isinstance(result, dict) and not result.get("failed"):
@@ -307,7 +309,7 @@ def _run_quiet_single_query(cli, effective_query, emitter=None):
 
             def _follow_up(text):
                 nonlocal history
-                if delivery_profile:
+                if released_delivery_lease:
                     history = cli.conversation_history
                 follow = cli.agent.run_conversation(
                     user_message=text, conversation_history=history, **author_kwargs,
@@ -326,6 +328,8 @@ def _run_quiet_single_query(cli, effective_query, emitter=None):
             # statement, so anything raising past that point has consumed budget the
             # finalize pass must not re-wait.
             try:
+                if released_delivery_lease:
+                    from tools.bot_relay import turn_wait_seconds
                 linger_budget = (max(0.0, linger_deadline - time.monotonic()) if delivery_profile
                                  else quiet_notify_linger_seconds())
                 continued = continue_quiet_notify_completions(
@@ -333,8 +337,9 @@ def _run_quiet_single_query(cli, effective_query, emitter=None):
                     _follow_up,
                     owns_event=getattr(cli, "_owns_process_notification", None),
                     linger_budget=linger_budget,
-                    **({"turn_guard": lambda: bot_chat_follow_up_lock(cli, delivery_profile, linger_deadline)}
-                       if delivery_profile else {}),
+                    **({"turn_guard": lambda: bot_chat_follow_up_lock(
+                        cli, delivery_profile, max(linger_deadline, time.monotonic() + turn_wait_seconds()))}
+                       if released_delivery_lease else {}),
                 )
             finally:
                 cli._quiet_notify_linger_done = True
@@ -346,10 +351,16 @@ def _run_quiet_single_query(cli, effective_query, emitter=None):
         if _single_query_exit_code(result) == 0:
             try:
                 if delivery_profile:
-                    with bot_chat_follow_up_lock(
-                            cli, delivery_profile, linger_deadline) as acquired:
-                        if acquired:
-                            _drain_quiet_bot_chat(cli, cli.conversation_history)
+                    from tools import fleet_message_drain as fmd
+                    from tools.bot_mode_dm import _session_title
+                    from tools.bot_mode_probe import BOT_CHAT_TITLE
+                    if _session_title(cli.agent) == BOT_CHAT_TITLE and fmd.drain_config() is not None:
+                        with bot_chat_follow_up_lock(
+                                cli, delivery_profile, time.monotonic(), skip_log_level=logging.INFO) as acquired:
+                            if acquired:
+                                _drain_quiet_bot_chat(cli, cli.conversation_history)
+                            else:
+                                logger.info("fleet message drain: Bot Chat lock busy; queued docs remain for next turn")
                 else:
                     _drain_quiet_bot_chat(cli, history)
             except Exception as exc:
