@@ -1005,6 +1005,31 @@ def _admit_api_agent_request(handler):
     return _wrapped
 
 
+def _admit_session_chat_or_queue(handler):
+    """Auth like ``_admit_api_agent_request``, but a draining gateway accepts a text
+    bot DM into the restart spool instead of answering 503. Other bodies still 503.
+    Accepted messages do not reserve a turn slot: drain must not wait on them."""
+    @wraps(handler)
+    async def _wrapped(self, request, *args, **kwargs):
+        auth_err = (
+            self._check_run_auth(request, permission="dispatch")
+            if _api_runs._uses_room_run_auth(self, request)
+            else self._check_auth(request))
+        if auth_err:
+            return auth_err
+        if self._gateway_is_draining():
+            return await self._queue_draining_session_chat(request)
+        reservation = {"active": True}
+        token = _api_agent_request_reservation.set(reservation)
+        self._pending_agent_requests += 1
+        try:
+            return await handler(self, request, *args, **kwargs)
+        finally:
+            _release_pending_api_work(self, reservation)
+            _api_agent_request_reservation.reset(token)
+    return _wrapped
+
+
 def _release_pending_api_work(adapter, reservation: dict[str, bool]) -> None:
     """Release a pending-work reservation exactly once."""
     if reservation["active"]:
@@ -1332,6 +1357,50 @@ class APIServerAdapter(OpenAICompatRoutesMixin, BasePlatformAdapter):
         return _error_response(
             "Gateway is draining existing work; retry shortly.", 503, code="gateway_draining",
             headers={"Retry-After": "1"})
+
+    async def _queue_draining_session_chat(self, request: "web.Request") -> "web.Response":
+        """Persist a draining session-chat text into the restart spool, or 503.
+
+        ``_queue_during_drain_enabled`` is the existing restart-survivable gate.
+        The spool is the ``pending_messages`` payload ``recover_pending_to_db``
+        replays (``data.text`` + ``data.session_id``). Empty bodies still 503.
+        """
+        from gateway.run import _gateway_runner_ref
+        from gateway.shutdown_flush import _flush_value, _get_flush_dir
+
+        runner = _gateway_runner_ref()
+        enabled = getattr(runner, "_queue_during_drain_enabled", None)
+        draining = self._draining_response()
+        if draining is None:
+            draining = _error_response(
+                "Gateway is draining existing work; retry shortly.", 503,
+                code="gateway_draining", headers={"Retry-After": "1"})
+        if not callable(enabled) or not enabled():
+            return draining
+        try:
+            body = await request.json()
+        except Exception:
+            return draining
+        message = body.get("message") if isinstance(body, dict) else None
+        session_id = str(request.match_info.get("session_id") or "")
+        if not isinstance(message, str) or not message.strip() or not session_id:
+            return draining
+        message_id = uuid.uuid4().hex
+        wrote = _flush_value(
+            _get_flush_dir(),
+            "drain",
+            f"agent:api:{session_id}",
+            {"text": message, "session_id": session_id},
+            reason="gateway_draining",
+            message_id=message_id,
+            ts=int(time.time()),
+        )
+        if not wrote:
+            return draining
+        return web.json_response(
+            {"object": "hermes.session.chat.queued", "session_id": session_id,
+             "status": "queued", "message_id": message_id},
+            status=202, headers=self._session_headers(session_id, None))
 
     def _activate_admitted_request(self) -> None:
         """Transfer this request's drain reservation to agent bookkeeping."""
@@ -3439,7 +3508,7 @@ class APIServerAdapter(OpenAICompatRoutesMixin, BasePlatformAdapter):
             logger.info("Session SSE client disconnected while a live Bot Chat held the turn")
         return response
 
-    @_admit_api_agent_request
+    @_admit_session_chat_or_queue
     async def _handle_session_chat(self, request: "web.Request") -> "web.Response":
         """POST /api/sessions/{session_id}/chat — one synchronous agent turn (plus the delivery lanes'
         one bounded re-run of a transient failure; ``hermes peer dm`` is the client)."""
@@ -3484,7 +3553,7 @@ class APIServerAdapter(OpenAICompatRoutesMixin, BasePlatformAdapter):
              "runtime": self._effective_turn_runtime(ctx["runtime_request"], result, usage)},
             headers=headers)
 
-    @_admit_api_agent_request
+    @_admit_session_chat_or_queue
     async def _handle_session_chat_stream(self, request: "web.Request") -> "web.StreamResponse":
         """POST /api/sessions/{session_id}/chat/stream — SSE wrapper over _run_agent."""
         limited = self._concurrency_limited_response()
