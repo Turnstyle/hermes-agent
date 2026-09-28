@@ -2095,6 +2095,40 @@ def _has_sticky_block(conn: sqlite3.Connection, task_id: str) -> bool:
     return bool(trip) and bool(_json_dict(trip["payload"]).get("sticky"))
 
 
+def _newest_event_kind(
+    conn: sqlite3.Connection, task_id: str, kinds: tuple[str, ...],
+) -> Optional[str]:
+    """Kind of the newest ``task_events`` row whose kind is in ``kinds``."""
+    placeholders = ", ".join("?" for _ in kinds)
+    row = conn.execute(
+        f"SELECT kind FROM task_events WHERE task_id = ? AND kind IN ({placeholders}) "
+        "ORDER BY id DESC LIMIT 1", (task_id, *kinds),
+    ).fetchone()
+    return row["kind"] if row else None
+
+
+_HOLD_EVENT_KINDS = ("blocked", "block_loop_detected")
+_HOLD_RELEASE_EVENT_KINDS = ("unblocked", "promoted_manual")
+_TURNER_HOLD_MARKER = "hold for turner"
+
+
+def _has_turner_hold(
+    conn: sqlite3.Connection, task_id: str, block_kind: Optional[str],
+    title: str, body: Optional[str],
+) -> bool:
+    """A todo hold lasts until unblock/promote after its latest hold event."""
+    if block_kind == "needs_input" and _newest_event_kind(
+        conn, task_id, _HOLD_EVENT_KINDS + _HOLD_RELEASE_EVENT_KINDS,
+    ) in _HOLD_EVENT_KINDS:
+        return True
+    if _TURNER_HOLD_MARKER in (title or "").lower() or _TURNER_HOLD_MARKER in (body or "").lower():
+        newest = _newest_event_kind(
+            conn, task_id, ("created", "edited") + _HOLD_RELEASE_EVENT_KINDS,
+        )
+        return newest is None or newest in ("created", "edited")
+    return False
+
+
 def _latest_event(
     conn: sqlite3.Connection, task_id: str, kind: str, run_id: Optional[int] = None,
 ) -> Optional[sqlite3.Row]:
@@ -2142,7 +2176,7 @@ def recompute_ready(conn: sqlite3.Connection, failure_limit: int = None) -> int:
     promoted = 0
     with write_txn(conn):
         todo_rows = conn.execute(
-            "SELECT id, status, consecutive_failures, max_retries "
+            "SELECT id, status, consecutive_failures, max_retries, block_kind, title, body "
             "FROM tasks WHERE status IN ('todo', 'blocked')"
         ).fetchall()
         for row in todo_rows:
@@ -2150,6 +2184,11 @@ def recompute_ready(conn: sqlite3.Connection, failure_limit: int = None) -> int:
             cur_status = row["status"]
             if cur_status == "blocked" and _has_sticky_block(conn, task_id):
                 # Explicit human-intervention block; only ``unblock_task`` may exit it.
+                continue
+            if cur_status == "todo" and _has_turner_hold(
+                conn, task_id, row["block_kind"], row["title"], row["body"],
+            ):
+                # Human hold parked in todo; only unblock/promote may release it.
                 continue
             parents = conn.execute(
                 "SELECT t.status FROM tasks t "
@@ -3643,16 +3682,29 @@ def _landing_status_after_parents(conn: sqlite3.Connection, task_id: str) -> str
 
 def unblock_task(conn: sqlite3.Connection, task_id: str) -> bool:
     """``blocked``/``scheduled`` -> its resumable phase (parent re-gated; ``review``
-    when that is where it left off), closing any leaked run first."""
+    when that is where it left off), closing any leaked run first. A ``todo``
+    row holding an unreleased Turner hold is also accepted: the
+    ``unblocked`` event is what releases it for ``recompute_ready``."""
     now = int(time.time())
     with write_txn(conn):
+        hold_row = conn.execute(
+            "SELECT status, block_kind, title, body FROM tasks WHERE id = ?", (task_id,),
+        ).fetchone()
+        unblockable = ("blocked", "scheduled")
+        if (
+            hold_row is not None and hold_row["status"] == "todo"
+            and _has_turner_hold(
+                conn, task_id, hold_row["block_kind"], hold_row["title"], hold_row["body"],
+            )
+        ):
+            unblockable = ("todo",)
         resume_status = (
             _resume_status_from_events(conn, task_id)
-            if _task_status(conn, task_id) == "blocked"
+            if hold_row is not None and hold_row["status"] == "blocked"
             else "ready"
         )
         _reclaim_dangling_run(
-            conn, task_id, statuses=("blocked", "scheduled"), now=now,
+            conn, task_id, statuses=unblockable, now=now,
             note="invariant recovery on unblock",
         )
         # Re-gate on parent completion before restoring the source phase.
@@ -3670,7 +3722,8 @@ def unblock_task(conn: sqlite3.Connection, task_id: str) -> bool:
         cur = conn.execute(
             "UPDATE tasks SET status = ?, current_run_id = NULL, "
             "consecutive_failures = 0, last_failure_error = NULL "
-            "WHERE id = ? AND status IN ('blocked', 'scheduled')", (new_status, task_id),
+            f"WHERE id = ? AND status IN ({', '.join('?' for _ in unblockable)})",
+            (new_status, task_id, *unblockable),
         )
         if cur.rowcount != 1:
             return False
