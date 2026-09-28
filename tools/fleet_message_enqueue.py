@@ -28,6 +28,12 @@ class FleetEnqueueError(RuntimeError):
     """The durable registry did not accept the message. It was not queued."""
 
 
+class MessageAlreadyExists(Exception):
+    """The create-only write found the document. Return its message_id; do not PATCH."""
+
+    already_exists = True
+
+
 def fleet_handle(value: Any, *, fallback: str) -> str:
     """A ``fleet_messages_v1`` from/to handle the drain's ``bot_identity`` can match."""
     text = str(value or "").strip()
@@ -75,7 +81,16 @@ def _default_writer(paths, collection: str, set_by: str) -> int:
         raise FleetEnqueueError(f"fleet_ops missing at {_FLEET_OPS}")
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
-    return int(module.write_files(paths, collection, set_by=set_by))
+    if len(paths) != 1:
+        raise FleetEnqueueError("queued DM create writes one document")
+    try:
+        return int(module.create_file_if_absent(paths[0], collection, set_by=set_by))
+    except FleetEnqueueError:
+        raise
+    except Exception as exc:
+        if getattr(exc, "already_exists", False):
+            raise MessageAlreadyExists(getattr(exc, "doc_id", "")) from exc
+        raise
 
 
 def _default_reader(message_id: str) -> dict | None:
@@ -104,7 +119,12 @@ def enqueue_busy_dm(
     writer: Optional[Callable[..., int]] = None,
     reader: Optional[Callable[[str], dict | None]] = None,
 ) -> str:
-    """Write one queued doc. Returns ``message_id``. Raises when the write does not land."""
+    """Write one queued doc. Returns ``message_id``. Raises when the write does not land.
+
+    When ``message_id`` is supplied, an existing registry document is returned without
+    rewriting it. A concurrent create that finds the document already there also returns
+    the existing ``message_id`` and does not change its status.
+    """
     doc = build_queued_dm(sender=sender, recipient=recipient, body=body, message_id=message_id)
     doc_id = doc["message_id"]
     if message_id is not None:
@@ -118,18 +138,27 @@ def enqueue_busy_dm(
         if existing is not None:
             return doc_id
     write = writer or _default_writer
+    path: str | None = None
     with tempfile.NamedTemporaryFile("w", suffix=".json", delete=False, encoding="utf-8") as handle:
         json.dump(doc, handle)
         path = handle.name
     try:
-        rc = write([path], "fleet_messages_v1", set_by=doc["from"])
-    except FleetEnqueueError:
-        raise
-    except Exception as exc:
-        raise FleetEnqueueError(str(exc)) from exc
-    if rc != 0:
-        raise FleetEnqueueError(f"fleet_ops write_files returned {rc}")
-    return doc["message_id"]
+        try:
+            rc = write([path], "fleet_messages_v1", set_by=doc["from"])
+        except MessageAlreadyExists:
+            return doc_id
+        except FleetEnqueueError:
+            raise
+        except Exception as exc:
+            if getattr(exc, "already_exists", False):
+                return doc_id
+            raise FleetEnqueueError(str(exc)) from exc
+        if rc != 0:
+            raise FleetEnqueueError(f"fleet_ops create_file_if_absent returned {rc}")
+        return doc["message_id"]
+    finally:
+        if path is not None:
+            Path(path).unlink(missing_ok=True)
 
 
 def queued_ack(message_id: str) -> str:
