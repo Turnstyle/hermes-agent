@@ -940,4 +940,61 @@ def test_observer_ignores_reused_pid_from_stale_state_file(tmp_path, monkeypatch
     assert obs.replacement_was_observed(frozenset(), all_profiles=False) is False
 
     monkeypatch.setattr("gateway.status._looks_like_gateway_process", lambda pid: True)
+    monkeypatch.setattr("gateway.status._read_process_cmdline", lambda pid: "hermes gateway run")
     assert obs.replacement_was_observed(frozenset(), all_profiles=False) is True
+
+
+def test_observer_ignores_pid_reused_by_another_profiles_gateway(tmp_path, monkeypatch):
+    """R6 HIGH: a stale PID now owned by another profile's gateway is not this
+    home's restart."""
+    import json
+    import os
+
+    from hermes_cli import gateway_restart_observe as obs
+
+    home = tmp_path / "profiles" / "alpha"
+    home.mkdir(parents=True)
+    monkeypatch.setattr("hermes_constants.get_hermes_home", lambda: home)
+    monkeypatch.setattr("gateway.status.get_running_pid", lambda *a, **k: None)
+    home.joinpath("gateway_state.json").write_text(
+        json.dumps({"pid": os.getpid(), "gateway_state": "running"}), encoding="utf-8"
+    )
+    monkeypatch.setattr("gateway.status._looks_like_gateway_process", lambda pid: True)
+    monkeypatch.setattr(
+        "gateway.status._read_process_cmdline", lambda pid: "hermes -p beta gateway run"
+    )
+    assert obs.replacement_was_observed(frozenset(), all_profiles=False) is False
+    monkeypatch.setattr(
+        "gateway.status._read_process_cmdline", lambda pid: "hermes -p alpha gateway run"
+    )
+    assert obs.replacement_was_observed(frozenset(), all_profiles=False) is True
+
+
+def test_restart_all_no_service_foreground_settles_claim_before_run(tmp_path, monkeypatch):
+    """R6 HIGH: no-service `restart --all` runs the gateway in the foreground,
+    which may os._exit; the hour must be released before run_gateway."""
+    from hermes_cli import gateway as gw
+
+    t0 = 1_700_000_000.0
+    _bind_restart_cli(monkeypatch, gw, tmp_path)
+    monkeypatch.setattr("hermes_cli.restart_budget.time.time", lambda: t0)
+    monkeypatch.setattr(gw, "_dispatch_all_via_service_manager_if_s6", lambda *a, **k: False)
+    monkeypatch.setattr(gw, "_installed_service_kind_for", lambda *a, **k: None)
+    for name in ("_wait_for_gateway_exit", "_wait_for_api_server_port_free", "_discard_dead_host_record"):
+        if hasattr(gw, name):
+            monkeypatch.setattr(gw, name, lambda *a, **k: None)
+    monkeypatch.setattr(gw, "_host_multiplexer_for_all_verb", lambda: None)
+    monkeypatch.setattr(gw, "_stop_installed_service", lambda *a, **k: False)
+    monkeypatch.setattr(gw, "kill_gateway_processes", lambda *a, **k: 0)
+    seen = {}
+
+    def fake_run_gateway(**kwargs):
+        seen["allowed_at_run"] = evaluate_restart_budget(now=t0 + 1, home=tmp_path)[0]
+        raise SystemExit(1)  # stands in for os._exit on failed startup
+
+    monkeypatch.setattr(gw, "run_gateway", fake_run_gateway)
+    import pytest as _pytest
+
+    with _pytest.raises(SystemExit):
+        gw._cmd_restart(SimpleNamespace(system=False, all=True, force=False))
+    assert seen["allowed_at_run"] is True
