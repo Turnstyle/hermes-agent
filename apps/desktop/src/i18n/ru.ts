@@ -4155,6 +4155,8 @@ export const ru = defineLocale({
     staleSessionTitle: 'Чат устарел',
     staleSessionBody:
       'Это окно отставало от другого вида того же чата. Загружены последние сообщения. Отправьте снова, если всё ещё хотите.',
+    staleSessionMerged: 'Новые сообщения подтянуты в этот чат. Ваше сообщение отправляется.',
+    queuedBehindBotMessage: 'В очереди за сообщением бота.',
     providerCredentialRequired: 'Добавьте учётные данные провайдера перед отправкой первого сообщения.',
     emptySlashCommand: 'пустая слэш-команда',
     desktopCommands: 'Команды desktop',

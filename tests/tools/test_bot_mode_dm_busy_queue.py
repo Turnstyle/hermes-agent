@@ -1,65 +1,16 @@
-"""Tests: message_agent queues behind a recipient whose Bot Chat is held by ANOTHER surface
-(plain ``hermes chat`` CLI, a gateway bridge turn — SESSION_NOT_OWNED, not a live-delivery
-mailbox owner) instead of dropping the message on the first refusal.
-
-``tools.bot_mode_dm._run_delivery_locked``'s queue loop already retried a ``TurnBusyError`` from
-its OWN turn-lock timeout; the bug is that ``_run_local_turn``'s separate SESSION_NOT_OWNED
-refusal (a rival transport holds the CLI lease, not this module's lock) short-circuited the loop
-on the very first attempt. These pin the fix: retry that refusal too, bounded by
-``bot_mode.dm_queue_wait_seconds``, re-probing for a live mailbox owner between attempts.
+"""A held Bot Chat is fast-acked into fleet_messages_v1. The old 1800s retry
+loop is the bug: the sender must see queued (message_id) in under 5s.
 """
 
 import json
-import datetime
 import subprocess
 import time
 from pathlib import Path
 
-import pytest
-
 from tools import bot_live_delivery as live
-from tools import bot_mode_dm, bot_relay, fleet_message_drain as fmd
+from tools import bot_mode_dm, bot_relay
 
 _REFUSAL_STDERR = "hermes-refusal-reason: SESSION_NOT_OWNED\nCe chat est occupé.\n"
-
-
-def test_busy_opted_in_target_is_enqueued_on_first_attempt(tmp_path, monkeypatch, capsys):
-    home, dm_file = _setup(tmp_path, monkeypatch, queue_wait=1800)
-    target = home / "profiles" / "ops"
-    target.mkdir(parents=True)
-    (target / "config.yaml").write_text("fleet_messages:\n  drain_on_turn_end: true\n  target: live\n")
-    assert fmd.drain_config_for_home(home) is None
-    assert fmd.drain_config_for_home(target) is not None
-    assert fmd.drain_config_for_home(home) is None
-    monkeypatch.setattr(live, "find_canonical_live_owner", lambda h: None)
-    writes = []
-    monkeypatch.setattr(fmd, "store_for", lambda config: type("Store", (), {
-        "create": lambda self, doc_id, fields: writes.append((doc_id, fields, config))})())
-    calls = []
-
-    def held(argv, **kwargs):
-        calls.append(argv)
-        return subprocess.CompletedProcess(argv, 1, stdout="", stderr=_REFUSAL_STDERR)
-
-    monkeypatch.setattr(subprocess, "run", held)
-    started = time.monotonic()
-    rc = bot_mode_dm._run_delivery(["hermes", "-p", "ops"], str(dm_file), stdin_file=False,
-                                   profile_home=target, author={"id": "bot:tb-cndr", "name": "tb-cndr"})
-    assert rc == 0 and time.monotonic() - started < 5
-    assert len(calls) == 1 and len(writes) == 1
-    payload = json.loads(capsys.readouterr().out)
-    doc_id, fields, config = writes[0]
-    assert payload["status"] == "queued" and payload["message_id"] == doc_id
-    assert len(doc_id) == 32 and int(doc_id, 16) >= 0
-    assert set(fields) == {"message_id", "from", "to", "kind", "body", "status", "attempts",
-                           "created_at", "updated_at", "expires_at"}
-    assert (fields["from"], fields["to"], fields["body"], fields["status"], fields["attempts"]) == (
-        "tb-cndr", "ops", "hi", "queued", 0)
-    assert fields["message_id"] == doc_id and fields["created_at"] == fields["updated_at"]
-    assert fmd.parse_ts(fields["expires_at"]) - fmd.parse_ts(fields["created_at"]) == datetime.timedelta(hours=24)
-    assert config.timeout_seconds <= 1.5
-    assert "No need to resend" in payload["reply"]
-    assert not dm_file.exists()
 
 
 def _setup(tmp_path, monkeypatch, *, slice_seconds=0.05, queue_wait=5.0):
@@ -73,40 +24,26 @@ def _setup(tmp_path, monkeypatch, *, slice_seconds=0.05, queue_wait=5.0):
     return home, dm_file
 
 
-def test_message_agent_queues_behind_a_held_session_then_delivers(tmp_path, monkeypatch, capsys):
-    """(a) Held for the first 2 attempts, free on the 3rd: the delivery still succeeds and the
-    reply reaches stdout, having run the CLI exactly 3 times."""
-    home, dm_file = _setup(tmp_path, monkeypatch)
-    monkeypatch.setattr(live, "find_canonical_live_owner", lambda h: None)
+def test_message_agent_fast_acks_a_held_session(tmp_path, monkeypatch, capsys):
+    """A held Bot Chat is queued to fleet_messages_v1 on the first refusal, under 5s,
+    and the sender sees queued (message_id). The CLI is not retried for the old budget."""
+    from tools.fleet_message_enqueue import queued_ack
 
-    calls = []
-
-    def fake_run(argv, **kwargs):
-        calls.append(argv)
-        if len(calls) <= 2:
-            return subprocess.CompletedProcess(argv, 1, stdout="", stderr=_REFUSAL_STDERR)
-        return subprocess.CompletedProcess(argv, 0, stdout="got it, thanks", stderr="")
-
-    monkeypatch.setattr(subprocess, "run", fake_run)
-
-    rc = bot_mode_dm._run_delivery(
-        ["hermes", "-p", "ops"], str(dm_file), stdin_file=False,
-        profile_home=home / "profiles" / "ops",
+    home, dm_file = _setup(tmp_path, monkeypatch, queue_wait=30.0)
+    ops = home / "profiles" / "ops"
+    ops.mkdir(parents=True)
+    (ops / "config.yaml").write_text(
+        "fleet_messages:\n  drain_on_turn_end: true\n  emulator_host: 127.0.0.1:1\n",
+        encoding="utf-8",
     )
-
-    assert rc == 0
-    assert len(calls) == 3
-    assert capsys.readouterr().out == "got it, thanks"
-    assert not dm_file.exists()
-
-
-def test_message_agent_fails_loudly_after_the_full_queue_wait(tmp_path, monkeypatch, capsys):
-    """(b) Held for the whole budget: a LOUD target_busy refusal, mentioning how long it queued,
-    after a bounded number of attempts — not hundreds — and at least the configured wait."""
-    slice_seconds, queue_wait = 0.05, 0.3
-    home, dm_file = _setup(tmp_path, monkeypatch, slice_seconds=slice_seconds, queue_wait=queue_wait)
     monkeypatch.setattr(live, "find_canonical_live_owner", lambda h: None)
+    seen = {}
 
+    def fake_enqueue(*, sender, recipient, body, message_id=None, writer=None):
+        seen.update(sender=sender, recipient=recipient, body=body)
+        return "fm-held"
+
+    monkeypatch.setattr("tools.fleet_message_enqueue.enqueue_busy_dm", fake_enqueue)
     calls = []
 
     def fake_run(argv, **kwargs):
@@ -119,44 +56,71 @@ def test_message_agent_fails_loudly_after_the_full_queue_wait(tmp_path, monkeypa
     rc = bot_mode_dm._run_delivery(
         ["hermes", "-p", "ops"], str(dm_file), stdin_file=False,
         profile_home=home / "profiles" / "ops",
+        author={"name": "tb-cndr", "id": "bot:tb-cndr", "is_bot": True},
+    )
+    elapsed = time.monotonic() - started
+
+    assert rc == 0
+    assert len(calls) == 1
+    assert elapsed < 5
+    assert capsys.readouterr().out.strip() == queued_ack("fm-held")
+    assert seen["recipient"] == "ops"
+    assert seen["sender"] == "tb-cndr"
+    assert seen["body"] == "hi"
+
+
+def test_message_agent_does_not_claim_queued_when_the_registry_write_fails(tmp_path, monkeypatch, capsys):
+    """A failed fleet write is an immediate target_busy, not a 30-minute wait and not a queued ack."""
+    from tools.fleet_message_enqueue import FleetEnqueueError
+
+    home, dm_file = _setup(tmp_path, monkeypatch, queue_wait=30.0)
+    ops = home / "profiles" / "ops"
+    ops.mkdir(parents=True)
+    (ops / "config.yaml").write_text(
+        "fleet_messages:\n  drain_on_turn_end: true\n  emulator_host: 127.0.0.1:1\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(live, "find_canonical_live_owner", lambda h: None)
+
+    def fake_enqueue(**kwargs):
+        raise FleetEnqueueError("firestore down")
+
+    monkeypatch.setattr("tools.fleet_message_enqueue.enqueue_busy_dm", fake_enqueue)
+
+    def fake_run(argv, **kwargs):
+        return subprocess.CompletedProcess(argv, 1, stdout="", stderr=_REFUSAL_STDERR)
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    started = time.monotonic()
+    rc = bot_mode_dm._run_delivery(
+        ["hermes", "-p", "ops"], str(dm_file), stdin_file=False,
+        profile_home=home / "profiles" / "ops",
     )
     elapsed = time.monotonic() - started
 
     assert rc == 1
+    assert elapsed < 5
     payload = json.loads(capsys.readouterr().out)
     assert payload["reason"] == "target_busy"
-    assert "queu" in payload["error"].lower()
-    # The final slice doesn't sleep before giving up, so elapsed may fall a bit short of the full
-    # budget (by at most one slice) — never far short, and never long past it.
-    assert queue_wait - slice_seconds <= elapsed < queue_wait + 2.0
-    # ~ queue_wait / slice_seconds = 6 attempts; generous bound rules out a hot loop.
-    assert 1 <= len(calls) <= 30
-    assert not dm_file.exists()
+    assert "queued (" not in payload["error"]
 
 
-def test_message_agent_hands_off_to_a_live_owner_that_appears_while_queued(tmp_path, monkeypatch):
-    """(c) A live mailbox owner shows up between attempts: the NEXT loop iteration's
-    ``_via_live_owner()`` re-probe takes over, and the CLI is never invoked again."""
-    home, dm_file = _setup(tmp_path, monkeypatch)
-    target = home / "profiles" / "ops"
-    owner = dict(profile_home=str(target), session_id="bot", lease_id="lease", live_session_id="live")
-    owners = iter([None])  # first probe (before the loop, and the first retry probe): no owner yet
-    monkeypatch.setattr(live, "find_canonical_live_owner", lambda h: next(owners, owner))
+def test_queued_dm_matches_fleet_messages_v1_expiry():
+    """expires_at is created_at plus 24 hours, and the drain identity is the profile name."""
+    import datetime
 
-    calls = []
+    from tools.fleet_message_enqueue import build_queued_dm, fleet_handle
 
-    def fake_run(argv, **kwargs):
-        calls.append(argv)
-        return subprocess.CompletedProcess(argv, 1, stdout="", stderr=_REFUSAL_STDERR)
-
-    monkeypatch.setattr(subprocess, "run", fake_run)
-
-    rc = bot_mode_dm._run_delivery(
-        ["hermes", "-p", "ops"], str(dm_file), stdin_file=False, profile_home=target,
-    )
-
-    assert rc == 0
-    assert len(calls) == 1
+    doc = build_queued_dm(sender="tb-cndr", recipient="tb-king", body="hello")
+    created = datetime.datetime.strptime(doc["created_at"], "%Y-%m-%dT%H:%M:%SZ")
+    expires = datetime.datetime.strptime(doc["expires_at"], "%Y-%m-%dT%H:%M:%SZ")
+    assert expires - created == datetime.timedelta(hours=24)
+    assert doc["status"] == "queued"
+    assert doc["to"] == "tb-king"
+    assert doc["kind"] == "dm"
+    assert doc["schema_version"] == 2
+    assert doc["last_error"] == "target_busy"
+    assert fleet_handle("bot:sheldon/tb-king", fallback="sender") == "tb-king"
 
 
 def test_direct_call_contract_still_fails_target_busy_immediately(tmp_path, capsys):

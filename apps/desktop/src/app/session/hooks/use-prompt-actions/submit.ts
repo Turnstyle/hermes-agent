@@ -814,9 +814,9 @@ export function useSubmitPrompt(deps: SubmitPromptDeps) {
         rewriteOptimistic(liveSessionId)
         const text = buildContextText(syncedAttachments)
 
-        // Another Desktop window may own a newer transcript while this one
-        // still shows an open-time snapshot. Refuse the send and refresh
-        // rather than forking the session (#65047).
+        // Server-side appends (compaction, background notices, bot replies on
+        // this same chat) must not eat the send. Merge the newer page and
+        // continue (#65047 kept the comparison; the refusal did not).
         const guardStoredId = targetStoredSessionId ?? selectedStoredSessionIdRef.current
 
         if (guardStoredId && liveSessionId) {
@@ -838,8 +838,6 @@ export function useSubmitPrompt(deps: SubmitPromptDeps) {
               liveSessionId,
               state => ({
                 ...state,
-                awaitingResponse: false,
-                busy: false,
                 messages: refreshed,
                 pendingBranchGroup: null
               }),
@@ -849,15 +847,10 @@ export function useSubmitPrompt(deps: SubmitPromptDeps) {
             if (targetIsCurrentView()) {
               scope.setMessages(() => refreshed)
               notify({
-                kind: 'warning',
-                message: copy.staleSessionBody,
-                title: copy.staleSessionTitle
+                kind: 'info',
+                message: copy.staleSessionMerged
               })
             }
-
-            releaseBusy()
-
-            return false
           }
         }
 
@@ -933,6 +926,28 @@ export function useSubmitPrompt(deps: SubmitPromptDeps) {
             // instead of erroring out and losing the session binding.
             { alsoTimeout: true }
           )
+
+          if (submitted.result?.status === 'queued' && submitted.result?.behind === 'bot') {
+            // The bot CLI keeps its turn. This send sits on the gateway queue and
+            // runs when that lease drops; it is not an error and not a live turn yet.
+            releaseBusy()
+            updateSessionState(
+              submitted.sessionId,
+              state => ({
+                ...state,
+                busy: false,
+                awaitingResponse: false,
+                turnStartedAt: null
+              }),
+              targetStoredSessionId
+            )
+
+            if (targetIsCurrentView()) {
+              notify({ kind: 'info', message: copy.queuedBehindBotMessage })
+            }
+
+            return true
+          }
 
           const rowId = submitted.result?.user_row_id
 

@@ -5921,7 +5921,7 @@ describe('usePromptActions stale multi-window guard (#65047)', () => {
     setSessions(() => [])
   })
 
-  it('refuses prompt.submit when the local transcript is behind and refreshes it', async () => {
+  it('merges a newer server transcript and still submits', async () => {
     const storedId = 'stored-stale-submit'
     setSessions(() => [sessionInfo({ id: storedId, profile: 'work-vps', title: 'Remote chat' })])
     vi.mocked(getLatestSessionMessages).mockResolvedValue({
@@ -5952,15 +5952,14 @@ describe('usePromptActions stale multi-window guard (#65047)', () => {
       />
     )
 
-    expect(await handle!.submitText('stale send from secondary window')).toBe(false)
+    expect(await handle!.submitText('stale send from secondary window')).toBe(true)
     expect(getLatestSessionMessages).toHaveBeenCalledWith(storedId, 'work-vps')
-    expect(requestGateway).not.toHaveBeenCalledWith('prompt.submit', expect.anything(), expect.anything())
+    expect(requestGateway).toHaveBeenCalledWith('prompt.submit', expect.anything(), expect.anything())
 
-    const last = seeds.at(-1) as { awaitingResponse?: boolean; busy?: boolean; messages?: unknown[] } | undefined
-    expect(last?.busy).toBe(false)
-    expect(last?.awaitingResponse).toBe(false)
-    expect(last?.messages).toHaveLength(4)
-    expect($notifications.get().some(note => note.kind === 'warning')).toBe(true)
+    const last = seeds.at(-1) as { messages?: unknown[] } | undefined
+    expect(last?.messages?.length).toBeGreaterThanOrEqual(4)
+    expect($notifications.get().some(note => note.kind === 'warning' && note.title)).toBe(false)
+    expect($notifications.get().some(note => note.kind === 'info')).toBe(true)
   })
 
   it('allows prompt.submit when the authoritative transcript is not ahead', async () => {
@@ -6064,5 +6063,34 @@ describe('usePromptActions stale multi-window guard (#65047)', () => {
       { session_id: RUNTIME_SESSION_ID, text: 'send anyway' },
       1_800_000
     )
+  })
+})
+
+describe('human send behind a bot CLI lease', () => {
+  afterEach(() => {
+    cleanup()
+    $notifications.set([])
+  })
+
+  it('shows queued behind a bot message and does not stamp SESSION_NOT_OWNED', async () => {
+    const requestGateway = vi.fn(async () => ({ status: 'queued', behind: 'bot' }) as never)
+    const seeds: Record<string, unknown>[] = []
+    let handle: HarnessHandle | null = null
+
+    await actRender(
+      <Harness
+        onReady={h => (handle = h)}
+        onSeedState={state => seeds.push(state)}
+        requestGateway={requestGateway}
+      />
+    )
+
+    expect(await handle!.submitText('while the bot is talking')).toBe(true)
+    expect(
+      $notifications.get().some(note => note.kind === 'info' && note.message === 'Queued behind a bot message.')
+    ).toBe(true)
+    const last = seeds.at(-1) as { busy?: boolean; messages?: { errorSurface?: unknown }[] } | undefined
+    expect(last?.busy).toBe(false)
+    expect(last?.messages?.some(message => message.errorSurface)).toBe(false)
   })
 })

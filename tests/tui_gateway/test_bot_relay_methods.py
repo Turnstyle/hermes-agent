@@ -34,7 +34,10 @@ from tui_gateway import methods_bot_relay
 def home(tmp_path, monkeypatch):
     h = tmp_path / ".hermes"
     (h / "profiles" / "ops").mkdir(parents=True)
-    (h / "profiles" / "ops" / "config.yaml").write_text("{}\n")  # identity marker: a bare dir is no target
+    (h / "profiles" / "ops" / "config.yaml").write_text(
+        "fleet_messages:\n  drain_on_turn_end: true\n  emulator_host: 127.0.0.1:1\n",
+        encoding="utf-8",
+    )
     monkeypatch.setenv("HERMES_HOME", str(h))
     return h
 
@@ -465,64 +468,11 @@ def test_deliver_live_owner_wait_budget_matches_the_cli_paths_worst_case(home, m
 _REFUSAL_STDERR = "hermes-refusal-reason: SESSION_NOT_OWNED\nCe chat est occupé.\n"
 
 
-def test_deliver_queues_behind_a_held_session_then_delivers(home, monkeypatch):
-    """#<relay-busy-queue>: the CLI transport's SESSION_NOT_OWNED refusal (another surface — plain
-    `hermes chat`, a gateway bridge turn — holds the target's live Bot Chat, distinct from this
-    handler's own turn lock) used to fail on the first attempt; it must retry like a lock-wait
-    timeout already does, bounded by bot_mode.turn_wait_seconds."""
-    from tools import bot_mode_dm
+def test_deliver_fast_acks_a_held_session(home, monkeypatch):
+    """A SESSION_NOT_OWNED Bot Chat is written to fleet_messages_v1 on the first
+    refusal. The sender gets queued (message_id) without a turn_wait_seconds loop."""
+    from tools.bot_relay import relay_queued_sender_text
 
-    monkeypatch.setattr(bot_relay, "turn_wait_seconds", lambda: 5.0)
-    monkeypatch.setattr(bot_mode_dm, "_BUSY_SLICE_SECONDS", 0.05)
-    calls = []
-
-    class _Proc:
-        def __init__(self, returncode, stdout="", stderr=""):
-            self.returncode, self.stdout, self.stderr = returncode, stdout, stderr
-
-    def _fake_run(argv, **kwargs):
-        calls.append(list(argv))
-        if len(calls) <= 2:
-            return _Proc(1, stderr=_REFUSAL_STDERR)
-        return _Proc(0, stdout="pong from ops")
-
-    monkeypatch.setattr("hermes_cli.quiet_single_query.run_reported_turn", _fake_run)
-    out = _result(srv._methods["bot_relay.deliver"](1, {"profile": "ops", "message": "ping"}))
-    assert out["reply"] == "pong from ops"
-    assert len(calls) == 3
-
-
-def test_relay_busy_opted_in_target_enqueues_without_wait(home, monkeypatch):
-    from tools import fleet_message_drain as fmd
-
-    monkeypatch.setattr(fmd, "drain_config_for_home", lambda h: fmd.DrainConfig(target="live"))
-    queued = []
-    monkeypatch.setattr(fmd, "enqueue_message", lambda *args, **kwargs: queued.append(args) or "relay123")
-    calls = []
-
-    def held(argv, **kwargs):
-        calls.append(argv)
-        return subprocess.CompletedProcess(argv, 1, stdout="", stderr=_REFUSAL_STDERR)
-
-    monkeypatch.setattr("hermes_cli.quiet_single_query.run_reported_turn", held)
-    started = time.monotonic()
-    out = _result(srv._methods["bot_relay.deliver"](
-        1, {"profile": "ops", "message": "ping", "from_profile": "tb-cndr", "from_handle": "tb-cndr"}))
-    assert time.monotonic() - started < 5
-    assert len(calls) == 1 and queued[0][:2] == ("tb-cndr", "ops")
-    assert out["status"] == "queued" and out["message_id"] == "relay123"
-    assert "No need to resend" in out["reply"]
-
-
-def test_deliver_fails_target_busy_after_the_full_turn_wait_budget(home, monkeypatch):
-    """Held for the whole budget: a target_busy refusal, mentioning how long it queued, within a
-    bounded number of attempts and never past turn_wait_seconds plus one retry slice — the
-    Desktop's fixed deliver deadline depends on this handler never holding longer than that."""
-    from tools import bot_mode_dm
-
-    slice_seconds, budget = 0.05, 0.3
-    monkeypatch.setattr(bot_relay, "turn_wait_seconds", lambda: budget)
-    monkeypatch.setattr(bot_mode_dm, "_BUSY_SLICE_SECONDS", slice_seconds)
     calls = []
 
     class _Proc:
@@ -534,6 +484,38 @@ def test_deliver_fails_target_busy_after_the_full_turn_wait_budget(home, monkeyp
         return _Proc(1, stderr=_REFUSAL_STDERR)
 
     monkeypatch.setattr("hermes_cli.quiet_single_query.run_reported_turn", _fake_run)
+    monkeypatch.setattr(
+        "tools.fleet_message_enqueue.enqueue_busy_dm",
+        lambda **kwargs: "fmrelay",
+    )
+    out = _result(srv._methods["bot_relay.deliver"](1, {"profile": "ops", "message": "ping"}))
+    assert out["reply"] == relay_queued_sender_text("ops")
+    assert out["status"] == "queued"
+    assert out["message_id"] == "fmrelay"
+    assert out["reply_relayed"] is False
+    assert len(calls) == 1
+
+
+def test_deliver_does_not_claim_queued_when_the_registry_write_fails(home, monkeypatch):
+    """A failed fleet write is an immediate target_busy, not a turn_wait_seconds hold."""
+    from tools.fleet_message_enqueue import FleetEnqueueError
+
+    calls = []
+
+    class _Proc:
+        def __init__(self, returncode, stdout="", stderr=""):
+            self.returncode, self.stdout, self.stderr = returncode, stdout, stderr
+
+    def _fake_run(argv, **kwargs):
+        calls.append(list(argv))
+        return _Proc(1, stderr=_REFUSAL_STDERR)
+
+    monkeypatch.setattr("hermes_cli.quiet_single_query.run_reported_turn", _fake_run)
+
+    def _fail(**kwargs):
+        raise FleetEnqueueError("firestore down")
+
+    monkeypatch.setattr("tools.fleet_message_enqueue.enqueue_busy_dm", _fail)
     started = time.monotonic()
     out = srv._methods["bot_relay.deliver"](1, {"profile": "ops", "message": "ping"})
     elapsed = time.monotonic() - started
@@ -541,12 +523,70 @@ def test_deliver_fails_target_busy_after_the_full_turn_wait_budget(home, monkeyp
     assert "error" in out
     assert out["error"]["code"] == 5092
     assert out["error"]["data"]["reason"] == "target_busy"
-    assert "queu" in out["error"]["message"].lower()
-    # The final slice doesn't sleep before giving up, so elapsed may fall a bit short of the full
-    # budget (by at most one slice) — never far short, and this handler must never hold long past it
-    # (the Desktop's fixed deliver deadline depends on that).
-    assert budget - slice_seconds <= elapsed < budget + 2.0
-    assert 1 <= len(calls) <= 30
+    assert "queued (" not in out["error"]["message"]
+    assert elapsed < 5
+    assert len(calls) == 1
+
+
+def test_deliver_held_computed_from_final_proc_after_provider_retry(home, monkeypatch):
+    """After a policy-gated retry, busy is decided from the retried proc, not the first
+    attempt. A transient provider failure followed by SESSION_NOT_OWNED fast-acks; it does
+    not classify the first error as unknown and it does not wait out the turn budget."""
+    from hermes_cli.active_sessions import (
+        SESSION_NOT_OWNED,
+        ActiveSessionRefusal,
+        format_refusal_stderr,
+        session_already_owned_message,
+    )
+    from tools.bot_relay import relay_queued_sender_text
+
+    sid = "chat"
+    refusal_stderr = format_refusal_stderr(
+        ActiveSessionRefusal(
+            session_already_owned_message(sid, {"surface": "cli", "started_at": time.time()}),
+            SESSION_NOT_OWNED,
+        )
+    )
+    calls = []
+
+    class _Proc:
+        def __init__(self, returncode, stdout="", stderr=""):
+            self.returncode, self.stdout, self.stderr = returncode, stdout, stderr
+
+    def _fake_run(argv, **kwargs):
+        calls.append(list(argv))
+        if len(calls) == 1:
+            return _Proc(1, stdout="Error code: 503 - overloaded")
+        return _Proc(1, stderr=refusal_stderr)
+
+    monkeypatch.setattr("hermes_cli.quiet_single_query.run_reported_turn", _fake_run)
+    monkeypatch.setattr("tools.fleet_message_enqueue.enqueue_busy_dm", lambda **kwargs: "fm-retry")
+    out = _result(srv._methods["bot_relay.deliver"](1, {"profile": "ops", "message": "ping"}))
+    assert out["reply"] == relay_queued_sender_text("ops")
+    assert out["status"] == "queued"
+    assert out["reply_relayed"] is False
+    assert len(calls) == 2
+    assert out.get("reason") != "unknown"
+
+
+def test_deliver_target_profile_wins_over_route_stamped_profile(home, monkeypatch):
+    """Desktop dial wrappers overwrite ``profile`` with the route key; ``target_profile`` names the
+    install that must run the turn."""
+    calls = []
+
+    class _Proc:
+        returncode, stdout, stderr = 0, "pong from ops", ""
+
+    def _fake_run(argv, **kwargs):
+        calls.append(list(argv))
+        return _Proc()
+
+    monkeypatch.setattr("hermes_cli.quiet_single_query.run_reported_turn", _fake_run)
+    out = _result(srv._methods["bot_relay.deliver"](
+        1, {"profile": "default", "target_profile": "ops", "message": "ping"}))
+    assert calls[0][1:3] == ["-p", "ops"]
+    assert out["delivered_profile"] == "ops"
+    assert out["delivered_profile"] != "default"
 
 
 def test_deliver_non_held_failure_path_is_unchanged(home, monkeypatch):

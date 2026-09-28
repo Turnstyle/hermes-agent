@@ -92,6 +92,43 @@ def test_fixture_no_access_token_is_missing_config():
     assert fr.classify_agent_error(FIXTURE_NO_TOKEN) == fr.MISSING_CONFIG
 
 
+def _session_not_owned_delivery_texts():
+    """CLI stderr and relay-wrapped failure text from the real ownership refusal producers."""
+    from hermes_cli.active_sessions import (
+        SESSION_NOT_OWNED,
+        ActiveSessionRefusal,
+        format_refusal_stderr,
+        session_already_owned_message,
+    )
+
+    session_id = "20260910_013345_08bcee"
+    entry = {"surface": "cli", "started_at": 0}
+    refusal = ActiveSessionRefusal(
+        session_already_owned_message(session_id, entry),
+        SESSION_NOT_OWNED,
+    )
+    bare = format_refusal_stderr(refusal)
+    return bare, f"delivery turn failed: {bare[-500:]}"
+
+
+@pytest.mark.parametrize(
+    "variant",
+    ["bare", "relayed"],
+)
+def test_session_not_owned_refusal_classifies_target_busy_and_never_auto_retries(variant):
+    """Ownership refusals reach the relay as CLI stderr (or prefixed by the delivery error); they
+    must map to target_busy, not unknown or a provider class, and must not auto-retry."""
+    bare, relayed = _session_not_owned_delivery_texts()
+    text = bare if variant == "bare" else relayed
+    assert "SESSION_NOT_OWNED" in text
+    expected = getattr(fr, "TARGET_BUSY", "target_busy")
+    code = fr.classify_agent_error(text)
+    assert code == expected
+    assert code in fr.ALL_REASONS
+    assert not fr.is_auto_retryable(code)
+    assert fr.retry_action(code) == fr.RETRY_NONE
+
+
 def test_target_scope_refusal_wins_over_the_api_key_wording_and_never_auto_retries():
     """The copy says "API key" and names a gateway restart, but nothing was ever sent to a provider:
     the delivery turn was never created because a spawn site could not resolve the target profile's

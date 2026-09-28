@@ -214,13 +214,57 @@ function releaseRelayRetention() {
   relayRouteRetentions.clear()
 }
 
-/** connectionId::targetProfile -> its own route. `relayConnections()` below still collapses to
- *  ONE representative route per connectionId (retention and outbox-draining are connection-level,
- *  not profile-level), but a delivery must be dialed against the profile it actually targets — on
- *  a multiplexed connection the representative route can be pinned to a DIFFERENT profile's socket
- *  (typically the primary/default, listed first by the host) than the one an envelope names, which
- *  silently ran the turn on the wrong profile. Refreshed on every `relayConnections()` call (each
- *  drain cycle); see `relayRouteForTarget` below. */
+/** Same alias the server applies before comparing attestation (methods_bot_relay.py). */
+function normalizeRelayProfile(name: string): string {
+  const trimmed = name.trim()
+
+  return trimmed.toLowerCase() === 'hermes' ? 'default' : trimmed
+}
+
+/** Matches tools.bot_relay.relay_queued_sender_text for busy fast-ack deliveries. */
+function relayQueuedSenderText(targetProfile: string): string {
+  const target = normalizeRelayProfile(String(targetProfile || '').trim())
+
+  return `Queued for @${target || 'target'}, not yet answered`
+}
+
+interface RelayReplyPayload {
+  delivered_profile?: string
+  error?: string
+  message_id?: string
+  reason?: string
+  reply?: string
+  reply_relayed?: boolean
+  status?: string
+}
+
+/** `bot_relay.reply` keys a sender backend older than delivery attestation does not declare. */
+const ATTESTATION_REPLY_FIELDS = ['delivered_profile', 'reply_relayed', 'status', 'message_id'] as const
+
+function withoutAttestationFields(payload: RelayReplyPayload): RelayReplyPayload {
+  if (!ATTESTATION_REPLY_FIELDS.some(key => key in payload)) {
+    return payload
+  }
+
+  const legacy = { ...payload }
+
+  for (const key of ATTESTATION_REPLY_FIELDS) {
+    delete legacy[key]
+  }
+
+  return legacy
+}
+
+/** tui_gateway/contracts/registry.py::validate_params answers an unknown param key with 4000. */
+function isUnknownParamsRejection(error: unknown): boolean {
+  return (error as { code?: unknown } | null)?.code === 4000
+}
+
+/** connectionId::normalizedTargetProfile -> its own route. `relayConnections()` below still
+ *  collapses to ONE representative route per connectionId (retention and outbox-draining are
+ *  connection-level, not profile-level); delivery must NOT reuse that representative when no
+ *  per-target route exists — dialing another profile's socket makes another bot answer. Refreshed
+ *  on every `relayConnections()` call (each drain cycle); see `relayRouteForTarget` below. */
 let relayProfileRoutes = new Map<string, ProfileRoute>()
 
 /** One representative route per reachable connection id. */
@@ -242,7 +286,7 @@ async function relayConnections(): Promise<RelayConnection[]> {
       }
 
       if (id) {
-        byConnectionAndProfile.set(`${id}::${String(route?.targetProfile || '')}`, route)
+        byConnectionAndProfile.set(`${id}::${normalizeRelayProfile(String(route?.targetProfile || ''))}`, route)
       }
     }
 
@@ -257,11 +301,10 @@ async function relayConnections(): Promise<RelayConnection[]> {
   }
 }
 
-/** The (connectionId, targetProfile)-specific route seen by the latest `relayConnections()` call,
- *  or `fallback` (the collapsed representative route) when none exists — an older gateway that
- *  doesn't advertise per-profile routes yet, or a genuinely single-profile connection. */
-function relayRouteForTarget(connectionId: string, targetProfile: string, fallback: ProfileRoute): ProfileRoute {
-  return relayProfileRoutes.get(`${connectionId}::${targetProfile}`) ?? fallback
+/** The (connectionId, targetProfile)-specific route from the latest `relayConnections()` call,
+ *  or undefined when this Desktop has no proven dial to that bot on that connection. */
+function relayRouteForTarget(connectionId: string, targetProfile: string): ProfileRoute | undefined {
+  return relayProfileRoutes.get(`${connectionId}::${normalizeRelayProfile(targetProfile)}`)
 }
 
 /** Human label per connection id, from the registry — the only place that has one.
@@ -556,18 +599,32 @@ async function deliverRelayEnvelope(
   const envelopeId = String(envelope?.id || '')
   const target = byId.get(String(envelope?.target_connection || ''))
   const requestedProfile = String(envelope?.target_profile || '')
-  // Same alias the server applies (tui_gateway/methods_bot_relay.py) before comparing against
-  // what it reports it actually ran.
-  const normalizedRequestedProfile = requestedProfile.toLowerCase() === 'hermes' ? 'default' : requestedProfile
+  const normalizedRequestedProfile = normalizeRelayProfile(requestedProfile)
 
-  const postReply = async (payload: { error?: string; reason?: string; reply?: string; reply_relayed?: boolean }) => {
+  const postReply = async (payload: RelayReplyPayload) => {
     try {
       await host.requestProfile(sender.route, 'bot_relay.reply', {
         id: envelopeId,
         ...payload
       })
-    } catch {
-      // Sender gateway unreachable — its waiter times out with guidance.
+    } catch (error) {
+      // A sender backend older than delivery attestation rejects the newer keys as unknown params
+      // (4000), which used to drop the reply outright; its waiter still gets the text, unattested.
+      const legacy = withoutAttestationFields(payload)
+
+      if (!isUnknownParamsRejection(error) || legacy === payload) {
+        // Sender gateway unreachable — its waiter times out with guidance.
+        return
+      }
+
+      try {
+        await host.requestProfile(sender.route, 'bot_relay.reply', {
+          id: envelopeId,
+          ...legacy
+        })
+      } catch {
+        // Same as above: the waiter's own budget reports it.
+      }
     }
   }
 
@@ -587,31 +644,58 @@ async function deliverRelayEnvelope(
   // this bot's "good turn"; a classified delivery failure badges it.
   const attentionKey = `${target.id}::${String(envelope?.target_profile || '')}`
 
+  const route = relayRouteForTarget(target.id, normalizedRequestedProfile)
+
+  if (!route) {
+    noteBotAttention(attentionKey, 'target_scope_unresolved')
+    await postReply({
+      error: `NOT delivered: this Desktop has no route to @${normalizedRequestedProfile} on '${target.id}', and it never delivers on another bot's socket.`,
+      reason: 'target_scope_unresolved'
+    })
+
+    return
+  }
+
+  const routeDialProfile = normalizeRelayProfile(String(route.profile || ''))
+
   try {
     const res = await host.requestProfile<{
       reply?: string
       delivered_profile?: string
       reason?: string
       reply_relayed?: boolean
+      status?: string
+      message_id?: string
     }>(
-      relayRouteForTarget(target.id, requestedProfile, target.route),
+      route,
       'bot_relay.deliver',
       {
         profile: requestedProfile,
+        ...(routeDialProfile !== normalizedRequestedProfile ? { target_profile: requestedProfile } : {}),
         message: String(envelope?.message || ''),
         from_profile: String(envelope?.from_profile || ''),
         from_handle: String(envelope?.from_handle || ''),
-        from_connection: String(sender.id)
+        from_connection: String(sender.id),
+        envelope_id: envelopeId
       },
       RELAY_DELIVER_TIMEOUT_MS
     )
 
-    // A misroute can never be silent (FORENSIC-default-misroute.md,
-    // FORENSIC-multiplex-misroute.md): the gateway now names which profile actually ran the
-    // turn. Older gateways omit the field — compat, treated as a normal success below.
-    const deliveredProfile = typeof res?.delivered_profile === 'string' ? res.delivered_profile : undefined
+    // A misroute can never be silent: the gateway must name which profile actually ran the turn.
+    const deliveredProfile =
+      typeof res?.delivered_profile === 'string' ? res.delivered_profile.trim() : ''
 
-    if (deliveredProfile && deliveredProfile !== normalizedRequestedProfile) {
+    if (!deliveredProfile) {
+      noteBotAttention(attentionKey, 'target_scope_unresolved')
+      await postReply({
+        error: `UNVERIFIED: @${normalizedRequestedProfile}'s gateway did not attest which profile ran this turn (a backend older than delivery attestation); the reply is withheld.`,
+        reason: 'target_scope_unresolved'
+      })
+
+      return
+    }
+
+    if (normalizeRelayProfile(deliveredProfile) !== normalizedRequestedProfile) {
       noteBotAttention(attentionKey, 'target_scope_unresolved')
       await postReply({
         error: `MISROUTED: delivered to @${deliveredProfile} instead of @${normalizedRequestedProfile}`,
@@ -622,14 +706,23 @@ async function deliverRelayEnvelope(
     }
 
     clearBotAttention(attentionKey)
+    const deliverStatus = typeof res?.status === 'string' ? res.status.trim() : ''
+    const queued = deliverStatus === 'queued'
     await postReply({
-      reply: String(res?.reply || ''),
+      reply: queued ? relayQueuedSenderText(normalizedRequestedProfile) : String(res?.reply || ''),
+      delivered_profile: deliveredProfile,
       // Forward the gateway's own machine-readable classification of an otherwise-ok reply (e.g.
       // reply_relayed: false / reason: "reply_not_relayed" for a REPLY NOT RELAYED text, pairs
       // 9-12) the same way the MISROUTED branch above forwards its reason — the sender's
       // waiter/telemetry can then branch on `reason` instead of re-parsing the prose. Omitted
       // entirely when absent (older gateway, or a plain success) — additive, no behavior change.
-      ...(typeof res?.reply_relayed === 'boolean' ? { reply_relayed: res.reply_relayed } : {}),
+      ...(queued
+        ? { reply_relayed: false }
+        : typeof res?.reply_relayed === 'boolean'
+          ? { reply_relayed: res.reply_relayed }
+          : {}),
+      ...(queued ? { status: 'queued' } : {}),
+      ...(queued && res?.message_id ? { message_id: String(res.message_id) } : {}),
       ...(res?.reason ? { reason: String(res.reason) } : {})
     })
   } catch (error: any) {

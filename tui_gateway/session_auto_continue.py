@@ -337,6 +337,75 @@ def _handle_busy_submit(rid, sid: str, session: dict, text: Any, transport: Any,
     return _ok(rid, {"status": "queued"})
 
 
+def _foreign_cli_holds_session(session: dict) -> bool:
+    """True when a different process's CLI lease holds this stored session.
+
+    Bot one-shots (``hermes -p <profile> chat -Q``) take surface ``cli``. A Desktop
+    or messaging window is a different surface and still refuses, so two human
+    writers do not share the chat.
+    """
+    key = str(session.get("session_key") or "")
+    if not key:
+        return False
+    import os
+
+    from hermes_cli.active_sessions import active_session_registry_snapshot
+
+    try:
+        entries = active_session_registry_snapshot(session.get("profile_home"))
+    except Exception:
+        logger.warning("cli-lease lookup failed for %s", key, exc_info=True)
+        return False
+    me = os.getpid()
+    for entry in entries:
+        if str(entry.get("session_id") or "") != key:
+            continue
+        if str(entry.get("surface") or "") != "cli":
+            return False
+        try:
+            pid = int(entry.get("pid") or -1)
+        except (TypeError, ValueError):
+            return False
+        return pid != me
+    return False
+
+
+def _schedule_cli_lease_drain(sid: str, session: dict) -> None:
+    """Run the queued human send once the CLI lease is gone. Never interrupts that process."""
+    with session["history_lock"]:
+        if session.get("_cli_lease_drain_scheduled"):
+            return
+        session["_cli_lease_drain_scheduled"] = True
+
+    def wait() -> None:
+        import time
+
+        try:
+            while _foreign_cli_holds_session(session):
+                if session.get("_closing") or session.get("_finalized"):
+                    return
+                time.sleep(0.25)
+            _drain_queued_prompt(f"cli-lease-{sid}", sid, session)
+        finally:
+            session["_cli_lease_drain_scheduled"] = False
+
+    worker = _start_session_work(wait, name=f"cli-lease-drain-{sid}")
+    if worker is None:
+        session["_cli_lease_drain_scheduled"] = False
+
+
+def _queue_human_send_behind_cli(rid, sid: str, session: dict, text) -> dict:
+    """Park a human prompt behind a live bot CLI turn and ack it as queued."""
+    import time
+
+    transport = current_transport() or session.get("transport")
+    with session["history_lock"]:
+        _enqueue_prompt(session, text, transport, sid=sid)
+        session["last_active"] = time.time()
+    _schedule_cli_lease_drain(sid, session)
+    return _ok(rid, {"status": "queued", "behind": "bot"})
+
+
 def _persist_queued_user_row(sid: str, session: dict, text: Any, client_ids: list[str],
                              generation: int | None, display_kind: str | None = None) -> None:
     """Write a receipted send's user row before its turn runs (the ``prompt.submit`` shape: the turn adopts

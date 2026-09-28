@@ -466,20 +466,15 @@ export function useSessionTileDelegate({
               runtimeId,
               state => ({
                 ...state,
-                awaitingResponse: false,
-                busy: false,
                 messages: refreshed,
                 pendingBranchGroup: null
               }),
               storedSessionId
             )
             notify({
-              kind: 'warning',
-              message: translateNow('desktop.staleSessionBody'),
-              title: translateNow('desktop.staleSessionTitle')
+              kind: 'info',
+              message: translateNow('desktop.staleSessionMerged')
             })
-
-            return
           }
         }
 
