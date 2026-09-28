@@ -319,7 +319,9 @@ def _(rid, params: dict, _root=_relay_root) -> dict:
     ``tools.bot_failure_reasons``) for envelope ``id`` so the sender-side waiter picks it up. A
     target-scope failure that came back from a cross-connection target is rewritten here (see
     ``bot_relay.relayed_failure_error``) — this is the last point that still knows both the error
-    and WHICH target produced it."""
+    and WHICH target produced it. ``reply_relayed`` (bool, optional) rides an otherwise-ok reply the
+    Desktop flagged as not carrying the real answer (e.g. ``reason="reply_not_relayed"``, pairs
+    9-12) — forwarded through, never dropped, so the waiter/telemetry can classify it too."""
     envelope_id = str(params.get("id") or "").strip()
     if not envelope_id:
         return _err(rid, 4093, "id required")
@@ -328,11 +330,13 @@ def _(rid, params: dict, _root=_relay_root) -> dict:
         from tools.bot_relay import read_claimed_envelope, relayed_failure_error, write_reply
         root = _root()
         raw_error = str(params.get("error") or "")
+        reply_relayed = params.get("reply_relayed")
         # Classify BEFORE the copy rewrite: the rewritten text is for a human and no longer carries
         # the signature the classifier keys on, and the Desktop only forwards `reason`.
         write_reply(root, envelope_id, reply=str(params.get("reply") or ""),
                     error=relayed_failure_error(raw_error, read_claimed_envelope(root, envelope_id)),
-                    reason=str(params.get("reason") or "") or (classify_agent_error(raw_error) if raw_error else ""))
+                    reason=str(params.get("reason") or "") or (classify_agent_error(raw_error) if raw_error else ""),
+                    reply_relayed=reply_relayed if isinstance(reply_relayed, bool) else None)
         return _ok(rid, {"ok": True})
     except ValueError as e:
         return _err(rid, 4094, str(e))

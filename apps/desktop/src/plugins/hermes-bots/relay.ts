@@ -513,7 +513,7 @@ async function deliverRelayEnvelope(
   // what it reports it actually ran.
   const normalizedRequestedProfile = requestedProfile.toLowerCase() === 'hermes' ? 'default' : requestedProfile
 
-  const postReply = async (payload: { error?: string; reason?: string; reply?: string }) => {
+  const postReply = async (payload: { error?: string; reason?: string; reply?: string; reply_relayed?: boolean }) => {
     try {
       await host.requestProfile(sender.route, 'bot_relay.reply', {
         id: envelopeId,
@@ -541,7 +541,12 @@ async function deliverRelayEnvelope(
   const attentionKey = `${target.id}::${String(envelope?.target_profile || '')}`
 
   try {
-    const res = await host.requestProfile<{ reply?: string; delivered_profile?: string }>(
+    const res = await host.requestProfile<{
+      reply?: string
+      delivered_profile?: string
+      reason?: string
+      reply_relayed?: boolean
+    }>(
       relayRouteForTarget(target.id, requestedProfile, target.route),
       'bot_relay.deliver',
       {
@@ -571,7 +576,14 @@ async function deliverRelayEnvelope(
 
     clearBotAttention(attentionKey)
     await postReply({
-      reply: String(res?.reply || '')
+      reply: String(res?.reply || ''),
+      // Forward the gateway's own machine-readable classification of an otherwise-ok reply (e.g.
+      // reply_relayed: false / reason: "reply_not_relayed" for a REPLY NOT RELAYED text, pairs
+      // 9-12) the same way the MISROUTED branch above forwards its reason — the sender's
+      // waiter/telemetry can then branch on `reason` instead of re-parsing the prose. Omitted
+      // entirely when absent (older gateway, or a plain success) — additive, no behavior change.
+      ...(typeof res?.reply_relayed === 'boolean' ? { reply_relayed: res.reply_relayed } : {}),
+      ...(res?.reason ? { reason: String(res.reason) } : {})
     })
   } catch (error: any) {
     // #93091: bot_relay.deliver classifies the failed turn and ships the

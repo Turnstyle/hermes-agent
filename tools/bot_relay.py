@@ -481,9 +481,13 @@ def target_scope_refusal(profile: str, home: "str | Path | None" = None) -> str:
     )
 
 
-def write_reply(root: Path | str, envelope_id: str, *, reply: str = "", error: str = "", reason: str = "") -> Path:
+def write_reply(root: Path | str, envelope_id: str, *, reply: str = "", error: str = "", reason: str = "",
+                reply_relayed: bool | None = None) -> Path:
     """Persist the relayed reply (or delivery error) for the waiter. ``reason`` (typed
-    code, ``tools.bot_failure_reasons``) is classified from ``error`` when omitted.
+    code, ``tools.bot_failure_reasons``) is classified from ``error`` when omitted. ``reply_relayed``
+    is the relay's own machine-readable flag for an otherwise-ok reply whose real answer never made
+    it back (e.g. ``reason="reply_not_relayed"``, pairs 9-12) — written only when given, so an
+    ordinary reply's record is byte-identical to before this field existed.
 
     Idempotent by envelope id — the first settled reply stands, error or not. That is safe because
     two deliveries of one envelope never overlap: ``_reoffer_unanswered`` waits past the Desktop's own
@@ -504,7 +508,10 @@ def write_reply(root: Path | str, envelope_id: str, *, reply: str = "", error: s
         from tools.bot_failure_reasons import classify_agent_error
 
         code = classify_agent_error(err)
-    _atomic_write_json(path, {"id": safe, "at": int(time.time()), "reply": str(reply or ""), "error": err, "reason": code})
+    record = {"id": safe, "at": int(time.time()), "reply": str(reply or ""), "error": err, "reason": code}
+    if reply_relayed is not None:
+        record["reply_relayed"] = bool(reply_relayed)
+    _atomic_write_json(path, record)
     return path
 
 
