@@ -51,7 +51,7 @@ const RELAY_DRAIN_INTERVAL_MS = 30_000
 // silently invalidate this constant: relay-deliver-budget.test.ts reads
 // hermes_cli/config_defaults.py and tools/bot_relay.py and fails if the
 // mirrors drift or the margin stops being positive.
-const RELAY_TURN_LOCK_WAIT_MS = 120_000 // bot_mode.turn_wait_seconds default
+const RELAY_TURN_LOCK_WAIT_MS = 1_800_000 // bot_mode.turn_wait_seconds default (30 min busy-bot queue, Turner 2026-09-28)
 const RELAY_TURN_ATTEMPT_MS = 600_000 // tools/bot_relay.py TURN_ATTEMPT_TIMEOUT_SECONDS
 const RELAY_TURN_MAX_ATTEMPTS = 2 // first attempt + the policy-gated re-run
 
