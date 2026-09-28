@@ -3,10 +3,12 @@
 A Bot Chat DM or notify-subscribe wake that hit ``target_busy`` stays in the durable registry with
 ``status='queued'`` (write-first sender). When this bot's canonical Bot Chat finishes a turn, the
 TUI gateway's post-turn hook (``tui_gateway.session_notifications._drain_fleet_messages_once``)
-calls :func:`claim_next`, which runs exactly ONE indexed query:
+calls :func:`claim_next`, which runs exactly ONE equality-only query:
 
-    to == <this bot> AND status == 'queued'  ORDER BY created_at ASC  LIMIT n
-    (composite index: to ASC, status ASC, created_at ASC)
+    to == <this bot> AND status == 'queued'  LIMIT 50
+
+The returned page is sorted by created_at and document id locally before the caller's limit
+is applied. No composite index is needed.
 
 It never runs while the bot is idle: the post-turn hook is its only caller, so no turn end means no
 Firestore read. Expired docs seen in the page are marked expired so they cannot starve fresh docs.
@@ -42,7 +44,7 @@ The feature is dark by default. Config (profile ``config.yaml``)::
       emulator_host: ""            # e.g. 127.0.0.1:8794
       project: mission-control-444444
       database: fleet-operations
-      limit: 10                    # query page size (1..50)
+      limit: 10                    # locally selected page size (1..50)
       max_attempts: 5
       timeout_seconds: 5
 
@@ -251,9 +253,7 @@ class FirestoreStore:
             {"fieldFilter": {"field": {"fieldPath": "to"}, "op": "EQUAL", "value": enc(to)}},
             {"fieldFilter": {"field": {"fieldPath": "status"}, "op": "EQUAL", "value": enc("queued")}},
         ]}}
-        query = {"from": [{"collectionId": COLLECTION}], "where": where,
-                 "orderBy": [{"field": {"fieldPath": "created_at"}, "direction": "ASCENDING"}],
-                 "limit": max(1, min(MAX_LIMIT, int(limit)))}
+        query = {"from": [{"collectionId": COLLECTION}], "where": where, "limit": MAX_LIMIT}
         self.reads += 1
         rows = []
         for item in self._req(self.query_url, "POST", {"structuredQuery": query}):
@@ -261,7 +261,14 @@ class FirestoreStore:
             if doc:
                 rows.append(Row(doc["name"].rsplit("/", 1)[1],
                                 {k: dec(v) for k, v in doc.get("fields", {}).items()}, doc.get("updateTime", "")))
-        return rows
+
+        def sort_key(row: Row) -> tuple:
+            created = parse_ts(row.fields.get("created_at"))
+            return (created is None, created or datetime.datetime.max.replace(tzinfo=datetime.timezone.utc),
+                    row.doc_id)
+
+        rows.sort(key=sort_key)
+        return rows[:max(1, min(MAX_LIMIT, int(limit)))]
 
     def query_status(self, status: str, limit: int) -> list[Row]:
         """Maintenance query by status alone; no composite index or recipient scope."""
@@ -433,6 +440,8 @@ def _malformed(fields: dict) -> str:
         return "missing body"
     if not isinstance(fields.get("from"), str) or not fields["from"].strip():
         return "missing from"
+    if parse_ts(fields.get("created_at")) is None:
+        return "missing or invalid created_at"
     if parse_ts(fields.get("expires_at")) is None:
         return "missing or invalid expires_at"
     attempts = fields.get("attempts")

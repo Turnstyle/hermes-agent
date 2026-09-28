@@ -88,7 +88,9 @@ class MemoryStore:
             self.queries.append((to, limit))
             rows = [fmd.Row(k, dict(v), self.ut[k]) for k, v in self.docs.items()
                     if v.get("to") == to and v.get("status") == "queued"]
-        rows.sort(key=lambda r: fmd.parse_ts(r.fields["created_at"]))
+        rows.sort(key=lambda r: (fmd.parse_ts(r.fields.get("created_at")) is None,
+                                 fmd.parse_ts(r.fields.get("created_at")) or
+                                 datetime.datetime.max.replace(tzinfo=datetime.timezone.utc), r.doc_id))
         return rows[:limit]
 
     def query_status(self, status, limit):
@@ -211,6 +213,25 @@ def test_one_query_per_turn_end_scoped_to_me(store):
     claimed = fmd.claim_next(store, ME, limit=7, now=NOW)
     assert claimed is not None and claimed.fields["to"] == ME
     assert store.queries == [(ME, 7)]   # exactly one query, filtered on to == me
+
+
+def test_rest_query_queued_sorts_full_page_without_server_order(monkeypatch):
+    transport = fmd.FirestoreStore(base_url="http://unused", project="p", database="d",
+                                   token_fn=lambda: "unused")
+    request = []
+    docs = [("a-newest", 1), ("b-oldest", 30), ("c-middle", 10)]
+    response = [{"document": {"name": transport.prefix + doc_id,
+                              "fields": {"created_at": fmd.enc(msg(minutes)["created_at"], "created_at")},
+                              "updateTime": "2026-09-28T06:00:00Z"}}
+                for doc_id, minutes in docs]
+    monkeypatch.setattr(transport, "_req", lambda url, method, body: request.append(body) or response)
+
+    rows = transport.query_queued(ME, 2)
+
+    assert len(request) == transport.reads == 1
+    structured = request[0]["structuredQuery"]
+    assert "orderBy" not in structured and structured["limit"] == fmd.MAX_LIMIT
+    assert [row.doc_id for row in rows] == ["b-oldest", "c-middle"]
 
 
 def test_foreign_or_non_queued_rows_are_never_written():
@@ -421,12 +442,14 @@ def test_release_returns_an_unstarted_claim_without_an_attempt(store):
 
 
 def test_malformed_doc_is_rejected_not_run(store):
-    bad, missing, invalid, good = uid("bad"), uid("missing"), uid("invalid"), uid("good")
+    bad, missing, invalid, invalid_created, good = (uid(label) for label in
+                                                    ("bad", "missing", "invalid", "invalid-created", "good"))
     store.seed(bad, msg(20, kind="carrier_pigeon"))
     without_expiry = msg(19)
     without_expiry.pop("expires_at")
     store.seed(missing, without_expiry)
     store.seed(invalid, msg(18, expires_at="not-a-timestamp"))
+    store.seed(invalid_created, msg(17, created_at="not-a-timestamp"))
     store.seed(good, msg(10))
     assert drain_all(store) == [good]
     row = store.get(bad)
@@ -434,6 +457,8 @@ def test_malformed_doc_is_rejected_not_run(store):
     for doc_id in (missing, invalid):
         row = store.get(doc_id)
         assert row.fields["status"] == "rejected" and "expires_at" in row.fields["last_error"]
+    row = store.get(invalid_created)
+    assert row.fields["status"] == "rejected" and "created_at" in row.fields["last_error"]
 
 
 # ---------- rendering ----------
