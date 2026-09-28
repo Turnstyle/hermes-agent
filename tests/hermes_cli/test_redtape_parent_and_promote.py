@@ -312,6 +312,28 @@ def test_human_hold_keeps_gate_despite_verified_merged_pr(kanban_home, monkeypat
         assert kb.get_task(conn, child).status == "ready"
 
 
+@pytest.mark.parametrize("parent_status", ["review", "blocked"])
+def test_parent_awaiting_review_or_blocked_keeps_gate_despite_merged_pr(
+    kanban_home, monkeypatch, parent_status
+):
+    """R2 HIGH: request_review writes no sticky block, so status itself must hold."""
+    pr_url = "https://github.com/acme/app/pull/23"
+    monkeypatch.setattr(
+        "hermes_cli.kanban_parent_gate.query_pr_merge_state",
+        lambda _url: {"state": "MERGED", "mergedAt": "2026-09-28T12:00:00Z"},
+    )
+    with kbc.connect() as conn:
+        parent = kb.create_task(conn, title="Implement", completion_contract=pr_url)
+        conn.execute("UPDATE tasks SET status = ? WHERE id = ?", (parent_status, parent))
+        conn.commit()
+        child = kb.create_task(conn, title="deploy child")
+        kb.link_tasks(conn, parent, child)
+        conn.execute("UPDATE tasks SET status = 'ready' WHERE id = ?", (child,))
+        conn.commit()
+        assert kb.complete_task(conn, child, result="should not close") is False
+        assert kb.get_task(conn, child).status == "ready"
+
+
 def test_pr_acceptance_system_event_releases_without_completion_contract(kanban_home, monkeypatch):
     pr_url = "https://github.com/acme/app/pull/22"
 

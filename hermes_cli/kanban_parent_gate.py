@@ -89,24 +89,36 @@ def parent_gate_allows_completion(
     open_parents = unsatisfied_parents(conn, task_id)
     if not open_parents:
         return True
-    for parent_id, _status in open_parents:
-        if not _parent_release(conn, parent_id, allow_network=allow_network):
+    for parent_id, status in open_parents:
+        if not _parent_release(conn, parent_id, status, allow_network=allow_network):
             return False
     return True
+
+
+# A parent in ``review`` is waiting on an approval gate (request_review writes
+# no sticky block), so no rehome or merged-PR evidence may release it.
+_NEVER_RELEASE_STATUSES = frozenset({"review"})
+# A ``blocked`` parent may be a hold; only a verified rehome releases it.
+_NO_MERGE_RELEASE_STATUSES = frozenset({"review", "blocked"})
 
 
 def _parent_release(
     conn: sqlite3.Connection,
     parent_id: str,
+    status: str | None,
     *,
     allow_network: bool,
 ) -> bool:
     from hermes_cli.kanban_db import _has_sticky_block
 
+    if status in _NEVER_RELEASE_STATUSES:
+        return False
     if _has_sticky_block(conn, parent_id):
         return False
     if _verified_parent_rehome(conn, parent_id):
         return True
+    if status in _NO_MERGE_RELEASE_STATUSES:
+        return False
     return _verified_merged_pr_parent(conn, parent_id, allow_network=allow_network)
 
 
