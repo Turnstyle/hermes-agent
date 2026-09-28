@@ -975,8 +975,12 @@ def _persist_reply_when_done(proc_id: str, agent: Any) -> bool:
 def _wait_reply_main(reply_path: str, label: str, budget_seconds: str) -> int:
     """The relay reply waiter (``tools/bot_relay.waiter_command``): block until the sender-side
     reply file exists, print it as the completion notification the sender wakes on, exit 1 on a
-    delivery error or when the budget runs out. Stdlib only: this runs as a background process
-    from any bot turn, and the sender's completion notification is exactly its stdout."""
+    delivery error, when the responder is unattested or is not the envelope's target, or when the
+    budget runs out. An attested ok reply with ``reply_not_relayed`` (or ``reply_relayed: false``)
+    exits 0 with a typed flag and is not the trusted ``Reply from`` line: the message will run, so
+    a resend would duplicate it, but the prose is not that bot's answer. Stdlib only: this runs as a
+    background process from any bot turn, and the
+    sender's completion notification is exactly its stdout."""
     try:
         deadline = time.time() + float(budget_seconds)
     except ValueError:
@@ -992,6 +996,39 @@ def _wait_reply_main(reply_path: str, label: str, budget_seconds: str) -> int:
                 tag = f" [reason: {code}]" if code else ""
                 print(f"Delivery to {label} failed{tag}: {d['error']}")
                 return 1
+            from tools.bot_failure_reasons import REPLY_NOT_RELAYED, TARGET_SCOPE_UNRESOLVED
+
+            expected, delivered = _reply_attestation(reply_path, d)
+            if expected and delivered and expected != delivered:
+                print(
+                    f"Delivery to {label} failed [reason: {TARGET_SCOPE_UNRESOLVED}]: MISROUTED: "
+                    f"the relay delivered this message to @{delivered} instead of @{expected}; "
+                    f"that bot's reply is not {label}'s and is withheld. The message did NOT reach "
+                    f"{label}."
+                )
+                return 1
+            if not delivered or not expected:
+                print(
+                    f"Delivery to {label} UNVERIFIED [reason: {TARGET_SCOPE_UNRESOLVED}]: the relay "
+                    f"did not attest which bot answered (a Desktop or target gateway older than "
+                    f"delivery attestation), so the text below may not be from {label}. Do not "
+                    f"attribute it to {label} and do not resend blindly."
+                )
+                print(d.get("reply") or "(empty reply)")
+                return 1
+            reason = str(d.get("reason") or "").strip()
+            relayed = d.get("reply_relayed")
+            # An admitted-but-unrelayed ok reply is not the target's answer. Exit 0 so the sender
+            # does not resend a message that will run; the typed flag is what stops it booking the
+            # prose as "Reply from {label}".
+            if reason == REPLY_NOT_RELAYED or relayed is False:
+                flag = "true" if relayed is True else "false"
+                print(
+                    f"Delivery to {label} admitted "
+                    f"[reason: {reason or REPLY_NOT_RELAYED}, reply_relayed: {flag}]: "
+                    f"{d.get('reply') or '(empty reply)'}"
+                )
+                return 0
             print(f"Reply from {label}:")
             print(d.get("reply") or "(empty reply)")
             return 0
