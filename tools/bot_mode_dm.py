@@ -768,6 +768,31 @@ def _run_delivery_locked(argv: list[str], dm_file: str, *, stdin_file: bool,
     try:
         from tools.bot_relay import TurnBusyError, delivery_env, dm_queue_wait_seconds
 
+        queue_config = None
+        author_id = str((author or {}).get("id") or "")
+        sender = author_id.removeprefix("bot:").split(":", 1)[0] if author_id.startswith("bot:") else ""
+        if home is not None and sender and not stdin_file:
+            try:
+                from tools import fleet_message_drain as fmd
+                queue_config = fmd.drain_config_for_home(home)
+            except Exception:
+                logger.warning("fleet message drain: could not check recipient opt-in", exc_info=True)
+
+        def _queue_busy() -> bool:
+            if queue_config is None:
+                return False
+            try:
+                from tools import fleet_message_drain as fmd
+                body = Path(dm_file).read_text(encoding="utf-8-sig")
+                message_id = fmd.enqueue_message(sender, fmd.bot_identity(home), body, config=queue_config)
+            except Exception:
+                logger.warning("fleet message drain: enqueue failed; using delivery wait", exc_info=True)
+                return False
+            reply = (f"Queued for @{fmd.bot_identity(home)} (message_id {message_id}): it is mid-turn and will "
+                     "get this right after its current turn ends. No need to resend.")
+            print(json.dumps({"status": "queued", "message_id": message_id, "reply": reply}))
+            return True
+
         env = delivery_env(author, profile_home if not stdin_file else None)
         if stdin_file:
             with _delivery_lock(argv, stdin_file=stdin_file):
@@ -781,28 +806,40 @@ def _run_delivery_locked(argv: list[str], dm_file: str, *, stdin_file: bool,
         from tools.fleet_message_enqueue import FleetEnqueueError, enqueue_busy_dm, fleet_handle, queued_ack
 
         can_queue = home is not None
-        probe = min(_FAST_ACK_SECONDS, dm_queue_wait_seconds())
-        try:
-            with _delivery_lock(argv, stdin_file=False, timeout_seconds=probe):
-                return _run_local_turn(argv, dm_file, env=env, busy_raises=can_queue)
-        except (_session_held_cls(), TurnBusyError) as exc:
-            if not can_queue:
-                raise
+        first = True
+        while True:
+            first_attempt = first
+            if not first:
+                rc = _via_live_owner()
+                if rc is not None:
+                    keep_dm_file = True  # the live path owns its intent/evidence files from here
+                    return rc
+            first = False
+            remaining = max(0.0, deadline - time.monotonic())
+            final = remaining <= _BUSY_SLICE_SECONDS
             try:
-                body = Path(dm_file).read_text(encoding="utf-8")
-                sender = "sender"
-                if isinstance(author, dict):
-                    sender = fleet_handle(author.get("name") or author.get("id"), fallback="sender")
-                recipient = fleet_handle(exc.profile, fallback="recipient")
-                message_id = enqueue_busy_dm(sender=sender, recipient=recipient, body=body)
-            except (FleetEnqueueError, OSError, ValueError) as write_exc:
-                print(json.dumps({
-                    "error": f"Delivery failed: could not queue for @{exc.profile}: {write_exc}",
-                    "reason": "target_busy",
-                }))
-                return 1
-            print(queued_ack(message_id))
-            return 0
+                with _delivery_lock(argv, stdin_file=False,
+                                    timeout_seconds=(min(0.1, remaining) if first_attempt and queue_config
+                                                     else remaining if final else _BUSY_SLICE_SECONDS)):
+                    return _run_local_turn(argv, dm_file, env=env, busy_raises=can_queue)
+            except _session_held_cls() as exc:
+                if first_attempt and _queue_busy():
+                    return 0
+                if final:
+                    waited = time.monotonic() - started
+                    print(json.dumps({
+                        "error": f"Delivery failed: @{exc.profile}'s Bot Chat is open on another surface "
+                                 f"right now, so your message was NOT delivered after queuing ~{int(round(waited))}s. "
+                                 "Try again later.",
+                        "reason": "target_busy",
+                    }))
+                    return 1
+                time.sleep(min(_BUSY_SLICE_SECONDS, remaining))
+            except TurnBusyError as exc:
+                if first_attempt and _queue_busy():
+                    return 0
+                if final:
+                    raise TurnBusyError(exc.profile, time.monotonic() - started) from None
     finally:
         if not keep_dm_file:
             _unlink_dm_artifacts(dm_file)

@@ -9,16 +9,64 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 import logging
+import io
 import os
 import sys
 import time
 from agent.interrupt_compat import request_hard_interrupt
 from contextlib import suppress
+from contextlib import redirect_stdout
 from pathlib import Path
 from typing import Any
 
 # Log-record parity with the origin module.
 logger = logging.getLogger("cli")
+
+
+def _drain_quiet_bot_chat(cli, history) -> None:
+    """Run at most five queued fleet messages as transcript-only Bot Chat turns."""
+    from tools import fleet_message_drain as fmd
+    from tools.bot_mode_dm import _agent_home, _session_title
+    from tools.bot_mode_probe import BOT_CHAT_TITLE
+
+    if _session_title(cli.agent) != BOT_CHAT_TITLE:
+        return
+    config = fmd.drain_config()
+    if config is None:
+        return
+    store = fmd.store_for(config)
+    me = fmd.bot_identity(_agent_home(cli.agent))
+    for _ in range(5):
+        claimed = fmd.claim_next(store, me, limit=config.limit)
+        if claimed is None:
+            return
+        try:
+            if not fmd.mark_read(store, claimed):
+                continue
+            text, author, _metadata = fmd.render_input(claimed)
+            author_kwargs = {"turn_author": author} if author is not None else {}
+            with redirect_stdout(io.StringIO()):
+                outcome = cli.agent.run_conversation(
+                    user_message=text, conversation_history=history, **author_kwargs)
+            if isinstance(outcome, dict) and outcome.get("messages"):
+                history = outcome["messages"]
+            _sync = getattr(cli.agent, "session_id", None)
+            if _sync:
+                cli.session_id = _sync
+            settled = (isinstance(outcome, dict) and not outcome.get("failed")
+                       and not outcome.get("partial") and outcome.get("completed") is not False)
+            fmd.finish(store, claimed,
+                       {"status": "settled" if settled else "failed",
+                        "error": outcome.get("error", "") if isinstance(outcome, dict) else "no turn result"},
+                       max_attempts=config.max_attempts)
+            if not settled:
+                return  # Let a later turn retry this doc; do not spend the whole cap on one failure.
+        except Exception as exc:
+            try:
+                fmd.record_error(store, claimed, str(exc), max_attempts=config.max_attempts)
+            except Exception:
+                logger.warning("fleet message drain: could not settle %s", claimed.doc_id, exc_info=True)
+            raise
 
 if TYPE_CHECKING:
     from cli import HermesCLI
@@ -297,6 +345,13 @@ def _run_quiet_single_query(cli, effective_query, emitter=None):
                 # A teammate's reply displaced the answer this run prints; tell the spawner.
                 _report_turn(result)
         response = result.get("final_response", "") if isinstance(result, dict) else str(result)
+        if _single_query_exit_code(result) == 0:
+            try:
+                _drain_quiet_bot_chat(cli, history)
+            except Exception as exc:
+                from tools.fleet_message_drain import NoGoogleCredentials
+                if not isinstance(exc, NoGoogleCredentials):
+                    logger.warning("fleet message drain: quiet Bot Chat turn skipped: %s", exc)
     # Surface backend errors that produced no visible output (e.g. invalid model slug
     # -> provider 4xx) on stderr so piped stdout stays clean.
     if emitter is not None:

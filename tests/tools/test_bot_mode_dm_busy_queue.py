@@ -3,6 +3,7 @@ loop is the bug: the sender must see queued (message_id) in under 5s.
 """
 
 import json
+import datetime
 import subprocess
 import time
 from pathlib import Path
@@ -10,9 +11,48 @@ from pathlib import Path
 import pytest
 
 from tools import bot_live_delivery as live
-from tools import bot_mode_dm, bot_relay
+from tools import bot_mode_dm, bot_relay, fleet_message_drain as fmd
 
 _REFUSAL_STDERR = "hermes-refusal-reason: SESSION_NOT_OWNED\nCe chat est occupé.\n"
+
+
+def test_busy_opted_in_target_is_enqueued_on_first_attempt(tmp_path, monkeypatch, capsys):
+    home, dm_file = _setup(tmp_path, monkeypatch, queue_wait=1800)
+    target = home / "profiles" / "ops"
+    target.mkdir(parents=True)
+    (target / "config.yaml").write_text("fleet_messages:\n  drain_on_turn_end: true\n  target: live\n")
+    assert fmd.drain_config_for_home(home) is None
+    assert fmd.drain_config_for_home(target) is not None
+    assert fmd.drain_config_for_home(home) is None
+    monkeypatch.setattr(live, "find_canonical_live_owner", lambda h: None)
+    writes = []
+    monkeypatch.setattr(fmd, "store_for", lambda config: type("Store", (), {
+        "create": lambda self, doc_id, fields: writes.append((doc_id, fields, config))})())
+    calls = []
+
+    def held(argv, **kwargs):
+        calls.append(argv)
+        return subprocess.CompletedProcess(argv, 1, stdout="", stderr=_REFUSAL_STDERR)
+
+    monkeypatch.setattr(subprocess, "run", held)
+    started = time.monotonic()
+    rc = bot_mode_dm._run_delivery(["hermes", "-p", "ops"], str(dm_file), stdin_file=False,
+                                   profile_home=target, author={"id": "bot:tb-cndr", "name": "tb-cndr"})
+    assert rc == 0 and time.monotonic() - started < 5
+    assert len(calls) == 1 and len(writes) == 1
+    payload = json.loads(capsys.readouterr().out)
+    doc_id, fields, config = writes[0]
+    assert payload["status"] == "queued" and payload["message_id"] == doc_id
+    assert len(doc_id) == 32 and int(doc_id, 16) >= 0
+    assert set(fields) == {"message_id", "from", "to", "kind", "body", "status", "attempts",
+                           "created_at", "updated_at", "expires_at"}
+    assert (fields["from"], fields["to"], fields["body"], fields["status"], fields["attempts"]) == (
+        "tb-cndr", "ops", "hi", "queued", 0)
+    assert fields["message_id"] == doc_id and fields["created_at"] == fields["updated_at"]
+    assert fmd.parse_ts(fields["expires_at"]) - fmd.parse_ts(fields["created_at"]) == datetime.timedelta(hours=24)
+    assert config.timeout_seconds <= 1.5
+    assert "No need to resend" in payload["reply"]
+    assert not dm_file.exists()
 
 
 def _setup(tmp_path, monkeypatch, *, slice_seconds=0.05, queue_wait=5.0):

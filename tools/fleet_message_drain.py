@@ -54,10 +54,14 @@ import dataclasses
 import datetime
 import json
 import logging
+import re
+import subprocess
 import threading
+import time
 import urllib.error
 import urllib.parse
 import urllib.request
+import uuid
 from pathlib import Path
 from typing import Any, Callable, Optional
 
@@ -75,6 +79,7 @@ WRITABLE_FIELDS = frozenset({"status", "updated_at", "delivered_at", "read_at", 
 MAX_LIMIT = 50
 LAST_ERROR_CHARS = 500
 _SCOPE = "https://www.googleapis.com/auth/datastore"
+SAFE_HANDLE_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._@+:-]{0,127}\Z")
 
 
 class PreconditionFailed(RuntimeError):
@@ -127,6 +132,16 @@ def drain_config(cfg: Optional[dict] = None) -> Optional[DrainConfig]:
                        project=str(section.get("project") or DEFAULT_PROJECT),
                        database=str(section.get("database") or DEFAULT_DATABASE),
                        limit=limit, max_attempts=max_attempts, timeout_seconds=timeout)
+
+
+def drain_config_for_home(profile_home: Path | str) -> Optional[DrainConfig]:
+    """Resolve a recipient's opt-in from its own profile, without changing process env."""
+    from hermes_constants import reset_hermes_home_override, set_hermes_home_override
+    token = set_hermes_home_override(profile_home)
+    try:
+        return drain_config()
+    finally:
+        reset_hermes_home_override(token)
 
 
 def bot_identity(profile_home: Path | str) -> str:
@@ -256,6 +271,13 @@ class FirestoreStore:
             raise
         return Row(doc_id, {k: dec(v) for k, v in doc.get("fields", {}).items()}, doc.get("updateTime", ""))
 
+    def create(self, doc_id: str, fields: dict) -> None:
+        """Create exactly one named document; Firestore refuses an existing document id."""
+        _check_id(doc_id)
+        url = self.doc_url[:-1] + "?" + urllib.parse.urlencode({"documentId": doc_id})
+        self.commits += 1
+        self._req(url, "POST", {"fields": {key: enc(value, key) for key, value in fields.items()}})
+
     def update(self, doc_id: str, fields: dict, update_time: str) -> str:
         """Atomic guarded update of listed fields; returns the new updateTime. Raises
         :class:`PreconditionFailed` when the doc changed since ``update_time``."""
@@ -291,19 +313,49 @@ def _check_write(doc_id: str, fields: dict, update_time: str) -> None:
 
 _live_lock = threading.Lock()
 _live_credentials: Any = None
+_gcloud_token_cached = ""
+_gcloud_token_until = 0.0
+_credentials_warned = False
+
+
+class NoGoogleCredentials(RuntimeError):
+    """Neither host ADC nor the operator's gcloud login can authorize Firestore."""
 
 
 def _live_token() -> str:
-    """Google application-default credentials of this host (datastore scope), refreshed as needed."""
-    global _live_credentials
-    import google.auth
-    import google.auth.transport.requests
+    """Prefer host ADC; use a short, cached gcloud token when ADC is unavailable."""
+    global _live_credentials, _gcloud_token_cached, _gcloud_token_until, _credentials_warned
     with _live_lock:
-        if _live_credentials is None:
-            _live_credentials, _project = google.auth.default(scopes=[_SCOPE])
-        if not _live_credentials.valid:
-            _live_credentials.refresh(google.auth.transport.requests.Request())
-        return _live_credentials.token
+        try:
+            import google.auth
+            import google.auth.transport.requests
+            if _live_credentials is None:
+                _live_credentials, _project = google.auth.default(scopes=[_SCOPE])
+            if not _live_credentials.valid:
+                _live_credentials.refresh(google.auth.transport.requests.Request())
+            if not _live_credentials.token:
+                raise ValueError("ADC returned no token")
+            _credentials_warned = False
+            return _live_credentials.token
+        except Exception:
+            _live_credentials = None
+        try:
+            if not _gcloud_token_cached or time.monotonic() >= _gcloud_token_until:
+                proc = subprocess.run(["gcloud", "auth", "print-access-token"], capture_output=True,
+                                      text=True, check=True, timeout=3)
+                token = proc.stdout.strip()
+                if not token:
+                    raise ValueError("gcloud returned no token")
+                _gcloud_token_cached = token
+                _gcloud_token_until = time.monotonic() + 45 * 60
+            _credentials_warned = False
+            return _gcloud_token_cached
+        except Exception as exc:
+            if not _credentials_warned:
+                logger.warning("fleet message drain: no Google credentials (ADC expired and gcloud token failed); "
+                               "drain skipped, turns unaffected")
+                _credentials_warned = True
+            raise NoGoogleCredentials("ADC expired and gcloud token failed") from exc
 
 
 def store_for(config: DrainConfig) -> FirestoreStore:
@@ -312,6 +364,28 @@ def store_for(config: DrainConfig) -> FirestoreStore:
                               database=config.database, token_fn=lambda: "owner", timeout=config.timeout_seconds)
     return FirestoreStore(base_url="https://firestore.googleapis.com", project=config.project,
                           database=config.database, token_fn=_live_token, timeout=config.timeout_seconds)
+
+
+def enqueue_message(from_handle: str, to_handle: str, body: str, kind: str = "dm",
+                    *, config: Optional[DrainConfig] = None) -> str:
+    """Write a busy target's message to Mission Control before acknowledging its sender."""
+    if not isinstance(from_handle, str) or not SAFE_HANDLE_RE.fullmatch(from_handle):
+        raise Refused("invalid sender handle")
+    if not isinstance(to_handle, str) or not SAFE_HANDLE_RE.fullmatch(to_handle):
+        raise Refused("invalid recipient handle")
+    if kind not in KINDS or not isinstance(body, str) or not body.strip():
+        raise Refused("invalid message kind or empty body")
+    config = config or drain_config()
+    if config is None:
+        raise Refused("fleet message drain is disabled")
+    message_id = uuid.uuid4().hex
+    now = utcnow()
+    stamp = rfc3339(now)
+    fields = {"message_id": message_id, "from": from_handle, "to": to_handle, "kind": kind,
+              "body": body, "status": "queued", "attempts": 0, "created_at": stamp,
+              "updated_at": stamp, "expires_at": rfc3339(now + datetime.timedelta(hours=24))}
+    store_for(dataclasses.replace(config, timeout_seconds=min(config.timeout_seconds, 1.5))).create(message_id, fields)
+    return message_id
 
 
 # ---------- drain logic ----------

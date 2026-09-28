@@ -470,6 +470,57 @@ def test_deliver_fast_acks_a_held_session(home, monkeypatch):
     refusal. The sender gets queued (message_id) without a turn_wait_seconds loop."""
     from tools.fleet_message_enqueue import queued_ack
 
+    monkeypatch.setattr(bot_relay, "turn_wait_seconds", lambda: 5.0)
+    monkeypatch.setattr(bot_mode_dm, "_BUSY_SLICE_SECONDS", 0.05)
+    calls = []
+
+    class _Proc:
+        def __init__(self, returncode, stdout="", stderr=""):
+            self.returncode, self.stdout, self.stderr = returncode, stdout, stderr
+
+    def _fake_run(argv, **kwargs):
+        calls.append(list(argv))
+        if len(calls) <= 2:
+            return _Proc(1, stderr=_REFUSAL_STDERR)
+        return _Proc(0, stdout="pong from ops")
+
+    monkeypatch.setattr("hermes_cli.quiet_single_query.run_reported_turn", _fake_run)
+    out = _result(srv._methods["bot_relay.deliver"](1, {"profile": "ops", "message": "ping"}))
+    assert out["reply"] == "pong from ops"
+    assert len(calls) == 3
+
+
+def test_relay_busy_opted_in_target_enqueues_without_wait(home, monkeypatch):
+    from tools import fleet_message_drain as fmd
+
+    monkeypatch.setattr(fmd, "drain_config_for_home", lambda h: fmd.DrainConfig(target="live"))
+    queued = []
+    monkeypatch.setattr(fmd, "enqueue_message", lambda *args, **kwargs: queued.append(args) or "relay123")
+    calls = []
+
+    def held(argv, **kwargs):
+        calls.append(argv)
+        return subprocess.CompletedProcess(argv, 1, stdout="", stderr=_REFUSAL_STDERR)
+
+    monkeypatch.setattr("hermes_cli.quiet_single_query.run_reported_turn", held)
+    started = time.monotonic()
+    out = _result(srv._methods["bot_relay.deliver"](
+        1, {"profile": "ops", "message": "ping", "from_profile": "tb-cndr", "from_handle": "tb-cndr"}))
+    assert time.monotonic() - started < 5
+    assert len(calls) == 1 and queued[0][:2] == ("tb-cndr", "ops")
+    assert out["status"] == "queued" and out["message_id"] == "relay123"
+    assert "No need to resend" in out["reply"]
+
+
+def test_deliver_fails_target_busy_after_the_full_turn_wait_budget(home, monkeypatch):
+    """Held for the whole budget: a target_busy refusal, mentioning how long it queued, within a
+    bounded number of attempts and never past turn_wait_seconds plus one retry slice — the
+    Desktop's fixed deliver deadline depends on this handler never holding longer than that."""
+    from tools import bot_mode_dm
+
+    slice_seconds, budget = 0.05, 0.3
+    monkeypatch.setattr(bot_relay, "turn_wait_seconds", lambda: budget)
+    monkeypatch.setattr(bot_mode_dm, "_BUSY_SLICE_SECONDS", slice_seconds)
     calls = []
 
     class _Proc:
