@@ -54,21 +54,34 @@ def current_provider_owns_vendor(model_name: str, current_provider: str) -> bool
     switch there". Aggregators, custom endpoints and multi-vendor resellers (nvidia, alibaba, ...)
     have no single native vendor and are skipped."""
     from hermes_cli.model_normalize import detect_vendor
+
+    vendor = detect_vendor(model_name or "")
+    return bool(vendor and _native_vendor(current_provider) == vendor)
+
+
+def model_foreign_to_provider(model_name: str, provider: str) -> bool:
+    """Known vendor mismatch on a single-vendor first-party provider only."""
+    from hermes_cli.model_normalize import detect_vendor
+
+    native = _native_vendor(provider)
+    vendor = detect_vendor(model_name or "")
+    return bool(native and vendor and native != vendor)
+
+
+def _native_vendor(provider: str) -> Optional[str]:
+    from hermes_cli.model_normalize import detect_vendor
     from hermes_cli.models import _AGGREGATOR_PROVIDERS, _PROVIDER_MODELS, normalize_provider
 
-    provider = (current_provider or "").strip().lower()
-    if provider in _SKIP or provider.startswith("custom:"):
-        return False
-    normalized = normalize_provider(provider)
+    name = (provider or "").strip().lower()
+    if name in _SKIP or name.startswith("custom:"):
+        return None
+    normalized = normalize_provider(name)
     if normalized in _SKIP or normalized in _AGGREGATOR_PROVIDERS:
-        return False
-    vendor = detect_vendor(model_name or "")
-    if not vendor:
-        return False
+        return None
     # An id the classifier cannot place (Bedrock ``us.anthropic.claude-…``) is evidence the
     # provider is NOT single-vendor; only a fully classified, single-vendor catalog owns the name.
     native = {detect_vendor(mid) for mid in _PROVIDER_MODELS.get(normalized, ())}
-    return native == {vendor}
+    return next(iter(native)) if len(native) == 1 and None not in native else None
 
 
 def provider_has_credentials(provider: str) -> bool:

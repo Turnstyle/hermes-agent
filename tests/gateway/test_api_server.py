@@ -2548,6 +2548,58 @@ class TestModelRoutesHandlers:
 
 class TestModelRoutesAgentCreation:
 
+    def test_fallback_runtime_beats_session_row_model_and_foreign_row_model_is_skipped(self, monkeypatch):
+        captured = {}
+
+        class FakeAgent:
+            def __init__(self, **kwargs):
+                captured.update(kwargs)
+
+        _patch_create_agent_runtime(monkeypatch, captured, FakeAgent)
+        adapter = _make_routing_adapter({})
+        monkeypatch.setattr(adapter, "_ensure_session_db", lambda: None)
+        monkeypatch.setattr(adapter, "_session_model_override_for", lambda *_: None)
+        monkeypatch.setattr(adapter, "_resolve_provider_runtime", lambda *_args, **_kwargs: None)
+        monkeypatch.setattr("gateway.run._resolve_gateway_model", lambda: "claude-opus-5-5")
+        monkeypatch.setattr("gateway.run._resolve_runtime_agent_kwargs", lambda: {
+            "provider": "openai-codex", "api_key": "sk-codex", "model": "gpt-6-sol-900k",
+            "_fallback_notice": "primary unavailable",
+            "_fallback_entry": {"provider": "openai-codex", "model": "gpt-6-sol-900k"},
+        })
+
+        adapter._create_agent(session_id="s1", session_model="claude-opus-5-5")
+        assert captured["provider"] == "openai-codex"
+        assert captured["model"] == "gpt-6-sol-900k"
+        assert "_fallback_entry" not in captured
+        assert "_fallback_notice" not in captured
+
+        captured.clear()
+        monkeypatch.setattr("gateway.run._resolve_runtime_agent_kwargs", lambda: {
+            "provider": "anthropic", "api_key": "sk-anthropic",
+        })
+        adapter._create_agent(session_id="s1", session_model="gpt-6-sol-900k")
+        assert captured["provider"] == "anthropic"
+        assert captured["model"] == "claude-opus-5-5"
+
+        from hermes_cli.models_detect import model_foreign_to_provider
+        assert model_foreign_to_provider("gpt-6-sol-900k", "anthropic")
+        assert model_foreign_to_provider("claude-opus-5-5", "openai-codex")
+        assert not model_foreign_to_provider("gpt-6-sol-900k", "openai-codex")
+        assert not model_foreign_to_provider("claude-opus-5-5", "anthropic")
+        assert not model_foreign_to_provider("claude-opus-5-5", "openrouter")
+
+        captured.clear()
+        monkeypatch.setattr("gateway.run._resolve_runtime_agent_kwargs", lambda: {
+            "provider": "openai-codex", "api_key": "sk-codex", "model": "gpt-6-sol-900k",
+            "_fallback_entry": {"provider": "openai-codex", "model": "gpt-6-sol-900k"},
+        })
+        monkeypatch.setattr(adapter, "_session_model_override_for", lambda *_: {
+            "provider": "anthropic", "model": "claude-opus-5-5", "api_key": None,
+        })
+        adapter._create_agent(session_id="s1", session_model="claude-opus-5-5")
+        assert captured["provider"] == "openai-codex"
+        assert captured["model"] == "gpt-6-sol-900k"
+
     def test_route_provider_resolves_provider_credentials(self, monkeypatch):
         captured = {}
 

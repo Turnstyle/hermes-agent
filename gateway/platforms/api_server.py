@@ -2237,7 +2237,8 @@ class APIServerAdapter(OpenAICompatRoutesMixin, BasePlatformAdapter):
     def _select_agent_runtime(
         self, runtime_kwargs: Dict[str, Any], model: str, *, requested_model: Optional[str],
         requested_provider: Optional[str], route: Optional[Dict[str, Any]], session_model: Optional[str],
-        confirmed_runtime_lock: bool, gateway_session_key: Optional[str], session_id: Optional[str]) -> tuple:
+        confirmed_runtime_lock: bool, gateway_session_key: Optional[str], session_id: Optional[str],
+        runtime_from_fallback: bool = False) -> tuple:
         """Apply the model/provider precedence chain for one agent (mutates ``runtime_kwargs``):
         confirmed Browser lock > session ``/model`` override > session-persisted model >
         model_routes alias > per-request provider/model > global defaults. A confirmed lock
@@ -2255,18 +2256,33 @@ class APIServerAdapter(OpenAICompatRoutesMixin, BasePlatformAdapter):
         # Model-string precedence (override > session-persisted > global) is owned by
         # hermes_cli.model_switch.resolve_effective_model.
         from hermes_cli.model_switch import resolve_effective_model
+        from hermes_cli.models_detect import model_foreign_to_provider
+        foreign_row_model = bool(session_row_model and model_foreign_to_provider(session_row_model, current_provider))
+        override_runtime_applied = False
+        if session_override:
+            override_provider = _clean_request_string(session_override.get("provider"))
+            if override_provider and override_provider != current_provider and not session_override.get("api_key"):
+                override_model = resolve_effective_model(session_override, None, model)
+                override_runtime_applied = self._apply_provider_runtime(
+                    runtime_kwargs, override_provider, target_model=override_model)
+                if not override_runtime_applied:
+                    logger.warning(
+                        "api_server session /model override unavailable: session=%s provider=%s model=%s",
+                        session_key or "", override_provider, override_model)
+                    session_override = None
         if session_override:
             model = resolve_effective_model(session_override, None, model)
-            self._apply_provider_runtime(
-                runtime_kwargs,
-                _clean_request_string(session_override.get("provider")) or current_provider,
-                target_model=model)
+            if not override_runtime_applied:
+                self._apply_provider_runtime(
+                    runtime_kwargs,
+                    _clean_request_string(session_override.get("provider")) or current_provider,
+                    target_model=model)
             _apply_runtime_agent_overrides(runtime_kwargs, session_override)
             if route or request_model or request_provider:
                 logger.debug(
                     "api_server request selection skipped: session /model override wins for %s",
                     session_key or "")
-        elif session_row_model and not confirmed_runtime_lock:
+        elif session_row_model and not confirmed_runtime_lock and not runtime_from_fallback and not foreign_row_model:
             # A session-persisted raw model (no route alias) is a standing selection that pins
             # this session's turns ahead of per-request body values.
             self._apply_provider_runtime(
@@ -2277,6 +2293,11 @@ class APIServerAdapter(OpenAICompatRoutesMixin, BasePlatformAdapter):
                     "api_server request selection skipped: session-persisted model wins for %s",
                     session_key or "")
         else:
+            if session_row_model and not confirmed_runtime_lock and (runtime_from_fallback or foreign_row_model):
+                logger.info(
+                    "api_server session row model skipped: session=%s row_model=%s provider=%s reason=%s",
+                    session_key or "", session_row_model, current_provider,
+                    "runtime_fallback" if runtime_from_fallback else "foreign_provider")
             # The request's ``model`` selected the route, so its value is the ALIAS — never a
             # model name; a route with no ``model`` key keeps the global default.
             effective_model = (route_model or model) if route is not None else (request_model or model)
@@ -2332,13 +2353,15 @@ class APIServerAdapter(OpenAICompatRoutesMixin, BasePlatformAdapter):
         # must not collide with the ``**runtime_kwargs`` spread).
         model = runtime_kwargs.pop("model", None) or _resolve_gateway_model()
         runtime_kwargs.pop("_fallback_notice", None)  # raw API surface: the switch is already logged
+        fallback_entry = runtime_kwargs.pop("_fallback_entry", None)
         request_reasoning_config = _request_reasoning_config(model_options)
         request_service_tier = _request_service_tier(model_options)
         model, session_override, request_model, request_provider = self._select_agent_runtime(
             runtime_kwargs, model,
             requested_model=requested_model, requested_provider=requested_provider, route=route,
             session_model=session_model, confirmed_runtime_lock=confirmed_runtime_lock,
-            gateway_session_key=gateway_session_key, session_id=session_id)
+            gateway_session_key=gateway_session_key, session_id=session_id,
+            runtime_from_fallback=bool(fallback_entry))
         user_config = _load_gateway_config()
         enabled_toolsets = sorted(_get_platform_tools(user_config, "api_server"))
         # Same gate the messaging gateway and TUI apply: ``display.interim_assistant_messages``
