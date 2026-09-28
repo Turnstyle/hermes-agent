@@ -769,7 +769,7 @@ class TestBuildCodexClient:
             def peek(self):
                 return self.entry
 
-            def select(self, *, model=None):
+            def select(self):
                 return self.entry
 
         pool = _Pool()
@@ -1132,7 +1132,7 @@ class TestGetTextAuxiliaryClient:
             def has_credentials(self):
                 return True
 
-            def select(self, *, model=None):
+            def select(self):
                 return _Entry()
 
         with (
