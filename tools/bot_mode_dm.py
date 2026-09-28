@@ -425,11 +425,33 @@ def _delivery_lock(argv: list[str], *, stdin_file: bool, timeout_seconds: Option
     return acquire_turn_lock(_hermes_root(Path(_default_home())), argv[2], timeout_seconds)
 
 
-def _run_local_turn(argv: list[str], dm_file: str, *, env: Optional[dict[str, str]] = None) -> int:
+def _session_held_cls() -> type:
+    """Lazily-defined, module-cached ``TurnBusyError`` subclass marking an INSTANT SESSION_NOT_OWNED
+    refusal (the target's Bot Chat is held by another surface right now) as distinct from a lock-wait
+    timeout, so ``_run_delivery_locked``'s queue loop can retry the former instead of surfacing the
+    first refusal as a hard failure. Cached so every raise/except pair shares one class identity; the
+    ``tools.bot_relay`` import stays lazy like the rest of this module's Hermes deps."""
+    cls = getattr(_session_held_cls, "_cls", None)
+    if cls is None:
+        from tools.bot_relay import TurnBusyError
+
+        class _SessionHeld(TurnBusyError):
+            pass
+
+        cls = _session_held_cls._cls = _SessionHeld
+    return cls
+
+
+def _run_local_turn(argv: list[str], dm_file: str, *, env: Optional[dict[str, str]] = None,
+                    busy_raises: bool = False) -> int:
     """One Bot Chat turn via ``--query-file`` (plus one policy-gated retry); re-emits
     the transport's streams and returns its exit code. Transient failures re-run the
     same session; a context_overflow re-run lets the retried turn's pre-API compaction
-    compact the transcript first (no fresh session is ever minted). Auth/quota/config never retry."""
+    compact the transcript first (no fresh session is ever minted). Auth/quota/config never retry.
+    ``busy_raises`` turns a SESSION_NOT_OWNED refusal into a raised ``_SessionHeld`` instead of the
+    printed 'target_busy' refusal below — the caller is queueing behind the recipient and wants to
+    retry, not fail on the first attempt (see ``_run_delivery_locked``). Default False keeps this
+    printed refusal byte-identical for every direct/legacy caller."""
 
     def _turn(turn_env=env):
         return subprocess.run([*argv, "--query-file", dm_file], check=False, stdin=subprocess.DEVNULL,
@@ -457,6 +479,8 @@ def _run_local_turn(argv: list[str], dm_file: str, *, env: Optional[dict[str, st
         # never ran — tell the sender plainly instead of leaking a raw lease error.
         # See #100523.
         who = argv[argv.index("-p") + 1] if "-p" in argv[:-1] else "the teammate"
+        if busy_raises:
+            raise _session_held_cls()(who, 0.0)
         print(json.dumps({
             "error": f"Delivery failed: @{who}'s Bot Chat is open on another "
                      "surface right now, so your message was NOT delivered. Try again later.",
@@ -747,6 +771,11 @@ def _run_delivery_locked(argv: list[str], dm_file: str, *, stdin_file: bool,
         # lock attempts, re-probe for a live Bot Chat owner that opened meanwhile and hand off to it.
         started = time.monotonic()
         deadline = started + dm_queue_wait_seconds()
+        # ``home`` is a known local profile: only then is there a mailbox worth queueing behind, so an
+        # instant SESSION_NOT_OWNED refusal from the CLI (another surface holds the live session, not
+        # our own lock) is retried too — not just a lock-wait timeout. Without a resolvable profile
+        # (stdin/peer shapes, or a transport this module doesn't own) that refusal stays a hard failure.
+        can_queue = home is not None
         first = True
         while True:
             if not first:
@@ -760,7 +789,18 @@ def _run_delivery_locked(argv: list[str], dm_file: str, *, stdin_file: bool,
             try:
                 with _delivery_lock(argv, stdin_file=False,
                                     timeout_seconds=remaining if final else _BUSY_SLICE_SECONDS):
-                    return _run_local_turn(argv, dm_file, env=env)
+                    return _run_local_turn(argv, dm_file, env=env, busy_raises=can_queue)
+            except _session_held_cls() as exc:
+                if final:
+                    waited = time.monotonic() - started
+                    print(json.dumps({
+                        "error": f"Delivery failed: @{exc.profile}'s Bot Chat is open on another surface "
+                                 f"right now, so your message was NOT delivered after queuing ~{int(round(waited))}s. "
+                                 "Try again later.",
+                        "reason": "target_busy",
+                    }))
+                    return 1
+                time.sleep(min(_BUSY_SLICE_SECONDS, remaining))
             except TurnBusyError as exc:
                 if final:
                     raise TurnBusyError(exc.profile, time.monotonic() - started) from None
