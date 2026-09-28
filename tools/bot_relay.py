@@ -39,7 +39,7 @@ REPLIES_DIR = "replies"
 LOCKS_DIR = "locks"
 
 # Config fallbacks (real knobs: ``bot_mode.turn_wait_seconds`` / ``bot_mode.envelope_ttl_seconds``).
-TURN_WAIT_SECONDS_FALLBACK = 120
+TURN_WAIT_SECONDS_FALLBACK = 1800  # busy-bot queue: 30 min (Turner 2026-09-28); mirrors config_defaults
 DEFAULT_ENVELOPE_TTL_SECONDS = 900  # older envelopes are refused at drain with 'queued_expired'
 # Per-attempt turn timeout and attempt ceiling for bot_relay.deliver (tui_gateway/methods_bot_relay.py).
 TURN_ATTEMPT_TIMEOUT_SECONDS = 600
