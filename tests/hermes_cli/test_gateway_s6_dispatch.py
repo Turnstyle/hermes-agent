@@ -67,7 +67,9 @@ def test_dispatch_all_handles_partial_failure(
     monkeypatch.setattr(
         "hermes_cli.service_manager.get_service_manager", lambda: rec,
     )
-    assert gw._dispatch_all_via_service_manager_if_s6("stop") is True
+    from hermes_cli.restart_budget import RestartSignal
+
+    assert gw._dispatch_all_via_service_manager_if_s6("stop") is RestartSignal.INITIATED
     # The two successful ones were called; writer raised before recording.
     assert ("stop", "gateway-coder") in rec.calls
     assert ("stop", "gateway-assistant") in rec.calls
@@ -261,7 +263,9 @@ def test_start_registers_a_missing_slot_for_a_real_profile(monkeypatch, tmp_path
     mgr = _UnregisteredRecorder()
     gw = _arrange(monkeypatch, tmp_path, mgr, profile="coder", seed_soul=True)
 
-    assert gw._dispatch_via_service_manager_if_s6("start", "coder") is True
+    from hermes_cli.restart_budget import RestartSignal
+
+    assert gw._dispatch_via_service_manager_if_s6("start", "coder") is RestartSignal.INITIATED
 
     assert mgr.registered == [("coder", False)]
     assert mgr.calls == [("start", "gateway-coder")]
