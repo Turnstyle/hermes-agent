@@ -286,19 +286,35 @@ def quiet_notify_linger_seconds() -> float:
     return ProcessRegistry._oneshot_completion_wait_seconds()
 
 
-def _handoff_refused_notify_events(process_registry, key: str, owns_event, pending: list[dict]) -> bool:
-    """Durably admit refused Bot Chat notices before removing them from this child."""
+def _handoff_refused_notify_events(process_registry, key: str, owns_event) -> bool:
+    """Claim the refused Bot Chat notices, then admit exactly those notices elsewhere."""
     from pathlib import Path
     from hermes_constants import get_hermes_home
-    from tools.process_registry_notifications import format_process_notification
+    from agent.notification_presentation import diagnostic_process_event
     from tools import bot_live_delivery, fleet_message_drain as fmd
-    from tools.async_delegation import claim_event_delivery, complete_event_delivery
+    from tools.async_delegation import claim_event_delivery, complete_event_delivery, defer_completion_delivery
 
+    drained = process_registry.drain_notifications(session_key=key, owns_event=owns_event)
+    claimed = []
+    try:
+        for event, text in drained:
+            claim = claim_event_delivery(event, "cli-quiet")
+            if claim is not None and text:
+                claimed.append((event, text, claim))
+            elif claim:
+                defer_completion_delivery(str(event["delegation_id"]), claim)
+    except Exception:
+        for event, _text, claim in claimed:
+            if claim:
+                defer_completion_delivery(str(event["delegation_id"]), claim)
+        for event, _text in drained:
+            process_registry.completion_queue.put(event)
+        raise
+    if not claimed:
+        return True
     event_ids = [str(event.get("delegation_id") or event.get("id") or hashlib.sha256(
-        json.dumps(event, sort_keys=True, default=str).encode()).hexdigest()) for event in pending]
-    texts = [text for event in pending if (text := format_process_notification(event))]
-    if not texts:
-        return False
+        json.dumps(event, sort_keys=True, default=str).encode()).hexdigest()) for event, _text, _claim in claimed]
+    texts = [text for _event, text, _claim in claimed]
     message = "\n\n".join(texts)
     home = Path(get_hermes_home()).resolve()
     route = None
@@ -306,7 +322,10 @@ def _handoff_refused_notify_events(process_registry, key: str, owns_event, pendi
         owner = bot_live_delivery.find_canonical_live_owner(home)
         if owner is not None:
             delivery_id = hashlib.sha256(json.dumps([key, event_ids], separators=(",", ":")).encode()).hexdigest()
-            record = bot_live_delivery.deliver_to_live_owner(home, owner, message, delivery_id=delivery_id)
+            category = ({"notification_category": "diagnostic"}
+                        if all(diagnostic_process_event(event) for event, _text, _claim in claimed) else {})
+            record = bot_live_delivery.deliver_to_live_owner(
+                home, owner, message, delivery_id=delivery_id, **category)
             if record.get("status") not in ("queued", "claimed", "settled"):
                 raise RuntimeError(f"live-owner delivery was {record.get('status')}")
             route = f"live_owner delivery_id={delivery_id}"
@@ -317,17 +336,21 @@ def _handoff_refused_notify_events(process_registry, key: str, owns_event, pendi
             config = fmd.drain_config_for_home(home)
             if config is not None:
                 bot = fmd.bot_identity(home)
-                message_id = fmd.enqueue_message(bot, bot, message, config=config)
+                message_id = fmd.enqueue_message(bot, bot, message, kind="notify_wake", config=config)
                 route = f"fleet_queue message_id={message_id}"
         except Exception:
             logger.warning("Bot Chat notify fleet-queue handoff failed: event_ids=%s", event_ids, exc_info=True)
     if route is None:
+        for event, _text, claim in claimed:
+            if claim:
+                defer_completion_delivery(str(event["delegation_id"]), claim)
+        for event, _text in drained:
+            process_registry.completion_queue.put(event)
+        logger.warning("Bot Chat notify handoff unavailable; events requeued: event_ids=%s", event_ids)
         return False
     try:
-        for event, _text in process_registry.drain_notifications(session_key=key, owns_event=owns_event):
-            claim = claim_event_delivery(event, "cli-quiet")
-            if claim is not None:
-                complete_event_delivery(event, claim)
+        for event, _text, claim in claimed:
+            complete_event_delivery(event, claim)
     except Exception:
         logger.warning("Bot Chat notify handoff admitted but event cleanup failed: event_ids=%s", event_ids,
                        exc_info=True)
@@ -369,15 +392,9 @@ def continue_quiet_notify_completions(
         with guard as acquired:
             if not acquired:
                 try:
-                    if _handoff_refused_notify_events(process_registry, key, owns_event, pending):
-                        return last
+                    _handoff_refused_notify_events(process_registry, key, owns_event)
                 except Exception:
                     logger.warning("Bot Chat notify handoff could not be prepared", exc_info=True)
-                logger.warning("Bot Chat notify events lost at child exit after lock refusal: "
-                               "event_ids=%s process_ids=%s",
-                               [event.get("delegation_id") or event.get("id") or event.get("session_id")
-                                for event in pending],
-                               [event.get("session_id") for event in pending])
                 return last
             drained = []
             for event, text in process_registry.drain_notifications(session_key=key, owns_event=owns_event):
