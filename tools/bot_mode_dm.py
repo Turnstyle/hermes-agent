@@ -490,8 +490,9 @@ def _run_local_turn(argv: list[str], dm_file: str, *, env: Optional[dict[str, st
         if busy_raises:
             raise _session_held_cls()(who, 0.0)
         print(json.dumps({
-            "error": f"Delivery failed: @{who}'s Bot Chat is open on another "
-                     "surface right now, so your message was NOT delivered. Try again later.",
+            "error": f"Delivery failed: @{who}'s Bot Chat single-owner lock is still held on another "
+                     "surface, so this send did not run. Continue the rest of the card; do not park it "
+                     "for this lock.",
             "reason": "target_busy",
         }))
         return 1
