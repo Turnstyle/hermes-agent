@@ -7,7 +7,7 @@ import json
 import os
 from pathlib import Path
 
-import hermes_yaml as yaml
+import yaml
 
 
 def test_codex_fallback_resolves_pooled_credential_benched_for_other_model(monkeypatch):
