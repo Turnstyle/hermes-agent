@@ -35,7 +35,8 @@ def _run(monkeypatch, capsys, *, base="http://192.168.2.55:8642", raise_on_post=
 
         monkeypatch.setattr(peer_mod, "_request", _request)
     code = peer_mod._peer_dm(SimpleNamespace(json=False), "hello", "mini", None, base, "key")
-    return code, capsys.readouterr().err
+    captured = capsys.readouterr()
+    return code, captured.out + captured.err
 
 
 @pytest.mark.parametrize(
@@ -60,7 +61,7 @@ def test_only_a_timeout_on_an_accepted_turn_is_reported_as_delivered(
     that one bare). A connect-phase timeout, a refusal, or a status code proves nothing arrived."""
     code, err = _run(monkeypatch, capsys, raise_on_post=raise_on_post, raise_on_session=raise_on_session)
 
-    assert code == 1
+    assert code == (0 if "still running" in expected else 1)
     assert expected in err
     assert forbidden not in err
     if "still running" in expected:
@@ -105,8 +106,9 @@ def test_the_real_urllib_stack_raises_the_signatures_the_branch_relies_on(monkey
         for conn in held:
             conn.close()
 
-    assert code == 1
     if phase == "response":
+        assert code == 0
         assert "accepted the message but its turn is still running" in err and "Do NOT resend" in err
     else:
+        assert code == 1
         assert "Could not reach peer" in err and "still running" not in err
