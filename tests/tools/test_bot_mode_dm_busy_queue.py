@@ -142,6 +142,20 @@ def test_busy_queue_uses_delivery_venv_when_store_python_cannot_read_config(tmp_
     assert not dm_file.exists()
 
 
+def test_drain_enqueue_uses_checkout_venv_without_source_launcher(tmp_path, monkeypatch):
+    root = tmp_path / "checkout"
+    (root / "tools").mkdir(parents=True)
+    python = root / "venv" / "bin" / "python"
+    python.parent.mkdir(parents=True)
+    python.write_text("stub\n")
+    monkeypatch.setattr(bot_mode_dm, "__file__", str(root / "tools" / "bot_mode_dm.py"))
+
+    assert bot_mode_dm._drain_enqueue_command("hermes", "sender", tmp_path / "recipient", "dm.txt") == [
+        str(python), "-m", "tools.fleet_message_drain", "enqueue", "--from", "sender",
+        "--to-home", str(tmp_path / "recipient"), "--body-file", "dm.txt",
+    ]
+
+
 def test_nonbusy_delivery_does_not_start_enqueue_subprocess(tmp_path, monkeypatch, capsys):
     home, dm_file = _setup(tmp_path, monkeypatch)
     target = home / "profiles" / "ops"

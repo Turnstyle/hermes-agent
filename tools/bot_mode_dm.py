@@ -716,21 +716,22 @@ def _drain_enqueue_command(cli: str, sender: str, home: Path, dm_file: str,
                            message_id: str | None = None) -> list[str]:
     """Run the Firestore write under the Hermes runtime of the SAME source tree this runner runs from.
 
-    The runner itself runs under the bare store python (no yaml / google.auth). The install venv's
-    python is not usable either: it imports the editable ``environments/*/workspace`` copy, which can
-    lag this checkout and lack ``tools.fleet_message_drain`` entirely. The checkout's own bootstrap
-    launcher (``<root>/.hermes/bin/hermes --run-module``) activates the dependency env and imports this
-    tree; fall back to the delivery CLI's launcher only when that file is absent.
+    The runner itself runs under the bare store python (no yaml / google.auth). Prefer the checkout's
+    bootstrap launcher when present. On v0.21.5 nodes, use the checkout's venv Python directly so
+    ``-m`` imports this source tree. The delivery CLI is the last fallback.
 
     ``message_id`` is the relay envelope id (create-only: an existing doc is not reset to queued).
     """
     source_launcher = Path(__file__).resolve().parents[1] / ".hermes" / "bin" / "hermes"
-    launcher = str(source_launcher) if source_launcher.is_file() else cli
-    argv = [launcher, "--run-module", "tools.fleet_message_drain",
-            "enqueue", "--from", sender, "--to-home", str(home), "--body-file", dm_file]
+    args = ["enqueue", "--from", sender, "--to-home", str(home), "--body-file", dm_file]
     if message_id:
-        argv.extend(["--message-id", message_id])
-    return argv
+        args.extend(["--message-id", message_id])
+    if source_launcher.is_file():
+        return [str(source_launcher), "--run-module", "tools.fleet_message_drain", *args]
+    checkout_python = source_launcher.parents[2] / "venv" / "bin" / "python"
+    if checkout_python.is_file():
+        return [str(checkout_python), "-m", "tools.fleet_message_drain", *args]
+    return [cli, "--run-module", "tools.fleet_message_drain", *args]
 
 
 @contextlib.contextmanager
