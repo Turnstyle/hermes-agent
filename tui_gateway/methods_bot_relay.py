@@ -209,16 +209,24 @@ def _(rid, params: dict, _root=_relay_root, _run=_run_delivery,
             # A live Bot Chat here that advertises no mailbox: land the DM through prompt.submit, the
             # composer's choke point, so role alternation, persistence and streaming behave as a
             # typed message would (#100523). queued=True: a teammate's DM runs as the NEXT turn and
-            # never interrupts or steers a turn in flight (the default busy mode does).
+            # never interrupts or steers a turn in flight (the default busy mode does). Same false-
+            # reply class as the live-owner mailbox branch above (AGY-DELIVERY-STATE-MACHINE.md row
+            # 21): prompt.submit only ACKs the submission — there is no receipt to wait on here, so
+            # the real reply, once that turn runs, is never relayed back through this RPC. Loud and
+            # machine-readable instead of a reply the sender could mistake for the real answer.
             submit_params: dict = {"session_id": live_sid, "text": message, "queued": True}
             if author:
                 submit_params["_turn_author"] = DeliveryAuthor(author)
             submitted = _methods["prompt.submit"](rid, submit_params)
             if "error" in submitted:
                 return submitted
-            reply = f"Delivered into @{resolved}'s open Bot Chat; the reply will appear there."
+            from tools.bot_failure_reasons import REPLY_NOT_RELAYED
+            reply = (f"REPLY NOT RELAYED: @{resolved}'s Bot Chat is still open; your message will run as "
+                     f"its next turn, but the answer will appear only in @{resolved}'s own Bot Chat on "
+                     "this machine, not here. Do not resend.")
             _log_deliver(profile, resolved, "live_sid", want_home)
-            return _ok(rid, {"reply": reply, "delivered_profile": resolved, "requested_profile": profile})
+            return _ok(rid, {"reply": reply, "delivered_profile": resolved, "requested_profile": profile,
+                             "reply_relayed": False, "reason": REPLY_NOT_RELAYED})
 
         def _detail(p) -> str:
             from tools.bot_failure_reasons import turn_failure_text
