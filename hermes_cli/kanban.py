@@ -226,9 +226,29 @@ def _is_delegated_child_cli_mutation(args: argparse.Namespace) -> bool:
             return False
     elif action not in _DELEGATED_CHILD_DENIED_ACTIONS:
         return False
-    from agent.delegation_context import kanban_path_is_fenced
 
-    return kanban_path_is_fenced(kb.kanban_home()) or kanban_path_is_fenced(kb.kanban_db_path())
+    from agent.delegation_context import is_delegated_child_process_context, kanban_path_is_fenced
+
+    fenced = kanban_path_is_fenced(kb.kanban_home()) or kanban_path_is_fenced(kb.kanban_db_path())
+    is_child = is_delegated_child_process_context() or fenced
+
+    # Scoped exception: a worker may reassign its OWN card to support live handbacks.
+    # It must verify scrubbed owned_kanban_task() or dispatcher-recorded claim,
+    # and NEVER allow --reclaim from a delegated child context.
+    if action == "reassign":
+        if getattr(args, "reclaim", False) and is_child:
+            return True  # Never allow --reclaim from a delegated child
+
+        target_task = (getattr(args, "task_id", None) or "").strip()
+        if target_task:
+            try:
+                with kbc.connect_closing() as conn:
+                    if kb.is_task_claimed_by_caller(conn, target_task):
+                        return False
+            except Exception:
+                pass
+
+    return is_child
 
 
 def _joined_words(words) -> Optional[str]:
@@ -607,13 +627,30 @@ def _cmd_reclaim(args: argparse.Namespace) -> int:
 def _cmd_reassign(args: argparse.Namespace) -> int:
     profile = _none_profile(args.profile)
     reclaim = bool(getattr(args, "reclaim", False))
-    with kbc.connect_closing() as conn:
-        ok = kb.reassign_task(conn, args.task_id, profile, reclaim_first=reclaim, reason=getattr(args, "reason", None))
-    return _ok_or_err(
-        ok,
-        f"cannot reassign {args.task_id} (unknown id, or still running — pass --reclaim to release first)",
-        f"Reassigned {args.task_id} to {profile or '(unassigned)'}" + (" (claim reclaimed)" if reclaim else ""),
-    )
+    from agent.delegation_context import is_delegated_child_process_context, kanban_path_is_fenced
+
+    fenced = kanban_path_is_fenced(kb.kanban_home()) or kanban_path_is_fenced(kb.kanban_db_path())
+    if reclaim and (is_delegated_child_process_context() or fenced):
+        return _err("kanban: delegate_task child contexts cannot reclaim tasks")
+
+    try:
+        with kbc.connect_closing() as ro_conn:
+            is_own_card = kb.is_task_claimed_by_caller(ro_conn, args.task_id)
+    except Exception:
+        is_own_card = False
+
+    token = kb._OWN_TASK_REASSIGN_ACTIVE.set(True) if is_own_card else None
+    try:
+        with kbc.connect_closing() as conn:
+            ok = kb.reassign_task(conn, args.task_id, profile, reclaim_first=reclaim, reason=getattr(args, "reason", None))
+        return _ok_or_err(
+            ok,
+            f"cannot reassign {args.task_id} (unknown id, or still running — pass --reclaim to release first)",
+            f"Reassigned {args.task_id} to {profile or '(unassigned)'}" + (" (claim reclaimed)" if reclaim else ""),
+        )
+    finally:
+        if token is not None:
+            kb._OWN_TASK_REASSIGN_ACTIVE.reset(token)
 
 
 def _rows_by_task(conn, table: str, ids: list[str]) -> dict[str, list]:

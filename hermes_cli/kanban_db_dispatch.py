@@ -130,6 +130,9 @@ class DispatchResult:
     """Unassigned task ids that had ``kanban.default_assignee`` applied this
     tick before spawning, so telemetry/CLI/dashboard can show the dispatcher
     acting on the fallback rule rather than explicit assignments."""
+    auto_rerouted_builder: list[tuple[str, str, str]] = field(default_factory=list)
+    """``(task_id, decompose_only_profile, target_builder)`` execution cards
+    re-routed from a decompose-only profile to the node builder."""
     skipped_nonspawnable: list[str] = field(default_factory=list)
     """Ready task ids whose assignee names a control-plane lane (e.g. a Claude
     Code terminal like ``orion-cc``), not a Hermes profile. Expected steady-state
@@ -2145,6 +2148,41 @@ def _call_spawn_fn(spawn_fn, task: Task, workspace: str, board: Optional[str]) -
         return spawn_fn(task, workspace)
 
 
+_DECOMPOSE_TITLE_PREFIXES = (
+    "decompose",
+    "decomposition",
+    "break down",
+    "breakdown",
+    "triage",
+    "specify",
+    "specification",
+    "spec out",
+    "plan backlog",
+)
+
+
+def is_execution_card_for_decomposer(title: Optional[str], body: Optional[str] = None) -> bool:
+    """Whether a card assigned to a decompose-only profile is an execution/build card.
+
+    Decomposition/planning-only profiles (e.g. shld-tasker) only perform task breakdown,
+    specification, and triage. Any card that does not explicitly ask for decomposition or
+    planning is treated as an execution card that must be routed to a builder profile.
+    """
+    text = (title or "").strip()
+    if not text:
+        return False
+    lower = text.lower()
+    for prefix in _DECOMPOSE_TITLE_PREFIXES:
+        if lower.startswith(prefix) or f"[{prefix}]" in lower or f"({prefix})" in lower:
+            return False
+
+    if "decompose" in lower or "break down" in lower or "triage" in lower:
+        if not lower.startswith(("build ", "implement ", "fix ", "create ", "make ", "add ", "setup ", "refactor ")):
+            return False
+
+    return True
+
+
 def _dispatch_lane_task(
     conn: sqlite3.Connection,
     row: sqlite3.Row,
@@ -2159,12 +2197,55 @@ def _dispatch_lane_task(
     spawn_fn,
     per_profile_cap: Optional[int],
     per_profile_running: dict[str, int],
+    default_assignee: Optional[str] = None,
 ) -> bool:
     """Guard, claim, resolve the workspace and spawn one ready/review row.
     Returns True when a spawn slot was consumed (real or ``dry_run``); every
     skip is recorded on ``result``.
     """
     task_id = row["id"]
+
+    # Re-route check for decompose-only profiles:
+    # A decompose-only profile (such as shld-tasker) must never receive execution/build cards.
+    # If one lands here, re-route it to the node builder with an audit comment instead of parking.
+    from hermes_cli.profiles import is_decompose_only_profile, resolve_node_builder
+    row_keys = row.keys() if hasattr(row, "keys") else ()
+    row_title = row["title"] if "title" in row_keys else None
+    row_body = row["body"] if "body" in row_keys else None
+    row_tenant = row["tenant"] if "tenant" in row_keys else None
+    if row_title is None and "title" not in row_keys:
+        try:
+            t_row = conn.execute("SELECT title, body, tenant FROM tasks WHERE id = ?", (task_id,)).fetchone()
+            if t_row:
+                row_title = t_row["title"]
+                row_body = t_row["body"]
+                row_tenant = t_row["tenant"]
+        except Exception:
+            pass
+
+    if is_decompose_only_profile(assignee) and is_execution_card_for_decomposer(row_title, row_body):
+        target_builder = resolve_node_builder(tenant=row_tenant, fallback=default_assignee)
+        if target_builder != assignee:
+            _kb._log.info(
+                "kanban: re-routing execution card %s from decompose-only profile %r to node builder %r",
+                task_id, assignee, target_builder,
+            )
+            result.auto_rerouted_builder.append((task_id, assignee, target_builder))
+            if not dry_run:
+                reassign_comment = (
+                    f"[auto-reroute] Re-routed execution card from decompose-only profile "
+                    f"'{assignee}' to node builder '{target_builder}'."
+                )
+                try:
+                    _kb.reassign_task(conn, task_id, target_builder, reclaim_first=True)
+                    _kb.add_comment(conn, task_id, "kanban-dispatcher", reassign_comment)
+                except Exception as exc:
+                    _kb._log.error(
+                        "kanban: failed to re-route execution card %s to builder %r: %s",
+                        task_id, target_builder, exc,
+                    )
+            return False
+
     # Non-profile assignees (control-plane lanes that pull via ``claim_task``)
     # would fail ``hermes -p <assignee>`` at startup and loop ready→crash→ready
     # forever. Bucketed apart from skipped_unassigned: the operator cannot fix
@@ -2382,7 +2463,7 @@ def _tick_spawn_budget(
 def _lane_rows(conn: sqlite3.Connection, status: str) -> list[sqlite3.Row]:
     """Unclaimed rows of one lane in dispatch order."""
     return conn.execute(
-        "SELECT id, assignee FROM tasks "
+        "SELECT id, assignee, title, body, tenant FROM tasks "
         f"WHERE status = '{status}' AND claim_lock IS NULL "
         "ORDER BY priority DESC, created_at ASC"
     ).fetchall()
@@ -2503,12 +2584,13 @@ def _dispatch_once_locked(
         per_profile_cap=per_profile_cap, per_profile_running=per_profile_running,
     ):
         ready_budget = max(spawn_budget - 1, 0)
+    default_assignee = _resolve_default_assignee(default_assignee)
     lane_kwargs: dict[str, Any] = dict(
         dry_run=dry_run, ttl_seconds=ttl_seconds, board=board,
         failure_limit=failure_limit, spawn_fn=spawn_fn,
         per_profile_cap=per_profile_cap, per_profile_running=per_profile_running,
+        default_assignee=default_assignee,
     )
-    default_assignee = _resolve_default_assignee(default_assignee)
     spawned = 0
     for row in ready_rows:
         if ready_budget is not None and spawned >= ready_budget:

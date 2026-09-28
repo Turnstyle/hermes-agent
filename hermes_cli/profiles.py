@@ -14,7 +14,7 @@ import threading
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Optional, Tuple, Union
 
 from hermes_cli.archive_safe import archive_root_dirs, make_targz, normalize_archive_parts, safe_extract_targz
 from hermes_constants import (
@@ -85,7 +85,8 @@ NO_BUNDLED_SKILLS_MARKER = ".no-bundled-skills"
 # ``profile.yaml`` ``role`` values. A role grants backend capabilities (the setup toolset), so
 # only the backend writes one, and a copy of a profile (clone-all, import) never inherits it.
 SETUP_ROLE = "setup"
-PROFILE_ROLES = frozenset({SETUP_ROLE})
+DECOMPOSE_ROLE = "decompose_only"
+PROFILE_ROLES = frozenset({SETUP_ROLE, DECOMPOSE_ROLE, "decomposer"})
 
 # Header seeded into a profile's empty .env so it owns a credentials file from day one.
 _PLACEHOLDER_ENV = (
@@ -901,6 +902,101 @@ def drop_profile_role(profile_dir: Path) -> None:
     existing.pop("role")
     from utils import atomic_yaml_write
     atomic_yaml_write(path, existing, sort_keys=False)
+
+
+def _is_decompose_only_description(desc: str) -> bool:
+    if not desc:
+        return False
+    d = desc.lower()
+    return (
+        "decomposition-only" in d
+        or "decompose-only" in d
+        or "decomposition only" in d
+        or ("decomposes" in d and ("planning only" in d or "never child execution" in d))
+    )
+
+
+def is_decompose_only_profile(profile_or_name: Union[ProfileInfo, str, None]) -> bool:
+    """Whether a profile is designated as decomposition/planning-only (never for execution/build tasks)."""
+    if not profile_or_name:
+        return False
+    if isinstance(profile_or_name, str):
+        name = profile_or_name.strip()
+        if not name:
+            return False
+        try:
+            p = get_profile(name)
+        except Exception:
+            p = None
+        if p is not None:
+            if getattr(p, "role", None) in (DECOMPOSE_ROLE, "decomposer"):
+                return True
+            desc = getattr(p, "description", None) or ""
+            return _is_decompose_only_description(desc)
+        try:
+            p_dir = _get_profiles_root() / name
+            meta = read_profile_meta(p_dir)
+            if meta.get("role") in (DECOMPOSE_ROLE, "decomposer"):
+                return True
+            return _is_decompose_only_description(meta.get("description") or "")
+        except Exception:
+            return False
+
+    if getattr(profile_or_name, "role", None) in (DECOMPOSE_ROLE, "decomposer"):
+        return True
+    desc = getattr(profile_or_name, "description", None) or ""
+    return _is_decompose_only_description(desc)
+
+
+def resolve_node_builder(
+    tenant: Optional[str] = None,
+    *,
+    fallback: Optional[str] = None,
+) -> str:
+    """Resolve the maker/builder profile for a given node/tenant.
+    On Sheldon: shld-bot-maker (or shld-king).
+    General nodes: look for installed profiles matching <node>-builder, <node>-bot-maker,
+    *-maker, *-builder, or with 'builder'/'maker' in their description.
+    Falls back to fallback (or default).
+    """
+    node = (tenant or "").strip().lower()
+    if node in ("sheldon", "shld"):
+        for candidate in ("shld-bot-maker", "shld-king"):
+            if profile_exists(candidate):
+                return candidate
+
+    try:
+        profiles = list_profiles()
+    except Exception:
+        profiles = []
+
+    if node:
+        for p in profiles:
+            p_name = p.name.lower()
+            if p_name.startswith(node) and ("builder" in p_name or "maker" in p_name):
+                if not is_decompose_only_profile(p):
+                    return p.name
+
+    for p in profiles:
+        p_name = p.name.lower()
+        if "bot-maker" in p_name or "maker" in p_name or "builder" in p_name:
+            if not is_decompose_only_profile(p):
+                return p.name
+
+    for p in profiles:
+        desc = (p.description or "").lower()
+        if ("maker" in desc or "builder" in desc) and not is_decompose_only_profile(p):
+            return p.name
+
+    if fallback and profile_exists(fallback) and not is_decompose_only_profile(fallback):
+        return fallback
+    try:
+        active = get_active_profile_name()
+        if active and not is_decompose_only_profile(active):
+            return active
+    except Exception:
+        pass
+    return "default"
 
 
 def format_profile_label(name: str, display_name: Optional[str]) -> str:

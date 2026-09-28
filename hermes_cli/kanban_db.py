@@ -132,6 +132,87 @@ _IS_WINDOWS = sys.platform == "win32"
 KANBAN_ATTACHMENT_MAX_BYTES = 25 * 1024 * 1024  # one cap for dashboard, tools and CLI
 
 
+_OWN_TASK_REASSIGN_ACTIVE: ContextVar[bool] = ContextVar(
+    "kanban_own_task_reassign_active", default=False
+)
+
+
+def _is_pid_in_caller_tree(worker_pid: int | None) -> bool:
+    """Check if worker_pid is the current process or an ancestor in the process tree."""
+    if not worker_pid:
+        return False
+    try:
+        w_pid = int(worker_pid)
+    except (TypeError, ValueError):
+        return False
+    if w_pid <= 1:
+        return False
+
+    cur = os.getpid()
+    if cur == w_pid:
+        return True
+
+    ppid = os.getppid()
+    if ppid == w_pid:
+        return True
+
+    if not sys.platform.startswith("win"):
+        visited = {cur}
+        cur = ppid
+        while cur > 1 and cur not in visited:
+            visited.add(cur)
+            if cur == w_pid:
+                return True
+            try:
+                if sys.platform == "linux" and os.path.exists(f"/proc/{cur}/stat"):
+                    with open(f"/proc/{cur}/stat", "r") as f:
+                        fields = f.read().split()
+                        cur = int(fields[3])
+                else:
+                    res = subprocess.run(
+                        ["ps", "-o", "ppid=", "-p", str(cur)],
+                        capture_output=True, text=True, check=False, timeout=2,
+                    )
+                    if res.returncode == 0 and res.stdout.strip():
+                        cur = int(res.stdout.strip())
+                    else:
+                        break
+            except Exception:
+                break
+    return False
+
+
+def is_task_claimed_by_caller(conn: sqlite3.Connection, task_id: str) -> bool:
+    """Return True if task_id has an active claim belonging to this caller.
+
+    Verifies via:
+    1. Scrubbed owned_kanban_task() identity (from agent.delegation_context).
+       This returns empty for delegated child contexts, so raw env var spoofing fails closed.
+    2. Active dispatcher-recorded claim in SQLite: task has status='running', claim_lock is not null,
+       and worker_pid matches the caller or an ancestor in the caller's process tree.
+    """
+    from agent.delegation_context import owned_kanban_task
+    task_id = (task_id or "").strip()
+    if not task_id:
+        return False
+
+    scrubbed = owned_kanban_task()
+    if scrubbed and scrubbed == task_id:
+        return True
+
+    try:
+        row = conn.execute(
+            "SELECT status, claim_lock, worker_pid FROM tasks WHERE id = ?", (task_id,)
+        ).fetchone()
+        if not row:
+            return False
+        if row["status"] != "running" or row["claim_lock"] is None or not row["worker_pid"]:
+            return False
+        return _is_pid_in_caller_tree(row["worker_pid"])
+    except Exception:
+        return False
+
+
 def _assert_not_delegated_child_mutation(path: "str | Path | None" = None) -> None:
     """Reject Kanban mutations from ``delegate_task`` child contexts.
 
@@ -144,6 +225,8 @@ def _assert_not_delegated_child_mutation(path: "str | Path | None" = None) -> No
     from agent.delegation_context import kanban_path_is_fenced
 
     if kanban_path_is_fenced(kanban_home() if path is None else path):
+        if _OWN_TASK_REASSIGN_ACTIVE.get():
+            return
         raise PermissionError("delegate_task child contexts cannot mutate Kanban tasks or boards")
 
 
@@ -231,7 +314,7 @@ def notify_task_updated(
 _TICK_ACTIVITY_FIELDS = (
     "spawned", "reclaimed", "promoted", "reconciled_orphans", "reaped_terminal_workers", "crashed", "stale",
     "timed_out", "auto_blocked", "rate_limited", "profile_busy", "auto_assigned_default",
-    "respawn_guarded", "skipped_per_profile_capped", "skipped_unassigned",
+    "auto_rerouted_builder", "respawn_guarded", "skipped_per_profile_capped", "skipped_unassigned",
     "skipped_nonspawnable",
 )
 
@@ -2597,16 +2680,37 @@ def reassign_task(
 ) -> bool:
     """Reassign (None unassigns); a running task is refused unless
     ``reclaim_first`` releases its claim — the "this profile's model is broken" path."""
-    if reclaim_first:
-        # Safe to call even if nothing to reclaim.
-        reclaim_task(conn, task_id, reason=reason or "reassign")
-    # assign_task handles its own txn + the still-running guard.
+    from agent.delegation_context import is_delegated_child_process_context, kanban_path_is_fenced
+
+    fenced = kanban_path_is_fenced(kanban_home()) or is_delegated_child_process_context()
+    if reclaim_first and fenced:
+        raise PermissionError("delegate_task child contexts cannot reclaim tasks")
+
+    is_own_card = is_task_claimed_by_caller(conn, task_id)
+    token = _OWN_TASK_REASSIGN_ACTIVE.set(True) if (is_own_card and not _OWN_TASK_REASSIGN_ACTIVE.get()) else None
     try:
-        return assign_task(conn, task_id, profile)
-    except RuntimeError:
-        # Task is still running and reclaim_first was False; caller
-        # needs to decide whether to retry with reclaim.
-        return False
+        if is_own_card and not reclaim_first:
+            row = conn.execute("SELECT status, claim_lock FROM tasks WHERE id = ?", (task_id,)).fetchone()
+            if row and row["status"] == "running" and row["claim_lock"] is not None:
+                with write_txn(conn):
+                    conn.execute(
+                        "UPDATE tasks SET status = 'ready', claim_lock = NULL, claim_expires = NULL, "
+                        "worker_pid = NULL, worker_started_at = NULL WHERE id = ?",
+                        (task_id,),
+                    )
+        if reclaim_first:
+            # Safe to call even if nothing to reclaim.
+            reclaim_task(conn, task_id, reason=reason or "reassign")
+        # assign_task handles its own txn + the still-running guard.
+        try:
+            return assign_task(conn, task_id, profile)
+        except RuntimeError:
+            # Task is still running and reclaim_first was False; caller
+            # needs to decide whether to retry with reclaim.
+            return False
+    finally:
+        if token is not None:
+            _OWN_TASK_REASSIGN_ACTIVE.reset(token)
 
 
 def _verify_created_cards(

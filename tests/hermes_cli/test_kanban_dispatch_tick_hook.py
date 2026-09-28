@@ -19,7 +19,6 @@ import pytest
 from hermes_cli import kanban_db as kb
 from hermes_cli import kanban_db_connect as kbc
 from hermes_cli import kanban_db_dispatch as kbd
-from hermes_cli.plugins import get_plugin_manager
 
 
 @pytest.fixture
@@ -35,6 +34,7 @@ def kanban_home(tmp_path, monkeypatch):
 @pytest.fixture
 def captured_ticks(monkeypatch):
     """Register a capturing callback for the dispatch tick hook."""
+    from hermes_cli.plugins import get_plugin_manager
     mgr = get_plugin_manager()
     events: list[dict] = []
     saved = {k: list(v) for k, v in mgr._hooks.items()}
@@ -70,6 +70,7 @@ def test_tick_hook_fires_after_dispatch_lock_released(kanban_home):
     descriptors within one process, so this fails if the hook still fires
     while ``dispatch_once`` holds the lock."""
     db_path = kb.kanban_db_path()
+    from hermes_cli.plugins import get_plugin_manager
     mgr = get_plugin_manager()
     saved = {k: list(v) for k, v in mgr._hooks.items()}
     acquired: list[bool] = []
@@ -92,6 +93,7 @@ def test_tick_hook_fires_after_dispatch_lock_released(kanban_home):
 
 def test_misbehaving_subscriber_does_not_break_dispatcher(kanban_home):
     """A hook callback that raises must not break the dispatch tick."""
+    from hermes_cli.plugins import get_plugin_manager
     mgr = get_plugin_manager()
     saved = {k: list(v) for k, v in mgr._hooks.items()}
 
