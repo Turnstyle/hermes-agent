@@ -734,16 +734,24 @@ def test_cleanup_bot_relay_artifacts_sweeps_stale_plaintext(tmp_path, monkeypatc
     )
     base = bot_relay.relay_root(tmp_path)
     stale_reply = bot_relay.write_reply(tmp_path, stale_env["id"], reply="done")
+    stale_body = base / bot_relay.OUTBOX_DIR / f"{stale_env['id']}.json"
+    stale_meta = base / bot_relay.OUTBOX_DIR / f"{stale_env['id']}.meta.json"
+    stale_reply_meta = stale_reply.parent / f"{stale_env['id']}.reply.meta.json"
+    fresh_body = base / bot_relay.OUTBOX_DIR / f"{fresh_env['id']}.json"
+    fresh_meta = base / bot_relay.OUTBOX_DIR / f"{fresh_env['id']}.meta.json"
     old = _time.time() - bot_relay.STALE_AFTER_SECONDS - 1
-    _os.utime(base / bot_relay.OUTBOX_DIR / f"{stale_env['id']}.json", (old, old))
+    _os.utime(stale_body, (old, old))
     _os.utime(stale_reply, (old, old))
 
     removed = bot_relay.cleanup_bot_relay_artifacts()
 
-    assert removed == 2
-    assert not (base / bot_relay.OUTBOX_DIR / f"{stale_env['id']}.json").exists()
+    assert removed == 4  # Two stale payloads and their two metadata sidecars.
+    assert not stale_body.exists()
+    assert not stale_meta.exists()
     assert not stale_reply.exists()
-    assert (base / bot_relay.OUTBOX_DIR / f"{fresh_env['id']}.json").exists()
+    assert not stale_reply_meta.exists()
+    assert fresh_body.exists()
+    assert fresh_meta.exists()
 
 
 def test_cleanup_bot_relay_artifacts_missing_dir_is_zero(tmp_path, monkeypatch):
