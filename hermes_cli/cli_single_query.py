@@ -63,7 +63,13 @@ def _drain_quiet_bot_chat(cli, history) -> None:
                 return  # Let a later turn retry this doc; do not spend the whole cap on one failure.
         except Exception as exc:
             try:
-                fmd.record_error(store, claimed, str(exc), max_attempts=config.max_attempts)
+                # Mirror tui_gateway recover(): an uncertain mark_read leaves pending_fields at
+                # status=read; reconcile first so record_error requeues instead of re-committing a
+                # non-terminal "read" that no future drain would ever query.
+                pending = claimed.pending_fields
+                if not (pending and pending.get("status") == "read"
+                        and not fmd.reconcile_claim(store, claimed)):
+                    fmd.record_error(store, claimed, str(exc), max_attempts=config.max_attempts)
             except Exception:
                 logger.warning("fleet message drain: could not settle %s", claimed.doc_id, exc_info=True)
             raise

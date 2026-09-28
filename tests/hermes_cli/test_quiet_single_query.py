@@ -68,6 +68,53 @@ def test_bot_chat_quiet_turn_drains_one_message_without_changing_stdout(monkeypa
     assert capsys.readouterr().out == "first reply\n"
 
 
+def test_uncertain_mark_read_requeues_instead_of_stranding_at_read(monkeypatch, capsys, tmp_path):
+    """Checker HIGH (VERDICT-CLAUDE): mark_read commits, then the write reply is lost. The -Q drain
+    must reconcile before record_error, so the doc goes back to queued, not a stuck 'read'."""
+    from hermes_cli import quiet_single_query as qsq
+
+    home = tmp_path / "profiles" / "ops"
+    home.mkdir(parents=True)
+    monkeypatch.setenv("HERMES_HOME", str(home))
+    monkeypatch.setattr(fmd, "drain_config", lambda: fmd.DrainConfig(target="emulator", emulator_host="unused"))
+    now = fmd.utcnow()
+    fields = {"message_id": "m1", "from": "sender", "to": "ops", "kind": "dm", "body": "hello",
+              "status": "queued", "attempts": 0, "created_at": fmd.rfc3339(now),
+              "updated_at": fmd.rfc3339(now), "expires_at": fmd.rfc3339(now + datetime.timedelta(hours=24))}
+
+    class Store:
+        version = 0
+
+        def query_queued(self, to, limit):
+            return [fmd.Row("m1", dict(fields), str(self.version))] if fields["status"] == "queued" else []
+
+        def get(self, doc_id):
+            return fmd.Row("m1", dict(fields), str(self.version))
+
+        def update(self, doc_id, changes, update_time):
+            assert update_time == str(self.version)
+            fields.update(changes)
+            self.version += 1
+            if changes.get("status") == "read":
+                raise TimeoutError("write committed, reply lost")
+            return str(self.version)
+
+    monkeypatch.setattr(fmd, "store_for", lambda _: Store())
+    monkeypatch.setattr(qsq, "continue_quiet_notify_completions", lambda *a, **kw: None)
+    turns = []
+
+    def run_conversation(**kwargs):
+        turns.append(kwargs)
+        return {"final_response": "first reply", "messages": []}
+
+    agent = SimpleNamespace(run_conversation=run_conversation, session_id="s-1", _session_title_hint="Bot Chat")
+    with pytest.raises(SystemExit) as exc:
+        cli._run_quiet_single_query(SimpleNamespace(agent=agent, conversation_history=[], session_id="s-1"), "first")
+    assert exc.value.code == 0 and len(turns) == 1
+    assert fields["status"] == "queued" and fields["attempts"] == 1
+    assert capsys.readouterr().out == "first reply\n"
+
+
 def _quiet_turn(monkeypatch, history, marker):
     monkeypatch.delenv("HERMES_KANBAN_GOAL_MODE", raising=False)
     monkeypatch.delenv("HERMES_KANBAN_TASK", raising=False)
