@@ -496,6 +496,36 @@ def test_deliver_fast_acks_a_held_session(home, monkeypatch):
     assert len(calls) == 1
 
 
+def test_deliver_waits_behind_a_held_session_when_recipient_drain_is_off(home, monkeypatch):
+    """Drain off: no fleet write and no target_busy bounce; the DM retries behind the held turn
+    within turn_wait_seconds and returns the recipient's real reply."""
+    (home / "profiles" / "ops" / "config.yaml").write_text(
+        "fleet_messages:\n  drain_on_turn_end: false\n", encoding="utf-8")
+    from tools import bot_mode_dm
+
+    monkeypatch.setattr(bot_mode_dm, "_BUSY_SLICE_SECONDS", 0.05)
+    monkeypatch.setattr(bot_relay, "turn_wait_seconds", lambda: 30.0)
+    calls = []
+
+    class _Proc:
+        def __init__(self, returncode, stdout="", stderr=""):
+            self.returncode, self.stdout, self.stderr = returncode, stdout, stderr
+
+    def _fake_run(argv, **kwargs):
+        calls.append(list(argv))
+        if len(calls) <= 2:  # the recipient's current turn still holds the chat
+            return _Proc(1, stderr=_REFUSAL_STDERR)
+        return _Proc(0, stdout="pong after your turn")
+
+    enqueued = []
+    monkeypatch.setattr("hermes_cli.quiet_single_query.run_reported_turn", _fake_run)
+    monkeypatch.setattr("tools.fleet_message_enqueue.enqueue_busy_dm", lambda **kw: enqueued.append(kw))
+    out = _result(srv._methods["bot_relay.deliver"](1, {"profile": "ops", "message": "ping"}))
+    assert out["reply"] == "pong after your turn"
+    assert out["delivered_profile"] == "ops"
+    assert len(calls) == 3 and not enqueued
+
+
 def test_deliver_does_not_claim_queued_when_the_registry_write_fails(home, monkeypatch):
     """A failed fleet write is an immediate target_busy, not a turn_wait_seconds hold."""
     from tools.fleet_message_enqueue import FleetEnqueueError

@@ -244,24 +244,26 @@ def _(rid, params: dict, _root=_relay_root, _run=_run_delivery,
         try:
             with os.fdopen(fd, "w", encoding="utf-8") as f:
                 f.write(message)
-            # One short lock probe. A busy target is written to fleet_messages_v1 and
-            # acked in under 5s; the recipient drain delivers it. Not an 1800s wait.
-            from tools.bot_mode_dm import _FAST_ACK_SECONDS, refused_not_owned
+            # One short lock probe. A busy target whose recipient drains fleet_messages_v1 is written
+            # there and acked in under 5s; the recipient drain delivers it. A recipient that does not
+            # drain keeps the queue-behind retry: ONE shared deadline (bot_mode.turn_wait_seconds)
+            # covers both the lock wait and retries behind a SESSION_NOT_OWNED refusal, so the two
+            # waits never stack (see tools/bot_mode_dm.py::_run_delivery_locked, same rule).
+            from tools.bot_mode_dm import _BUSY_SLICE_SECONDS, _FAST_ACK_SECONDS, refused_not_owned
             from tools.bot_relay import TurnBusyError, relay_queued_sender_text, turn_wait_seconds
             from tools.fleet_message_drain import recipient_drain_enabled
             from tools.fleet_message_enqueue import FleetEnqueueError, enqueue_busy_dm
 
             relay_envelope_id = str(params.get("envelope_id") or "").strip() or None
 
-            def _fast_ack_busy() -> dict:
+            def _fast_ack_busy() -> dict | None:
+                """The queued ack, or None when the recipient does not drain (the caller waits instead)."""
                 sender = "sender"
                 if isinstance(author, dict):
                     sender = str(author.get("name") or author.get("id") or sender)
                 recipient_home = _profile_home(resolved)
                 if not recipient_drain_enabled(resolved, profile_home=recipient_home):
-                    return _err(rid, 5092,
-                                f"delivery turn failed: @{resolved}'s Bot Chat is busy and fleet drain is disabled",
-                                data={"reason": "target_busy"})
+                    return None
                 try:
                     body = Path(tmp).read_text(encoding="utf-8")
                     enqueue_kwargs = {"sender": sender, "recipient": resolved, "body": body}
@@ -276,8 +278,8 @@ def _(rid, params: dict, _root=_relay_root, _run=_run_delivery,
                                  "status": "queued", "delivered_profile": resolved,
                                  "requested_profile": profile, "reply_relayed": False})
 
-            try:
-                with acquire_turn_lock(root, resolved, min(_FAST_ACK_SECONDS, turn_wait_seconds())):
+            def _attempt(lock_timeout: float):
+                with acquire_turn_lock(root, resolved, lock_timeout):
                     proc = _run(resolved, tmp, turn_env)
                     # Team 1: the refusal marker can ride the combined turn text, not stderr alone.
                     if proc.returncode != 0 and not refused_not_owned(_detail(proc)):
@@ -291,11 +293,35 @@ def _(rid, params: dict, _root=_relay_root, _run=_run_delivery,
                             # The failed attempt already persisted the DM; the re-run resumes that row.
                             from tools.bot_relay import retry_turn_env
                             proc = _run(resolved, tmp, retry_turn_env(turn_env))
-                    # Busy is decided on the proc we will actually stop on, including a retry.
-                    if proc.returncode != 0 and refused_not_owned(_detail(proc)):
-                        return _fast_ack_busy()
+                    return proc
+
+            started = time.monotonic()
+            deadline = started + turn_wait_seconds()
+            try:
+                proc = _attempt(min(_FAST_ACK_SECONDS, turn_wait_seconds()))
+                # Busy is decided on the proc we will actually stop on, including a retry.
+                held = proc.returncode != 0 and refused_not_owned(_detail(proc))
             except TurnBusyError:
-                return _fast_ack_busy()
+                held = False
+                proc = None
+            if proc is None or held:
+                queued = _fast_ack_busy()
+                if queued is not None:
+                    return queued
+                while proc is None or held:
+                    remaining = max(0.0, deadline - time.monotonic())
+                    if held and remaining <= 0:
+                        waited = time.monotonic() - started
+                        return _err(rid, 5092,
+                            f"delivery turn failed: @{resolved}'s Bot Chat is open on another surface "
+                            f"right now; NOT delivered after queuing ~{int(round(waited))}s.",
+                            data={"reason": "target_busy"})
+                    if held:
+                        # Outside the lock, so a live owner or another delivery can still get in.
+                        time.sleep(min(_BUSY_SLICE_SECONDS, remaining))
+                    # A lock wait that outlives the deadline raises TurnBusyError -> target_busy below.
+                    proc = _attempt(max(0.0, deadline - time.monotonic()))
+                    held = proc.returncode != 0 and refused_not_owned(_detail(proc))
         finally:
             with contextlib.suppress(OSError):
                 os.unlink(tmp)

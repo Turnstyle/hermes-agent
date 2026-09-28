@@ -1,4 +1,5 @@
-"""Busy DM fast-ack is honest: queued only when the recipient's turn-end drain is enabled."""
+"""Busy DM fast-ack is honest: queued only when the recipient's turn-end drain is enabled. A recipient
+that does not drain keeps the queue-behind wait: the message runs after the current turn, never bounces."""
 
 from __future__ import annotations
 
@@ -65,11 +66,28 @@ def test_busy_dm_is_queued_only_when_recipient_drain_is_enabled(tmp_path, monkey
     assert payload["message_id"] == "fm-test-id"
     assert payload["reply"] == queued_ack("fm-test-id")
 
-    enqueued.clear()
-    dm_file.write_text("hi", encoding="utf-8")
+
+
+def test_busy_dm_waits_behind_the_turn_when_recipient_drain_is_off(tmp_path, monkeypatch, capsys):
+    """Drain off: no fleet write, no target_busy bounce; the DM runs once the held turn ends."""
+    home, ops, dm_file = _setup(tmp_path, monkeypatch)
     (ops / "config.yaml").write_text("fleet_messages:\n  drain_on_turn_end: false\n", encoding="utf-8")
-    rc = bot_mode_dm._run_delivery(argv, str(dm_file), stdin_file=False, profile_home=ops)
-    assert rc == 1
-    assert not enqueued
-    payload = json.loads(capsys.readouterr().out)
-    assert payload["reason"] == "target_busy"
+    monkeypatch.setattr(live, "find_canonical_live_owner", lambda h: None)
+    enqueued = []
+    monkeypatch.setattr("tools.fleet_message_enqueue.enqueue_busy_dm", lambda **kw: enqueued.append(kw))
+    turns = []
+
+    def fake_run(argv, **kwargs):
+        assert "tools.fleet_message_drain" not in argv, "drain-off recipient must not be enqueued"
+        turns.append(argv)
+        if len(turns) <= 2:  # the recipient's current turn still holds the chat
+            return subprocess.CompletedProcess(argv, 1, stdout="", stderr=_REFUSAL_STDERR)
+        return subprocess.CompletedProcess(argv, 0, stdout="done after your turn", stderr="")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    rc = bot_mode_dm._run_delivery(["hermes", "-p", "ops"], str(dm_file), stdin_file=False, profile_home=ops)
+
+    assert rc == 0
+    assert len(turns) == 3 and not enqueued
+    out = capsys.readouterr().out
+    assert "done after your turn" in out and "target_busy" not in out

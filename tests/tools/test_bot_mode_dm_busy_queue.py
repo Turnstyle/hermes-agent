@@ -4,7 +4,8 @@ loop is the bug: the sender must see a queued reply in under 5s.
 The write itself is a subprocess of the source-checkout launcher
 (``.hermes/bin/hermes --run-module tools.fleet_message_drain enqueue``), keyed
 by the delivery envelope id. Queueing happens only when the recipient drain is
-on; otherwise the reply is an immediate ``target_busy``.
+on; otherwise the DM waits behind the current turn (see
+test_fleet_busy_ack_requires_recipient_drain.py).
 """
 
 import io

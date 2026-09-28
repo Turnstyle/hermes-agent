@@ -831,66 +831,104 @@ def _run_delivery_locked(argv: list[str], dm_file: str, *, stdin_file: bool,
                 with open(dm_file, "r", encoding="utf-8-sig") as stream:
                     # Passing the file descriptor as stdin bypasses the BOM-aware decoder.
                     return subprocess.run(argv, input=stream.read().encode("utf-8"), check=False, env=env).returncode
-        # A busy target is a fast-ack, not an 1800s blind wait. One short lock probe, then
-        # the checkout launcher writes fleet_messages_v1. Under 5s.
-        from tools.fleet_message_enqueue import queued_ack
-
+        # A busy target whose recipient drains fleet_messages_v1 at turn end is a fast-ack, not an 1800s
+        # blind wait: one short lock probe, then the checkout launcher writes the queue doc. Under 5s.
+        started = time.monotonic()
+        # ``home`` is a known local profile: only then is there a mailbox worth queueing behind, so an
+        # instant SESSION_NOT_OWNED refusal from the CLI (another surface holds the live session, not
+        # our own lock) is retried too — not just a lock-wait timeout. Without a resolvable profile
+        # (stdin/peer shapes, or a transport this module doesn't own) that refusal stays a hard failure.
         can_queue = home is not None
         probe = min(_FAST_ACK_SECONDS, dm_queue_wait_seconds())
         try:
             with _delivery_lock(argv, stdin_file=False, timeout_seconds=probe):
                 return _run_local_turn(argv, dm_file, env=env, busy_raises=can_queue)
         except (_session_held_cls(), TurnBusyError) as exc:
-            if not can_queue:
-                raise
-            from tools.bot_mode_probe import _default_home, _hermes_root, _roster
-
-            recipient_home = home
-            if recipient_home is None:
-                recipient_home = dict(_roster(_hermes_root(Path(_default_home())))).get(exc.profile)
-            admits = _recipient_admits_queue(exc.profile, recipient_home)
-            if admits is False or recipient_home is None:
-                print(json.dumps({
-                    "error": (f"Delivery failed: @{exc.profile}'s Bot Chat is busy and the recipient "
-                              "does not drain queued fleet messages at turn end."),
-                    "reason": "target_busy",
-                    "reply_relayed": False,
-                }))
-                return 1
-            sender = _busy_sender(author)
-            envelope_id = _generation_delivery_id(dm_file, _read_generation(dm_file))
+            if can_queue:
+                rc = _enqueue_busy_dm(exc.profile, argv, dm_file, env=env, author=author, home=home)
+                if rc is not None:
+                    return rc
+        # The recipient does not drain queued fleet messages (or there is no local profile to queue
+        # into): queue behind its running turn instead of failing target_busy after the short probe.
+        # This runner is a detached process that wakes the sender on exit (t_78c79c6b). Between lock
+        # attempts, re-probe for a live Bot Chat owner that opened meanwhile and hand off to it.
+        deadline = started + dm_queue_wait_seconds()
+        while True:
+            rc = _via_live_owner()
+            if rc is not None:
+                keep_dm_file = True  # the live path owns its intent/evidence files from here
+                return rc
+            remaining = max(0.0, deadline - time.monotonic())
+            final = remaining <= _BUSY_SLICE_SECONDS
             try:
-                result = subprocess.run(
-                    _drain_enqueue_command(argv[0], sender, recipient_home, dm_file, envelope_id),
-                    check=False, stdin=subprocess.DEVNULL, capture_output=True,
-                    text=True, encoding="utf-8", errors="replace", timeout=5, env=env)
-                if result.returncode != 0:
-                    detail = (result.stderr or "").strip() or f"enqueue exited {result.returncode}"
-                    raise ValueError(detail.splitlines()[0])
-                child = json.loads(result.stdout)
-                if child.get("status") != "queued":
-                    raise ValueError(str(child.get("status") or "not queued"))
-                message_id = child.get("message_id")
-                if not isinstance(message_id, str) or not message_id:
-                    raise ValueError("missing queue message id")
-            except Exception as write_exc:
-                logger.warning("fleet message drain: enqueue failed", exc_info=True)
-                print(json.dumps({
-                    "error": f"Delivery failed: could not queue for @{exc.profile}: {write_exc}",
-                    "reason": "target_busy",
-                    "reply_relayed": False,
-                }))
-                return 1
-            print(json.dumps({
-                "status": "queued",
-                "message_id": message_id,
-                "reply_relayed": False,
-                "reply": queued_ack(message_id),
-            }))
-            return 0
+                with _delivery_lock(argv, stdin_file=False,
+                                    timeout_seconds=remaining if final else _BUSY_SLICE_SECONDS):
+                    return _run_local_turn(argv, dm_file, env=env, busy_raises=can_queue)
+            except _session_held_cls() as exc:
+                if final:
+                    waited = time.monotonic() - started
+                    print(json.dumps({
+                        "error": f"Delivery failed: @{exc.profile}'s Bot Chat is open on another surface "
+                                 f"right now, so your message was NOT delivered after queuing ~{int(round(waited))}s. "
+                                 "Try again later.",
+                        "reason": "target_busy",
+                    }))
+                    return 1
+                time.sleep(min(_BUSY_SLICE_SECONDS, remaining))
+            except TurnBusyError as exc:
+                if final:
+                    raise TurnBusyError(exc.profile, time.monotonic() - started) from None
     finally:
         if not keep_dm_file:
             _unlink_dm_artifacts(dm_file)
+
+
+def _enqueue_busy_dm(profile: str, argv: list[str], dm_file: str, *, env: dict[str, str],
+                     author: Optional[dict], home: Path | None) -> Optional[int]:
+    """Fast-ack a busy target into fleet_messages_v1. None when the recipient does not drain queued
+    fleet messages at turn end: the caller then waits behind the current turn (never a bounce)."""
+    from tools.bot_mode_probe import _default_home, _hermes_root, _roster
+    from tools.fleet_message_enqueue import queued_ack
+
+    recipient_home = home
+    if recipient_home is None:
+        recipient_home = dict(_roster(_hermes_root(Path(_default_home())))).get(profile)
+    if recipient_home is None or _recipient_admits_queue(profile, recipient_home) is False:
+        return None
+    sender = _busy_sender(author)
+    envelope_id = _generation_delivery_id(dm_file, _read_generation(dm_file))
+    try:
+        result = subprocess.run(
+            _drain_enqueue_command(argv[0], sender, recipient_home, dm_file, envelope_id),
+            check=False, stdin=subprocess.DEVNULL, capture_output=True,
+            text=True, encoding="utf-8", errors="replace", timeout=5, env=env)
+        if result.returncode != 0:
+            detail = (result.stderr or "").strip() or f"enqueue exited {result.returncode}"
+            raise ValueError(detail.splitlines()[0])
+        child = json.loads(result.stdout)
+        if child.get("status") == "disabled":
+            # The checkout launcher read the recipient's config (this interpreter could not): no drain.
+            return None
+        if child.get("status") != "queued":
+            raise ValueError(str(child.get("status") or "not queued"))
+        message_id = child.get("message_id")
+        if not isinstance(message_id, str) or not message_id:
+            raise ValueError("missing queue message id")
+    except Exception as write_exc:
+        logger.warning("fleet message drain: enqueue failed", exc_info=True)
+        print(json.dumps({
+            "error": f"Delivery failed: could not queue for @{profile}: {write_exc}",
+            "reason": "target_busy",
+            "reply_relayed": False,
+        }))
+        return 1
+    print(json.dumps({
+        "status": "queued",
+        "message_id": message_id,
+        "reply_relayed": False,
+        "reply": queued_ack(message_id),
+    }))
+    return 0
 
 
 def _delivery_command(argv: list[str], dm_file: str, *, stdin_file: bool,
