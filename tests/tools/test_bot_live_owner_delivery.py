@@ -224,3 +224,21 @@ def test_schema_damaged_ticket_does_not_wedge_bulk_scans(tmp_path, caplog):
     assert len(skipped) == len(damaged), "each damaged ticket warns once per process, not per scan"
 
 
+def test_sidecar_write_failure_does_not_strand_a_claimed_ticket(tmp_path, monkeypatch):
+    """Checker HIGH on e6bd66c00f: the advisory stall-watch sidecar is written after the ticket is
+    durably ``claimed``; an OSError there must not abort the claim and strand the message."""
+    from tools import bot_live_delivery as mailbox
+
+    owner = dict(profile_home=str(tmp_path.resolve()), session_id="chat",
+                 lease_id="lease", live_session_id="live")
+    queued = mailbox.deliver_to_live_owner(tmp_path, owner, "hello")
+
+    def boom(*_a, **_k):
+        raise OSError("disk full")
+
+    monkeypatch.setattr(mailbox, "write_mailbox_stall_meta", boom)
+    claim = mailbox.claim_pending_delivery(tmp_path, owner)
+    assert claim is not None and claim["delivery_id"] == queued["delivery_id"]
+    assert mailbox.read_delivery_result(tmp_path, queued["delivery_id"])["status"] == "claimed"
+    receipt = mailbox.complete_delivery(tmp_path, queued["delivery_id"], status="settled", reply="ok")
+    assert receipt["status"] == "settled"

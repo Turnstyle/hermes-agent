@@ -143,7 +143,7 @@ def iter_relay_payload_json(directory: Path) -> Iterator[Path]:
             yield path
 
 
-def write_envelope_stall_meta(
+def _write_envelope_stall_meta_strict(
     envelope_json_path: Path,
     *,
     envelope_id: str,
@@ -172,7 +172,7 @@ def write_envelope_stall_meta(
     return target
 
 
-def write_reply_stall_meta(
+def _write_reply_stall_meta_strict(
     replies_dir: Path,
     envelope_id: str,
     *,
@@ -192,6 +192,26 @@ def write_reply_stall_meta(
     target = replies_dir / f"{safe}{REPLY_META_SUFFIX}"
     _atomic_write_json(target, payload, sort_keys=True)
     return target
+
+
+def write_envelope_stall_meta(envelope_json_path: Path, **kwargs: Any) -> Path | None:
+    """Best-effort sidecar write. The sidecar is advisory stall-watch metadata written AFTER the
+    envelope's durable state change (enqueue, claim, re-offer); a failure here must never abort the
+    caller's delivery path, or a claimed/re-offered envelope is stranded (checker HIGH, e6bd66c00f)."""
+    try:
+        return _write_envelope_stall_meta_strict(envelope_json_path, **kwargs)
+    except (OSError, ValueError, TypeError) as exc:
+        logger.warning("bot_relay: envelope stall meta write failed for %s: %s", envelope_json_path.name, exc)
+        return None
+
+
+def write_reply_stall_meta(replies_dir: Path, envelope_id: str, **kwargs: Any) -> Path | None:
+    """Best-effort reply sidecar write; never fails the reply write that precedes it."""
+    try:
+        return _write_reply_stall_meta_strict(replies_dir, envelope_id, **kwargs)
+    except (OSError, ValueError, TypeError) as exc:
+        logger.warning("bot_relay: reply stall meta write failed for %s: %s", envelope_id, exc)
+        return None
 
 
 def _move_envelope_meta(src_body: Path, dst_body: Path) -> None:

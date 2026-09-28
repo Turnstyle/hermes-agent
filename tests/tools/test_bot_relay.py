@@ -1025,3 +1025,27 @@ def test_delivery_env_single_profile_process_is_unchanged(monkeypatch):
     assert not is_multiplex_active()
     monkeypatch.setenv("T681656E1_AMBIENT", "kept")
     assert bot_relay.delivery_env(None, None).get("T681656E1_AMBIENT") == "kept"
+
+
+def test_sidecar_write_failure_does_not_burn_the_claim_or_reoffer(root, monkeypatch):
+    """Checker HIGH on e6bd66c00f: an OSError writing the advisory envelope sidecar must not drop the
+    claimed envelope from the drain, nor consume its one re-offer without handing it out."""
+    import time as _time
+
+    bot_relay.write_remote_roster(root, _rows())
+    target = bot_relay.resolve_remote_target("researcher", bot_relay.read_remote_roster(root))
+    env = bot_relay.enqueue_envelope(root, target=target, message="hi", sender_profile="w", sender_handle="w")
+
+    def boom(*_a, **_k):
+        raise OSError("disk full")
+
+    monkeypatch.setattr(bot_relay, "_write_envelope_stall_meta_strict", boom)
+    claimed = bot_relay.claim_pending_envelopes(root)
+    assert [e["id"] for e in claimed] == [env["id"]]
+    # Age the claim past the re-offer window: the one re-offer must still be handed out.
+    now = _time.time()
+    monkeypatch.setattr(bot_relay.time, "time", lambda: now + bot_relay.REOFFER_AFTER_SECONDS + 5)
+    reoffered = bot_relay.claim_pending_envelopes(root)
+    assert [e["id"] for e in reoffered] == [env["id"]]
+    assert reoffered[0].get("reoffered_at")
+    assert bot_relay.claim_pending_envelopes(root) == []
