@@ -47,6 +47,13 @@ from agent.delegation_context import (
     enter_non_dispatcher_owned_context, exit_non_dispatcher_owned_context)
 from agent.memory_provider import ctx_bound
 from agent.turn_failure_copy import is_max_iteration_handoff
+from cron.scheduler_budget import (
+    apply_job_budgets_to_agent,
+    budget_audit_fields,
+    is_cron_turn_limit_handoff,
+    positive_job_budget,
+    usage_audit_value,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -2012,7 +2019,7 @@ def _final_response_from_result(result: dict, job_id: str, job_name: str, AIAgen
     # Raise so the except handler below builds the proper failure tuple. (issue #17855)
     turn_exit_reason = str(result.get("turn_exit_reason") or "")
     final_response_text = (result.get("final_response") or "").strip()
-    max_iteration_summary = is_max_iteration_handoff(result)
+    max_iteration_summary = is_max_iteration_handoff(result) or is_cron_turn_limit_handoff(result)
     if result.get("failed") is True or (result.get("completed") is False and not max_iteration_summary):
         raise RuntimeError(result.get("error") or final_response_text or "agent reported failure")
     if max_iteration_summary:
@@ -2357,6 +2364,8 @@ class _CronAgentSetup:
     runtime: dict = None
     prefill_messages: Any = None
     max_iterations: Any = None
+    job_max_tokens: Optional[int] = None
+    job_max_turns: Optional[int] = None
     reasoning_config: Any = None
     fallback_model: Any = None
     credential_pool: Any = None
@@ -2370,9 +2379,15 @@ def _resolve_cron_agent_setup(job: dict, job_id: str, job_name: str, jc) -> _Cro
     setup = _CronAgentSetup(model=jc.model)
     setup.prefill_messages = _load_prefill_messages(_cfg, job_id)
 
-    # resolve_turn_limit() honors none/unlimited (sys.maxsize) and explicit 0 / null.
+    # An explicit per-job max_turns is the scheduled wake's hard boundary; jobs without it keep
+    # the profile-wide default. resolve_turn_limit() honors none/unlimited (sys.maxsize) and
+    # explicit 0 / null. Invalid per-job budgets raise here and fail the fire closed.
     from hermes_cli.config import resolve_turn_limit as _resolve_turn_limit
-    _mt = _cfg.get("agent", {}).get("max_turns")
+    setup.job_max_turns = positive_job_budget(job, "max_turns")
+    setup.job_max_tokens = positive_job_budget(job, "max_tokens")
+    _mt = setup.job_max_turns
+    if _mt is None:
+        _mt = _cfg.get("agent", {}).get("max_turns")
     if _mt is None:
         _mt = _cfg.get("max_turns")
     setup.max_iterations = _resolve_turn_limit(_mt)
@@ -2445,22 +2460,25 @@ def _construct_cron_agent(AIAgent, job: dict, _cfg: dict, setup: _CronAgentSetup
 class _FireAudit:
     """One usage_audit.jsonl line per fire (created once the agent exists; fire id + start clock)."""
 
-    def __init__(self, job: dict, job_id: str, model: str):
-        self.job, self.job_id, self.model = job, job_id, model
+    def __init__(self, job: dict, job_id: str, model: str, agent: Any = None):
+        self.job, self.job_id, self.model, self.agent = job, job_id, model, agent
         self.fire_id = uuid.uuid4().hex
         self.t_start = time.monotonic()
 
     def write(self, result: dict, error: Optional[str]) -> None:
+        agent = self.agent
         _write_usage_audit({
             "ts": _utcnow_iso_ms(),
             "job_id": self.job_id,
             "fire_id": self.fire_id,
-            "prompt_tokens": result.get("prompt_tokens"),
-            "completion_tokens": result.get("completion_tokens"),
-            "total_tokens": result.get("total_tokens"),
+            "prompt_tokens": usage_audit_value(result, "prompt_tokens", agent, "session_prompt_tokens"),
+            "completion_tokens": usage_audit_value(
+                result, "completion_tokens", agent, "session_completion_tokens"),
+            "total_tokens": usage_audit_value(result, "total_tokens", agent, "session_total_tokens"),
             "response_silent": bool(result.get("response_silent")),
             "deliver_target": self.job.get("deliver"),
             "model": self.model or None,
+            **budget_audit_fields(self.job, agent),
             "duration_ms": int((time.monotonic() - self.t_start) * 1000),
             "error": error})
 
@@ -2522,7 +2540,8 @@ def run_job(
         agent = _construct_cron_agent(
             AIAgent, job, _cfg, setup, workdir=scope.workdir, session_id=_cron_session_id,
             session_db=_session_db)
-        _audit = _FireAudit(job, job_id, model)
+        apply_job_budgets_to_agent(agent, max_tokens=setup.job_max_tokens, max_turns=setup.job_max_turns)
+        _audit = _FireAudit(job, job_id, model, agent)
 
         result = _run_agent_with_watchdog(
             agent, prompt, job, job_id, job_name, scope.task_id, cancel_event,

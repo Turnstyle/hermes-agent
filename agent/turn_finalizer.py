@@ -19,6 +19,7 @@ from agent.message_content import flatten_message_text
 from agent.message_metadata import append_message, stamp_message_timestamp
 from agent.message_sanitization import _sanitize_surrogates
 from agent.served_model import result_model_fields
+from agent.turn_cron_budget import cron_turn_limit_stop
 
 # Verification-continuation nudges (verify-on-stop / pre_verify) must be stripped from
 # returned/live history to avoid role-alternation breaks; the assistant response is
@@ -143,6 +144,9 @@ def _resolve_budget_fallback(
             if _pending_verification_response_previewed:
                 agent._response_was_previewed = True
             preserved_verification_fallback = True
+        elif (_cron_stop := cron_turn_limit_stop(agent, api_call_count)) is not None:
+            # A per-job cron turn limit is a hard cost boundary: no extra unmetered summary call.
+            final_response, _turn_exit_reason = _cron_stop
         else:
             # _handle_max_iterations makes one extra toolless request for a summary.
             agent._emit_diagnostic_status(
