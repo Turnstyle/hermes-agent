@@ -293,7 +293,7 @@ def test_peer_dm_reports_a_turn_queued_in_the_open_bot_chat_as_delivered(monkeyp
     assert "(no reply)" not in out
     if as_json:
         assert json.loads(out) == {"peer": "mini", "profile": None, "session_id": "bot-chat",
-                                   "status": "claimed", "delivery_id": "d" * 32}
+                                   "status": "queued", "delivery_id": "d" * 32, "message_id": None}
     else:
         assert "went into that chat (session bot-chat)" in out and "Do NOT resend" in out
 
