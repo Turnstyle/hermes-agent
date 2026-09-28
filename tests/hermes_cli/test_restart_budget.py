@@ -254,6 +254,57 @@ def test_cmd_restart_wedged_systemd_escalates_without_budget_refusal(
     assert "Restart budget blocked" not in capsys.readouterr().err
 
 
+def test_wedged_systemd_generic_failure_does_not_keep_hour(tmp_path, monkeypatch, capsys):
+    """Round 3 HIGH: a nonzero `systemctl restart` (e.g. unit not found) after
+    wedged escalation started nothing, so the hour must stay free."""
+    import json
+    import os
+    import subprocess
+
+    from hermes_cli import gateway as gw
+
+    t0 = 1_700_000_000.0
+    monkeypatch.setattr("hermes_constants.get_hermes_home", lambda: tmp_path)
+    monkeypatch.setattr("hermes_cli.restart_budget.time.time", lambda: t0)
+    monkeypatch.setattr(
+        "hermes_cli.restart_budget.lifecycle_indicates_crash_recovery", lambda home=None: False
+    )
+    tmp_path.joinpath("gateway_state.json").write_text(
+        json.dumps({"pid": os.getpid(), "gateway_state": "running"}), encoding="utf-8"
+    )
+    monkeypatch.setattr(gw, "_refuse_from_inside_gateway", lambda *a, **k: None)
+    monkeypatch.setattr(
+        "hermes_cli.gateway_profile_lifecycle.profile_lifecycle", lambda *a, **k: False
+    )
+    monkeypatch.setattr(gw, "_guard_named_profile_under_multiplexer", lambda **k: None)
+    monkeypatch.setattr(gw, "_dispatch_all_via_service_manager_if_s6", lambda *a, **k: False)
+    monkeypatch.setattr(gw, "_dispatch_via_service_manager_if_s6", lambda *a, **k: False)
+    monkeypatch.setattr(gw, "_installed_service_kind_for", lambda *a, **k: "systemd")
+    monkeypatch.setattr(gw, "_systemd_scope_preamble", lambda *a, **k: False)
+    monkeypatch.setattr(gw, "refresh_systemd_unit_if_needed", lambda **k: None)
+    monkeypatch.setattr("gateway.status.get_running_pid", lambda *a, **k: os.getpid())
+    monkeypatch.setattr(
+        gw, "probe_gateway_loop_liveness", lambda pid, home=None: gw.GATEWAY_LOOP_WEDGED
+    )
+    monkeypatch.setattr(gw, "_escalate_wedged_gateway", lambda pid: True)
+    monkeypatch.setattr(gw, "_systemd_action_was_start_limited", lambda *a, **k: False)
+    waited = []
+    monkeypatch.setattr(gw, "_wait_for_systemd_service_restart", lambda **k: waited.append(1) or True)
+    monkeypatch.setattr(gw, "get_service_name", lambda: "hermes-gateway")
+
+    def fail_restart(args, **kwargs):
+        if args and args[0] == "restart":
+            return subprocess.CompletedProcess(args, 5, "", "Unit hermes-gateway.service not found.")
+        return subprocess.CompletedProcess(args, 0, "", "")
+
+    monkeypatch.setattr(gw, "_run_systemctl", fail_restart)
+    gw._cmd_restart(SimpleNamespace(system=False, all=False, force=False))
+    assert "failed (exit 5)" in capsys.readouterr().out
+    assert waited == []
+    allowed, _ = evaluate_restart_budget(now=t0 + 60, home=tmp_path)
+    assert allowed, "a failed wedged restart must not consume the hour"
+
+
 def test_health_check_failed_bypasses_budget(tmp_path, monkeypatch):
     import json
     import os

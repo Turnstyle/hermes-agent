@@ -3803,6 +3803,11 @@ def systemd_restart(system: bool = False):
         if _systemd_action_was_start_limited(restarted, system=system):
             _print_systemd_start_limit_wait(system=system)
             return RestartSignal.REJECTED
+        if getattr(restarted, "returncode", 0) != 0:
+            # Any other nonzero systemctl result (unit not found, permission,
+            # timeout) started no replacement: do not keep the hour claim.
+            print(f"✗ systemctl restart {svc} failed (exit {restarted.returncode})")
+            return RestartSignal.REJECTED
         _wait_for_systemd_service_restart(system=system, previous_pid=pid)
         return RestartSignal.INITIATED
     if pid is not None:
