@@ -572,6 +572,27 @@ def test_deliver_cli_response_names_the_resolved_and_requested_profile(home, mon
     assert "top secret ping" not in line
 
 
+def test_deliver_live_sid_response_flags_reply_not_relayed(home, monkeypatch):
+    """AGY-DELIVERY-STATE-MACHINE.md row 21: prompt.submit only ACKs the submission — there is no
+    mailbox/receipt to wait on for this branch, so the real reply (once that turn runs) is never
+    relayed back through this RPC. Same false-reply class as the live-owner branch (pair 9/10): the
+    ok payload must be loud and machine-readable, not a reply the sender could mistake for the real
+    answer."""
+    monkeypatch.setattr("hermes_cli.quiet_single_query.run_reported_turn",
+                        lambda *a, **k: pytest.fail("must not spawn the CLI"))
+    monkeypatch.setitem(srv._methods, "prompt.submit",
+                        lambda rid, p: srv._ok(rid, {"status": "streaming"}))
+    monkeypatch.setattr(srv, "_profile_home", lambda name: home / "profiles" / name)
+    monkeypatch.setitem(srv._sessions, "live-ops",
+                        {"profile_home": str(home / "profiles" / "ops"), "pending_title": "Bot Chat", "history": []})
+    out = _result(srv._methods["bot_relay.deliver"](1, {"profile": "ops", "message": "ping"}))
+    assert out["reply_relayed"] is False
+    assert out["reason"] == "reply_not_relayed"
+    assert out["reply"].startswith("REPLY NOT RELAYED:")
+    assert out["delivered_profile"] == "ops"
+    assert out["requested_profile"] == "ops"
+
+
 def test_deliver_live_sid_response_carries_delivered_profile(home, monkeypatch):
     """The prompt.submit (live Bot Chat, no mailbox) path names delivered_profile too."""
     monkeypatch.setattr("hermes_cli.quiet_single_query.run_reported_turn",
