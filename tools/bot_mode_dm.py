@@ -678,6 +678,61 @@ def _local_delivery_home(argv: list[str]) -> Path | None:
     return dict(_roster(_hermes_root(Path(_default_home())))).get(argv[2])
 
 
+def _busy_sender(author: Optional[dict]) -> str:
+    """tb-king: the fleet handle is the author id with a leading ``bot:`` stripped.
+
+    A missing or non-bot author still queues, under the ``sender`` fallback, so a failed write
+    stays an immediate ``target_busy`` rather than a wait loop.
+    """
+    author_id = str((author or {}).get("id") or "") if isinstance(author, dict) else ""
+    if author_id.startswith("bot:"):
+        sender = author_id.removeprefix("bot:").split(":", 1)[0]
+        if sender:
+            return sender
+    if isinstance(author, dict):
+        from tools.fleet_message_enqueue import fleet_handle
+        return fleet_handle(author.get("name") or author.get("id"), fallback="sender")
+    return "sender"
+
+
+def _recipient_admits_queue(profile: str, home: Path | None) -> bool | None:
+    """True when that profile drains, False when it does not, None when this interpreter cannot read config.
+
+    The delivery runner is sometimes the bare store python (no yaml). A failed import is not
+    "drain disabled": the checkout launcher decides admission. A readable config that is off is
+    an honest ``target_busy`` and does not start the enqueue subprocess.
+    """
+    try:
+        from hermes_cli.config import read_user_config_raw  # noqa: F401
+    except ImportError:
+        return None
+    if home is None:
+        return False
+    from tools.fleet_message_drain import recipient_drain_enabled
+    return recipient_drain_enabled(profile, profile_home=home)
+
+
+def _drain_enqueue_command(cli: str, sender: str, home: Path, dm_file: str,
+                           message_id: str | None = None) -> list[str]:
+    """Run the Firestore write under the Hermes runtime of the SAME source tree this runner runs from.
+
+    The runner itself runs under the bare store python (no yaml / google.auth). The install venv's
+    python is not usable either: it imports the editable ``environments/*/workspace`` copy, which can
+    lag this checkout and lack ``tools.fleet_message_drain`` entirely. The checkout's own bootstrap
+    launcher (``<root>/.hermes/bin/hermes --run-module``) activates the dependency env and imports this
+    tree; fall back to the delivery CLI's launcher only when that file is absent.
+
+    ``message_id`` is the relay envelope id (create-only: an existing doc is not reset to queued).
+    """
+    source_launcher = Path(__file__).resolve().parents[1] / ".hermes" / "bin" / "hermes"
+    launcher = str(source_launcher) if source_launcher.is_file() else cli
+    argv = [launcher, "--run-module", "tools.fleet_message_drain",
+            "enqueue", "--from", sender, "--to-home", str(home), "--body-file", dm_file]
+    if message_id:
+        argv.extend(["--message-id", message_id])
+    return argv
+
+
 @contextlib.contextmanager
 def _dm_runner_lock(dm_file: str):
     """One runner per DM file for its whole lifecycle (live admission, owner_gone re-admission, CLI fallback).
@@ -777,8 +832,8 @@ def _run_delivery_locked(argv: list[str], dm_file: str, *, stdin_file: bool,
                     # Passing the file descriptor as stdin bypasses the BOM-aware decoder.
                     return subprocess.run(argv, input=stream.read().encode("utf-8"), check=False, env=env).returncode
         # A busy target is a fast-ack, not an 1800s blind wait. One short lock probe, then
-        # the message lands in fleet_messages_v1 for the recipient drain. Under 5s.
-        from tools.fleet_message_enqueue import FleetEnqueueError, enqueue_busy_dm, fleet_handle, queued_ack
+        # the checkout launcher writes fleet_messages_v1. Under 5s.
+        from tools.fleet_message_enqueue import queued_ack
 
         can_queue = home is not None
         probe = min(_FAST_ACK_SECONDS, dm_queue_wait_seconds())
@@ -789,32 +844,49 @@ def _run_delivery_locked(argv: list[str], dm_file: str, *, stdin_file: bool,
             if not can_queue:
                 raise
             from tools.bot_mode_probe import _default_home, _hermes_root, _roster
-            from tools.fleet_message_drain import recipient_drain_enabled
 
             recipient_home = home
             if recipient_home is None:
                 recipient_home = dict(_roster(_hermes_root(Path(_default_home())))).get(exc.profile)
-            if not recipient_drain_enabled(exc.profile, profile_home=recipient_home):
+            admits = _recipient_admits_queue(exc.profile, recipient_home)
+            if admits is False or recipient_home is None:
                 print(json.dumps({
                     "error": (f"Delivery failed: @{exc.profile}'s Bot Chat is busy and the recipient "
                               "does not drain queued fleet messages at turn end."),
                     "reason": "target_busy",
+                    "reply_relayed": False,
                 }))
                 return 1
+            sender = _busy_sender(author)
+            envelope_id = _generation_delivery_id(dm_file, _read_generation(dm_file))
             try:
-                body = Path(dm_file).read_text(encoding="utf-8")
-                sender = "sender"
-                if isinstance(author, dict):
-                    sender = fleet_handle(author.get("name") or author.get("id"), fallback="sender")
-                recipient = fleet_handle(exc.profile, fallback="recipient")
-                message_id = enqueue_busy_dm(sender=sender, recipient=recipient, body=body)
-            except (FleetEnqueueError, OSError, ValueError) as write_exc:
+                result = subprocess.run(
+                    _drain_enqueue_command(argv[0], sender, recipient_home, dm_file, envelope_id),
+                    check=False, stdin=subprocess.DEVNULL, capture_output=True,
+                    text=True, encoding="utf-8", errors="replace", timeout=5, env=env)
+                if result.returncode != 0:
+                    detail = (result.stderr or "").strip() or f"enqueue exited {result.returncode}"
+                    raise ValueError(detail.splitlines()[0])
+                child = json.loads(result.stdout)
+                if child.get("status") != "queued":
+                    raise ValueError(str(child.get("status") or "not queued"))
+                message_id = child.get("message_id")
+                if not isinstance(message_id, str) or not message_id:
+                    raise ValueError("missing queue message id")
+            except Exception as write_exc:
+                logger.warning("fleet message drain: enqueue failed", exc_info=True)
                 print(json.dumps({
                     "error": f"Delivery failed: could not queue for @{exc.profile}: {write_exc}",
                     "reason": "target_busy",
+                    "reply_relayed": False,
                 }))
                 return 1
-            print(queued_ack(message_id))
+            print(json.dumps({
+                "status": "queued",
+                "message_id": message_id,
+                "reply_relayed": False,
+                "reply": queued_ack(message_id),
+            }))
             return 0
     finally:
         if not keep_dm_file:

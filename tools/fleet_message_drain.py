@@ -59,6 +59,7 @@ import dataclasses
 import datetime
 import json
 import logging
+import os
 import subprocess
 import sys
 import threading
@@ -70,6 +71,8 @@ from pathlib import Path
 from typing import Any, Callable, Optional
 
 logger = logging.getLogger(__name__)
+_config_read_warned = False
+_config_read_warning_lock = threading.Lock()
 
 COLLECTION = "fleet_messages_v1"
 DEFAULT_PROJECT = "mission-control-444444"
@@ -113,8 +116,12 @@ def drain_config(cfg: Optional[dict] = None) -> Optional[DrainConfig]:
         try:
             from hermes_cli.config import load_config
             cfg = load_config() or {}
-        except Exception:
-            logger.debug("fleet message drain: config read failed", exc_info=True)
+        except Exception as exc:
+            global _config_read_warned
+            with _config_read_warning_lock:
+                if not _config_read_warned:
+                    _config_read_warned = True
+                    logger.warning("fleet message drain: config read failed (%s)", type(exc).__name__)
             return None
     section = (cfg or {}).get("fleet_messages") or {}
     if not isinstance(section, dict) or section.get("drain_on_turn_end") is not True:
@@ -136,6 +143,16 @@ def drain_config(cfg: Optional[dict] = None) -> Optional[DrainConfig]:
                        project=str(section.get("project") or DEFAULT_PROJECT),
                        database=str(section.get("database") or DEFAULT_DATABASE),
                        limit=limit, max_attempts=max_attempts, timeout_seconds=timeout)
+
+
+def drain_config_for_home(profile_home: Path | str) -> Optional[DrainConfig]:
+    """Resolve a recipient's opt-in from its own profile, without changing process env."""
+    from hermes_constants import reset_hermes_home_override, set_hermes_home_override
+    token = set_hermes_home_override(profile_home)
+    try:
+        return drain_config()
+    finally:
+        reset_hermes_home_override(token)
 
 
 def _config_for_profile_home(profile_home: Path) -> Optional[dict]:
@@ -385,8 +402,12 @@ def _live_token() -> str:
             _live_credentials = None
         try:
             if not _gcloud_token_cached or time.monotonic() >= _gcloud_token_until:
+                # gcloud runs its own Python; the Hermes bootstrap's PYTHONPATH/PYTHONHOME would load
+                # Hermes's crypto packages into it and crash it (pyOpenSSL: no attribute GEN_EMAIL).
+                gcloud_env = {k: v for k, v in os.environ.items()
+                              if k not in ("PYTHONPATH", "PYTHONHOME", "VIRTUAL_ENV")}
                 proc = subprocess.run(["gcloud", "auth", "print-access-token"], capture_output=True,
-                                      text=True, check=True, timeout=3)
+                                      text=True, check=True, timeout=3, env=gcloud_env)
                 token = proc.stdout.strip()
                 if not token:
                     raise ValueError("gcloud returned no token")
@@ -668,11 +689,33 @@ def reclaim_stale(store: Any, *, older_than_seconds: int = 1800, max_attempts: i
 def main(argv: Optional[list[str]] = None) -> int:
     parser = argparse.ArgumentParser(description="Fleet message maintenance")
     subparsers = parser.add_subparsers(dest="command", required=True)
+    enqueue = subparsers.add_parser("enqueue", help="queue a busy target's message")
+    enqueue.add_argument("--from", dest="from_handle", required=True)
+    enqueue.add_argument("--to-home", type=Path, required=True)
+    enqueue.add_argument("--body-file", type=Path, required=True)
+    enqueue.add_argument("--message-id", default=None,
+                         help="relay envelope id; create-only, an existing doc is not rewritten")
     reclaim = subparsers.add_parser("reclaim-stale", help="requeue stale delivered/read claims")
     reclaim.add_argument("--older-than", type=int, default=1800, metavar="SECONDS")
     reclaim.add_argument("--target", choices=("live", "emulator"))
     reclaim.add_argument("--dry-run", action="store_true")
     args = parser.parse_args(argv)
+    if args.command == "enqueue":
+        try:
+            recipient = bot_identity(args.to_home)
+            if not recipient_drain_enabled(recipient, profile_home=args.to_home):
+                print(json.dumps({"status": "disabled", "reason": "target_busy", "reply_relayed": False}))
+                return 0
+            body = args.body_file.read_text(encoding="utf-8-sig")
+            from tools.fleet_message_enqueue import enqueue_busy_dm
+            message_id = enqueue_busy_dm(
+                sender=args.from_handle, recipient=recipient, body=body, message_id=args.message_id)
+        except Exception as exc:
+            reason = str(exc).splitlines()
+            print(f"fleet message enqueue: {reason[0] if reason else type(exc).__name__}", file=sys.stderr)
+            return 1
+        print(json.dumps({"status": "queued", "message_id": message_id, "reply_relayed": False}))
+        return 0
     # This standalone cron command owns its stderr contract even if the credential
     # fallback or config loader logs a warning before raising.
     prior_log_level = logging.root.manager.disable

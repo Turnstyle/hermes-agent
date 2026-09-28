@@ -47,9 +47,13 @@ def test_live_token_falls_back_to_gcloud_and_warns_once_per_failed_streak(monkey
         return SimpleNamespace(stdout="gcloud-token\n")
 
     monkeypatch.setattr(fmd.subprocess, "run", gcloud)
+    monkeypatch.setenv("PYTHONPATH", "/hermes/bootstrap/site-packages")
+    monkeypatch.setenv("PYTHONHOME", "/hermes/python")
     assert fmd._live_token() == "gcloud-token"
     assert fmd._live_token() == "gcloud-token"
     assert len(calls) == 1 and calls[0]["timeout"] <= 3
+    # gcloud runs its own Python: the Hermes bootstrap's PYTHONPATH/PYTHONHOME must not leak into it.
+    assert "PYTHONPATH" not in calls[0]["env"] and "PYTHONHOME" not in calls[0]["env"]
 
     monkeypatch.setattr(fmd, "_gcloud_token_cached", "")
     monkeypatch.setattr(fmd.subprocess, "run", lambda *a, **kw: (_ for _ in ()).throw(OSError("offline")))
