@@ -598,38 +598,21 @@ def _worker_alive(pid: Optional[int], started_at) -> bool:
         return False
     if started_at == UNVERIFIED_WORKER_FINGERPRINT:
         return True
-    return not _pid_recycled(pid, started_at)
+    return not _pid_recycled(pid, started_at) or _fingerprint_drifted(pid, started_at)
 
 
 def _pid_recycled(pid: Optional[int], started_at) -> bool:
     """True when a live ``pid`` is NOT the process fingerprinted at spawn (or the fingerprint can no
     longer be read). Signalling it would hit a stranger. ``None`` fingerprint = legacy row, never
     recycled; the UNVERIFIED marker is always foreign. An integer fingerprint (rows written before the
-    boot witness was added) compares the start time only.
-
-    A composed ``"<epoch>|<start>"`` fingerprint needs the SAME instantiation epoch (exact) and a start
-    time within :data:`gateway.status.START_TIME_DRIFT_TOLERANCE`: same-host readings drift by ~1 s
-    (macOS ``kern.boottime``, #117505), and exact string equality made a live worker read as recycled.
-    On macOS the epoch is ``""`` (no ``/proc``) and the psutil start time is wall-clock, so a reboot
-    still changes it. An unreadable recorded or current start time stays foreign (fail closed)."""
+    boot witness was added) compares the start time only. A composed fingerprint is an EXACT match:
+    this is the identity that authorizes a signal (see :func:`_fingerprint_drifted` for claim holding)."""
     if started_at is None or not pid:
         return False
     if started_at == UNVERIFIED_WORKER_FINGERPRINT:
         return True
     if isinstance(started_at, str) and "|" in started_at:
-        from gateway.drain_control import current_instantiation_epoch
-        from gateway.status import get_process_start_time, start_time_fingerprints_match
-        recorded_epoch, recorded_start = started_at.rsplit("|", 1)
-        if recorded_epoch != current_instantiation_epoch():
-            return True
-        try:
-            recorded = int(recorded_start)
-        except ValueError:
-            return True
-        current = get_process_start_time(int(pid))
-        if current is None or recorded <= 0 or current <= 0:
-            return True
-        return not start_time_fingerprints_match(recorded, current)
+        return _process_fingerprint(int(pid)) != started_at
     from gateway.status import _start_times_agree, get_process_start_time
     current = get_process_start_time(int(pid))
     if current is None:
@@ -638,6 +621,30 @@ def _pid_recycled(pid: Optional[int], started_at) -> bool:
         return not _start_times_agree(current, started_at)
     except (TypeError, ValueError):
         return True
+
+
+def _fingerprint_drifted(pid: Optional[int], started_at) -> bool:
+    """True when a live ``pid``'s composed ``"<epoch>|<start>"`` fingerprint misses the exact match
+    ONLY by same-host start-time drift: identical instantiation epoch and a start time within
+    :data:`gateway.status.START_TIME_DRIFT_TOLERANCE` (~1 s ``kern.boottime`` drift on macOS,
+    #117505, where the epoch is ``""`` by design). Such a process is most likely our worker, so its
+    claim is HELD (never released or requeued beside it), but identity is not exact, so it is NEVER
+    signalled — the same hold-don't-signal rule as an UNVERIFIED spawn (t_b0e7b8ed). Malformed or
+    unreadable values are never drift."""
+    if not pid or not isinstance(started_at, str) or "|" not in started_at:
+        return False
+    from gateway.drain_control import current_instantiation_epoch
+    from gateway.status import get_process_start_time, start_time_fingerprints_match
+    recorded_epoch, recorded_start = started_at.rsplit("|", 1)
+    if recorded_epoch != current_instantiation_epoch():
+        return False
+    if not (recorded_start.isascii() and recorded_start.isdigit()):
+        return False
+    recorded = int(recorded_start)
+    current = get_process_start_time(int(pid))
+    if not isinstance(current, int) or recorded <= 0 or current <= 0 or current == recorded:
+        return False
+    return start_time_fingerprints_match(recorded, current)
 
 
 def _kill_fn(signal_fn) -> Optional[Callable[[int, int], None]]:
@@ -958,7 +965,8 @@ def _terminate_reclaimed_worker(
     signalled — the worker is gone, which is what the reclaim wanted (``terminated`` = True). An
     UNVERIFIED spawn (fingerprint capture failed) that is still live is never signalled either, but
     it is reported as surviving (``signal_refused``) so the reclaim holds the claim instead of
-    spawning a duplicate beside it.
+    spawning a duplicate beside it. A live worker whose start time only DRIFTED within tolerance
+    (``_fingerprint_drifted``, #117505) gets the same hold-and-never-signal answer (t_b0e7b8ed).
 
     Process group: when the live, fingerprint-verified worker leads its own group
     (``getpgid(pid) == pid``, the ``_default_spawn`` shape), SIGTERM and SIGKILL go to the whole
@@ -989,6 +997,11 @@ def _terminate_reclaimed_worker(
         # Never signal by bare number: a dead PID is "gone" (reclaim proceeds), a live one is held.
         info["signal_refused"] = True
         info["terminated"] = not _kb._pid_alive(pid)
+        return info
+    if _kb._pid_alive(pid) and _fingerprint_drifted(pid, started_at):
+        # Most likely our worker (start time drifted ~1 s, #117505) but identity is not exact: hold
+        # the claim beside it and send nothing, like an UNVERIFIED spawn (t_b0e7b8ed).
+        info["signal_refused"] = True
         return info
     if _kb._pid_alive(pid) and _pid_recycled(pid, started_at):
         info["terminated"] = True

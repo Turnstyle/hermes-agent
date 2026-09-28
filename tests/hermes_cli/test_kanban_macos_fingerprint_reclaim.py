@@ -101,17 +101,46 @@ def test_macos_fingerprint_shape_reads_live(macos_epoch):
 
 @pytest.mark.parametrize("delta", [100, -100, 200, -200])
 def test_drifted_start_time_is_still_our_live_worker(macos_epoch, monkeypatch, delta):
-    """~1-2 s kern.boottime drift (#117505) must not make a live worker read as recycled."""
+    """~1-2 s kern.boottime drift (#117505) must not make a live worker read as dead.
+
+    Liveness holds; exact identity (what authorizes a signal) does not."""
     recorded = f"|{gw_status.get_process_start_time(os.getpid())}"
     _drift(monkeypatch, delta)
-    assert kbd._pid_recycled(os.getpid(), recorded) is False
     assert kbd._worker_alive(os.getpid(), recorded) is True
+    assert kbd._fingerprint_drifted(os.getpid(), recorded) is True
+    assert kbd._pid_recycled(os.getpid(), recorded) is True  # no exact identity -> never signalled
+
+
+@pytest.mark.parametrize("delta", [100, -200])
+def test_drifted_worker_is_held_but_never_signalled(macos_epoch, monkeypatch, delta):
+    """Checker R1 HIGH: a PID recycled within the tolerance window must not receive a signal.
+    A drifted row is held (claim not released) and nothing is sent."""
+    recorded = f"|{gw_status.get_process_start_time(os.getpid())}"
+    _drift(monkeypatch, delta)
+    killed: list = []
+    info = kbd._terminate_reclaimed_worker(
+        os.getpid(), f"{kb._host_prefix()}1", signal_fn=lambda p, s: killed.append((p, s)),
+        started_at=recorded,
+    )
+    assert killed == []
+    assert info["signal_refused"] is True
+    assert info["terminated"] is False
+    assert kbd._worker_leads_own_group(os.getpid(), recorded, None) is False
+
+
+@pytest.mark.parametrize("recorded_fmt", ["| {}", "|{} ", "|+{}", "|{}.0"])
+def test_malformed_start_is_never_drift(macos_epoch, recorded_fmt):
+    """Checker R1: ``| 10000`` parsed as numeric under int(); it must stay foreign, not drift."""
+    recorded = recorded_fmt.format(gw_status.get_process_start_time(os.getpid()))
+    assert kbd._fingerprint_drifted(os.getpid(), recorded) is False
+    assert kbd._worker_alive(os.getpid(), recorded) is False
 
 
 @pytest.mark.parametrize("delta", [201, -201, 10_000])
 def test_start_time_beyond_tolerance_is_recycled(macos_epoch, monkeypatch, delta):
     recorded = f"|{gw_status.get_process_start_time(os.getpid())}"
     _drift(monkeypatch, delta)
+    assert kbd._fingerprint_drifted(os.getpid(), recorded) is False
     assert kbd._pid_recycled(os.getpid(), recorded) is True
     assert kbd._worker_alive(os.getpid(), recorded) is False
 
@@ -121,6 +150,8 @@ def test_other_boot_epoch_is_still_recycled_even_with_matching_start(monkeypatch
     monkeypatch.setattr(drain_control, "current_instantiation_epoch", lambda: "bootB:7")
     start = gw_status.get_process_start_time(os.getpid())
     assert kbd._pid_recycled(os.getpid(), f"bootA:7|{start}") is True
+    assert kbd._worker_alive(os.getpid(), f"bootA:7|{start}") is False
+    assert kbd._worker_alive(os.getpid(), f"bootA:7|{start + 100}") is False
     assert kbd._pid_recycled(os.getpid(), f"bootB:7|{start}") is False
 
 
@@ -128,30 +159,38 @@ def test_other_boot_epoch_is_still_recycled_even_with_matching_start(monkeypatch
 def test_unreadable_recorded_start_fails_closed(macos_epoch, recorded):
     """A garbled record never proves identity: it stays foreign (never signalled)."""
     assert kbd._pid_recycled(os.getpid(), recorded) is True
+    assert kbd._fingerprint_drifted(os.getpid(), recorded) is False
 
 
 def test_unreadable_current_start_fails_closed(macos_epoch, monkeypatch):
     recorded = f"|{gw_status.get_process_start_time(os.getpid())}"
     monkeypatch.setattr(gw_status, "get_process_start_time", lambda pid: None)
     assert kbd._pid_recycled(os.getpid(), recorded) is True
+    assert kbd._fingerprint_drifted(os.getpid(), recorded) is False
 
 
 def test_drifted_live_worker_claim_is_extended_not_released(board, macos_epoch, monkeypatch):
-    """End to end: an expired claim beside a live, drifted worker is extended."""
+    """End to end: an expired claim beside a live, drifted worker is extended; the max-runtime
+    path holds it and sends nothing."""
     conn = board
-    tid = kb.create_task(conn, title="job", assignee="worker")
+    tid = kb.create_task(conn, title="job", assignee="worker", max_runtime_seconds=1)
     kb.claim_task(conn, tid)
     kbd._set_worker_pid(conn, tid, os.getpid())
     recorded = conn.execute("SELECT worker_started_at FROM tasks WHERE id = ?", (tid,)).fetchone()[0]
     assert recorded.startswith("|")
     old = int(time.time()) - 3600
     with kb.write_txn(conn):
-        conn.execute("UPDATE tasks SET claim_expires = ? WHERE id = ?", (old, tid))
+        conn.execute("UPDATE tasks SET claim_expires = ?, started_at = ? WHERE id = ?", (old, old, tid))
+        conn.execute("UPDATE task_runs SET started_at = ? WHERE id = (SELECT current_run_id FROM tasks "
+                     "WHERE id = ?)", (old, tid))
     _drift(monkeypatch, 100)
     killed: list = []
-    assert kb.release_stale_claims(conn, signal_fn=lambda p, s: killed.append((p, s))) == 0
+    sig = lambda p, s: killed.append((p, s))  # noqa: E731
+    assert kb.release_stale_claims(conn, signal_fn=sig) == 0
+    assert kbd.enforce_max_runtime(conn, signal_fn=sig) == []
     assert killed == []
-    assert kb.get_task(conn, tid).status == "running"
+    task = kb.get_task(conn, tid)
+    assert task.status == "running" and task.worker_pid == os.getpid()
     assert "claim_extended" in [e.kind for e in kb.list_events(conn, tid)]
 
 
