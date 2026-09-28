@@ -2863,6 +2863,16 @@ def _compose_run_delivery(
     return deliver_content, blocked_config, blocked_config_silent, incident_acked, failure_incident_id
 
 
+def _blocked_config_delivery_job(job: dict, blocked_config: bool) -> dict:
+    """Route a local blocked-config alert to this profile's Bot Chat for this run only."""
+    if not blocked_config:
+        return job
+    lane = _normalize_deliver_value(_delivery_lane_value(job, for_failure=True))
+    if lane.strip().lower() not in {"local", "none"}:
+        return job
+    return {**job, "failure_deliver": "bot-chat"}
+
+
 class _FireClaimLostDuringSideEffect(Exception):
     """Raised inside a side-effect fence when the durable fire claim is no longer ours."""
 
@@ -2927,6 +2937,7 @@ class _RunDelivery:
     job: dict
     success: bool
     error: Optional[str]
+    delivery_job: Optional[dict] = None
     delivery_attempted: bool = False
     delivery_error: Optional[str] = None
     should_deliver: bool = False
@@ -2998,9 +3009,11 @@ def _save_compose_deliver(
 
     if not d.should_deliver:
         return
+    d.delivery_job = _blocked_config_delivery_job(job, d.blocked_config)
+    delivery_job = d.delivery_job
     d.unresolved_origin = (
-        _normalize_deliver_value(_delivery_lane_value(job, for_failure=not d.success)) == "origin"
-        and not _resolve_delivery_targets(job, for_failure=not d.success)
+        _normalize_deliver_value(_delivery_lane_value(delivery_job, for_failure=not d.success)) == "origin"
+        and not _resolve_delivery_targets(delivery_job, for_failure=not d.success)
     )
     try:
         with fence.side_effect_fence() as owns_delivery:
@@ -3008,7 +3021,7 @@ def _save_compose_deliver(
                 raise _FireClaimLostDuringSideEffect
             d.delivery_attempted = True
             d.delivery_error = _deliver_result(
-                job,
+                delivery_job,
                 deliver_content,
                 adapters=adapters,
                 loop=loop,
@@ -3046,6 +3059,7 @@ def _finish_interrupted_run(job: dict, execution_id: str, delivery_error: Option
 def _finish_completed_run(d: _RunDelivery, fire_owner: Optional[str], execution_id: str) -> bool:
     """mark_job_run (owner-fenced) + execution ledger row for a run that reached delivery."""
     job = d.job
+    delivery_job = d.delivery_job or job
     if not d.should_deliver and job.get("last_delivery_queued"):
         from cron.jobs import update_job
         update_job(job["id"], {"last_delivery_queued": None})
@@ -3076,12 +3090,13 @@ def _finish_completed_run(d: _RunDelivery, fire_owner: Optional[str], execution_
         return True
     delivery_outcome = _classify_delivery_outcome(
         delivery_error=d.delivery_error,
-        delivery_queued=job.get("last_delivery_queued"),
-        notification_suppressed=bool(job.get("_notification_all_targets_suppressed")),
+        delivery_queued=delivery_job.get("last_delivery_queued"),
+        notification_suppressed=bool(delivery_job.get("_notification_all_targets_suppressed")),
         should_deliver=d.should_deliver,
         unresolved_origin=d.unresolved_origin,
         # Read the lane the notice was actually routed through (failure_deliver on failure).
-        normalized_deliver=_normalize_deliver_value(_delivery_lane_value(job, for_failure=not d.success)),
+        normalized_deliver=_normalize_deliver_value(
+            _delivery_lane_value(delivery_job, for_failure=not d.success)),
         incident_acked=d.incident_acked,
         success=d.success,
     )
