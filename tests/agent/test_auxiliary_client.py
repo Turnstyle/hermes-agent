@@ -2046,7 +2046,7 @@ def test_resolve_api_key_provider_skips_unconfigured_copilot(monkeypatch):
 
     pool_selected = []
 
-    def mock_select_pool_entry(provider_id):
+    def mock_select_pool_entry(provider_id, model=None):
         pool_selected.append(provider_id)
         return False, None
 
