@@ -5412,6 +5412,9 @@ def _cmd_restart(args):
     system = getattr(args, "system", False)
     restart_all = getattr(args, "all", False)
     force = getattr(args, "force", False)
+    from hermes_cli.restart_budget import guard_cli_gateway_restart
+
+    guard_cli_gateway_restart(force=force)
     # `--all` targets the ONE host multiplexer and _restart_all does its own ownership check with
     # the right one-liner; running the generic named-profile guard first made that branch
     # unreachable for `-p X gateway restart --all` (it printed a bare `gateway restart` instead).
