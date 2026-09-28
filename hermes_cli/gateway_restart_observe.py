@@ -10,57 +10,22 @@ RESTART_OBSERVE_POLL_S = 0.25
 
 
 def _pids_for_home(home: Path, *, active_home: bool) -> set[int]:
-    from gateway.status import get_running_pid
-    from hermes_cli.restart_budget import _pid_alive, _read_runtime_state
+    """Verified live gateway PID for ``home`` (empty set if none).
 
-    pids: set[int] = set()
-    pid = None
-    try:
-        if active_home:
-            pid = get_running_pid()
-        else:
-            pid_path = home / "gateway.pid"
-            if pid_path.exists():
-                # Scoped poll of another profile. cleanup_stale would unlink a
-                # dead gateway.pid that profile still owns (#106406).
-                pid = get_running_pid(pid_path, cleanup_stale=False)
-    except Exception:
-        pid = None
-    if isinstance(pid, int) and pid > 0:
-        pids.add(pid)
-    state = _read_runtime_state(home)
-    try:
-        recorded = int(state.get("pid") or 0)
-    except (TypeError, ValueError):
-        recorded = 0
-    if recorded > 0 and _pid_alive(recorded) and _is_gateway_pid(recorded, home):
-        pids.add(recorded)
-    return pids
-
-
-def _is_gateway_pid(pid: int, home: Path) -> bool:
-    """A recorded PID counts only if that live process is still a Hermes
-    gateway serving *this* home.
-
-    ``gateway_state.json`` can outlive its process; the OS may hand the same
-    PID to an unrelated program, or to another profile's gateway. Match the
-    live command line's ``-p/--profile`` against the home's profile name
-    (root home = no profile flag). Any doubt counts as not observed.
+    Uses ``gateway.status.live_gateway_pid_for_home``, the one identity check
+    every other reader of a home's gateway uses: pid file + runtime lock, then
+    the runtime status record, with the start-time reuse guard and a live
+    command line that belongs to ``home``. A recycled PID (unrelated process,
+    another profile's gateway, or a new incarnation) is not a restart.
+    ``active_home`` is kept for callers; both paths never unlink identity files.
     """
     try:
-        from gateway.status import (
-            _looks_like_gateway_process,
-            _profile_name_for_home,
-            _read_process_cmdline,
-            profile_flag_value,
-        )
+        from gateway.status import live_gateway_pid_for_home
 
-        if not _looks_like_gateway_process(pid):
-            return False
-        cmdline = _read_process_cmdline(pid) or ""
-        return profile_flag_value(cmdline) == _profile_name_for_home(Path(home))
+        pid = live_gateway_pid_for_home(Path(home))
     except Exception:
-        return False
+        return set()
+    return {pid} if isinstance(pid, int) and pid > 0 else set()
 
 
 def _current_live_pids(*, all_profiles: bool) -> frozenset[int]:
