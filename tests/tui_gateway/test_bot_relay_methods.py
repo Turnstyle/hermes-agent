@@ -345,10 +345,12 @@ def test_deliver_into_an_open_bot_chat_returns_the_owners_answer(home, monkeypat
         lease.release()
 
 
-def test_deliver_into_a_busy_open_bot_chat_reports_it_queued_and_keeps_the_receipt(home, monkeypatch):
-    """The owner admits at its next idle boundary; a DM not answered within the budget is reported
-    queued there — the record stays for the owner, carrying the message and the relayed sender as
-    the turn author, and the sender is told not to resend."""
+def test_deliver_into_a_busy_open_bot_chat_flags_reply_not_relayed_and_keeps_the_receipt(home, monkeypatch):
+    """The owner admits at its next idle boundary; a DM not answered within even the extended,
+    CLI-path-matching budget is reported queued there — the record stays for the owner, carrying
+    the message and the relayed sender as the turn author — and the reply is flagged
+    reply_relayed=False / REPLY NOT RELAYED instead of a canned success the sender could book as
+    the real answer (AGY-DELIVERY-STATE-MACHINE.md Forensic 2: silent reply loss)."""
     from tools import bot_live_delivery as mailbox
 
     ops_home, lease = _lease_open_bot_chat(home)
@@ -356,12 +358,22 @@ def test_deliver_into_a_busy_open_bot_chat_reports_it_queued_and_keeps_the_recei
     _no_cli_transport(monkeypatch, spawned)
     monkeypatch.setattr(srv, "_profile_home", lambda name: ops_home)
     monkeypatch.setattr(srv, "_sessions", {})
-    monkeypatch.setattr("tools.bot_mode_dm._LIVE_WAIT_SECONDS", 0.6)
+    # Small budget so the test itself is fast: TURN_ATTEMPT_TIMEOUT_SECONDS * TURN_MAX_ATTEMPTS.
+    monkeypatch.setattr(bot_relay, "TURN_ATTEMPT_TIMEOUT_SECONDS", 0.05)
+    monkeypatch.setattr(bot_relay, "TURN_MAX_ATTEMPTS", 2)
+    monkeypatch.setattr("tools.bot_mode_dm._LIVE_WAIT_SECONDS", 0.05)  # RED-run safety: pre-fix code still reads this
     try:
+        started = time.monotonic()
         out = _result(srv._methods["bot_relay.deliver"](1, {
             "profile": "ops", "message": "ping", "from_profile": "cody", "from_handle": "cody",
             "from_connection": "conn-a"}))
-        assert not spawned and "open Bot Chat" in out["reply"] and "Do not resend" in out["reply"]
+        elapsed = time.monotonic() - started
+        assert not spawned
+        assert out["reply_relayed"] is False
+        assert out["reason"] == "reply_not_relayed"
+        assert out["reply"].startswith("REPLY NOT RELAYED:")
+        assert "Do not resend" in out["reply"]
+        assert elapsed < 5.0  # bounded by the (tiny, monkeypatched) budget, not the real 1200s default
         (queued,) = [
             r for p in (ops_home / "runtime" / mailbox.DELIVERY_DIR_NAME).glob("*.json")
             if (r := json.loads(p.read_text(encoding="utf-8")))]
@@ -370,6 +382,84 @@ def test_deliver_into_a_busy_open_bot_chat_reports_it_queued_and_keeps_the_recei
         assert queued["author"]["name"] == "cody" and queued["author"]["is_bot"] is True
     finally:
         lease.release()
+
+
+def test_deliver_live_owner_waits_the_extended_budget_for_a_late_settlement(home, monkeypatch):
+    """A reply that lands after a naively-short wait but within the new CLI-path-matching budget
+    must come back as the real answer, not the flagged/canned text — this is the whole point of
+    extending the wait (AGY-DELIVERY-STATE-MACHINE.md Forensic 2)."""
+    from tools import bot_live_delivery as mailbox
+
+    ops_home, lease = _lease_open_bot_chat(home)
+    spawned = []
+    _no_cli_transport(monkeypatch, spawned)
+    monkeypatch.setattr(srv, "_profile_home", lambda name: ops_home)
+    monkeypatch.setattr(srv, "_sessions", {})
+    monkeypatch.setattr(bot_relay, "TURN_ATTEMPT_TIMEOUT_SECONDS", 1.0)
+    monkeypatch.setattr(bot_relay, "TURN_MAX_ATTEMPTS", 2)  # budget = 2s
+    monkeypatch.setattr("tools.bot_mode_dm._LIVE_WAIT_SECONDS", 0.3)  # RED-run safety: shorter than the 1s settle delay below
+
+    def _settle_late():
+        time.sleep(1.0)
+        owner = mailbox.find_canonical_live_owner(ops_home)
+        deadline = time.monotonic() + 10
+        while time.monotonic() < deadline:
+            claimed = mailbox.claim_pending_delivery(ops_home, owner)
+            if claimed is not None:
+                mailbox.complete_delivery(ops_home, claimed["delivery_id"], status="settled",
+                                          reply="the real answer")
+                return
+            time.sleep(0.05)
+
+    thread = threading.Thread(target=_settle_late, daemon=True)
+    thread.start()
+    try:
+        started = time.monotonic()
+        out = _result(srv._methods["bot_relay.deliver"](1, {"profile": "ops", "message": "ping"}))
+        elapsed = time.monotonic() - started
+    finally:
+        thread.join(timeout=5)
+        lease.release()
+
+    assert out["reply"] == "the real answer"
+    assert "reply_relayed" not in out
+    assert elapsed >= 1.0
+
+
+def test_deliver_live_owner_wait_budget_matches_the_cli_paths_worst_case(home, monkeypatch):
+    """Budget accounting: the live-owner branch's settlement wait is
+    TURN_ATTEMPT_TIMEOUT_SECONDS * TURN_MAX_ATTEMPTS minus time already spent in the handler — the
+    same worst-case hold the CLI transport may take inside the Desktop deliver deadline, not the
+    old, much shorter fixed budget."""
+    from tools import bot_live_delivery as live
+
+    ops_home, lease = _lease_open_bot_chat(home)
+    spawned = []
+    _no_cli_transport(monkeypatch, spawned)
+    monkeypatch.setattr(srv, "_profile_home", lambda name: ops_home)
+    monkeypatch.setattr(srv, "_sessions", {})
+    monkeypatch.setattr(bot_relay, "TURN_ATTEMPT_TIMEOUT_SECONDS", 3.0)
+    monkeypatch.setattr(bot_relay, "TURN_MAX_ATTEMPTS", 2)
+    monkeypatch.setattr("tools.bot_mode_dm._LIVE_WAIT_SECONDS", 0.05)  # RED-run safety: pre-fix code still reads this
+
+    captured = {}
+    real_await_delivery = live.await_delivery
+
+    def _capture_await_delivery(profile_home, delivery_id, timeout, **kwargs):
+        captured["timeout"] = timeout
+        # Settle the wait with a near-zero REAL budget so the test itself stays fast; only the
+        # requested budget (what the handler asked for) is under test here.
+        return real_await_delivery(profile_home, delivery_id, 0, **kwargs)
+
+    monkeypatch.setattr(live, "await_delivery", _capture_await_delivery)
+    try:
+        _result(srv._methods["bot_relay.deliver"](1, {"profile": "ops", "message": "ping"}))
+    finally:
+        lease.release()
+
+    # TURN_ATTEMPT_TIMEOUT_SECONDS(3.0) * TURN_MAX_ATTEMPTS(2) = 6.0, minus negligible handler
+    # overhead before this call.
+    assert 5.9 < captured["timeout"] <= 6.0
 
 
 _REFUSAL_STDERR = "hermes-refusal-reason: SESSION_NOT_OWNED\nCe chat est occupé.\n"
