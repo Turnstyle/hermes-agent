@@ -2375,61 +2375,12 @@ def _parents_satisfied(conn: sqlite3.Connection, task_id: str) -> bool:
     ).fetchone() is None
 
 
-_REHOMED_OR_SUPERSEDED_RE = re.compile(r"\b(rehomed|superseded)\b", re.IGNORECASE)
-_GITHUB_PULL_URL_RE = re.compile(r"github\.com/.+/pull/\d+", re.IGNORECASE)
-_MERGE_WORD_RE = re.compile(r"\bmerge\b", re.IGNORECASE)
-_MERGED_WORD_RE = re.compile(r"\bmerged\b", re.IGNORECASE)
+def _parent_gate_allows_completion(
+    conn: sqlite3.Connection, task_id: str, *, allow_network: bool = True,
+) -> bool:
+    from hermes_cli.kanban_parent_gate import parent_gate_allows_completion
 
-
-def _newest_event_text(conn: sqlite3.Connection, task_id: str) -> str:
-    row = conn.execute(
-        "SELECT kind, payload FROM task_events WHERE task_id = ? ORDER BY id DESC LIMIT 1",
-        (task_id,),
-    ).fetchone()
-    if not row:
-        return ""
-    payload = row["payload"] if row["payload"] is not None else ""
-    return f"{row['kind']} {payload}"
-
-
-def _child_rehomed_supersedes_parent_gate(conn: sqlite3.Connection, task_id: str) -> bool:
-    return bool(_REHOMED_OR_SUPERSEDED_RE.search(_newest_event_text(conn, task_id)))
-
-
-def _merge_parent_allows_child_completion(conn: sqlite3.Connection, parent_id: str) -> bool:
-    row = conn.execute(
-        "SELECT status, title, body FROM tasks WHERE id = ?", (parent_id,),
-    ).fetchone()
-    if row is None or row["status"] != "todo":
-        return False
-    title_body = f"{row['title'] or ''} {row['body'] or ''}"
-    if not _MERGE_WORD_RE.search(title_body):
-        return False
-    comment_rows = conn.execute(
-        "SELECT body FROM task_comments WHERE task_id = ?", (parent_id,),
-    ).fetchall()
-    combined = title_body + " " + " ".join(c["body"] or "" for c in comment_rows)
-    return bool(_GITHUB_PULL_URL_RE.search(combined) and _MERGED_WORD_RE.search(combined))
-
-
-def _parent_gate_allows_completion(conn: sqlite3.Connection, task_id: str) -> bool:
-    if _parents_satisfied(conn, task_id):
-        return True
-    if _child_rehomed_supersedes_parent_gate(conn, task_id):
-        _log.warning(
-            "kanban complete_task: completing %s despite open parents "
-            "(newest event indicates rehomed/superseded)",
-            task_id,
-        )
-        return True
-    for parent_id, _status in unsatisfied_parents(conn, task_id):
-        if not _merge_parent_allows_child_completion(conn, parent_id):
-            return False
-    _log.warning(
-        "kanban complete_task: completing %s despite open merge-bookkeeping parent(s)",
-        task_id,
-    )
-    return True
+    return parent_gate_allows_completion(conn, task_id, allow_network=allow_network)
 
 
 def _blocked_event_reason(payload: Any) -> str:
@@ -3032,7 +2983,7 @@ def complete_task(
     with write_txn(conn):
         # Hard invariant even for human review approval: a parent may have
         # reopened while this task waited.
-        if not _parent_gate_allows_completion(conn, task_id):
+        if not _parent_gate_allows_completion(conn, task_id, allow_network=False):
             return False
         if acceptance is not None and not record_acceptance(conn, task_id, acceptance):
             return False
