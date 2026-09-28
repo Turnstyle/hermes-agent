@@ -34,6 +34,38 @@ from hermes_cli.kanban_specify import _profile_author as _specify_author
 logger = logging.getLogger(__name__)
 
 
+def _installed_fleet_node_id(conn):
+    helper = getattr(kb, "_fleet_adapter_installed_node_id", None)
+    if helper is not None:
+        return helper(conn)
+    from hermes_cli.kanban_recover_ghost import _installed_fleet_node_id as installed_from_trigger
+    return installed_from_trigger(conn)
+
+
+def _is_foreign_fleet_mirror(conn, task_id, installed_node_id):
+    helper = getattr(kb, "_is_foreign_fleet_mirror", None)
+    if helper is not None:
+        return helper(conn, task_id, installed_node_id)
+    if installed_node_id is None:
+        return False
+    row = conn.execute(
+        "SELECT current_node, source_node FROM fleet_kanban_issue_map "
+        "WHERE local_task_id = ?", (task_id,),
+    ).fetchone()
+    if row is None:
+        return False
+    current_node, source_node = row["current_node"], row["source_node"]
+    owner = source_node if current_node is None else current_node
+    if not isinstance(owner, str) or not owner.strip():
+        logger.warning(
+            "kanban decompose: task %s has a fleet mapping with unknown owner "
+            "(current_node=%r, source_node=%r); treating as foreign",
+            task_id, current_node, source_node,
+        )
+        return True
+    return owner != installed_node_id
+
+
 _SYSTEM_PROMPT = """You are the Kanban decomposer for the Hermes Agent board.
 
 A user dropped a rough idea into the Triage column. Your job is to break it
@@ -312,6 +344,11 @@ def decompose_task(
     task, reason = _load_triage_task(task_id)
     if task is None:
         return DecomposeOutcome(task_id, False, reason)
+    with kbc.connect_closing() as conn:
+        installed = _installed_fleet_node_id(conn)
+        if _is_foreign_fleet_mirror(conn, task_id, installed):
+            logger.debug("decompose: skipping foreign Fleet mirror %s", task_id)
+            return DecomposeOutcome(task_id, False, "foreign Fleet mirror owned by another node")
 
     routing = _load_routing(root_assignee=task.assignee)
     raw, reason = _call_aux(
@@ -340,7 +377,8 @@ def list_triage_ids(*, tenant: Optional[str] = None) -> list[str]:
     """Return task ids currently in the triage column."""
     with kbc.connect_closing() as conn:
         rows = kb.list_tasks(conn, status="triage", tenant=tenant, limit=1000)
-    return [row.id for row in rows]
+        installed = _installed_fleet_node_id(conn)
+        return [row.id for row in rows if not _is_foreign_fleet_mirror(conn, row.id, installed)]
 
 
 # ---- BEGIN PLUGIN-COMPAT (revert-scheduled; see COMPAT_MANIFEST.md) ----
