@@ -284,7 +284,7 @@ def _finalize_child_env(env: dict) -> dict:
 
 def _scrubbed_env(parts, plugin_strip: frozenset, fix_path) -> dict:
     """Filter each ``(items, unwrap_force)`` in *parts* into one env, rewrite PATH via
-    *fix_path* (always prepending the hermes install dir so bare ``hermes`` resolves
+    *fix_path* (making bare ``hermes`` resolve from the source launcher when present
     for children of a systemd/cron-launched gateway), then apply the shared guards."""
     out: dict[str, str] = {}
     for items, unwrap_force in parts:
@@ -301,6 +301,13 @@ def _scrubbed_env(parts, plugin_strip: frozenset, fix_path) -> dict:
     # already applies this invariant; Cron scripts use this sanitizer directly (#92998).
     if path_key is not None:
         out[path_key] = _prepend_hermes_bin_dir(fix_path(out.get(path_key, "")))
+        if not _IS_WINDOWS:
+            from pm.environments import source_launcher_dir
+            launcher_dir = source_launcher_dir(_hermes_repo_root)
+            if launcher_dir is not None:
+                source = str(launcher_dir)
+                entries = [entry for entry in out[path_key].split(os.pathsep) if entry != source]
+                out[path_key] = os.pathsep.join([source, *entries])
     return _finalize_child_env(out)
 
 

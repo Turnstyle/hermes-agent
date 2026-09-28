@@ -54,5 +54,5 @@ def test_service_paths_prefer_source_launcher_and_omit_installs_bins(tmp_path, m
 
     monkeypatch.setattr(gateway, "PROJECT_ROOT", installs_root() / "old" / "environments" / "old" / "workspace")
     installed_dirs = gateway._build_service_path_dirs()
-    assert installed_dirs[0] == str(stale_launcher)
+    assert str(stale_launcher) not in installed_dirs
     assert str(stale_launcher) not in gateway._persisted_service_path_entries(installed_dirs)

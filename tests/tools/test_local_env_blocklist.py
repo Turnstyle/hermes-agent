@@ -360,6 +360,28 @@ def test_foreground_minimal_path_preserves_operator_precedence(child_env, monkey
     assert result.count("/custom/bin") == 1
 
 
+@pytest.mark.platforms("posix")
+def test_terminal_run_env_prefers_source_launcher_over_installs_venv(child_env, monkeypatch):
+    from pm import environments
+
+    root = child_env / "repo"
+    source = root / ".hermes" / "bin"
+    source.mkdir(parents=True)
+    (source / "hermes").touch()
+    installs = child_env / "installs"
+    venv_bin = installs / "environments" / "current" / "venv" / "bin"
+    venv_bin.mkdir(parents=True)
+    monkeypatch.setattr(environments, "installs_root", lambda: installs)
+    monkeypatch.setattr(local, "_hermes_repo_root", root)
+    monkeypatch.setattr(local, "_HERMES_BIN_DIR", None)
+    monkeypatch.setenv("PATH", os.pathsep.join((str(venv_bin), str(source), "/usr/bin")))
+
+    entries = local._make_run_env({})["PATH"].split(os.pathsep)
+    assert entries[0] == str(source)
+    assert entries.count(str(source)) == 1
+    assert entries.index(str(source)) < entries.index(str(venv_bin))
+
+
 def _make_directory_link(link: Path, target: Path) -> None:
     """Create a directory link without requiring symlink privileges.
 
