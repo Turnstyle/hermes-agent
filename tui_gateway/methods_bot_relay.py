@@ -100,12 +100,18 @@ def _(rid, params: dict, _root=_relay_root) -> dict:
 def _(rid, params: dict, _root=_relay_root, _run=_run_delivery,
       _failure_reason=delivery_failure_reason, _log_deliver=_log_deliver,
       _live_wait_budget_seconds=_live_wait_budget_seconds) -> dict:
-    """Deliver a relayed DM (``profile``, attribution-prefixed ``message``) into a Bot Chat ON THIS
-    GATEWAY via the one-turn ``hermes -p <profile> chat -c "Bot Chat"`` transport local DMs use →
-    ``{reply}``. Blocking by design (Desktop relay worker; the RPC pool keeps it off the reader)."""
+    """Deliver a relayed DM (``profile`` or explicit ``target_profile``, attribution-prefixed
+    ``message``) into a Bot Chat ON THIS GATEWAY via the one-turn ``hermes -p <profile> chat -c
+    "Bot Chat"`` transport local DMs use → ``{reply}``. ``target_profile`` wins when both are sent
+    (the Desktop dial wrapper overwrites ``profile``). Blocking by design (Desktop relay worker;
+    the RPC pool keeps it off the reader)."""
     import tempfile
     handler_started = time.monotonic()
-    profile = str(params.get("profile") or "").strip()
+    stamped = str(params.get("profile") or "").strip()
+    profile = str(params.get("target_profile") or "").strip() or stamped
+    if stamped and profile != stamped:
+        logger.warning("bot_relay.deliver: target_profile %r overrides the route-stamped profile %r",
+                       profile, stamped)
     message = str(params.get("message") or "").strip()
     if not profile or not message:
         return _err(rid, 4090, "profile and message required")
@@ -262,10 +268,8 @@ def _(rid, params: dict, _root=_relay_root, _run=_run_delivery,
             try:
                 with acquire_turn_lock(root, resolved, min(_FAST_ACK_SECONDS, turn_wait_seconds())):
                     proc = _run(resolved, tmp, turn_env)
-                    held = proc.returncode != 0 and refused_not_owned(proc.stderr or "")
-                    if held:
-                        return _fast_ack_busy()
-                    if proc.returncode != 0:
+                    # Team 1: the refusal marker can ride the combined turn text, not stderr alone.
+                    if proc.returncode != 0 and not refused_not_owned(_detail(proc)):
                         # Retry policy: transient classes re-run the SAME session once; context_overflow
                         # too — the retried turn's pre-API compaction pass compacts the over-threshold
                         # transcript first (no fresh session is minted). Auth/quota/config never retry.
@@ -276,6 +280,9 @@ def _(rid, params: dict, _root=_relay_root, _run=_run_delivery,
                             # The failed attempt already persisted the DM; the re-run resumes that row.
                             from tools.bot_relay import retry_turn_env
                             proc = _run(resolved, tmp, retry_turn_env(turn_env))
+                    # Busy is decided on the proc we will actually stop on, including a retry.
+                    if proc.returncode != 0 and refused_not_owned(_detail(proc)):
+                        return _fast_ack_busy()
             except TurnBusyError:
                 return _fast_ack_busy()
         finally:
@@ -308,7 +315,8 @@ def _(rid, params: dict, _root=_relay_root, _run=_run_delivery,
             # this profile actually lives on — answer with this install's own truth.
             from tools.bot_relay import target_scope_refusal
             return _err(rid, 5094, target_scope_refusal(resolved, _hermes_home), data={"reason": reason})
-        return _err(rid, 5096 if reason == "target_busy" else 5094, str(e), data={"reason": reason})
+        from tools.bot_failure_reasons import TARGET_BUSY
+        return _err(rid, 5096 if reason == TARGET_BUSY else 5094, str(e), data={"reason": reason})
 
 
 @method("bot_relay.reply")
@@ -319,21 +327,26 @@ def _(rid, params: dict, _root=_relay_root) -> dict:
     ``bot_relay.relayed_failure_error``) — this is the last point that still knows both the error
     and WHICH target produced it. ``reply_relayed`` (bool, optional) rides an otherwise-ok reply the
     Desktop flagged as not carrying the real answer (e.g. ``reason="reply_not_relayed"``, pairs
-    9-12) — forwarded through, never dropped, so the waiter/telemetry can classify it too."""
+    9-12) — forwarded through, never dropped, so the waiter/telemetry can classify it too. Optional
+    ``delivered_profile`` is the target gateway's attestation of which profile actually ran the turn."""
     envelope_id = str(params.get("id") or "").strip()
     if not envelope_id:
         return _err(rid, 4093, "id required")
     try:
-        from tools.bot_failure_reasons import classify_agent_error
+        from tools.bot_failure_reasons import UNKNOWN, classify_agent_error
         from tools.bot_relay import read_claimed_envelope, relayed_failure_error, write_reply
         root = _root()
         raw_error = str(params.get("error") or "")
         reply_relayed = params.get("reply_relayed")
         # Classify BEFORE the copy rewrite: the rewritten text is for a human and no longer carries
         # the signature the classifier keys on, and the Desktop only forwards `reason`.
+        code = str(params.get("reason") or "").strip()
+        if raw_error and code in ("", UNKNOWN):
+            code = classify_agent_error(raw_error)
         write_reply(root, envelope_id, reply=str(params.get("reply") or ""),
                     error=relayed_failure_error(raw_error, read_claimed_envelope(root, envelope_id)),
-                    reason=str(params.get("reason") or "") or (classify_agent_error(raw_error) if raw_error else ""),
+                    reason=code,
+                    delivered_profile=str(params.get("delivered_profile") or "").strip() or None,
                     reply_relayed=reply_relayed if isinstance(reply_relayed, bool) else None)
         return _ok(rid, {"ok": True})
     except ValueError as e:
