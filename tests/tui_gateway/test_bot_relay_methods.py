@@ -465,42 +465,11 @@ def test_deliver_live_owner_wait_budget_matches_the_cli_paths_worst_case(home, m
 _REFUSAL_STDERR = "hermes-refusal-reason: SESSION_NOT_OWNED\nCe chat est occupé.\n"
 
 
-def test_deliver_queues_behind_a_held_session_then_delivers(home, monkeypatch):
-    """#<relay-busy-queue>: the CLI transport's SESSION_NOT_OWNED refusal (another surface — plain
-    `hermes chat`, a gateway bridge turn — holds the target's live Bot Chat, distinct from this
-    handler's own turn lock) used to fail on the first attempt; it must retry like a lock-wait
-    timeout already does, bounded by bot_mode.turn_wait_seconds."""
-    from tools import bot_mode_dm
+def test_deliver_fast_acks_a_held_session(home, monkeypatch):
+    """A SESSION_NOT_OWNED Bot Chat is written to fleet_messages_v1 on the first
+    refusal. The sender gets queued (message_id) without a turn_wait_seconds loop."""
+    from tools.fleet_message_enqueue import queued_ack
 
-    monkeypatch.setattr(bot_relay, "turn_wait_seconds", lambda: 5.0)
-    monkeypatch.setattr(bot_mode_dm, "_BUSY_SLICE_SECONDS", 0.05)
-    calls = []
-
-    class _Proc:
-        def __init__(self, returncode, stdout="", stderr=""):
-            self.returncode, self.stdout, self.stderr = returncode, stdout, stderr
-
-    def _fake_run(argv, **kwargs):
-        calls.append(list(argv))
-        if len(calls) <= 2:
-            return _Proc(1, stderr=_REFUSAL_STDERR)
-        return _Proc(0, stdout="pong from ops")
-
-    monkeypatch.setattr("hermes_cli.quiet_single_query.run_reported_turn", _fake_run)
-    out = _result(srv._methods["bot_relay.deliver"](1, {"profile": "ops", "message": "ping"}))
-    assert out["reply"] == "pong from ops"
-    assert len(calls) == 3
-
-
-def test_deliver_fails_target_busy_after_the_full_turn_wait_budget(home, monkeypatch):
-    """Held for the whole budget: a target_busy refusal, mentioning how long it queued, within a
-    bounded number of attempts and never past turn_wait_seconds plus one retry slice — the
-    Desktop's fixed deliver deadline depends on this handler never holding longer than that."""
-    from tools import bot_mode_dm
-
-    slice_seconds, budget = 0.05, 0.3
-    monkeypatch.setattr(bot_relay, "turn_wait_seconds", lambda: budget)
-    monkeypatch.setattr(bot_mode_dm, "_BUSY_SLICE_SECONDS", slice_seconds)
     calls = []
 
     class _Proc:
@@ -512,6 +481,36 @@ def test_deliver_fails_target_busy_after_the_full_turn_wait_budget(home, monkeyp
         return _Proc(1, stderr=_REFUSAL_STDERR)
 
     monkeypatch.setattr("hermes_cli.quiet_single_query.run_reported_turn", _fake_run)
+    monkeypatch.setattr(
+        "tools.fleet_message_enqueue.enqueue_busy_dm",
+        lambda **kwargs: "fmrelay",
+    )
+    out = _result(srv._methods["bot_relay.deliver"](1, {"profile": "ops", "message": "ping"}))
+    assert out["reply"] == queued_ack("fmrelay")
+    assert out["status"] == "queued"
+    assert len(calls) == 1
+
+
+def test_deliver_does_not_claim_queued_when_the_registry_write_fails(home, monkeypatch):
+    """A failed fleet write is an immediate target_busy, not a turn_wait_seconds hold."""
+    from tools.fleet_message_enqueue import FleetEnqueueError
+
+    calls = []
+
+    class _Proc:
+        def __init__(self, returncode, stdout="", stderr=""):
+            self.returncode, self.stdout, self.stderr = returncode, stdout, stderr
+
+    def _fake_run(argv, **kwargs):
+        calls.append(list(argv))
+        return _Proc(1, stderr=_REFUSAL_STDERR)
+
+    monkeypatch.setattr("hermes_cli.quiet_single_query.run_reported_turn", _fake_run)
+
+    def _fail(**kwargs):
+        raise FleetEnqueueError("firestore down")
+
+    monkeypatch.setattr("tools.fleet_message_enqueue.enqueue_busy_dm", _fail)
     started = time.monotonic()
     out = srv._methods["bot_relay.deliver"](1, {"profile": "ops", "message": "ping"})
     elapsed = time.monotonic() - started
@@ -519,12 +518,9 @@ def test_deliver_fails_target_busy_after_the_full_turn_wait_budget(home, monkeyp
     assert "error" in out
     assert out["error"]["code"] == 5092
     assert out["error"]["data"]["reason"] == "target_busy"
-    assert "queu" in out["error"]["message"].lower()
-    # The final slice doesn't sleep before giving up, so elapsed may fall a bit short of the full
-    # budget (by at most one slice) — never far short, and this handler must never hold long past it
-    # (the Desktop's fixed deliver deadline depends on that).
-    assert budget - slice_seconds <= elapsed < budget + 2.0
-    assert 1 <= len(calls) <= 30
+    assert "queued (" not in out["error"]["message"]
+    assert elapsed < 5
+    assert len(calls) == 1
 
 
 def test_deliver_non_held_failure_path_is_unchanged(home, monkeypatch):
