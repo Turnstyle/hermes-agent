@@ -679,14 +679,18 @@ def _local_delivery_home(argv: list[str]) -> Path | None:
 
 
 def _drain_enqueue_command(cli: str, sender: str, home: Path, dm_file: str) -> list[str]:
-    """Use the delivery CLI's own Hermes runtime for the Firestore write."""
-    launcher = Path(cli)
-    python = launcher.parent / ("python.exe" if sys.platform == "win32" else "python")
-    if launcher.is_absolute() and (launcher.parent.parent / "pyvenv.cfg").is_file() and python.is_file():
-        prefix = [str(python), "-m", "tools.fleet_message_drain"]
-    else:
-        prefix = [cli, "--run-module", "tools.fleet_message_drain"]
-    return [*prefix, "enqueue", "--from", sender, "--to-home", str(home), "--body-file", dm_file]
+    """Run the Firestore write under the Hermes runtime of the SAME source tree this runner runs from.
+
+    The runner itself runs under the bare store python (no yaml / google.auth). The install venv's
+    python is not usable either: it imports the editable ``environments/*/workspace`` copy, which can
+    lag this checkout and lack ``tools.fleet_message_drain`` entirely. The checkout's own bootstrap
+    launcher (``<root>/.hermes/bin/hermes --run-module``) activates the dependency env and imports this
+    tree; fall back to the delivery CLI's launcher only when that file is absent.
+    """
+    source_launcher = Path(__file__).resolve().parents[1] / ".hermes" / "bin" / "hermes"
+    launcher = str(source_launcher) if source_launcher.is_file() else cli
+    return [launcher, "--run-module", "tools.fleet_message_drain",
+            "enqueue", "--from", sender, "--to-home", str(home), "--body-file", dm_file]
 
 
 @contextlib.contextmanager

@@ -91,9 +91,12 @@ def test_busy_queue_uses_delivery_venv_when_store_python_cannot_read_config(tmp_
                                    stdin_file=False, profile_home=target, author={"id": "bot:tb-cndr"})
     assert rc == 0 and time.monotonic() - started < 5
     assert len(calls) == 2
-    assert calls[1][0] == [str(venv / "bin" / "python"), "-m", "tools.fleet_message_drain",
+    source_launcher = Path(bot_mode_dm.__file__).resolve().parents[1] / ".hermes" / "bin" / "hermes"
+    expected_launcher = str(source_launcher) if source_launcher.is_file() else str(venv / "bin" / "hermes")
+    assert calls[1][0] == [expected_launcher, "--run-module", "tools.fleet_message_drain",
                            "enqueue", "--from", "tb-cndr", "--to-home", str(target),
                            "--body-file", str(dm_file)]
+    assert str(venv / "bin" / "python") not in calls[1][0], "venv python imports the stale editable workspace"
     assert calls[1][1]["timeout"] == 5
     assert json.loads(capsys.readouterr().out)["message_id"] == "m1"
     assert not dm_file.exists()
