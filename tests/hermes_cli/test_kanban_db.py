@@ -496,9 +496,20 @@ def test_respawn_guard_blocker_auth_curated_not_open_stem(
 
     with kbc.connect() as conn:
         tid = kb.create_task(conn, title="prose", assignee="a")
+        kb.claim_task(conn, tid)
+        run_id = kb.get_task(conn, tid).current_run_id
+        # The guard reads the latest run's own error. A leftover quota string
+        # on the task row must not park the card when the run says otherwise.
         conn.execute(
-            "UPDATE tasks SET last_failure_error=? WHERE id=?",
-            (error_text, tid),
+            "UPDATE task_runs SET outcome='failed', status='failed', error=?, ended_at=? "
+            "WHERE id=?",
+            (error_text, 5_000_000, run_id),
+        )
+        conn.execute(
+            "UPDATE tasks SET status='ready', current_run_id=NULL, "
+            "claim_lock=NULL, claim_expires=NULL, worker_pid=NULL, "
+            "last_failure_error=? WHERE id=?",
+            ("429 leftover rate limit", tid),
         )
         conn.commit()
         assert kbd.check_respawn_guard(conn, tid) == expected
@@ -516,9 +527,14 @@ def test_respawn_guard_ignores_auth_words_in_crashed_worker_output(kanban_home):
         kb.claim_task(conn, crashed_id)
         crashed_run_id = kb.get_task(conn, crashed_id).current_run_id
         conn.execute(
-            "UPDATE task_runs SET outcome='crashed', status='failed', ended_at=? "
+            "UPDATE task_runs SET outcome='crashed', status='failed', error=?, ended_at=? "
             "WHERE id=?",
-            (5_000_000, crashed_run_id),
+            (
+                "pid 1 killed by signal 9. Worker's last output: "
+                "'env -u ANTHROPIC_API_KEY claude auth status --text'",
+                5_000_000,
+                crashed_run_id,
+            ),
         )
         conn.execute(
             "UPDATE tasks SET status='ready', current_run_id=NULL, "
@@ -535,9 +551,9 @@ def test_respawn_guard_ignores_auth_words_in_crashed_worker_output(kanban_home):
         kb.claim_task(conn, spawn_failed_id)
         spawn_run_id = kb.get_task(conn, spawn_failed_id).current_run_id
         conn.execute(
-            "UPDATE task_runs SET outcome='spawn_failed', status='failed', ended_at=? "
+            "UPDATE task_runs SET outcome='spawn_failed', status='failed', error=?, ended_at=? "
             "WHERE id=?",
-            (5_000_000, spawn_run_id),
+            ("provider authentication failed", 5_000_000, spawn_run_id),
         )
         conn.execute(
             "UPDATE tasks SET status='ready', current_run_id=NULL, "

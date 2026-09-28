@@ -103,6 +103,12 @@ def _respawn_guard_pr_key(match: re.Match[str]) -> tuple[str, str, int]:
     owner, repo, _, number = match.group(0).casefold().split("github.com/", 1)[1].split("/")
     return owner, repo, int(number)
 
+
+_EXPLICIT_DO_NOT_DISPATCH_MARKERS = (
+    "do not dispatch",
+    "king seat is already doing this",
+)
+
 # ---------------------------------------------------------------------------
 # Lifecycle-guard fence recognition
 # ---------------------------------------------------------------------------
@@ -1866,6 +1872,69 @@ def _set_worker_pid(conn: sqlite3.Connection, task_id: str, pid: int) -> None:
         _kb._append_event(conn, task_id, "spawned", {"pid": int(pid), "started_at": started_at}, run_id=run_id)
 
 
+def _blocked_event_reason(payload: Optional[str]) -> str:
+    data = _kb._json_or(payload, {})
+    if not isinstance(data, dict):
+        return ""
+    return _kb._lossy_text(data.get("reason")) or ""
+
+
+def _unchanged_blocked_reason(conn: sqlite3.Connection, task_id: str) -> bool:
+    """True when the two newest ``blocked`` events share the same non-empty reason.
+
+    A human ``unblocked`` event after the newest ``blocked`` event clears the
+    guard so promote-and-respawn can proceed.
+    """
+    newest_blocked = conn.execute(
+        "SELECT id FROM task_events "
+        "WHERE task_id = ? AND kind = 'blocked' "
+        "ORDER BY id DESC LIMIT 1",
+        (task_id,),
+    ).fetchone()
+    if newest_blocked is None:
+        return False
+    if conn.execute(
+        "SELECT 1 FROM task_events "
+        "WHERE task_id = ? AND kind = 'unblocked' AND id > ? LIMIT 1",
+        (task_id, newest_blocked["id"]),
+    ).fetchone():
+        return False
+    rows = conn.execute(
+        "SELECT payload FROM task_events "
+        "WHERE task_id = ? AND kind = 'blocked' "
+        "ORDER BY id DESC LIMIT 2",
+        (task_id,),
+    ).fetchall()
+    if len(rows) < 2:
+        return False
+    newest, previous = (_blocked_event_reason(r["payload"]) for r in rows)
+    return bool(newest) and newest == previous
+
+
+def _explicit_do_not_dispatch_marked(conn: sqlite3.Connection, task_id: str) -> bool:
+    row = conn.execute(
+        "SELECT title, body FROM tasks WHERE id = ?",
+        (task_id,),
+    ).fetchone()
+    if row is None:
+        return False
+    texts = [_kb._lossy_text(row["title"]), _kb._lossy_text(row["body"])]
+    comment = conn.execute(
+        "SELECT body FROM task_comments WHERE task_id = ? "
+        "ORDER BY created_at DESC, id DESC LIMIT 1",
+        (task_id,),
+    ).fetchone()
+    if comment is not None:
+        texts.append(_kb._lossy_text(comment["body"]))
+    for text in texts:
+        if not text:
+            continue
+        lowered = text.casefold()
+        if any(marker in lowered for marker in _EXPLICIT_DO_NOT_DISPATCH_MARKERS):
+            return True
+    return False
+
+
 def _clear_failure_counter(conn: sqlite3.Connection, task_id: str) -> None:
     """Reset the unified consecutive-failures counter.
 
@@ -1887,6 +1956,9 @@ def check_respawn_guard(
     """Return a guard reason if ``task_id`` should NOT be re-spawned, else None.
 
     Called per ready/review row before any claim attempt. Priority order:
+    an explicit ``do not dispatch`` / ``king seat is already doing this`` marker,
+    then ``unchanged_block_reason`` (two newest blocked reasons match and no
+    later ``unblocked`` event), then
     ``"infrastructure_cooldown"`` (latest run is a ``spawn_failed`` the host
     refused — no restart-safe scope — within the cooldown; never counted),
     ``"rate_limit_cooldown"`` (latest run ``rate_limited`` within the cooldown;
@@ -1909,6 +1981,12 @@ def check_respawn_guard(
     if row is None:
         return None
 
+    if _explicit_do_not_dispatch_marked(conn, task_id):
+        return "explicit_do_not_dispatch"
+
+    if _unchanged_blocked_reason(conn, task_id):
+        return "unchanged_block_reason"
+
     now = int(time.time())
 
     # 1. Rate-limit cooldown — see docstring for why this precedes blocker_auth.
@@ -1918,7 +1996,7 @@ def check_respawn_guard(
     #    reaches the breaker.
     rl_cooldown = _kb._resolve_rate_limit_cooldown_seconds()
     latest_run = conn.execute(
-        "SELECT outcome, ended_at, metadata FROM task_runs "
+        "SELECT outcome, ended_at, metadata, error FROM task_runs "
         "WHERE task_id = ? AND ended_at IS NOT NULL "
         # ``id`` breaks same-second ties so the newest run decides (checker round 1).
         "ORDER BY ended_at DESC, id DESC LIMIT 1",
@@ -1955,9 +2033,13 @@ def check_respawn_guard(
     # crash is different: its persisted error includes the worker's last
     # captured output, which is context rather than a diagnosis and may contain
     # benign commands such as ``claude auth status`` (#117097).
-    err = _kb._lossy_text(row["last_failure_error"])
+    run_err = (
+        _kb._lossy_text(latest_run["error"])
+        if latest_run is not None
+        else None
+    )
     latest_outcome = latest_run["outcome"] if latest_run is not None else None
-    if err and latest_outcome != "crashed" and _RESPAWN_BLOCKER_RE.search(err):
+    if run_err and latest_outcome != "crashed" and _RESPAWN_BLOCKER_RE.search(run_err):
         return "blocker_auth"
 
     # Review-lane spawns stop here: a recent completed run and a fresh PR URL
@@ -2473,8 +2555,24 @@ def _dispatch_lane_task(
         # in-memory view) keeps diagnostics and the board state consistent: the task is now legitimately
         # owned by ``kanban.default_assignee``, not "unassigned but secretly routed".
         if not dry_run:
-            with _kb.write_txn(conn):
-                _kb._append_event(conn, task_id, "respawn_guarded", {"reason": guard_reason})
+            skip_event = False
+            if guard_reason == "unchanged_block_reason":
+                last = conn.execute(
+                    "SELECT kind, payload FROM task_events WHERE task_id = ? "
+                    "ORDER BY id DESC LIMIT 1",
+                    (task_id,),
+                ).fetchone()
+                if last is not None and last["kind"] == "respawn_guarded":
+                    prev = _kb._json_or(last["payload"], {})
+                    skip_event = (
+                        isinstance(prev, dict)
+                        and prev.get("reason") == guard_reason
+                    )
+            if not skip_event:
+                with _kb.write_txn(conn):
+                    _kb._append_event(
+                        conn, task_id, "respawn_guarded", {"reason": guard_reason},
+                    )
         return False
 
     def _count_spawn(name: str) -> None:
