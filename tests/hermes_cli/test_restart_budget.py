@@ -920,3 +920,24 @@ def test_cmd_restart_consumes_hour_when_new_pid_observed(
     gw._cmd_restart(args)
     allowed, _ = evaluate_restart_budget(now=t0 + 120, home=tmp_path)
     assert not allowed
+
+
+def test_observer_ignores_reused_pid_from_stale_state_file(tmp_path, monkeypatch):
+    """R5 HIGH: a stale gateway_state.json PID reused by an unrelated live
+    process must not count as an observed restart."""
+    import json
+    import os
+
+    from hermes_cli import gateway_restart_observe as obs
+
+    monkeypatch.setattr("hermes_constants.get_hermes_home", lambda: tmp_path)
+    monkeypatch.setattr("gateway.status.get_running_pid", lambda *a, **k: None)
+    tmp_path.joinpath("gateway_state.json").write_text(
+        json.dumps({"pid": os.getpid(), "gateway_state": "running"}), encoding="utf-8"
+    )
+    # os.getpid() is alive but is pytest, not a gateway.
+    monkeypatch.setattr("gateway.status._looks_like_gateway_process", lambda pid: False)
+    assert obs.replacement_was_observed(frozenset(), all_profiles=False) is False
+
+    monkeypatch.setattr("gateway.status._looks_like_gateway_process", lambda pid: True)
+    assert obs.replacement_was_observed(frozenset(), all_profiles=False) is True
