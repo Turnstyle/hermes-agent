@@ -457,6 +457,14 @@ def _run_post_turn_followups(
                 return
     except Exception as _dm_exc:
         _hook_failure("bot mailbox claim", _dm_exc)
+    # Queued fleet_messages_v1 docs (Mission Control registry: DMs / notify wakes that hit target_busy
+    # while this bot was mid-turn). Turn end is the ONLY trigger: the idle poller never calls this.
+    try:
+        with _session_profile_runtime_scope(session):
+            if _drain_fleet_messages_once(sid, session):
+                return
+    except Exception as _fm_exc:
+        _hook_failure("fleet message drain", _fm_exc)
     # Safety net for completion events that arrived mid-turn.  Ownership is positive-proof
     # and compression-chain aware (same fail-closed gate as the poller): session B must
     # not consume session A's event.  Unclaimable events are requeued for the poller.
