@@ -1979,6 +1979,8 @@ class ProcessRegistry(ProcessCheckpointMixin):
 
     def _reconcile_local_exit(self, session: "ProcessSession") -> None:
         """Reconcile ``session.exited`` against the real child state.
+        File-backed sessions need a refresh when their wrapper has exited but the
+        file reader has not reached its next polling tick.
         The reader flips ``exited`` only at EOF; when the direct child has exited but a
         descendant (e.g. a daemon from ``hermes update``) holds the pipe open, poll()
         would report "running" forever. If ``Popen.poll()`` has an exit code, drain
@@ -1991,7 +1993,7 @@ class ProcessRegistry(ProcessCheckpointMixin):
         stdout pipe open, the reader blocks forever and poll() keeps returning "running" indefinitely (issue
         #17327 — 74 polls over 7 minutes on Feishu).
         """
-        if session is None or session.exited or session.output_log_path:
+        if session is None or session.exited:
             return
         proc = getattr(session, "process", None)
         if proc is None:
@@ -2002,6 +2004,11 @@ class ProcessRegistry(ProcessCheckpointMixin):
             return
         if rc is None:
             return  # Direct child still running — reader block is legitimate.
+        if session.output_log_path:
+            self._poll_file_session(session)
+            if not session.exited:
+                self._finish_exited(session, rc)
+            return
         # Best-effort non-blocking drain of whatever the reader hasn't consumed.
         stdout = getattr(proc, "stdout", None)
         if stdout is not None and not _IS_WINDOWS:

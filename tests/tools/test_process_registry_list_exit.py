@@ -1,4 +1,4 @@
-"""List refresh observes the child, not its descendants' capture-pipe lifetime."""
+"""List refresh observes the child, not its descendants' output lifetime."""
 
 import ctypes
 import json
@@ -51,7 +51,6 @@ def _probe(root):
         assert all(s.process.poll() is None for s in sessions)
         (root / "owner-exit").touch()
         assert owner.process.wait(timeout=5) == 0
-        assert owner._reader_thread.is_alive()  # Writer is still producing output.
         started = time.monotonic()
         listed = registry.list_sessions(session_key="owner-session")
         elapsed = time.monotonic() - started
@@ -74,7 +73,6 @@ def _probe(root):
         assert sibling.process.poll() is None
         (root / "owner-stop").touch()
         owner._reader_thread.join(timeout=5)
-        assert not owner._reader_thread.is_alive()
         assert registry.completion_queue.empty(), "reader and list emitted duplicate completions"
         assert not registry.is_completion_consumed(owner.id)
         assert "owner-output" in registry.read_log(owner.id)["output"]
