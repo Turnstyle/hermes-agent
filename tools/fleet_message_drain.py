@@ -30,6 +30,9 @@ doc that anyone else touched in between is never overwritten):
     queued    -> rejected    the doc is malformed for this reader (unknown kind / missing body)
     queued    -> expired     its 24-hour expiry or queued delivery timeout passed
 
+An expiry also creates one ``notify_wake`` document for the original sender, unless the expired
+document is itself a notification. Stale-claim recovery uses the same sender notice path.
+
 ``replied`` is left to the reply path: the injected input tells the bot to answer the sender with
 ``message_agent``; a sender-side write may then mark the doc ``replied``.
 
@@ -52,8 +55,9 @@ The feature is dark by default. Config (profile ``config.yaml``)::
       queued_timeout_seconds: 1800 # queued without delivery -> expired with sender notice
 
 Security: the query filters ``to == me``, every returned doc is re-checked for ``to == me`` before
-any write, and writes are limited to the status bookkeeping fields below. Firestore IAM/rules stay
-the real boundary; this module never deletes and never writes message content.
+the turn-end update. Updates to existing docs are limited to the status bookkeeping fields below;
+expiry notices are separate create-only docs. Firestore IAM/rules stay the real boundary; this
+module never deletes or rewrites existing message content.
 """
 from __future__ import annotations
 
@@ -61,6 +65,7 @@ import argparse
 import contextlib
 import dataclasses
 import datetime
+import hashlib
 import json
 import logging
 import os
@@ -99,6 +104,10 @@ _SCOPE = "https://www.googleapis.com/auth/datastore"
 
 class PreconditionFailed(RuntimeError):
     """The doc changed since it was read: someone else moved it. Not ours to write."""
+
+
+class AlreadyExists(RuntimeError):
+    """A create-only sender notification was already queued."""
 
 
 class Refused(RuntimeError):
@@ -348,7 +357,12 @@ class FirestoreStore:
         _check_id(doc_id)
         url = self.doc_url[:-1] + "?" + urllib.parse.urlencode({"documentId": doc_id})
         self.commits += 1
-        self._req(url, "POST", {"fields": {key: enc(value, key) for key, value in fields.items()}})
+        try:
+            self._req(url, "POST", {"fields": {key: enc(value, key) for key, value in fields.items()}})
+        except urllib.error.HTTPError as exc:
+            if exc.code == 409:
+                raise AlreadyExists(doc_id) from exc
+            raise
 
     def update(self, doc_id: str, fields: dict, update_time: str) -> str:
         """Atomic guarded update of listed fields; returns the new updateTime. Raises
@@ -489,6 +503,33 @@ def _queued_timeout_sender_notice(doc_id: str, recipient: Any, seconds: int) -> 
             f"for {duration} without an available Bot Chat turn.")
 
 
+def _reclaimed_sender_notice(doc_id: str, recipient: Any) -> str:
+    return (f"Queued message {doc_id} to @{recipient or 'recipient'} expired before completion; "
+            "a previously started turn may have received it.")
+
+
+def _enqueue_sender_notice(store: Any, row: Row, notice: str, now: datetime.datetime) -> None:
+    if row.fields.get("kind") == "notify_wake":
+        return
+    sender = row.fields.get("from")
+    recipient = row.fields.get("to")
+    if not isinstance(sender, str) or not sender.strip() or not isinstance(recipient, str) or not recipient.strip():
+        logger.warning("fleet message drain: expired doc %s has no sender or recipient; notice not queued", row.doc_id)
+        return
+    doc_id = "fmn-" + hashlib.sha256(row.doc_id.encode("utf-8")).hexdigest()
+    now_s = rfc3339(now)
+    fields = {"message_id": doc_id, "from": recipient, "to": sender, "kind": "notify_wake",
+              "body": notice, "status": "queued", "attempts": 0, "last_error": "target_busy",
+              "created_at": now_s, "updated_at": now_s,
+              "expires_at": rfc3339(now + datetime.timedelta(hours=24)), "schema_version": 2}
+    try:
+        store.create(doc_id, fields)
+    except AlreadyExists:
+        pass
+    except Exception:
+        logger.warning("fleet message drain: could not queue sender notice for %s", row.doc_id, exc_info=True)
+
+
 def claim_next(store: Any, me: str, *, limit: int = 10, now: Optional[datetime.datetime] = None,
                queued_timeout_seconds: int = 1800, allow_claim: bool = True) -> Optional[Claimed]:
     """Run one recipient query and atomically claim the oldest claimable doc (queued -> delivered).
@@ -527,6 +568,8 @@ def claim_next(store: Any, me: str, *, limit: int = 10, now: Optional[datetime.d
                 pass
             except Exception:
                 logger.warning("fleet message drain: could not expire doc %s", row.doc_id, exc_info=True)
+            else:
+                _enqueue_sender_notice(store, row, notice, now)
             continue
         if not allow_claim:
             continue
@@ -855,7 +898,9 @@ def reclaim_stale(store: Any, *, older_than_seconds: int = 1800, max_attempts: i
                                       "(claimer died or store failed; a 'read' claim's turn may already have run)")}
             if expiry is not None and expiry <= now:
                 outcome = "expired"
-                changes.update(status=outcome, expired_at=now_s)
+                notice = _reclaimed_sender_notice(row.doc_id, fields.get("to"))
+                changes.update(status=outcome, expired_at=now_s,
+                               sender_notice=notice, sender_notice_at=now_s)
             elif attempts >= max_attempts:
                 outcome = "failed"
                 changes.update(status=outcome, failed_at=now_s)
@@ -868,6 +913,8 @@ def reclaim_stale(store: Any, *, older_than_seconds: int = 1800, max_attempts: i
                 except PreconditionFailed:
                     counts["conflicts"] += 1
                     continue
+                if outcome == "expired":
+                    _enqueue_sender_notice(store, row, notice, now)
             counts[outcome] += 1
     return counts
 

@@ -116,6 +116,15 @@ class MemoryStore:
             self.docs[doc_id].update(fields)
             return self._stamp(doc_id)
 
+    def create(self, doc_id, fields):
+        fmd._check_id(doc_id)
+        with self.lock:
+            self.commits += 1
+            if doc_id in self.docs:
+                raise fmd.AlreadyExists(doc_id)
+            self.docs[doc_id] = dict(fields)
+            self._stamp(doc_id)
+
     # test helper: an outside writer (e.g. a late sender success) touches the doc
     def outside_write(self, doc_id, fields):
         with self.lock:
@@ -612,6 +621,9 @@ class _Snapshot:
     def update(self, doc_id, fields, update_time):
         return self._store.update(doc_id, fields, update_time)
 
+    def create(self, doc_id, fields):
+        return self._store.create(doc_id, fields)
+
 
 def test_racing_turn_ends_claim_a_doc_once(store):
     doc = uid("race")
@@ -707,6 +719,11 @@ def test_reclaimer_requeues_stale_claims_and_fails_at_attempt_limit():
     assert store.get("last-attempt").fields["failed_at"] == fmd.rfc3339(NOW)
     assert store.get("expired").fields["status"] == "expired"
     assert store.get("expired").fields["expired_at"] == fmd.rfc3339(NOW)
+    assert store.get("expired").fields["sender_notice"]
+    notices = [fields for fields in store.docs.values() if fields.get("kind") == "notify_wake"]
+    assert len(notices) == 1
+    assert notices[0]["to"] == "tb-cndr"
+    assert notices[0]["body"] == store.get("expired").fields["sender_notice"]
 
 
 def test_reclaimer_skips_conflicts_and_cli_dry_run_never_writes(monkeypatch, capsys):
