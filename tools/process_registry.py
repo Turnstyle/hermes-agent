@@ -2444,6 +2444,12 @@ class ProcessRegistry(ProcessCheckpointMixin):
         with self._lock:
             return [s for s in self._running.values() if s.owner_task_id == owner_task_id and not s.exited]
 
+    def restart_safe_sessions(self) -> List[ProcessSession]:
+        """Live host jobs whose files permit adoption after a gateway stop."""
+        with self._lock:
+            return [s for s in self._running.values() if not s.exited and s.pid_scope == "host"
+                    and s.output_log_path and not s.owner_task_id.startswith("cron:")]
+
     def unread_completions_owned_by(self, owner_task_id: str) -> List[ProcessSession]:
         """Exited ``notify_on_complete`` processes of ``owner_task_id`` whose result nobody read (no wait/log/poll).
         A child's completion notice is suppressed in the parent, so an unread exit is otherwise lost silently."""
@@ -2500,8 +2506,7 @@ class ProcessRegistry(ProcessCheckpointMixin):
     def kill_all(
         self, task_id: Optional[str] = None, *, exclude_ids: frozenset = frozenset(),
         source: str = "kill_all", consume_output: bool = False,
-        session_key: Optional[str] = None, owner_task_ids: Optional[frozenset] = None,
-        spare_restart_safe: bool = False) -> int:
+        session_key: Optional[str] = None, owner_task_ids: Optional[frozenset] = None) -> int:
         """Kill all running processes, optionally only those ``task_id`` spawned (its ``owner_task_id``).
         Returns count killed."""
         with self._lock:
@@ -2510,8 +2515,6 @@ class ProcessRegistry(ProcessCheckpointMixin):
                 if (task_id is None or s.owner_task_id == task_id)
                 and (session_key is None or s.session_key == session_key)
                 and (owner_task_ids is None or s.owner_task_id in owner_task_ids)
-                and not (spare_restart_safe and s.pid_scope == "host" and s.output_log_path
-                         and not s.owner_task_id.startswith("cron:"))
                 and s.id not in exclude_ids and not s.exited
             ]
         return sum(

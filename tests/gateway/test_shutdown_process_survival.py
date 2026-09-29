@@ -7,6 +7,7 @@ from pathlib import Path
 import pytest
 
 from gateway.run_shutdown import GatewayShutdownMixin
+from hermes_constants import reset_hermes_home_override, set_hermes_home_override
 from tools.process_registry import ProcessRegistry
 
 
@@ -69,3 +70,26 @@ def test_shutdown_config_true_kills_file_host(shutdown_registry, monkeypatch):
     checkpoint_path = Path(session.output_log_path).parents[2] / "processes.json"
     assert _until(lambda: all(row["session_id"] != session.id
                               for row in json.loads(checkpoint_path.read_text())))
+
+
+@pytest.mark.platforms("posix")
+def test_shutdown_reads_each_owning_profiles_policy(shutdown_registry, tmp_path):
+    registry = shutdown_registry
+    sessions = {}
+    for name, kill in (("a", True), ("b", False)):
+        home = tmp_path / name
+        home.mkdir()
+        (home / "config.yaml").write_text(
+            f"terminal:\n  kill_background_on_gateway_stop: {str(kill).lower()}\n")
+        token = set_hermes_home_override(home)
+        try:
+            sessions[name] = registry.spawn_local("sleep 20", owner_task_id=f"turn:{name}")
+        finally:
+            reset_hermes_home_override(token)
+    token = set_hermes_home_override(tmp_path / "a")
+    try:
+        GatewayShutdownMixin._stop_kill_tool_subprocesses("test")
+    finally:
+        reset_hermes_home_override(token)
+    assert registry.wait(sessions["a"].id, timeout=5)["status"] == "exited"
+    assert registry.poll(sessions["b"].id)["status"] == "running"
