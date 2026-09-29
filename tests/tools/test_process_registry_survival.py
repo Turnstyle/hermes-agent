@@ -5,6 +5,7 @@ import os
 import shlex
 import subprocess
 import sys
+import threading
 import time
 from pathlib import Path
 
@@ -21,6 +22,100 @@ def _until(predicate, timeout=5):
             return True
         time.sleep(0.05)
     return False
+
+
+@pytest.mark.platforms("posix")
+@pytest.mark.parametrize("first_refresh", ["list", "poll"])
+def test_file_exit_refresh_before_reader_tick_notifies_once(tmp_path, monkeypatch, first_refresh):
+    registry = ProcessRegistry()
+    reader_gate = threading.Event()
+    original_reader = registry._file_reader_loop
+
+    def held_reader(session):
+        reader_gate.wait()
+        original_reader(session)
+
+    monkeypatch.setattr(registry, "_file_reader_loop", held_reader)
+    start_file = tmp_path / "start"
+    try:
+        session = registry.spawn_local(
+            f"while [ ! -f {shlex.quote(str(start_file))} ]; do sleep 0.05; done; "
+            "printf 'retained output\\n'; exit 7",
+            task_id="owner", session_key="conversation")
+        session.notify_on_complete = True
+        start_file.touch()
+        assert session.process.wait(timeout=5) == 7
+        assert not session.exited
+
+        if first_refresh == "list":
+            first = registry.list_sessions(session_key="conversation")[0]
+            second = registry.poll(session.id)
+        else:
+            first = registry.poll(session.id)
+            second = registry.list_sessions(session_key="conversation")[0]
+        assert first["status"] == second["status"] == "exited"
+        assert first["exit_code"] == second["exit_code"] == 7
+        assert "retained output" in registry.read_log(session.id)["output"]
+
+        reader_gate.set()
+        session._reader_thread.join(timeout=5)
+        assert not session._reader_thread.is_alive()
+        for _ in range(2):
+            registry.list_sessions(session_key="conversation")
+            registry.poll(session.id)
+        notices = [event for event in list(registry.completion_queue.queue)
+                   if event["type"] == "completion"]
+        assert len(notices) == 1
+        assert notices[0]["session_id"] == session.id
+        assert notices[0]["exit_code"] == 7
+    finally:
+        reader_gate.set()
+        registry.kill_all()
+
+
+@pytest.mark.platforms("posix")
+def test_file_exit_reader_refresh_race_notifies_once(tmp_path, monkeypatch):
+    registry = ProcessRegistry()
+    reader_gate = threading.Event()
+    finish_barrier = threading.Barrier(2)
+    original_reader = registry._file_reader_loop
+    original_finish = registry._finish_exited
+
+    def held_reader(session):
+        reader_gate.wait()
+        original_reader(session)
+
+    def finish_together(session, exit_code):
+        finish_barrier.wait(timeout=5)
+        original_finish(session, exit_code)
+
+    monkeypatch.setattr(registry, "_file_reader_loop", held_reader)
+    monkeypatch.setattr(registry, "_finish_exited", finish_together)
+    start_file = tmp_path / "start"
+    try:
+        session = registry.spawn_local(
+            f"while [ ! -f {shlex.quote(str(start_file))} ]; do sleep 0.05; done; exit 7",
+            task_id="owner", session_key="conversation")
+        session.notify_on_complete = True
+        start_file.touch()
+        assert session.process.wait(timeout=5) == 7
+        Path(session.exit_file_path).unlink()  # Force both observers through the Popen fallback.
+
+        reader_gate.set()
+        listed = registry.list_sessions(session_key="conversation")
+        assert listed[0]["status"] == "exited"
+        assert listed[0]["exit_code"] == 7
+        session._reader_thread.join(timeout=5)
+        assert not session._reader_thread.is_alive()
+        notices = [event for event in list(registry.completion_queue.queue)
+                   if event["type"] == "completion"]
+        assert len(notices) == 1
+        assert notices[0]["session_id"] == session.id
+        assert notices[0]["exit_code"] == 7
+    finally:
+        reader_gate.set()
+        finish_barrier.abort()
+        registry.kill_all()
 
 
 @pytest.mark.platforms("posix")
