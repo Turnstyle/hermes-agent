@@ -524,6 +524,9 @@ class ProcessSession:
     termination_source: str = ""                # process.kill|kill_all|backend_lost|failed_start
     output_buffer: str = ""                     # Rolling tail (last max_output_chars)
     max_output_chars: int = MAX_OUTPUT_CHARS
+    output_log_path: str = ""                  # POSIX non-PTY output survives its parent
+    exit_file_path: str = ""                   # wrapper's real exit status
+    log_offset_bytes: int = 0                  # bytes already delivered to live readers
     detached: bool = False                      # Recovered from checkpoint (no pipe)
     pid_scope: str = "host"                     # "host" for local/PTY PIDs, "sandbox" for env-local PIDs
     systemd_unit: str = ""                      # transient scope unit name when spawned under systemd-run
@@ -559,6 +562,7 @@ class ProcessSession:
     _completion_event: threading.Event = field(default_factory=threading.Event, repr=False)
     _lock: threading.Lock = field(default_factory=threading.Lock)
     _reader_thread: Optional[threading.Thread] = field(default=None, repr=False)
+    _file_read_lock: threading.Lock = field(default_factory=threading.Lock, repr=False)
     _pty: Any = field(default=None, repr=False)  # ptyprocess handle (use_pty=True)
 
     def __post_init__(self):
@@ -595,7 +599,7 @@ _CHECKPOINT_FIELDS = (
     "started_at", "task_id", "owner_task_id", "session_key",
     *(f"watcher_{k}" for k in _WATCHER_ROUTE_KEYS), "watcher_interval",
     "parent_session_id", "notify_on_complete", "completion_output_chars", "watch_patterns",
-    "heartbeat_seconds")
+    "heartbeat_seconds", "output_log_path", "exit_file_path", "log_offset_bytes")
 _CHECKPOINT_DEFAULTS = {
     f.name: ([] if f.name == "watch_patterns" else f.default)
     for f in ProcessSession.__dataclass_fields__.values()
@@ -616,6 +620,7 @@ class ProcessRegistry(ProcessCheckpointMixin):
         self._running: Dict[str, ProcessSession] = {}
         self._finished: Dict[str, ProcessSession] = {}
         self._lock = threading.Lock()
+        self._checkpoint_lock = threading.Lock()
         # Side-channel for check_interval watchers (gateway reads after agent run)
         self.pending_watchers: List[Dict[str, Any]] = []
         # Unified queue for all background events (distinguished by "type"); the CLI
@@ -899,6 +904,9 @@ class ProcessRegistry(ProcessCheckpointMixin):
     def _refresh_detached_session(self, session: Optional[ProcessSession]) -> Optional[ProcessSession]:
         """Update recovered host-PID sessions when the underlying process has exited."""
         if session is None or session.exited or not session.detached or session.pid_scope != "host":
+            return session
+        if session.output_log_path:
+            self._poll_file_session(session)
             return session
         # A recycled PID (alive but not ours) counts as "our process exited" so a
         # later kill() can never tree-kill the stranger.
@@ -1223,7 +1231,20 @@ class ProcessRegistry(ProcessCheckpointMixin):
                             "to avoid duplicate command execution"
                         ) from e
                     session.systemd_unit = ""
-        # Pipe path (non-PTY or PTY fallback).
+        # POSIX non-PTY processes write to a file: a gateway restart must not
+        # close their stdout reader and SIGPIPE the child on its next write.
+        if not _IS_WINDOWS and not use_pty:
+            output_dir = get_hermes_home() / "logs" / "process-output"
+            output_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
+            session.output_log_path = str(output_dir / f"{session.id}.log")
+            session.exit_file_path = str(output_dir / f"{session.id}.exit")
+            fd = os.open(session.output_log_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+            os.close(fd)
+            safe_command = (
+                f"( {safe_command} ) > {shlex.quote(session.output_log_path)} 2>&1; "
+                f"rc=$?; umask 077; printf '%s\\n' \"$rc\" > {shlex.quote(session.exit_file_path)}; "
+                f"exit \"$rc\"")
+        # Pipe path remains for Windows and a failed PTY fallback.
         _popen_kwargs = {"creationflags": windows_hide_flags()} if _IS_WINDOWS else {}
         unit_suffix = f"{session.id}-pipe-fallback" if pty_scope_attempted else session.id
         spawn_argv = self._scope_argv(session, safe_command, unit_suffix, "Local")
@@ -1237,13 +1258,15 @@ class ProcessRegistry(ProcessCheckpointMixin):
         # the scope attaches to the invoked process, not the spawning session.
         proc = subprocess.Popen(
             spawn_argv, text=True, cwd=session.cwd, env=spawn_env, encoding="utf-8",
-            errors="replace", stdout=subprocess.PIPE, stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL,
+            errors="replace", stdout=subprocess.DEVNULL if session.output_log_path else subprocess.PIPE,
+            stderr=subprocess.DEVNULL if session.output_log_path else subprocess.STDOUT, stdin=subprocess.DEVNULL,
             start_new_session=True, **_popen_kwargs)
         session.process = proc
         session.pid = proc.pid
         session.host_start_time = self._safe_host_start_time(session.pid)
         try:
-            self._track_started(session, self._reader_loop, f"proc-reader-{session.id}")
+            reader = self._file_reader_loop if session.output_log_path else self._reader_loop
+            self._track_started(session, reader, f"proc-reader-{session.id}")
         except Exception:
             self._reap_untracked(session, proc)
             raise
@@ -1328,6 +1351,70 @@ class ProcessRegistry(ProcessCheckpointMixin):
         return session
 
     # ----- Reader / Poller Threads -----
+
+    def _poll_file_session(self, session: ProcessSession) -> None:
+        """Consume only new file bytes, then the wrapper's exit status."""
+        if session.exited:
+            return
+        with session._file_read_lock:
+            if session.exited:
+                return
+            decoder = codecs.getincrementaldecoder("utf-8")(errors="replace")
+            try:
+                with open(session.output_log_path, "rb") as stream:
+                    stream.seek(session.log_offset_bytes)
+                    while chunk := stream.read(4096):
+                        session.log_offset_bytes += len(chunk)
+                        text = decoder.decode(chunk)
+                        if text:
+                            self._ingest_output(session, text)
+            except FileNotFoundError:
+                logger.warning("Process output file missing for %s: %s", session.id, session.output_log_path)
+            pending_bytes = decoder.getstate()[0]
+            # Re-read an incomplete final UTF-8 character next poll; the
+            # checkpoint offset must never cut a character in half.
+            session.log_offset_bytes -= len(pending_bytes)
+            try:
+                exit_code = int(Path(session.exit_file_path).read_text(encoding="ascii").strip())
+            except (FileNotFoundError, ValueError, OSError):
+                return
+            tail = decoder.decode(b"", final=True)
+            if tail:
+                self._ingest_output(session, tail)
+            session.log_offset_bytes += len(pending_bytes)
+            if session.process is not None:
+                with suppress(subprocess.TimeoutExpired):
+                    session.process.wait(timeout=1)
+            self._finish_exited(session, exit_code)
+
+    def _file_reader_loop(self, session: ProcessSession) -> None:
+        while not session.exited:
+            self._poll_file_session(session)
+            if session.exited:
+                return
+            proc = session.process
+            if proc is not None and proc.poll() is not None:
+                # The wrapper should have written its exit file first. If it
+                # could not, still release waiters with the real Popen code.
+                self._poll_file_session(session)
+                if not session.exited:
+                    self._finish_exited(session, proc.returncode)
+                return
+            if session.detached and not self._host_pid_is_ours(session.pid, session.host_start_time):
+                self._poll_file_session(session)
+                if not session.exited:
+                    self._finish_exited(session, None)
+                return
+            time.sleep(0.1)
+
+    def _track_recovered_file_session(self, session: ProcessSession) -> None:
+        from contextvars import copy_context
+
+        reader = threading.Thread(
+            target=copy_context().run, args=(self._file_reader_loop, session),
+            daemon=True, name=f"proc-file-reader-{session.id}")
+        session._reader_thread = reader
+        reader.start()
 
     def _reader_loop(self, session: ProcessSession):
         """Background thread: read stdout from a local Popen process.
@@ -1685,7 +1772,7 @@ class ProcessRegistry(ProcessCheckpointMixin):
     ) -> dict:
         """Bounded linger for ``notify_on_complete`` background processes at one-shot exit.
         A one-shot CLI run (``hermes -q/-Q/-z``) exits when its turn ends; a background
-        process it spawned still holds a stdout pipe owned by the dying parent and dies of
+        pipe-backed processes still hold stdout owned by the dying parent and can die of
         SIGPIPE seconds later (Bot Mode handoff replies were the visible casualty). Only
         ``notify_on_complete`` processes carry a completion contract — servers/daemons/
         watchers aren't the parent's to wait for. ``task_id=None`` waits on every tracked
@@ -1757,8 +1844,8 @@ class ProcessRegistry(ProcessCheckpointMixin):
         if result["timed_out"]:
             logger.warning(
                 "One-shot exit linger timed out after %ss with %d background "
-                "process(es) still running: %s — they may be killed when this "
-                "process exits.",
+                "process(es) still running: %s — non-file-backed processes may be killed "
+                "when this process exits.",
                 timeout, len(result["timed_out"]), ", ".join(result["timed_out"]))
         return result
 
@@ -1903,7 +1990,7 @@ class ProcessRegistry(ProcessCheckpointMixin):
         stdout pipe open, the reader blocks forever and poll() keeps returning "running" indefinitely (issue
         #17327 — 74 polls over 7 minutes on Feishu).
         """
-        if session is None or session.exited:
+        if session is None or session.exited or session.output_log_path:
             return
         proc = getattr(session, "process", None)
         if proc is None:
@@ -1962,7 +2049,9 @@ class ProcessRegistry(ProcessCheckpointMixin):
             # autonomous delivery turn. See __init__.
             self._poll_observed.add(session_id)
         if session.detached:
-            result.update(detached=True, note="Process recovered after restart -- output history unavailable")
+            result["detached"] = True
+            if not session.output_log_path:
+                result["note"] = "Process recovered after restart -- output history unavailable"
         return result
 
     def read_log(self, session_id: str, offset: int | None = None, limit: int = 200) -> dict:
@@ -2410,13 +2499,19 @@ class ProcessRegistry(ProcessCheckpointMixin):
 
     def kill_all(
         self, task_id: Optional[str] = None, *, exclude_ids: frozenset = frozenset(),
-        source: str = "kill_all", consume_output: bool = False) -> int:
+        source: str = "kill_all", consume_output: bool = False,
+        session_key: Optional[str] = None, owner_task_ids: Optional[frozenset] = None,
+        spare_restart_safe: bool = False) -> int:
         """Kill all running processes, optionally only those ``task_id`` spawned (its ``owner_task_id``).
         Returns count killed."""
         with self._lock:
             targets = [
                 s for s in self._running.values()
                 if (task_id is None or s.owner_task_id == task_id)
+                and (session_key is None or s.session_key == session_key)
+                and (owner_task_ids is None or s.owner_task_id in owner_task_ids)
+                and not (spare_restart_safe and s.pid_scope == "host" and s.output_log_path
+                         and not s.owner_task_id.startswith("cron:"))
                 and s.id not in exclude_ids and not s.exited
             ]
         return sum(

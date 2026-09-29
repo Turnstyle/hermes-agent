@@ -3,6 +3,7 @@
 import json
 import logging
 import time
+from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from agent.redact import redact_sensitive_text
@@ -16,30 +17,37 @@ class ProcessCheckpointMixin:
     def _write_checkpoint(self, extra_entries: Optional[List[Dict[str, Any]]] = None):
         """Write running process metadata to the checkpoint file atomically."""
         from tools.process_registry import _checkpoint_path, _CHECKPOINT_FIELDS
+        from hermes_constants import get_hermes_home
 
         try:
-            with self._lock:
-                entries = []
-                for s in self._running.values():
-                    if s.exited:
-                        continue
-                    # Backfill the start time so recovery can detect PID recycling
-                    # even for sessions spawned before this field existed.
-                    if s.host_start_time is None and s.pid_scope == "host" and s.pid:
-                        s.host_start_time = self._safe_host_start_time(s.pid)
-                    entry = {"session_id": s.id, **{f: getattr(s, f) for f in _CHECKPOINT_FIELDS}}
-                    # Redact inline credentials before persisting (~/.hermes/processes.json).
-                    # Recovery uses command only for display (adoption re-validates the
-                    # PID, never re-runs it), so masking is lossless.
-                    # See #77484.
-                    entry["command"] = redact_sensitive_text(s.command, code_file=True)
-                    entry["owner_task_id"] = s.owner_task_id or s.task_id
-                    entries.append(entry)
-                if extra_entries:
-                    tracked_ids = {item.get("session_id") for item in entries}
-                    entries.extend(item for item in extra_entries if item.get("session_id") not in tracked_ids)
-            from utils import atomic_json_write
-            atomic_json_write(_checkpoint_path(), entries)
+            with self._checkpoint_lock:
+                current_home = get_hermes_home()
+                entries_by_home: Dict[Path, List[Dict[str, Any]]] = {current_home: []}
+                with self._lock:
+                    for s in (*self._running.values(), *self._finished.values()):
+                        home = Path(s.output_log_path).parent.parent.parent if s.output_log_path else current_home
+                        entries_by_home.setdefault(home, [])
+                        if s.exited:
+                            continue
+                        # Backfill the start time so recovery can detect PID recycling.
+                        if s.host_start_time is None and s.pid_scope == "host" and s.pid:
+                            s.host_start_time = self._safe_host_start_time(s.pid)
+                        entry = {"session_id": s.id, **{f: getattr(s, f) for f in _CHECKPOINT_FIELDS}}
+                        # Recovery uses command only for display, never re-runs it.
+                        entry["command"] = redact_sensitive_text(s.command, code_file=True)
+                        entry["owner_task_id"] = s.owner_task_id or s.task_id
+                        entries_by_home[home].append(entry)
+                    if extra_entries:
+                        for item in extra_entries:
+                            log_path = item.get("output_log_path")
+                            home = Path(log_path).parent.parent.parent if log_path else current_home
+                            entries = entries_by_home.setdefault(home, [])
+                            if not any(row["session_id"] == item.get("session_id") for row in entries):
+                                entries.append(item)
+                from utils import atomic_json_write
+                for home, entries in entries_by_home.items():
+                    path = _checkpoint_path() if home == current_home else home / "processes.json"
+                    atomic_json_write(path, entries)
         except Exception as e:
             logger.debug("Failed to write checkpoint file: %s", e, exc_info=True)
 
@@ -78,7 +86,9 @@ class ProcessCheckpointMixin:
             # Alive AND the same process: across a restart the kernel may have
             # recycled the PID onto a stranger, and adopting it would let a later
             # kill tree-kill e.g. a browser.
-            if not self._host_pid_is_ours(pid, entry.get("host_start_time")):
+            has_exit_file = bool(entry.get("exit_file_path") and
+                                 Path(entry["exit_file_path"]).is_file())
+            if not has_exit_file and not self._host_pid_is_ours(pid, entry.get("host_start_time")):
                 if self._is_host_pid_alive(pid):
                     logger.info(
                         "Not recovering session %s: pid %d is alive but its "
@@ -98,12 +108,27 @@ class ProcessCheckpointMixin:
                 command=entry.get("command", "unknown"),
                 owner_task_id=entry.get("owner_task_id", "") or entry.get("task_id", ""),
                 started_at=entry.get("started_at", time.time()))
-            # detached: can't read output, but can report status + kill
+            # File-backed sessions can read missed output and the real exit
+            # status even when the wrapper finished while no gateway ran.
             session = ProcessSession(id=entry["session_id"], detached=True, **fields)
+            if session.output_log_path and session.log_offset_bytes:
+                try:
+                    with Path(session.output_log_path).open("rb") as stream:
+                        start = max(session.log_offset_bytes - session.max_output_chars * 4, 0)
+                        stream.seek(start)
+                        session.output_buffer = stream.read(session.log_offset_bytes - start)[-session.max_output_chars:].decode(
+                            "utf-8", errors="replace")
+                    session.total_output_chars = len(session.output_buffer)
+                except OSError:
+                    logger.warning("Could not restore output history for %s", session.id)
             with self._lock:
                 self._running[session.id] = session
             recovered += 1
             logger.info("Recovered detached process: %s (pid=%d)", session.command[:60], pid)
+            if session.output_log_path:
+                self._poll_file_session(session)
+                if not session.exited:
+                    self._track_recovered_file_session(session)
             # Re-enqueue watcher so gateway can resume notifications
             if session.watcher_interval > 0:
                 self.pending_watchers.append({

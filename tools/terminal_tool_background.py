@@ -206,6 +206,10 @@ def spawn_background_process(
         if watch_patterns:
             proc_session.watch_patterns = list(watch_patterns)
             result_data["watch_patterns"] = proc_session.watch_patterns
+        if notify_on_complete or watch_patterns:
+            # Spawn checkpoint precedes routing/notification metadata. Persist
+            # it now so a restarted gateway can deliver the original notice.
+            process_registry._write_checkpoint()
         return json.dumps(result_data, ensure_ascii=False)
     except Exception as e:
         return json.dumps({

@@ -870,7 +870,7 @@ class TestFinishedHandleRelease:
 # =========================================================================
 
 class TestSpawnEnvSanitization:
-    def test_spawn_local_strips_blocked_vars_from_background_env(self, registry):
+    def test_spawn_local_strips_blocked_vars_from_background_env(self, registry, tmp_path):
         captured = {}
 
         def fake_popen(cmd, **kwargs):
@@ -887,6 +887,7 @@ class TestSpawnEnvSanitization:
         with patch.dict(os.environ, {
             "PATH": "/usr/bin:/bin",
             "HOME": "/home/user",
+            "HERMES_HOME": str(tmp_path),
             "USER": "tester",
             "TELEGRAM_BOT_TOKEN": "bot-secret",
             "FIRECRAWL_API_KEY": "fc-secret",
@@ -2220,13 +2221,15 @@ class TestSystemdCgroupIsolation:
             value for value in properties if value.startswith("MemoryMax=")
         )
         assert int(memory_max.split("=", 1)[1]) > 0
-        # The original shell command must still be present at the tail,
-        # after the ``--`` separator that prevents systemd-run from
-        # interpreting command flags as its own.
+        # The file-backed command must remain after the separator so
+        # systemd-run cannot interpret shell flags as its own.
         assert "--" in argv, "systemd-run argv must use -- to separate command"
         sep_idx = argv.index("--")
-        assert "/bin/bash" in argv[sep_idx:]
-        assert "set +m; echo hello" in argv[sep_idx:]
+        assert argv[sep_idx + 1:-1] == ["/bin/bash", "-lic"]
+        shell_command = argv[-1]
+        assert shell_command.startswith("set +m; ( echo hello ) > ")
+        assert f"> {shlex.quote(session.output_log_path)} 2>&1" in shell_command
+        assert f"> {shlex.quote(session.exit_file_path)}" in shell_command
         # systemd-run --scope gives the worker a new cgroup but NOT a new
         # session (#70716 regression: start_new_session was False, so the
         # worker kept the parent's session + controlling terminal → SIGTTIN/
@@ -2261,7 +2264,8 @@ class TestSystemdCgroupIsolation:
 
         argv = captured["argv"]
         # No systemd-run wrapping — direct shell invocation.
-        assert argv == ["/bin/bash", "-lic", "set +m; echo hello"], argv
+        assert argv[:2] == ["/bin/bash", "-lic"], argv
+        assert argv[2].startswith("set +m; ( echo hello ) > "), argv
         assert captured["start_new_session"] is True
 
     def test_falls_back_when_not_under_supervisor(self, registry, monkeypatch):
@@ -2287,7 +2291,8 @@ class TestSystemdCgroupIsolation:
             registry.spawn_local("echo hello", cwd="/tmp")
 
         argv = captured["argv"]
-        assert argv == ["/bin/bash", "-lic", "set +m; echo hello"], argv
+        assert argv[:2] == ["/bin/bash", "-lic"], argv
+        assert argv[2].startswith("set +m; ( echo hello ) > "), argv
         assert captured["start_new_session"] is True
 
     @pytest.mark.parametrize("use_pty", [False, True])
@@ -2329,9 +2334,8 @@ class TestSystemdCgroupIsolation:
                 patch.object(registry, "_write_checkpoint"),
             ):
                 session = registry.spawn_local("echo hello", cwd="/tmp")
-            assert captured["argv"] == [
-                "/bin/bash", "-lic", "set +m; echo hello",
-            ]
+            assert captured["argv"][:2] == ["/bin/bash", "-lic"]
+            assert captured["argv"][2].startswith("set +m; ( echo hello ) > ")
             assert captured["start_new_session"] is True
 
         assert session.systemd_unit == ""
@@ -2380,9 +2384,8 @@ class TestSystemdCgroupIsolation:
                 patch.object(registry, "_write_checkpoint"),
             ):
                 session = registry.spawn_local("echo hello", cwd="/tmp")
-            assert captured["argv"] == [
-                "/bin/bash", "-lic", "set +m; echo hello",
-            ]
+            assert captured["argv"][:2] == ["/bin/bash", "-lic"]
+            assert captured["argv"][2].startswith("set +m; ( echo hello ) > ")
             assert captured["start_new_session"] is True
 
         assert session.systemd_unit == ""
