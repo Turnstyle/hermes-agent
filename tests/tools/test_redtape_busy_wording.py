@@ -60,7 +60,8 @@ def test_second_delivery_still_busy_refusal(root, tmp_path, monkeypatch, capsys)
     home = root / ".hermes"
     home.mkdir()
     monkeypatch.setenv("HERMES_HOME", str(home))
-    monkeypatch.setattr(bot_relay, "turn_wait_seconds", lambda: 0.2)
+    # The detached DM runner uses this budget, not the relay's turn budget.
+    monkeypatch.setattr(bot_relay, "dm_queue_wait_seconds", lambda: 0.2)
     dm = tmp_path / "dm.txt"
     dm.write_text("hi", encoding="utf-8")
 
