@@ -306,7 +306,7 @@ class TestNativeRead:
     def test_tilde_still_expands_through_the_shell(self, native):
         ops, calls = native
         r = ops.read_file("~/hermes-no-such-file-7f3a.txt")
-        assert calls[0] == "echo $HOME"
+        assert calls[0].splitlines()[-1] == "echo $HOME"
         assert r.error and "File not found" in r.error
 
     def test_injection_lookalike_path_is_never_expanded(self, native, tmp_path):
@@ -318,7 +318,8 @@ class TestNativeRead:
         # file recovery's directory listing; the tilde probe is a fixed
         # ``echo $HOME`` that never embeds the path. Nothing else runs.
         for c in calls:
-            assert c == "echo $HOME" or c.startswith("ls -1 '~; echo PWNED"), c
+            command = c.split("\n", 1)[-1]
+            assert command == "echo $HOME" or command.startswith("ls -1 '~; echo PWNED"), c
 
     @pytest.mark.linux_only
     def test_fifo_refused_without_a_shell_and_without_blocking(self, native, tmp_path):

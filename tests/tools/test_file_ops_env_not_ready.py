@@ -19,6 +19,7 @@ class _HealthyEmptyEnv:
     cwd = "/workspace"
 
     def execute(self, command: str, cwd=None, **kwargs) -> dict:
+        command = command.split("\n", 1)[-1]
         if command.startswith("if [ -f"):
             return {"output": "__hermes_missing__\n", "returncode": 0}
         if command.startswith("test -e"):

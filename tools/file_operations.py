@@ -149,6 +149,7 @@ MISSING_SENTINEL = "__hermes_missing__"
 
 _READ_SENTINEL_PREFIX = "__HERMES_RF_"
 _WRITE_SENTINEL_PREFIX = "__HERMES_WF_"
+_EXEC_SENTINEL_PREFIX = "__HERMES_FS_"
 
 
 def _new_sentinel(prefix: str) -> str:
@@ -199,9 +200,12 @@ class ShellFileOperations(LintMixin, SearchMixin, FileOperations):
         if stdin_data is not None:
             kwargs['stdin_data'] = stdin_data
         effective_cwd = cwd or getattr(self.env, 'cwd', None) or self.cwd
-        result = self.env.execute(command, cwd=effective_cwd, **kwargs)
+        marker = _new_sentinel(_EXEC_SENTINEL_PREFIX)
+        result = self.env.execute(f"echo {marker}\n{command}", cwd=effective_cwd, **kwargs)
         exit_code = result.get("returncode", 0)
         output = result.get("output", "")
+        if marker + "\n" in output:
+            output = output.split(marker + "\n", 1)[1]
         # The command wrapper's own ``builtin cd -- <cwd> || exit 126`` failed: the
         # working directory does not exist on this backend (typically ``terminal.cwd``
         # is a host path and the backend is a container). Name that, or the raw
@@ -1238,7 +1242,14 @@ class ShellFileOperations(LintMixin, SearchMixin, FileOperations):
         try:
             hash_result = self._exec(f"sha256sum {self._escape_shell_arg(path)} 2>/dev/null")
             if hash_result.exit_code == 0 and hash_result.stdout.strip():
-                disk_sha = hash_result.stdout.strip().split()[0]
+                disk_sha = None
+                for line in hash_result.stdout.splitlines():
+                    parts = line.split()
+                    if parts and re.fullmatch(r"[0-9a-f]{64}", parts[0]):
+                        disk_sha = parts[0]
+                        break
+                if disk_sha is None:
+                    return None, None
                 if disk_sha != hashlib.sha256(content_bytes).hexdigest():
                     return False, WriteResult(error=(
                         f"Post-write verification failed for {path}: on-disk "

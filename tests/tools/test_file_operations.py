@@ -304,6 +304,7 @@ class TestShellFileOpsHelpers:
         )
 
         def side_effect(command, **kwargs):
+            command = command.split("\n", 1)[-1]
             if command.startswith("if [ -f ") or command.startswith("wc -c"):
                 return {"output": "6\n", "returncode": 0}
             if command.startswith("head -c"):
@@ -457,6 +458,7 @@ class TestPatchReplacePostWriteVerification:
         file_contents = {"/tmp/test/a.py": "hello world\n"}
 
         def side_effect(command, **kwargs):
+            command = command.split("\n", 1)[-1]
             # cat reads the file — both the initial read and the verify read
             if command.startswith("cat "):
                 # Extract path from cat command (strip quotes)
@@ -494,6 +496,7 @@ class TestPatchReplacePostWriteVerification:
         state = {"content": "hello world\n"}
 
         def side_effect(command, stdin_data=None, **kwargs):
+            command = command.split("\n", 1)[-1]
             if stdin_data is not None:  # write (atomic temp-file + mv script)
                 state["content"] = stdin_data
                 return {"output": "", "returncode": 0}

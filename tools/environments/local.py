@@ -748,6 +748,16 @@ def _prepend_shell_init(cmd_string: str, files: list[str]) -> str:
     return "\n".join(prelude) + "\n" + cmd_string
 
 
+def _guard_fork_child_stderr(cmd_string: str) -> str:
+    """Drop gRPC fork-child fd 2 noise before exec, then restore merged stderr.
+
+    Bash runs this first in its -c script, ahead of any sourced init prelude.
+    With a login shell, stderr from bash's own profile sourcing before -c runs
+    is also dropped; command stderr remains merged into stdout.
+    """
+    return "exec 2>&1\n" + cmd_string
+
+
 # --- Process-group teardown (POSIX) ---
 def _wait_for_group_exit(proc, pgid: int, timeout: float) -> bool:
     """Wait until the process group is gone, reaping the wrapper as we go (a dead
@@ -940,11 +950,14 @@ class LocalEnvironment(BaseEnvironment):
         # custom init files so nvm/asdf/pyenv land on PATH in the snapshot.
         if login:
             cmd_string = _prepend_shell_init(cmd_string, _resolve_shell_init_files())
+        if not _IS_WINDOWS:
+            cmd_string = _guard_fork_child_stderr(cmd_string)
         args = [bash, *(["-l"] if login else []), "-c", cmd_string]
         self._recover_cwd()
         proc = subprocess.Popen(
             args, text=True, env=_make_run_env(self.env), encoding="utf-8", errors="replace",
-            stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT if _IS_WINDOWS else subprocess.DEVNULL,
             stdin=subprocess.PIPE if stdin_data is not None else subprocess.DEVNULL,
             start_new_session=True, cwd=self.cwd,
             **({"creationflags": windows_hide_flags()} if _IS_WINDOWS else {}))
