@@ -229,7 +229,8 @@ under the owning profile's `logs/process-output/`. The gateway tails the output 
 after a restart it resumes from the checkpointed byte offset and recovers the real exit
 code and output tail. `terminal.kill_background_on_gateway_stop` defaults to `false` for
 these processes; cron-owned, PTY, sandbox, and legacy pipe-backed processes are still
-stopped. Interactive PTY processes are outside restart survival.
+stopped. Checkpoint writers merge under a file lock so a one-shot CLI cannot erase a
+gateway's live jobs, or vice versa. Interactive PTY processes are outside restart survival.
 
 `tools/process_registry_checkpoint.py` owns running-process checkpoints and
 PID-safe adoption. Completed output is separate: `tools/process_registry_results.py`

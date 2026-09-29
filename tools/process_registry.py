@@ -621,6 +621,7 @@ class ProcessRegistry(ProcessCheckpointMixin):
         self._finished: Dict[str, ProcessSession] = {}
         self._lock = threading.Lock()
         self._checkpoint_lock = threading.Lock()
+        self._checkpoint_writer_id = f"{os.getpid()}:{uuid.uuid4().hex}"
         # Side-channel for check_interval watchers (gateway reads after agent run)
         self.pending_watchers: List[Dict[str, Any]] = []
         # Unified queue for all background events (distinguished by "type"); the CLI
