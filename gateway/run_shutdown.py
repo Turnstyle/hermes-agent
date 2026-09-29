@@ -1695,15 +1695,24 @@ class GatewayShutdownMixin:
 
         def _kill_processes() -> None:
             from tools.process_registry import ProcessRegistry, process_registry
-            try:
-                kill_all = bool(ProcessRegistry._config_value(
-                    "terminal", "kill_background_on_gateway_stop", False))
-            except Exception:
-                logger.warning("Could not read terminal.kill_background_on_gateway_stop; using default")
-                kill_all = False
+            from gateway.run import _profile_runtime_scope
+            per_home = {}
+            spare_ids = set()
+            for session in process_registry.restart_safe_sessions():
+                home = Path(session.output_log_path).parents[2]
+                if home not in per_home:
+                    try:
+                        with _profile_runtime_scope(home, {}):
+                            per_home[home] = bool(ProcessRegistry._config_value(
+                                "terminal", "kill_background_on_gateway_stop", False))
+                    except Exception:
+                        logger.warning("Could not read %s terminal stop policy; using default", home)
+                        per_home[home] = False
+                if not per_home[home]:
+                    spare_ids.add(session.id)
             _count_step(
                 "Shutdown (%s): killed %d tool subprocess(es)",
-                lambda: process_registry.kill_all(spare_restart_safe=not kill_all))
+                lambda: process_registry.kill_all(exclude_ids=frozenset(spare_ids)))
             process_registry._write_checkpoint()
 
         def _mark_cron_interrupted() -> list:
