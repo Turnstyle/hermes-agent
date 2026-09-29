@@ -233,8 +233,8 @@ def _is_delegated_child_cli_mutation(args: argparse.Namespace) -> bool:
     is_child = is_delegated_child_process_context() or fenced
 
     # Scoped exception: a worker may reassign its OWN card to support live handbacks.
-    # It must verify scrubbed owned_kanban_task() or dispatcher-recorded claim,
-    # and NEVER allow --reclaim from a delegated child context.
+    # It must prove a dispatcher-recorded claim in the caller pid tree (env hint alone
+    # is insufficient), and NEVER allow --reclaim from a delegated child context.
     if action == "reassign":
         if getattr(args, "reclaim", False) and is_child:
             return True  # Never allow --reclaim from a delegated child

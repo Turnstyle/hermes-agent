@@ -185,11 +185,12 @@ def _is_pid_in_caller_tree(worker_pid: int | None) -> bool:
 def is_task_claimed_by_caller(conn: sqlite3.Connection, task_id: str) -> bool:
     """Return True if task_id has an active claim belonging to this caller.
 
-    Verifies via:
-    1. Scrubbed owned_kanban_task() identity (from agent.delegation_context).
-       This returns empty for delegated child contexts, so raw env var spoofing fails closed.
-    2. Active dispatcher-recorded claim in SQLite: task has status='running', claim_lock is not null,
-       and worker_pid matches the caller or an ancestor in the caller's process tree.
+    Requires a live dispatcher-recorded claim: status ``running``, non-null
+    ``claim_lock``, truthy ``worker_pid``, and ``worker_pid`` in the caller's
+    process tree. ``owned_kanban_task()`` (from ``agent.delegation_context``) is
+    only a consistency hint when non-empty — it must match ``task_id`` but is
+    never sufficient proof on its own. Delegated children have an empty owned id
+    and may still match on the pid-tree claim alone.
     """
     from agent.delegation_context import owned_kanban_task
     task_id = (task_id or "").strip()
@@ -197,8 +198,8 @@ def is_task_claimed_by_caller(conn: sqlite3.Connection, task_id: str) -> bool:
         return False
 
     scrubbed = owned_kanban_task()
-    if scrubbed and scrubbed == task_id:
-        return True
+    if scrubbed and scrubbed != task_id:
+        return False
 
     try:
         row = conn.execute(
@@ -2690,9 +2691,31 @@ def reassign_task(
     token = _OWN_TASK_REASSIGN_ACTIVE.set(True) if (is_own_card and not _OWN_TASK_REASSIGN_ACTIVE.get()) else None
     try:
         if is_own_card and not reclaim_first:
-            row = conn.execute("SELECT status, claim_lock FROM tasks WHERE id = ?", (task_id,)).fetchone()
+            row = conn.execute(
+                "SELECT status, claim_lock, worker_pid FROM tasks WHERE id = ?", (task_id,),
+            ).fetchone()
             if row and row["status"] == "running" and row["claim_lock"] is not None:
+                termination = {
+                    "prev_pid": int(row["worker_pid"]) if row["worker_pid"] else None,
+                    "host_local": True,
+                    "termination_attempted": False,
+                    "terminated": False,
+                    "sigkill": False,
+                    "caller_not_signalled": True,
+                    "own_card_handback": True,
+                }
                 with write_txn(conn):
+                    _record_reclaim(
+                        conn,
+                        task_id,
+                        termination,
+                        error="own_card_handback: caller not signalled",
+                        payload={
+                            "reason": "own_card_handback",
+                            "prev_lock": row["claim_lock"],
+                            "caller_not_signalled": True,
+                        },
+                    )
                     conn.execute(
                         "UPDATE tasks SET status = 'ready', claim_lock = NULL, claim_expires = NULL, "
                         "worker_pid = NULL, worker_started_at = NULL WHERE id = ?",

@@ -384,10 +384,83 @@ def test_delegated_child_cli_fence_denies_other_card_reassign(tmp_path):
     assert "delegate_task child contexts cannot mutate Kanban tasks via the CLI" in res_other.stderr
 
 
-def test_dispatcher_worker_allows_own_card_reassign(tmp_path):
-    """A dispatcher-owned worker (with scrubbed owned_kanban_task() identity and no child fence)
-    can reassign its own card.
-    """
+_FOREIGN_WORKER_PID = 2**20
+
+
+def _assert_foreign_pid_not_in_caller_tree():
+    assert not kb._is_pid_in_caller_tree(_FOREIGN_WORKER_PID)
+
+
+def _set_running_claim(conn, task_id: str, *, worker_pid: int, claim_lock: str = "test-host:spoof") -> None:
+    with kb.write_txn(conn):
+        conn.execute(
+            "UPDATE tasks SET status = 'running', claim_lock = ?, claim_expires = ?, "
+            "worker_pid = ?, worker_started_at = ? WHERE id = ?",
+            (claim_lock, int(__import__("time").time()) + 3600, worker_pid, int(__import__("time").time()), task_id),
+        )
+
+
+def test_is_task_claimed_by_caller_predicate(kanban_home):
+    """Env match alone is false; pid-tree live claim is the proof."""
+    with kbc.connect_closing() as conn:
+        ready_id = kb.create_task(conn, title="ready card", assignee="p")
+        with kb.write_txn(conn):
+            conn.execute("UPDATE tasks SET status = 'ready' WHERE id = ?", (ready_id,))
+
+        running_own = kb.create_task(conn, title="own running", assignee="p")
+        with kb.write_txn(conn):
+            conn.execute("UPDATE tasks SET status = 'ready' WHERE id = ?", (running_own,))
+        assert kb.claim_task(conn, running_own) is not None
+        dispatch_mod._set_worker_pid(conn, running_own, os.getpid())
+
+        running_foreign = kb.create_task(conn, title="foreign running", assignee="p")
+        with kb.write_txn(conn):
+            conn.execute("UPDATE tasks SET status = 'ready' WHERE id = ?", (running_foreign,))
+        assert kb.claim_task(conn, running_foreign) is not None
+        dispatch_mod._set_worker_pid(conn, running_foreign, _FOREIGN_WORKER_PID)
+        _assert_foreign_pid_not_in_caller_tree()
+
+        other_id = kb.create_task(conn, title="other", assignee="p")
+
+    with patch.dict(os.environ, {"HERMES_KANBAN_TASK": ready_id}, clear=False):
+        with kbc.connect_closing() as conn:
+            assert kb.is_task_claimed_by_caller(conn, ready_id) is False
+
+    with patch.dict(os.environ, {"HERMES_KANBAN_TASK": running_foreign}, clear=False):
+        with kbc.connect_closing() as conn:
+            assert kb.is_task_claimed_by_caller(conn, running_foreign) is False
+
+    with patch.dict(os.environ, {"HERMES_KANBAN_TASK": running_own}, clear=False):
+        with kbc.connect_closing() as conn:
+            assert kb.is_task_claimed_by_caller(conn, running_own) is True
+
+    with patch.dict(os.environ, {"HERMES_KANBAN_TASK": other_id}, clear=False):
+        with kbc.connect_closing() as conn:
+            assert kb.is_task_claimed_by_caller(conn, running_own) is False
+
+    with patch.dict(
+        os.environ,
+        {"HERMES_DELEGATED_CHILD_CONTEXT": "1", "HERMES_KANBAN_TASK": ""},
+        clear=False,
+    ):
+        with kbc.connect_closing() as conn:
+            assert kb.is_task_claimed_by_caller(conn, running_own) is True
+
+
+def test_dispatcher_worker_env_var_does_not_prove_own_card(kanban_home):
+    """HERMES_KANBAN_TASK matching an unclaimed ready card is not caller ownership."""
+    with kbc.connect_closing() as conn:
+        task_id = kb.create_task(conn, title="worker card", assignee="old")
+        with kb.write_txn(conn):
+            conn.execute("UPDATE tasks SET status = 'ready' WHERE id = ?", (task_id,))
+
+    with patch.dict(os.environ, {"HERMES_KANBAN_TASK": task_id}, clear=False):
+        with kbc.connect_closing() as conn:
+            assert kb.is_task_claimed_by_caller(conn, task_id) is False
+
+
+def test_dispatcher_worker_unfenced_reassign_ready_card(tmp_path):
+    """Unfenced operator CLI may still reassign a ready card; that is not env-based ownership."""
     home = tmp_path / "hermes"
     home.mkdir()
 
@@ -395,7 +468,10 @@ def test_dispatcher_worker_allows_own_card_reassign(tmp_path):
     assert created.returncode == 0, created.stderr
     task_id = json.loads(created.stdout)["id"]
 
-    # Dispatcher worker runs with HERMES_KANBAN_TASK set, but without child fence
+    with patch.dict(os.environ, {"HERMES_KANBAN_TASK": task_id}, clear=False):
+        with kbc.connect_closing() as conn:
+            assert kb.is_task_claimed_by_caller(conn, task_id) is False
+
     res_own = _run_hermes_cli(
         home,
         "kanban",
@@ -409,11 +485,82 @@ def test_dispatcher_worker_allows_own_card_reassign(tmp_path):
     assert res_own.returncode == 0, res_own.stderr
     assert "Reassigned" in res_own.stdout
 
-    # Verify card was reassigned
     show = _run_hermes_cli(home, "kanban", "show", task_id, "--json")
     assert show.returncode == 0, show.stderr
     card = json.loads(show.stdout)["task"]
     assert card["assignee"] == "new-assignee"
+
+
+def test_env_spoof_cannot_reassign_foreign_running_claim(tmp_path):
+    """HERMES_KANBAN_TASK on a victim with a foreign live claim must not reassign."""
+    _assert_foreign_pid_not_in_caller_tree()
+    home = tmp_path / "hermes"
+    home.mkdir()
+
+    created = _run_hermes_cli(home, "kanban", "create", "victim running", "--json")
+    assert created.returncode == 0, created.stderr
+    victim_id = json.loads(created.stdout)["id"]
+
+    db_path = home / "kanban.db"
+    conn = kbc.connect(db_path)
+    _set_running_claim(conn, victim_id, worker_pid=_FOREIGN_WORKER_PID)
+    conn.close()
+
+    res = _run_hermes_cli(
+        home,
+        "kanban",
+        "reassign",
+        victim_id,
+        "attacker-profile",
+        env_vars={"HERMES_KANBAN_TASK": victim_id},
+    )
+    assert res.returncode != 0
+
+    conn = kbc.connect(db_path)
+    row = conn.execute(
+        "SELECT assignee, status, claim_lock, worker_pid FROM tasks WHERE id = ?", (victim_id,),
+    ).fetchone()
+    conn.close()
+    assert row["status"] == "running"
+    assert row["claim_lock"] is not None
+    assert int(row["worker_pid"]) == _FOREIGN_WORKER_PID
+    assert row["assignee"] != "attacker-profile"
+
+
+def test_env_spoof_other_card_foreign_running_claim_two_cards(tmp_path):
+    """Env names worker card but reassign targets another card with a foreign claim."""
+    _assert_foreign_pid_not_in_caller_tree()
+    home = tmp_path / "hermes"
+    home.mkdir()
+
+    own = _run_hermes_cli(home, "kanban", "create", "worker own", "--json")
+    own_id = json.loads(own.stdout)["id"]
+    victim = _run_hermes_cli(home, "kanban", "create", "victim other", "--json")
+    victim_id = json.loads(victim.stdout)["id"]
+
+    db_path = home / "kanban.db"
+    conn = kbc.connect(db_path)
+    _set_running_claim(conn, victim_id, worker_pid=_FOREIGN_WORKER_PID)
+    conn.close()
+
+    res = _run_hermes_cli(
+        home,
+        "kanban",
+        "reassign",
+        victim_id,
+        "attacker-profile",
+        env_vars={"HERMES_KANBAN_TASK": own_id},
+    )
+    assert res.returncode != 0
+
+    conn = kbc.connect(db_path)
+    row = conn.execute(
+        "SELECT assignee, status, claim_lock, worker_pid FROM tasks WHERE id = ?", (victim_id,),
+    ).fetchone()
+    conn.close()
+    assert row["status"] == "running"
+    assert row["claim_lock"] is not None
+    assert int(row["worker_pid"]) == _FOREIGN_WORKER_PID
 
 
 def test_dispatcher_claimed_card_reassign_by_worker(tmp_path):
@@ -452,4 +599,15 @@ def test_dispatcher_claimed_card_reassign_by_worker(tmp_path):
     conn = kbc.connect(db_path)
     updated = kb.get_task(conn, task_id)
     assert updated.assignee == "builder-profile"
+    assert updated.claim_lock is None
+    assert updated.worker_pid is None
+    open_runs = conn.execute(
+        "SELECT id FROM task_runs WHERE task_id = ? AND ended_at IS NULL", (task_id,),
+    ).fetchall()
+    assert open_runs == []
+    last_run = conn.execute(
+        "SELECT outcome FROM task_runs WHERE task_id = ? ORDER BY id DESC LIMIT 1", (task_id,),
+    ).fetchone()
+    assert last_run is not None
+    assert last_run["outcome"] == "reclaimed"
     conn.close()
