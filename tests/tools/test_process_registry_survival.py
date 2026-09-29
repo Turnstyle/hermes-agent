@@ -119,6 +119,28 @@ def _launch_and_lose_parent(home: Path, command: str):
 
 
 @pytest.mark.platforms("posix")
+def test_one_shot_checkpoint_survives_another_registry_write(tmp_path):
+    home = tmp_path / "profile"
+    home.mkdir()
+    orphan = _launch_and_lose_parent(home, "sleep 1; printf 'orphan finished\\n'")
+    token = set_hermes_home_override(home)
+    try:
+        gateway = ProcessRegistry()
+        own = gateway.spawn_local("sleep 0.2", task_id="gateway")
+        checkpoint = home / "processes.json"
+        assert {row["session_id"] for row in json.loads(checkpoint.read_text())} == {orphan["id"], own.id}
+        assert gateway.wait(own.id, timeout=3)["exit_code"] == 0
+        assert _until(lambda: {row["session_id"] for row in json.loads(checkpoint.read_text())}
+                      == {orphan["id"]})
+        successor = ProcessRegistry()
+        assert successor.recover_from_checkpoint() == 1
+        assert _until(lambda: successor.get(orphan["id"]).exited)
+        assert "orphan finished" in successor.read_log(orphan["id"])["output"]
+    finally:
+        reset_hermes_home_override(token)
+
+
+@pytest.mark.platforms("posix")
 @pytest.mark.parametrize("before_recovery", [False, True])
 def test_recovery_reads_output_exit_and_notifies_once(tmp_path, before_recovery):
     home = tmp_path / "profile"
