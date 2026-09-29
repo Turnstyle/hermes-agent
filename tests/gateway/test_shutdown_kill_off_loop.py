@@ -23,7 +23,7 @@ def _make_phase_runner(monkeypatch, events):
 
     loop_thread = threading.current_thread()
 
-    def _fake_kill_all(task_id=None):
+    def _fake_kill_all(task_id=None, **kwargs):
         events.append(("kill_all", threading.current_thread()))
         return 2
 

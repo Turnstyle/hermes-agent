@@ -224,6 +224,13 @@ It also supports:
 - PTY mode
 - approval callbacks for dangerous commands
 
+On POSIX hosts, local non-PTY background processes write output and an exit-status file
+under the owning profile's `logs/process-output/`. The gateway tails the output file;
+after a restart it resumes from the checkpointed byte offset and recovers the real exit
+code and output tail. `terminal.kill_background_on_gateway_stop` defaults to `false` for
+these processes; cron-owned, PTY, sandbox, and legacy pipe-backed processes are still
+stopped. Interactive PTY processes are outside restart survival.
+
 `tools/process_registry_checkpoint.py` owns running-process checkpoints and
 PID-safe adoption. Completed output is separate: `tools/process_registry_results.py`
 writes one atomic, redacted receipt per process under the profile's

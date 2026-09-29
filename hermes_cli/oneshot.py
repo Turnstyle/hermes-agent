@@ -617,9 +617,8 @@ def _quietly(what: str, fn) -> None:
 
 def _linger_for_background_completions() -> None:
     # Linger (bounded) for background processes this turn spawned with notify_on_complete=true BEFORE
-    # agent.close(): close() calls process_registry.kill_all(task_id) and the dying parent owns the
-    # children's stdout pipes, so exiting now destroys in-flight deliveries — including Bot Mode handoff
-    # replies dispatched from a short-lived recipient (#90879).
+    # Linger for completions before teardown. Pipe-backed children still need
+    # the parent reader; file-backed notify children can survive the bound.
     from tools.process_registry import process_registry
 
     process_registry.wait_for_pending_completions(None)
@@ -630,12 +629,12 @@ def _close_agent(agent, session_db) -> None:
     oneshot has no _active_agent_ref and the hard-exit path skips finalizers."""
     if agent is not None:
         # Linger (bounded) for notify_on_complete background processes BEFORE agent.close():
-        # close() kill_all()s the task and the dying parent owns the children's stdout pipes, so
-        # exiting now destroys in-flight deliveries (e.g. Bot Mode handoff replies).
+        # The bound lets short deliveries finish before closing the agent.
         _quietly("background completion wait", _linger_for_background_completions)
         session_messages = getattr(agent, "_session_messages", None)
         memory_args = (session_messages,) if isinstance(session_messages, list) else ()
         _quietly("memory/context cleanup", lambda: agent.shutdown_memory_provider(*memory_args))
+        agent._preserve_notify_file_processes_on_close = True
         _quietly("agent cleanup", lambda: agent.close())
     # agent.close() ends the session but leaves the connection open; close it to checkpoint the WAL.
     if session_db is not None:

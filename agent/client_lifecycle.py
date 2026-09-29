@@ -110,11 +110,23 @@ class ClientLifecycleMixin:
             # A session can run several task IDs; delegated IDs also differ from session_id.
             # Never match the environment key (e.g. "default"), shared by parent and siblings.
             owners = getattr(self, "_process_owner_task_ids", ())
+            kept = False
             for process in process_registry.list_sessions():
                 if process["owner_task_id"] in owners and process["status"] == "running":
+                    session = process_registry.get(process["session_id"])
+                    if (getattr(self, "_preserve_notify_file_processes_on_close", False)
+                            and session is not None and session.pid_scope == "host"
+                            and session.output_log_path and session.notify_on_complete):
+                        logger.info(
+                            "One-shot process survives close: session=%s pid=%s log=%s exit=%s",
+                            session.id, session.pid, session.output_log_path, session.exit_file_path)
+                        kept = True
+                        continue
                     process_registry.kill_process(
                         process["session_id"], source="agent_close", consume_output=True,
                     )
+            if kept:
+                process_registry._write_checkpoint()
 
         def release_computer_use() -> None:
             from tools.computer_use.tool import release_computer_use_session

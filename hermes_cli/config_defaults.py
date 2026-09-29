@@ -295,6 +295,9 @@ DEFAULT_CONFIG = {
         # Seconds between SIGTERM and escalated SIGKILL for host process trees (browser daemons). 0
         # = SIGTERM only.
         "daemon_term_grace_seconds": 2.0,
+        # Preserve POSIX file-backed host background jobs across gateway restarts.
+        # Cron-owned jobs and non-durable sessions are still stopped.
+        "kill_background_on_gateway_stop": False,
         # Max seconds a one-shot CLI run (-q/-Q/-z) lingers for tracked notify_on_complete
         # background processes to finish. The dying parent owns their stdout pipes, so exiting
         # immediately kills the delivery (e.g. Bot Mode handoff replies via message_agent /
