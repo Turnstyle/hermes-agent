@@ -12,6 +12,8 @@ is applied. No composite index is needed.
 An idle TUI owner polls at a bounded interval; a profile's no-agent cron can run
 ``python -m tools.fleet_message_drain idle-tick`` for a Bot Chat without a live UI owner.
 Both paths use the same atomic claim and hand-off. Expired docs cannot starve fresh docs.
+API turn-end follow-ups use the canonical quiet Bot Chat CLI with the relay's 600-second
+subprocess deadline; the child is killed and its claim requeued if that deadline expires.
 
 Status transitions this module performs (every write carries an ``updateTime`` precondition, so a
 doc that anyone else touched in between is never overwritten):
@@ -77,6 +79,8 @@ _config_read_warned = False
 _config_read_warning_lock = threading.Lock()
 _api_turn_locks_guard = threading.Lock()
 _api_turn_locks: dict[tuple[str, str], threading.Lock] = {}
+_api_drain_flights_guard = threading.Lock()
+_api_drain_flights: set[str] = set()
 
 COLLECTION = "fleet_messages_v1"
 DEFAULT_PROJECT = "mission-control-444444"
@@ -556,7 +560,7 @@ def turn_end_drain_query(
 
 
 def drain_agent_turn(agent: Any, profile_home: Path | str, history: Optional[list] = None) -> bool:
-    """Use the same turn-end claim for an API-server Bot Chat turn's next input."""
+    """Claim one API Bot Chat message and run its canonical CLI turn with a hard deadline."""
     from tools.bot_mode_dm import message_agent_authorized
 
     if not message_agent_authorized(agent):
@@ -569,15 +573,8 @@ def drain_agent_turn(agent: Any, profile_home: Path | str, history: Optional[lis
         return False
     try:
         text, author, _metadata = render_input(claimed)
-        kwargs = {"turn_author": author} if author is not None else {}
-        outcome = agent.run_conversation(
-            user_message=text, conversation_history=history, task_id=getattr(agent, "session_id", None),
-            **kwargs)
-        settled = isinstance(outcome, dict) and not outcome.get("failed") and not outcome.get("partial") \
-            and outcome.get("completed") is not False
-        finish(store, claimed, {"status": "settled" if settled else "failed",
-                                "error": outcome.get("error", "") if isinstance(outcome, dict) else "no result"},
-               max_attempts=config.max_attempts)
+        outcome = _idle_cli_turn(Path(profile_home), text, author)
+        finish(store, claimed, outcome, max_attempts=config.max_attempts)
     except Exception as exc:
         record_error(store, claimed, str(exc), max_attempts=config.max_attempts)
         raise
@@ -586,23 +583,25 @@ def drain_agent_turn(agent: Any, profile_home: Path | str, history: Optional[lis
 
 @contextlib.contextmanager
 def api_turn_lock(profile_home: Path | str, session_id: str | None, *, agent: Any = None):
-    """Serialize API turns with each other and enabled Bot Chat turns with idle cron."""
+    """Serialize one session locally; API requests never wait on the profile flock."""
+    if agent is None or not _api_drain_enabled(agent):
+        yield
+        return
     key = (str(Path(profile_home).resolve()), str(session_id or ""))
     with _api_turn_locks_guard:
         lock = _api_turn_locks.get(key)
         if lock is None:
             lock = threading.Lock()
             _api_turn_locks[key] = lock
-    with lock:
-        if agent is None or not _api_drain_enabled(agent):
-            yield
-            return
-        from tools.bot_mode_probe import _hermes_root
-        from tools.bot_relay import TURN_ATTEMPT_TIMEOUT_SECONDS, acquire_turn_lock
-        home = Path(profile_home)
-        with acquire_turn_lock(_hermes_root(home), bot_identity(home),
-                               timeout_seconds=TURN_ATTEMPT_TIMEOUT_SECONDS + 10):
-            yield
+    # A running drain owns this session until its bounded CLI child exits. Return busy
+    # promptly if a new API request arrives instead of occupying a gateway worker.
+    if not lock.acquire(timeout=1):
+        from tools.bot_relay import TurnBusyError
+        raise TurnBusyError(bot_identity(profile_home), 1)
+    try:
+        yield
+    finally:
+        lock.release()
 
 
 def _api_drain_enabled(agent: Any) -> bool:
@@ -615,21 +614,47 @@ def schedule_drain_agent_turn(agent: Any, profile_home: Path | str, history: Opt
     """Start a follow-up after the API result is ready, without delaying that result."""
     if not _api_drain_enabled(agent):
         return False
-    home = Path(profile_home)
-    session_id = session_id or getattr(agent, "session_id", None)
     from agent.memory_provider import spawn_context_thread
+    home = Path(profile_home)
+    profile_key = str(home.resolve())
+    with _api_drain_flights_guard:
+        if profile_key in _api_drain_flights:
+            return False
+        _api_drain_flights.add(profile_key)
+    session_id = session_id or getattr(agent, "session_id", None)
 
     def run_in_profile_scope() -> None:
-        with api_turn_lock(home, session_id, agent=agent):
-            drain_agent_turn(agent, home, history)
+        key = (profile_key, str(session_id or ""))
+        with _api_turn_locks_guard:
+            session_lock = _api_turn_locks.setdefault(key, threading.Lock())
+        if not session_lock.acquire(blocking=False):
+            return
+        try:
+            from tools.bot_mode_probe import _hermes_root
+            from tools.bot_relay import TurnBusyError, acquire_turn_lock
+            try:
+                with acquire_turn_lock(_hermes_root(home), bot_identity(home), timeout_seconds=0):
+                    drain_agent_turn(agent, home, history)
+            except TurnBusyError:
+                return  # The next turn end or idle tick will retry the queued doc.
+        finally:
+            session_lock.release()
 
     def run() -> None:
         try:
             run_in_profile_scope()
         except Exception:
             logger.warning("api_server fleet message drain failed", exc_info=True)
+        finally:
+            with _api_drain_flights_guard:
+                _api_drain_flights.discard(profile_key)
 
-    spawn_context_thread(run, name="fleet-message-api-drain").start()
+    try:
+        spawn_context_thread(run, name="fleet-message-api-drain").start()
+    except Exception:
+        with _api_drain_flights_guard:
+            _api_drain_flights.discard(profile_key)
+        raise
     return True
 
 
@@ -685,7 +710,7 @@ def _idle_cli_turn(home: Path, text: str, author: Optional[dict]) -> dict:
     try:
         argv = [_hermes_cli(), "-p", bot_identity(home), *BOT_CHAT_TURN_ARGS, "--query-file", str(path)]
         proc = subprocess.run(argv, env=delivery_env(author, home), stdin=subprocess.DEVNULL,
-                              capture_output=True, text=True, check=False,
+                              stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False,
                               timeout=TURN_ATTEMPT_TIMEOUT_SECONDS)
         return {"status": "settled" if proc.returncode == 0 else "failed",
                 "error": f"Bot Chat turn exited {proc.returncode}" if proc.returncode else ""}
