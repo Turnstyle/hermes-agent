@@ -874,6 +874,7 @@ async def _execute_run_via_live_owner(self, run: _RunLaunch, home, record: Dict[
 
 async def _execute_run(self, run: _RunLaunch, *, _api_server) -> None:
     """Drive one admitted run, publish its terminal event/status, release live state."""
+    from tools.bot_relay import TurnBusyError
     _redact_api_error_text = _api_server._redact_api_error_text
     run_id, loop = run.run_id, asyncio.get_running_loop()
 
@@ -946,6 +947,10 @@ async def _execute_run(self, run: _RunLaunch, *, _api_server) -> None:
         # Same controlled provider-auth message the _run_agent() endpoints give.
         logger.warning("Provider resolution failed for run=%s: %s", run_id, exc)
         _finish("failed", error=exc.user_text())
+    except TurnBusyError:
+        # POST already returned 202; retain the retry signal in both GET status and run.failed.
+        _finish("failed", error="Target session is busy; retry this turn.",
+                reason="target_busy", retry_after=30)
     except Exception as exc:
         logger.exception("[api_server] run %s failed", run_id)
         _finish("failed", error=_redact_api_error_text(exc))

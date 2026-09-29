@@ -463,6 +463,11 @@ class _ResponsesStream:
             if isinstance(result, dict) and result.get("error") and not self.final_response_text:
                 self.agent_error = self._api._redact_api_error_text(result["error"])
         except Exception as e:  # noqa: BLE001
+            from tools.bot_relay import TurnBusyError
+            if isinstance(e, TurnBusyError):
+                self.agent_error = "Target session is busy; retry this turn."
+                self.busy_retry_after = 30
+                return
             logger.error("Error running agent for streaming responses: %s", e, exc_info=True)
             self.agent_error = self._api._redact_api_error_text(e)
 
@@ -493,6 +498,9 @@ class _ResponsesStream:
     async def emit_failed(self) -> None:
         redact = self._api._redact_api_error_text
         env = self.terminal_envelope("failed", self._final_items(), error=redact(self.agent_error))
+        if getattr(self, "busy_retry_after", None):
+            env["reason"] = "target_busy"
+            env["retry_after"] = self.busy_retry_after
         history = self._history_with_user()
         history.append(
             {"role": "assistant", "content": self.final_response_text or redact(self.agent_error)})
@@ -827,6 +835,7 @@ class OpenAICompatRoutesMixin:
         route), folded into the key because the store keeps the fingerprint only as the slot's value.
         """
         from gateway.platforms.api_server import _error_response, _idem_cache, _make_request_fingerprint
+        from tools.bot_relay import TurnBusyError
         idempotency_key = request.headers.get("Idempotency-Key")
         try:
             if idempotency_key:
@@ -837,6 +846,9 @@ class OpenAICompatRoutesMixin:
             else:
                 result, usage = await compute()
             return (result, usage), None
+        except TurnBusyError:
+            return None, _error_response("Target session is busy; retry this turn.", 409,
+                                         code="target_busy", headers={"Retry-After": "30"})
         except Exception as e:
             logger.error("Error running agent for %s: %s", log_label, e, exc_info=True)
             message = "" if getattr(e, "_notification_presentation_suppressed", False) is True else f"Internal server error: {e}"
@@ -902,6 +914,13 @@ class OpenAICompatRoutesMixin:
             except Exception as exc:
                 agent_error = exc
                 logger.error("Agent task %s failed during SSE streaming: %s", completion_id, exc)
+            from tools.bot_relay import TurnBusyError
+            if isinstance(agent_error, TurnBusyError):
+                await response.write(_sse_frame({
+                    "message": "Target session is busy; retry this turn.",
+                    "code": "target_busy", "reason": "target_busy", "retry_after": 30}, event="error"))
+                await response.write(b"data: [DONE]\n\n")
+                return response
             completed, is_partial, is_failed, err_msg = _result_flags(result)
             if agent_error is not None:
                 is_failed = True
@@ -964,6 +983,10 @@ class OpenAICompatRoutesMixin:
             await st.collect_result(agent_task)
             await st.close_message_item()
             if st.agent_error:
+                if getattr(st, "busy_retry_after", None):
+                    await st.write_event("error", {
+                        "message": st.agent_error, "code": "target_busy",
+                        "reason": "target_busy", "retry_after": st.busy_retry_after})
                 await st.emit_failed()
             else:
                 await st.emit_completed()

@@ -975,6 +975,11 @@ def _error_response(
     return web.json_response(_openai_error(message, err_type, param, code), status=status, headers=headers)
 
 
+def _target_busy_response() -> "web.Response":
+    return _error_response("Target session is busy; retry this turn.", 409,
+                           code="target_busy", headers={"Retry-After": "30"})
+
+
 def _invalid_request(message: str) -> "web.Response":
     """400 with the bare ``{message, type}`` envelope the OpenAI-compatible validators use."""
     return web.json_response({"error": {"message": message, "type": "invalid_request_error"}}, status=400)
@@ -3516,32 +3521,33 @@ class APIServerAdapter(OpenAICompatRoutesMixin, BasePlatformAdapter):
                 await keepalive()
         return record
 
-    async def _queue_busy_peer_dm(self, ctx: Dict[str, Any]) -> Optional["web.Response"]:
-        """Fast-ack an opted-in peer only after the turn lease proves its target is busy."""
+    async def _queue_busy_peer_dm(self, ctx: Dict[str, Any], *, confirmed_busy: bool = False) -> Optional["web.Response"]:
+        """Fast-ack a peer after its turn lease or API session lock proves the target is busy."""
         from tools.bot_mode_dm import _FAST_ACK_SECONDS, _busy_sender, enqueue_busy_peer_dm
         from tools.fleet_message_drain import bot_identity, recipient_drain_enabled
 
         try:
-            deadline = time.monotonic() + _FAST_ACK_SECONDS
             db = await asyncio.wait_for(self._ensure_session_db_async(), _FAST_ACK_SECONDS)
             if db is None:
                 return None
-            held = False
-            while True:
-                remaining = deadline - time.monotonic()
-                if remaining <= 0:
-                    if held:
+            if not confirmed_busy:
+                deadline = time.monotonic() + _FAST_ACK_SECONDS
+                held = False
+                while True:
+                    remaining = deadline - time.monotonic()
+                    if remaining <= 0:
+                        if held:
+                            break
+                        return None
+                    holder = await asyncio.wait_for(
+                        asyncio.to_thread(db.session_turn_lease_holder, ctx["session_id"]), remaining)
+                    if not holder:
+                        return None
+                    held = True
+                    remaining = deadline - time.monotonic()
+                    if remaining <= 0:
                         break
-                    return None
-                holder = await asyncio.wait_for(
-                    asyncio.to_thread(db.session_turn_lease_holder, ctx["session_id"]), remaining)
-                if not holder:
-                    return None
-                held = True
-                remaining = deadline - time.monotonic()
-                if remaining <= 0:
-                    break
-                await asyncio.sleep(min(0.2, remaining))
+                    await asyncio.sleep(min(0.2, remaining))
         except Exception:
             logger.warning("Busy peer DM lease probe failed; running the turn normally", exc_info=True)
             return None
@@ -3627,19 +3633,18 @@ class APIServerAdapter(OpenAICompatRoutesMixin, BasePlatformAdapter):
         gateway_session_key = ctx["gateway_session_key"]
         session_id = ctx["session_id"]
         history = await self._conversation_history_for_session(session_id)
-        result, usage = await self._run_agent(conversation_history=history, **ctx["run_kwargs"])
-        # One policy-gated re-run of a transiently failed turn — the peer-DM transport's half of the
-        # retry the local (``tools.bot_mode_dm``) and relayed (``tui_gateway.methods_bot_relay``)
-        # delivery lanes already apply (#93091 item 5, #115325). Same policy, same gate: transient
-        # classes (429 / 5xx) re-run the SAME session once, a context overflow lets the re-run's
-        # pre-API compaction shrink the transcript first, and auth/quota/config/model never re-run. The
-        # store is read again first: the failed attempt's turn-start persist left the DM as the
-        # transcript's unanswered tail row, and the re-run resumes that row instead of appending a
-        # second copy of it. A turn that fails again reaches the peer client exactly as before.
-        if result_retry_action(result) != RETRY_NONE:
-            history = await self._conversation_history_for_session(session_id)
-            result, usage = await self._run_agent(
-                conversation_history=history, resume_unanswered_turn=True, **ctx["run_kwargs"])
+        from tools.bot_relay import TurnBusyError
+        try:
+            result, usage = await self._run_agent(conversation_history=history, **ctx["run_kwargs"])
+            # A transiently failed turn gets the peer transport's one policy-gated re-run.
+            # Reload history so the failed attempt's unanswered user row is adopted.
+            if result_retry_action(result) != RETRY_NONE:
+                history = await self._conversation_history_for_session(session_id)
+                result, usage = await self._run_agent(
+                    conversation_history=history, resume_unanswered_turn=True, **ctx["run_kwargs"])
+        except TurnBusyError:
+            queued = await self._queue_busy_peer_dm(ctx, confirmed_busy=True)
+            return queued if queued is not None else _target_busy_response()
         is_dict = isinstance(result, dict)
         effective_session_id = result.get("session_id") if is_dict else session_id
         final_response = _resolve_media_to_data_urls(
@@ -3737,6 +3742,15 @@ class APIServerAdapter(OpenAICompatRoutesMixin, BasePlatformAdapter):
                 self._set_run_status(run_id, "cancelled", last_event="run.cancelled")
                 raise
             except Exception as exc:
+                from tools.bot_relay import TurnBusyError
+                if isinstance(exc, TurnBusyError):
+                    self._set_run_status(
+                        run_id, "failed", reason="target_busy", retry_after=30,
+                        last_event="error")
+                    await queue.put(_event_payload("error", {
+                        "message": "Target session is busy; retry this turn.",
+                        "code": "target_busy", "reason": "target_busy", "retry_after": 30}))
+                    return
                 logger.exception("[api_server] session chat stream failed")
                 self._set_run_status(
                     run_id, "failed", error=_redact_api_error_text(exc), last_event="run.failed")
