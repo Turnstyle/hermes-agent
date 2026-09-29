@@ -286,20 +286,14 @@ def test_api_agent_turn_uses_same_claim_and_records_settled_receipt(monkeypatch,
     monkeypatch.setattr(fmd, "store_for", lambda cfg: store)
     monkeypatch.setattr(fmd, "utcnow", lambda: NOW)
     monkeypatch.setattr(bot_mode_dm, "message_agent_authorized", lambda agent: True)
-    history = [{"role": "assistant", "content": "previous"}]
     calls = []
+    monkeypatch.setattr(fmd, "_idle_cli_turn", lambda home, text, author: (
+        calls.append((home, text, author)) or {"status": "settled"}))
 
-    class Agent:
-        session_id = "chat"
-
-        def run_conversation(self, **kwargs):
-            calls.append(kwargs)
-            return {"completed": True}
-
-    assert fmd.drain_agent_turn(Agent(), tmp_path / "profiles" / ME, history) is True
+    assert fmd.drain_agent_turn(SimpleNamespace(session_id="chat"), tmp_path / "profiles" / ME) is True
     assert store.get("api-message").fields["status"] == "done"
-    assert calls[0]["conversation_history"] is history
-    assert calls[0]["turn_author"]["name"] == "tb-cndr"
+    assert calls[0][0] == tmp_path / "profiles" / ME
+    assert calls[0][2]["name"] == "tb-cndr"
 
 
 def test_api_drain_dispatch_returns_before_turn_and_serializes_next_turn(monkeypatch, tmp_path):
@@ -327,7 +321,7 @@ def test_api_drain_dispatch_returns_before_turn_and_serializes_next_turn(monkeyp
     assert not done.is_set()
     def _next_api_turn():
         follower_started.set()
-        with fmd.api_turn_lock(home, "chat"):
+        with fmd.api_turn_lock(home, "chat", agent=agent):
             next_turn.set()
 
     follower = threading.Thread(target=_next_api_turn, daemon=True)
@@ -341,7 +335,7 @@ def test_api_drain_dispatch_returns_before_turn_and_serializes_next_turn(monkeyp
 
 
 @pytest.mark.platforms("posix")
-def test_api_bot_chat_turn_blocks_idle_cron_claim(monkeypatch, tmp_path):
+def test_api_turn_does_not_wait_for_profile_flock(monkeypatch, tmp_path):
     from tools import bot_mode_dm
     from tools.bot_relay import TurnBusyError, acquire_turn_lock
 
@@ -349,10 +343,161 @@ def test_api_bot_chat_turn_blocks_idle_cron_claim(monkeypatch, tmp_path):
     agent = SimpleNamespace(session_id="chat")
     monkeypatch.setattr(bot_mode_dm, "message_agent_authorized", lambda _: True)
     monkeypatch.setattr(fmd, "drain_config", lambda: fmd.DrainConfig(target="emulator", emulator_host="fake"))
-    with fmd.api_turn_lock(home, "chat", agent=agent):
+    with acquire_turn_lock(tmp_path, ME, timeout_seconds=0):
+        start = fmd.time.monotonic()
+        with fmd.api_turn_lock(home, "chat", agent=agent):
+            pass
+        assert fmd.time.monotonic() - start < 0.5
+
+
+def test_api_drain_burst_has_one_worker_per_profile(monkeypatch, tmp_path):
+    from tools import bot_mode_dm
+
+    home = tmp_path / "profiles" / ME
+    entered = threading.Event()
+    release = threading.Event()
+    done = threading.Event()
+    monkeypatch.setattr(bot_mode_dm, "message_agent_authorized", lambda _: True)
+    monkeypatch.setattr(fmd, "drain_config", lambda: fmd.DrainConfig(target="emulator", emulator_host="fake"))
+
+    def drained(*_):
+        entered.set()
+        assert release.wait(2)
+        done.set()
+
+    monkeypatch.setattr(fmd, "drain_agent_turn", drained)
+    agent = SimpleNamespace(session_id="chat")
+    try:
+        assert fmd.schedule_drain_agent_turn(agent, home)
+        assert entered.wait(2)
+        assert sum(fmd.schedule_drain_agent_turn(agent, home) for _ in range(50)) == 0
+    finally:
+        release.set()
+    assert done.wait(2)
+
+
+@pytest.mark.platforms("posix")
+def test_api_drain_retries_after_profile_flock_is_busy(monkeypatch, tmp_path):
+    from tools import bot_mode_dm
+    from tools.bot_relay import acquire_turn_lock
+
+    home = tmp_path / "profiles" / ME
+    store = MemoryStore()
+    store.seed("flock-busy-message", msg(5))
+    done = threading.Event()
+    monkeypatch.setattr(bot_mode_dm, "message_agent_authorized", lambda _: True)
+    monkeypatch.setattr(fmd, "drain_config", lambda cfg=None: fmd.DrainConfig(target="emulator", emulator_host="fake"))
+    monkeypatch.setattr(fmd, "store_for", lambda cfg: store)
+    monkeypatch.setattr(fmd, "utcnow", lambda: NOW)
+    monkeypatch.setattr(fmd, "_idle_cli_turn", lambda *_: {"status": "settled"})
+    original = fmd.drain_agent_turn
+
+    def drained(*_):
+        try:
+            original(*_)
+        finally:
+            done.set()
+
+    monkeypatch.setattr(fmd, "drain_agent_turn", drained)
+    agent = SimpleNamespace(session_id="chat")
+    with acquire_turn_lock(tmp_path, ME, timeout_seconds=0):
+        assert fmd.schedule_drain_agent_turn(agent, home)
+        deadline = fmd.time.monotonic() + 2
+        while str(home.resolve()) in fmd._api_drain_flights and fmd.time.monotonic() < deadline:
+            done.wait(0.01)
+        assert str(home.resolve()) not in fmd._api_drain_flights
+        assert store.get("flock-busy-message").fields["status"] == "queued"
+    done.clear()
+    assert fmd.schedule_drain_agent_turn(agent, home)
+    assert done.wait(2)
+    assert store.get("flock-busy-message").fields["status"] == "done"
+
+
+def test_api_request_does_not_wait_for_drained_turn(monkeypatch, tmp_path):
+    from tools import bot_mode_dm
+    from tools.bot_relay import TurnBusyError
+
+    home = tmp_path / "profiles" / ME
+    entered = threading.Event()
+    release = threading.Event()
+    done = threading.Event()
+    monkeypatch.setattr(bot_mode_dm, "message_agent_authorized", lambda _: True)
+    monkeypatch.setattr(fmd, "drain_config", lambda: fmd.DrainConfig(target="emulator", emulator_host="fake"))
+
+    def drained(*_):
+        entered.set()
+        try:
+            assert release.wait(2)
+        finally:
+            done.set()
+
+    monkeypatch.setattr(fmd, "drain_agent_turn", drained)
+    try:
+        assert fmd.schedule_drain_agent_turn(SimpleNamespace(session_id="chat"), home)
+        assert entered.wait(2)
+        start = fmd.time.monotonic()
         with pytest.raises(TurnBusyError):
-            with acquire_turn_lock(tmp_path, ME, timeout_seconds=0):
+            with fmd.api_turn_lock(home, "chat", agent=SimpleNamespace(session_id="chat")):
                 pass
+        assert fmd.time.monotonic() - start < 1.5
+    finally:
+        release.set()
+    assert done.wait(2)
+
+
+@pytest.mark.platforms("posix")
+def test_api_drain_timeout_requeues_and_releases_profile_lock(monkeypatch, tmp_path):
+    from tools import bot_mode_dm
+    from tools.bot_relay import acquire_turn_lock
+
+    store = MemoryStore()
+    store.seed("timeout-message", msg(5))
+    home = tmp_path / "profiles" / ME
+    config = fmd.DrainConfig(target="emulator", emulator_host="fake")
+    monkeypatch.setattr(fmd, "drain_config", lambda cfg=None: config)
+    monkeypatch.setattr(fmd, "store_for", lambda cfg: store)
+    monkeypatch.setattr(fmd, "utcnow", lambda: NOW)
+    monkeypatch.setattr(bot_mode_dm, "message_agent_authorized", lambda _: True)
+    monkeypatch.setattr(fmd, "_idle_cli_turn", lambda *_: (_ for _ in ()).throw(
+        fmd.subprocess.TimeoutExpired("fake-hermes", 1)))
+    done = threading.Event()
+    original = fmd.drain_agent_turn
+
+    def drained(*args):
+        try:
+            original(*args)
+        finally:
+            done.set()
+
+    monkeypatch.setattr(fmd, "drain_agent_turn", drained)
+    assert fmd.schedule_drain_agent_turn(SimpleNamespace(session_id="chat"), home)
+    assert done.wait(2)
+    assert store.get("timeout-message").fields["status"] == "queued"
+    assert "timed out" in store.get("timeout-message").fields["last_error"]
+    with acquire_turn_lock(tmp_path, ME, timeout_seconds=0):
+        pass
+
+
+def test_api_drain_cli_child_has_turn_deadline(monkeypatch, tmp_path):
+    from tools import bot_relay
+
+    home = tmp_path / "profiles" / ME
+    seen = []
+    monkeypatch.setattr(bot_relay, "_hermes_cli", lambda: "fake-hermes")
+    monkeypatch.setattr(bot_relay, "delivery_env", lambda author, profile_home: {})
+
+    def fake_run(argv, **kwargs):
+        payload = fmd.Path(argv[-1])
+        seen.append((payload.read_text(), kwargs["timeout"], payload, kwargs))
+        return SimpleNamespace(returncode=0)
+
+    monkeypatch.setattr(fmd.subprocess, "run", fake_run)
+    assert fmd._idle_cli_turn(home, "queued message", None) == {"status": "settled", "error": ""}
+    assert seen[0][0] == "queued message"
+    assert seen[0][1] == bot_relay.TURN_ATTEMPT_TIMEOUT_SECONDS
+    assert seen[0][3]["stdout"] == fmd.subprocess.DEVNULL
+    assert seen[0][3]["stderr"] == fmd.subprocess.DEVNULL
+    assert not seen[0][2].exists()
 
 
 def test_api_drain_worker_keeps_each_profile_scope(monkeypatch, tmp_path):

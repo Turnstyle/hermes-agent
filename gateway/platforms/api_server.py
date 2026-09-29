@@ -4339,14 +4339,14 @@ class APIServerAdapter(OpenAICompatRoutesMixin, BasePlatformAdapter):
                             result, usage = self._finish_turn_result(
                                 agent, result, session_id, route=route, requested_runtime=requested_runtime,
                                 route_source=route_source, confirmed_runtime_lock=confirmed_runtime_lock)
-                            if (isinstance(result, dict) and not result.get("failed")
-                                    and not result.get("partial") and not result.get("interrupted")
-                                    and result.get("completed") is not False):
-                                try:
-                                    schedule_drain_agent_turn(agent, agent_home, result.get("messages"),
-                                                              session_id=session_id)
-                                except Exception:
-                                    logger.warning("api_server fleet message drain dispatch failed", exc_info=True)
+                        if (isinstance(result, dict) and not result.get("failed")
+                                and not result.get("partial") and not result.get("interrupted")
+                                and result.get("completed") is not False):
+                            try:
+                                schedule_drain_agent_turn(agent, agent_home, result.get("messages"),
+                                                          session_id=session_id)
+                            except Exception:
+                                logger.warning("api_server fleet message drain dispatch failed", exc_info=True)
                     finally:
                         if approval_token is not None:
                             from tools.approval_context import reset_current_session_key
