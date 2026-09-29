@@ -221,7 +221,8 @@ def _health_check_failed(home: Optional[Path]) -> bool:
         pid = int(state.get("pid") or 0)
     except (TypeError, ValueError):
         pid = 0
-    alive = _pid_alive(pid)
+    # "degraded while alive" only counts for the verified gateway of this home.
+    alive = pid > 0 and _live_pid_for_home(home) == pid
 
     def _failed_text(raw: object) -> bool:
         if isinstance(raw, str) and raw.strip().casefold() in _HEALTH_FAILED:
@@ -242,28 +243,22 @@ def _health_check_failed(home: Optional[Path]) -> bool:
 
 
 def _live_pid_for_home(home: Optional[Path]) -> Optional[int]:
-    from gateway.status import get_running_pid
+    """Verified live gateway PID for ``home`` (None if none or unproven).
 
-    pid = None
+    Recovery exemptions bypass the hourly budget, so they must not trust a bare
+    PID from ``gateway_state.json``: a recycled PID (unrelated process, another
+    profile, new incarnation) could look wedged or degraded (r8 HIGH). Use the
+    one identity check every other reader uses: ``live_gateway_pid_for_home``
+    (start-time reuse guard + live command line owned by ``home``).
+    """
     try:
-        if home is None:
-            pid = get_running_pid()
-        else:
-            pid_path = Path(home) / "gateway.pid"
-            if pid_path.exists():
-                pid = get_running_pid(pid_path)
+        from gateway.status import live_gateway_pid_for_home
+        from hermes_constants import get_hermes_home
+
+        pid = live_gateway_pid_for_home(Path(home) if home is not None else Path(get_hermes_home()))
     except Exception:
-        pid = None
-    if pid:
-        return int(pid)
-    state = _read_runtime_state(home)
-    try:
-        recorded = int(state.get("pid") or 0)
-    except (TypeError, ValueError):
         return None
-    if _pid_alive(recorded):
-        return recorded
-    return None
+    return int(pid) if isinstance(pid, int) and pid > 0 else None
 
 
 def _live_loop_wedged(home: Optional[Path]) -> bool:

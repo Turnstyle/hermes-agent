@@ -227,6 +227,9 @@ def test_wedged_loop_bypasses_budget_inside_window(tmp_path, monkeypatch):
         json.dumps({"pid": os.getpid(), "gateway_state": "running"}),
         encoding="utf-8",
     )
+    # The recorded PID is this home's verified gateway (identity is tested
+    # unstubbed in the real_identity tests).
+    monkeypatch.setattr("gateway.status.live_gateway_pid_for_home", lambda home: os.getpid())
     monkeypatch.setattr(
         gw, "probe_gateway_loop_liveness", lambda pid, home=None: gw.GATEWAY_LOOP_WEDGED
     )
@@ -380,6 +383,7 @@ def test_degraded_alive_bypasses_budget(tmp_path, monkeypatch):
         json.dumps({"pid": os.getpid(), "gateway_state": "degraded"}),
         encoding="utf-8",
     )
+    monkeypatch.setattr("gateway.status.live_gateway_pid_for_home", lambda home: os.getpid())
     begin_restart_budget(force=False, home=tmp_path, now=t0 + 30)
 
 
@@ -1063,3 +1067,54 @@ def test_restart_all_no_service_foreground_settles_claim_before_run(tmp_path, mo
     with _pytest.raises(SystemExit):
         gw._cmd_restart(SimpleNamespace(system=False, all=True, force=False))
     assert seen["allowed_at_run"] is True
+
+
+@pytest.mark.real_identity
+def test_recycled_state_pid_does_not_grant_wedged_recovery_exemption(tmp_path, monkeypatch):
+    """R8 HIGH: a stale runtime record whose PID now belongs to a different
+    incarnation must not look wedged and bypass an active hour."""
+    import os
+
+    from hermes_cli import restart_budget as rb
+
+    home = tmp_path / "profiles" / "alpha"
+    home.mkdir(parents=True)
+    monkeypatch.setattr("hermes_constants.get_hermes_home", lambda: home)
+    monkeypatch.setattr(rb, "lifecycle_indicates_crash_recovery", lambda home=None: False)
+    _state_record(home, os.getpid(), 1, "alpha")
+    _stub_live_process(monkeypatch, "hermes -p alpha gateway run", 222)
+    import hermes_cli.gateway as gw
+
+    monkeypatch.setattr(
+        gw, "probe_gateway_loop_liveness", lambda pid, home=None: gw.GATEWAY_LOOP_WEDGED
+    )
+    t0 = 1_700_000_000.0
+    record_restart_budget(now=t0, home=home)
+    assert rb.recovery_exempts_restart_budget(home) is False
+    allowed, _ = evaluate_restart_budget(now=t0 + 30, home=home)
+    assert allowed is False
+
+    # Positive control: the verified gateway of this home really is wedged.
+    _stub_live_process(monkeypatch, "hermes -p alpha gateway run", 1)
+    assert rb.recovery_exempts_restart_budget(home) is True
+
+
+@pytest.mark.real_identity
+def test_recycled_state_pid_does_not_count_as_degraded_alive(tmp_path, monkeypatch):
+    """Same class, degraded-health path."""
+    import json
+    import os
+
+    from hermes_cli import restart_budget as rb
+
+    home = tmp_path / "profiles" / "alpha"
+    home.mkdir(parents=True)
+    monkeypatch.setattr("hermes_constants.get_hermes_home", lambda: home)
+    _state_record(home, os.getpid(), 1, "alpha")
+    state = json.loads(home.joinpath("gateway_state.json").read_text())
+    state["gateway_state"] = "degraded"
+    home.joinpath("gateway_state.json").write_text(json.dumps(state))
+    _stub_live_process(monkeypatch, "python unrelated.py", 1)
+    assert rb._health_check_failed(home) is False
+    _stub_live_process(monkeypatch, "hermes -p alpha gateway run", 1)
+    assert rb._health_check_failed(home) is True
