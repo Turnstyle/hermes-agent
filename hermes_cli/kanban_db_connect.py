@@ -307,6 +307,39 @@ class KanbanDbCorruptError(RuntimeError):
         )
 
 
+class KanbanBoardPathError(ValueError):
+    """A board DB was requested at a non-canonical Kanban path."""
+
+
+def _noncanonical_board_path(path: Path) -> Optional[str]:
+    """Return why a resolved path cannot hold a Kanban board DB, if applicable."""
+    resolved = path.resolve()
+    boards = _kb.boards_root().resolve()
+    if resolved == (_kb.kanban_home() / "kanban" / "kanban.db").resolve():
+        return "the default DB belongs at the Kanban root"
+    try:
+        relative = resolved.relative_to(boards)
+    except ValueError:
+        return None
+    if not relative.parts:
+        return "the boards directory is not a DB file"
+    if resolved.parent == boards:
+        return "the boards directory contains board directories, not DB files"
+    if relative.parts[0] == "_archived":
+        return "archived boards cannot be opened as live boards"
+    if relative.parts[0] == "default":
+        return "the default board stores metadata here, not its DB"
+    if resolved.name != "kanban.db" or resolved.parent.parent != boards:
+        return "named boards use <slug>/kanban.db directly below boards"
+    try:
+        slug = _kb._normalize_board_slug(resolved.parent.name)
+    except ValueError:
+        return "the board directory is not a valid slug"
+    if slug != resolved.parent.name:
+        return "the board directory is not a normalized slug"
+    return None
+
+
 def _backup_label(backup_path: Optional[Path]) -> str:
     return str(backup_path) if backup_path is not None else "<backup failed>"
 
@@ -673,6 +706,13 @@ def connect(db_path: Optional[Path] = None, *, board: Optional[str] = None) -> s
     :func:`kanban_db_path` (``HERMES_KANBAN_DB`` -> ``HERMES_KANBAN_BOARD`` ->
     ``<root>/kanban/current`` -> ``default``)."""
     path = db_path if db_path is not None else _kb.kanban_db_path(board=board)
+    reason = _noncanonical_board_path(path)
+    if reason is not None:
+        raise KanbanBoardPathError(
+            f"Non-canonical Kanban board DB path {path}: {reason}. "
+            "Canonical layout: <root>/kanban.db for default, "
+            "<root>/kanban/boards/<slug>/kanban.db otherwise."
+        )
     from agent.delegation_context import kanban_path_is_fenced
     if kanban_path_is_fenced(path):
         # Reads must not enter schema/backfill write transactions. Never create a
@@ -756,7 +796,7 @@ def connect_closing(db_path: Optional[Path] = None, *, board: Optional[str] = No
 def connect_readonly_closing(db_path: Optional[Path] = None, *, board: Optional[str] = None):
     """Open an existing live board without initialization or write transactions."""
     path = db_path if db_path is not None else _kb.kanban_db_path(board=board)
-    if not path.is_file():
+    if not path.is_file() or path.stat().st_size == 0:
         raise ValueError(f"Kanban board is not initialized: {path}")
     conn = sqlite3.connect(path.resolve().as_uri() + "?mode=ro", uri=True)
     try:
@@ -776,7 +816,6 @@ def init_db(db_path: Optional[Path] = None, *, board: Optional[str] = None) -> P
     migration pass — callers that know the on-disk schema may have drifted
     (tests writing legacy event kinds, external upgrades) use it to force it."""
     path = db_path if db_path is not None else _kb.kanban_db_path(board=board)
-    path.parent.mkdir(parents=True, exist_ok=True)
     # Clear the cache entry so connect() re-runs schema + migrations.
     with _INIT_LOCK:
         _INITIALIZED_PATHS.discard(str(path.resolve()))

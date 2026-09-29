@@ -482,7 +482,7 @@ def board_dir(board: Optional[str] = None) -> Path:
 
 
 def board_exists(board: Optional[str] = None) -> bool:
-    """Board has ``board.json`` or ``kanban.db`` on disk; ``default`` always exists."""
+    """Board has metadata or a non-empty DB; ``default`` always exists."""
     slug = _slug_or_default(board)
     if slug == DEFAULT_BOARD:
         return True
@@ -490,7 +490,8 @@ def board_exists(board: Optional[str] = None) -> bool:
 
 
 def _dir_holds_board(d: Path) -> bool:
-    return (d / "board.json").exists() or (d / "kanban.db").exists()
+    db = d / "kanban.db"
+    return (d / "board.json").is_file() or (db.is_file() and db.stat().st_size > 0)
 
 
 def _board_path(
@@ -632,7 +633,7 @@ def create_board(
 
 def list_boards(*, include_archived: bool = True) -> list[dict]:
     """Metadata for every board: ``default`` first (always present), then
-    ``boards/<slug>/`` dirs holding a ``kanban.db`` or ``board.json``, sorted."""
+    ``boards/<slug>/`` dirs holding a non-empty DB or ``board.json``, sorted."""
     entries = [read_board_metadata(DEFAULT_BOARD)]
     seen = {DEFAULT_BOARD}
     root = boards_root()
