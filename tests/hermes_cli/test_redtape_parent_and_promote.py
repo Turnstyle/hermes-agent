@@ -379,6 +379,50 @@ def test_dependency_wait_parent_with_open_grandparent_keeps_gate(kanban_home, mo
         assert kb.complete_task(conn, child, result="upstream done") is True
 
 
+@pytest.mark.parametrize("hold", ["title_marker", "body_marker", "needs_input"])
+@pytest.mark.parametrize("evidence", ["rehome", "merged_pr"])
+def test_todo_turner_hold_parent_keeps_gate_until_explicit_release(
+    kanban_home, monkeypatch, hold, evidence,
+):
+    """v3 port review H1: a todo-parked human hold (HOLD FOR TURNER marker or a
+    needs_input loop hold) is not released by rehome or merged-PR evidence;
+    only unblock_task releases it."""
+    pr_url = "https://github.com/acme/app/pull/25"
+    monkeypatch.setattr(
+        "hermes_cli.kanban_parent_gate.query_pr_merge_state",
+        lambda _url: {"state": "MERGED", "mergedAt": "2026-09-28T12:00:00Z"},
+    )
+    with kbc.connect() as conn:
+        title = "HOLD FOR TURNER: pick a vendor" if hold == "title_marker" else "held parent"
+        body = "Hold for Turner before shipping." if hold == "body_marker" else None
+        kwargs = {"completion_contract": pr_url} if evidence == "merged_pr" else {}
+        parent = kb.create_task(conn, title=title, body=body, **kwargs)
+        conn.execute("UPDATE tasks SET status = 'todo' WHERE id = ?", (parent,))
+        conn.commit()
+        if hold == "needs_input":
+            with kb.write_txn(conn):
+                conn.execute(
+                    "UPDATE tasks SET block_kind = 'needs_input' WHERE id = ?", (parent,),
+                )
+                kb._append_event(conn, parent, "block_loop_detected", {"kind": "needs_input"})
+        if evidence == "rehome":
+            successor = kb.create_task(conn, title="successor")
+            assert record_parent_rehome(conn, parent, successor, action="rehomed") is True
+        child = kb.create_task(conn, title="child under todo hold")
+        kb.link_tasks(conn, parent, child)
+        conn.execute("UPDATE tasks SET status = 'ready' WHERE id = ?", (child,))
+        conn.commit()
+        assert kb.complete_task(conn, child, result="should not close") is False
+        assert kb.get_task(conn, child).status == "ready"
+
+        # Explicit operator release lifts the hold; the evidence then applies.
+        assert kb.unblock_task(conn, parent) is True
+        conn.execute("UPDATE tasks SET status = 'todo' WHERE id = ?", (parent,))
+        conn.commit()
+        assert kb.complete_task(conn, child, result="released") is True
+        assert kb.get_task(conn, child).status == "done"
+
+
 def test_pr_acceptance_system_event_releases_without_completion_contract(kanban_home, monkeypatch):
     pr_url = "https://github.com/acme/app/pull/22"
 

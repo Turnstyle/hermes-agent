@@ -111,13 +111,24 @@ def _parent_release(
     *,
     allow_network: bool,
 ) -> bool:
-    from hermes_cli.kanban_db import _has_sticky_block
+    from hermes_cli.kanban_db import _has_sticky_block, _has_turner_hold
     from hermes_cli.kanban_db import unsatisfied_parents as unsatisfied_parents_of
 
     if status not in _REHOME_RELEASE_STATUSES:
         return False
     if _has_sticky_block(conn, parent_id):
         return False
+    # A todo-parked human hold (HOLD FOR TURNER marker, or a needs_input loop
+    # hold) is released only by unblock/promote, never by rehome or merged-PR
+    # evidence (v3 port review H1). Same predicate recompute_ready uses.
+    if status == "todo":
+        hold_row = conn.execute(
+            "SELECT block_kind, title, body FROM tasks WHERE id = ?", (parent_id,),
+        ).fetchone()
+        if hold_row is not None and _has_turner_hold(
+            conn, parent_id, hold_row["block_kind"], hold_row["title"], hold_row["body"],
+        ):
+            return False
     # A dependency_wait parent sits in ``todo`` while its own prerequisites are
     # open; rehome or merged-PR evidence on it must not skip those upstream
     # dependencies (r4 HIGH). Any open grandparent keeps the gate closed.
