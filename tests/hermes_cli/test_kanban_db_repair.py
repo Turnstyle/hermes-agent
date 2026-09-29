@@ -211,11 +211,11 @@ def test_dispatch_tick_runs_wal_checkpoint_at_interval(tmp_path, monkeypatch):
     conn = kbc.connect(db_path=db_path)
     proxy = _ConnProxy(conn, executed)
     try:
-        kbd.dispatch_once(proxy, spawn_fn=lambda *a, **k: None, dry_run=True)
+        kbd.dispatch_once(proxy, spawn_fn=lambda *a, **k: None)
         assert len(executed) == 1, "first tick should checkpoint"
 
-        kbd.dispatch_once(proxy, spawn_fn=lambda *a, **k: None, dry_run=True)
-        kbd.dispatch_once(proxy, spawn_fn=lambda *a, **k: None, dry_run=True)
+        kbd.dispatch_once(proxy, spawn_fn=lambda *a, **k: None)
+        kbd.dispatch_once(proxy, spawn_fn=lambda *a, **k: None)
         assert len(executed) == 1, "ticks inside the interval must not checkpoint"
 
         # Age the per-path timestamp past the interval → next tick fires.
@@ -223,7 +223,7 @@ def test_dispatch_tick_runs_wal_checkpoint_at_interval(tmp_path, monkeypatch):
         kbc._LAST_WAL_CHECKPOINT[key] -= (
             kbc._WAL_CHECKPOINT_INTERVAL_SECONDS + 1.0
         )
-        kbd.dispatch_once(proxy, spawn_fn=lambda *a, **k: None, dry_run=True)
+        kbd.dispatch_once(proxy, spawn_fn=lambda *a, **k: None)
         assert len(executed) == 2, "tick after the interval should checkpoint"
         # PASSIVE, not TRUNCATE: CLI kanban commands in other processes write
         # to the same board without holding the dispatch flock, so a TRUNCATE
@@ -283,5 +283,4 @@ def test_cli_repair_json_shape(cli_home, capsys):
     assert payload["reindexed"] == ["idx_tasks_status"]
     assert payload["backup_path"]
     assert Path(payload["backup_path"]).exists()
-
 

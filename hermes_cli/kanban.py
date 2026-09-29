@@ -184,10 +184,12 @@ def kanban_command(args: argparse.Namespace) -> int:
             return _cmd_repair(args)
         # init_db is idempotent (one sqlite_master SELECT when tables exist) and prevents
         # "no such table: tasks" on first use from a fresh HERMES_HOME.
-        try:
-            kb.init_db()
-        except Exception as exc:
-            return _err(f"kanban: could not initialize database: {exc}")
+        diagnostic_dispatch = action == "dispatch" and bool(getattr(args, "dry_run", False))
+        if not diagnostic_dispatch:
+            try:
+                kb.init_db()
+            except Exception as exc:
+                return _err(f"kanban: could not initialize database: {exc}")
 
         handler = _HANDLERS.get(action)
         if not handler:
