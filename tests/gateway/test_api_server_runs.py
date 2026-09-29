@@ -205,6 +205,24 @@ class TestStartRun:
                 assert status["object"] == "hermes.run"
 
     @pytest.mark.asyncio
+    async def test_runs_bot_chat_turn_end_invokes_fleet_drain(self, adapter, monkeypatch):
+        from tools import fleet_message_drain as fmd
+
+        calls = []
+        monkeypatch.setattr(fmd, "drain_agent_turn", lambda agent, home, history: calls.append(agent))
+        agent = MagicMock()
+        agent.session_id = None
+        agent._session_db = None
+        agent._memory_manager = None
+        agent.run_conversation.return_value = {"final_response": "done"}
+        with patch.object(adapter, "_create_agent", return_value=agent):
+            async with TestClient(TestServer(_create_runs_app(adapter))) as cli:
+                response = await cli.post("/v1/runs", json={"input": "hello"})
+                run_id = (await response.json())["run_id"]
+                await self._wait_completed(cli, run_id)
+        assert calls == [agent]
+
+    @pytest.mark.asyncio
     async def test_start_binds_chat_id_for_delegation_wake_target(self, adapter):
         """/v1/runs must bind the raw session id as the api_server chat_id
         (like every other agent-entry route does via _run_agent): the async

@@ -196,12 +196,78 @@ def drain_all(store, *, now=NOW, outcome=None):
         fmd.finish(store, claimed, outcome or {"status": "settled", "text": "ok"}, max_attempts=5, now=now)
 
 
+def test_idle_tick_delivers_one_queued_doc_and_keeps_order(tmp_path):
+    store = MemoryStore()
+    store.seed("older", msg(5))
+    store.seed("newer", msg(2))
+    received = []
+
+    assert fmd.idle_tick(tmp_path / "profiles" / ME, store=store,
+                         config=fmd.DrainConfig(target="emulator", emulator_host="fake"),
+                         busy=lambda: False,
+                         run_turn=lambda text, author, metadata: received.append(text) or {"status": "settled"},
+                         now=NOW) is True
+    assert "older" in received[0]
+    assert store.get("older").fields["status"] == "done"
+    assert store.get("newer").fields["status"] == "queued"
+
+
+def test_idle_tick_busy_recipient_does_not_claim(tmp_path):
+    store = MemoryStore()
+    store.seed("waiting", msg(5))
+    assert fmd.idle_tick(tmp_path / "profiles" / ME, store=store,
+                         config=fmd.DrainConfig(target="emulator", emulator_host="fake"),
+                         busy=lambda: True, run_turn=lambda *_: pytest.fail("ran while busy"),
+                         now=NOW) is False
+    assert store.get("waiting").fields["status"] == "queued"
+    assert store.commits == 0
+
+
+def test_idle_tick_releases_claim_if_recipient_becomes_busy(tmp_path):
+    store = MemoryStore()
+    store.seed("racing", msg(5))
+    checks = iter((False, True))
+    assert fmd.idle_tick(tmp_path / "profiles" / ME, store=store,
+                         config=fmd.DrainConfig(target="emulator", emulator_host="fake"),
+                         busy=lambda: next(checks), run_turn=lambda *_: pytest.fail("ran while busy"),
+                         now=NOW) is False
+    row = store.get("racing")
+    assert row.fields["status"] == "queued" and row.fields["attempts"] == 1
+    assert "read_at" not in row.fields
+
+
+def test_api_agent_turn_uses_same_claim_and_records_settled_receipt(monkeypatch, tmp_path):
+    from tools import bot_mode_dm
+
+    store = MemoryStore()
+    store.seed("api-message", msg(5))
+    config = fmd.DrainConfig(target="emulator", emulator_host="fake")
+    monkeypatch.setattr(fmd, "drain_config", lambda cfg=None: config)
+    monkeypatch.setattr(fmd, "store_for", lambda cfg: store)
+    monkeypatch.setattr(fmd, "utcnow", lambda: NOW)
+    monkeypatch.setattr(bot_mode_dm, "message_agent_authorized", lambda agent: True)
+    history = [{"role": "assistant", "content": "previous"}]
+    calls = []
+
+    class Agent:
+        session_id = "chat"
+
+        def run_conversation(self, **kwargs):
+            calls.append(kwargs)
+            return {"completed": True}
+
+    assert fmd.drain_agent_turn(Agent(), tmp_path / "profiles" / ME, history) is True
+    assert store.get("api-message").fields["status"] == "done"
+    assert calls[0]["conversation_history"] is history
+    assert calls[0]["turn_author"]["name"] == "tb-cndr"
+
+
 # ---------- ordering + exactly once ----------
 def test_turn_ends_pick_up_each_queued_doc_once_in_created_at_order(store):
     a, b, c = uid("a"), uid("b"), uid("c")
     store.seed(b, msg(20))
     store.seed(c, msg(5))
-    store.seed(a, msg(40))            # oldest, seeded out of order on purpose
+    store.seed(a, msg(25))            # oldest, seeded out of order on purpose
     assert drain_all(store) == [a, b, c]
     for doc_id in (a, b, c):
         row = store.get(doc_id)
@@ -489,6 +555,9 @@ def test_config_is_dark_by_default_and_validated():
     cfg = fmd.drain_config({"fleet_messages": {"drain_on_turn_end": True, "emulator_host": "127.0.0.1:1",
                                                "limit": 999}})
     assert cfg.target == "emulator" and cfg.limit == fmd.MAX_LIMIT
+    assert cfg.queued_timeout_seconds == 1800
+    assert fmd.drain_config({"fleet_messages": {"drain_on_turn_end": True, "target": "live",
+                                                 "queued_timeout_seconds": 900}}).queued_timeout_seconds == 900
     assert fmd.drain_config({"fleet_messages": {"drain_on_turn_end": True, "target": "live"}}).target == "live"
 
 

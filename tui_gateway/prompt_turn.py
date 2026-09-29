@@ -458,7 +458,7 @@ def _run_post_turn_followups(
     except Exception as _dm_exc:
         _hook_failure("bot mailbox claim", _dm_exc)
     # Queued fleet_messages_v1 docs (Mission Control registry: DMs / notify wakes that hit target_busy
-    # while this bot was mid-turn). Turn end is the ONLY trigger: the idle poller never calls this.
+    # while this bot was mid-turn). The idle poller also calls the same admission-guarded drain.
     try:
         with _session_profile_runtime_scope(session):
             if _drain_fleet_messages_once(sid, session):

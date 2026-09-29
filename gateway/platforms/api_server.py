@@ -4339,6 +4339,15 @@ class APIServerAdapter(OpenAICompatRoutesMixin, BasePlatformAdapter):
                     result, usage = self._finish_turn_result(
                         agent, result, session_id, route=route, requested_runtime=requested_runtime,
                         route_source=route_source, confirmed_runtime_lock=confirmed_runtime_lock)
+                    if (isinstance(result, dict) and not result.get("failed")
+                            and not result.get("partial") and not result.get("interrupted")
+                            and result.get("completed") is not False):
+                        try:
+                            from tools.bot_mode_dm import _agent_home
+                            from tools.fleet_message_drain import drain_agent_turn
+                            drain_agent_turn(agent, _agent_home(agent), result.get("messages"))
+                        except Exception:
+                            logger.warning("api_server fleet message drain failed", exc_info=True)
                     if muted and isinstance(result, dict):
                         # Project presentation only after finishing the source outcome. Keep
                         # the agent's result, transcript, failure flags and usage intact.

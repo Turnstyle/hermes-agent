@@ -777,6 +777,14 @@ def _run_agent_sync(self, run: _RunLaunch, agent, approval_notify, *, _api_serve
             r = agent.run_conversation(
                 user_message=run.user_message, conversation_history=run.conversation_history,
                 task_id=effective_task_id, **author_kwargs)
+            if (isinstance(r, dict) and not r.get("failed") and not r.get("partial")
+                    and not r.get("interrupted") and r.get("completed") is not False):
+                try:
+                    from tools.bot_mode_dm import _agent_home
+                    from tools.fleet_message_drain import drain_agent_turn
+                    drain_agent_turn(agent, _agent_home(agent), r.get("messages"))
+                except Exception:
+                    logger.warning("api_server /v1/runs fleet message drain failed", exc_info=True)
         finally:
             # Clear ownership now so a later stop can't reap work this run left running.
             _api_server._clear_turn_process_ownership(agent)

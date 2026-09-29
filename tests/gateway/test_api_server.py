@@ -402,6 +402,20 @@ def auth_adapter():
 
 class TestAgentExecution:
     @pytest.mark.asyncio
+    async def test_bot_chat_api_turn_end_invokes_fleet_drain(self, adapter, monkeypatch):
+        from tools import fleet_message_drain as fmd
+        agent = MagicMock()
+        agent.session_id = None
+        agent._session_db = None
+        agent._memory_manager = None
+        agent.run_conversation.return_value = {"final_response": "ok"}
+        calls = []
+        monkeypatch.setattr(fmd, "drain_agent_turn", lambda a, home, history: calls.append((a, home, history)))
+        with patch.object(adapter, "_create_agent", return_value=agent):
+            await adapter._run_agent(user_message="hello", conversation_history=[], session_id="chat")
+        assert len(calls) == 1 and calls[0][0] is agent
+
+    @pytest.mark.asyncio
     async def test_run_agent_uses_session_id_as_task_id(self, adapter):
         mock_agent = MagicMock()
         mock_agent.run_conversation.return_value = {"final_response": "ok"}
