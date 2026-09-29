@@ -774,17 +774,16 @@ def _run_agent_sync(self, run: _RunLaunch, agent, approval_notify, *, _api_serve
             _api_server._publish_turn_process_ownership(agent, effective_task_id)
             # Passed only when set: a human turn keeps today's call shape.
             author_kwargs = {"turn_author": run.turn_author} if run.turn_author is not None else {}
-            r = agent.run_conversation(
-                user_message=run.user_message, conversation_history=run.conversation_history,
-                task_id=effective_task_id, **author_kwargs)
-            if (isinstance(r, dict) and not r.get("failed") and not r.get("partial")
-                    and not r.get("interrupted") and r.get("completed") is not False):
-                try:
-                    from tools.bot_mode_dm import _agent_home
-                    from tools.fleet_message_drain import drain_agent_turn
-                    drain_agent_turn(agent, _agent_home(agent), r.get("messages"))
-                except Exception:
-                    logger.warning("api_server /v1/runs fleet message drain failed", exc_info=True)
+            from tools.bot_mode_dm import _agent_home
+            from tools.fleet_message_drain import api_turn_lock, schedule_drain_agent_turn
+            agent_home = _agent_home(agent)
+            drain_after_result = False
+            with api_turn_lock(agent_home, session_id or getattr(agent, "session_id", None), agent=agent):
+                r = agent.run_conversation(
+                    user_message=run.user_message, conversation_history=run.conversation_history,
+                    task_id=effective_task_id, **author_kwargs)
+                drain_after_result = (isinstance(r, dict) and not r.get("failed") and not r.get("partial")
+                                      and not r.get("interrupted") and r.get("completed") is not False)
         finally:
             # Clear ownership now so a later stop can't reap work this run left running.
             _api_server._clear_turn_process_ownership(agent)
@@ -799,7 +798,13 @@ def _run_agent_sync(self, run: _RunLaunch, agent, approval_notify, *, _api_serve
                 for token, reset in resets:
                     with suppress(Exception):
                         reset(token)
-        return r, _run_usage(agent), _served_runtime(agent)
+        usage, served_runtime = _run_usage(agent), _served_runtime(agent)
+        if drain_after_result:
+            try:
+                schedule_drain_agent_turn(agent, agent_home, r.get("messages"), session_id=session_id)
+            except Exception:
+                logger.warning("api_server /v1/runs fleet message drain dispatch failed", exc_info=True)
+        return r, usage, served_runtime
 
 
 def _make_approval_notify(self, run: _RunLaunch, *, _api_server) -> Callable[[Dict[str, Any]], None]:

@@ -212,6 +212,46 @@ def test_idle_tick_delivers_one_queued_doc_and_keeps_order(tmp_path):
     assert store.get("newer").fields["status"] == "queued"
 
 
+@pytest.mark.platforms("posix")
+def test_idle_cli_turn_runs_with_parent_turn_lock_and_records_receipt(tmp_path, monkeypatch):
+    from tools.bot_relay import TurnBusyError, acquire_turn_lock
+
+    home = tmp_path / "profiles" / ME
+    home.mkdir(parents=True)
+    store = MemoryStore()
+    store.seed("idle-cli", msg(5))
+    def child_boundary(argv, **kwargs):
+        assert "-Q" in argv and argv[argv.index("-p") + 1] == ME
+        with pytest.raises(TurnBusyError):
+            with acquire_turn_lock(tmp_path, ME, timeout_seconds=0):
+                pass
+        return SimpleNamespace(returncode=0)
+
+    monkeypatch.setattr(fmd.subprocess, "run", child_boundary)
+    monkeypatch.setattr("tools.bot_relay._hermes_cli", lambda: "hermes")
+    monkeypatch.setattr("tools.bot_relay.delivery_env", lambda author, home: {})
+    with acquire_turn_lock(tmp_path, ME, timeout_seconds=0):
+        assert fmd.idle_tick(home, store=store,
+                             config=fmd.DrainConfig(target="emulator", emulator_host="fake"),
+                             busy=lambda: False, now=NOW)
+    row = store.get("idle-cli").fields
+    assert row["status"] == "done" and row["delivered_at"] and row["read_at"] and row["done_at"]
+
+
+def test_stale_owner_does_not_block_idle_drain(tmp_path, monkeypatch):
+    from tools import bot_live_delivery
+
+    home = tmp_path / "profiles" / ME
+    store = MemoryStore()
+    store.seed("stale", msg(5))
+    monkeypatch.setattr(bot_live_delivery, "find_canonical_owner", lambda _: {"lease_id": "stale"})
+    monkeypatch.setattr(bot_live_delivery, "find_canonical_live_owner", lambda _: None)
+    assert fmd.idle_tick(home, store=store,
+                         config=fmd.DrainConfig(target="emulator", emulator_host="fake"),
+                         run_turn=lambda *_: {"status": "settled"}, now=NOW)
+    assert store.get("stale").fields["status"] == "done"
+
+
 def test_idle_tick_busy_recipient_does_not_claim(tmp_path):
     store = MemoryStore()
     store.seed("waiting", msg(5))
@@ -260,6 +300,86 @@ def test_api_agent_turn_uses_same_claim_and_records_settled_receipt(monkeypatch,
     assert store.get("api-message").fields["status"] == "done"
     assert calls[0]["conversation_history"] is history
     assert calls[0]["turn_author"]["name"] == "tb-cndr"
+
+
+def test_api_drain_dispatch_returns_before_turn_and_serializes_next_turn(monkeypatch, tmp_path):
+    from tools import bot_mode_dm
+
+    home = tmp_path / "profiles" / ME
+    entered = threading.Event()
+    release = threading.Event()
+    done = threading.Event()
+    follower_started = threading.Event()
+    next_turn = threading.Event()
+    monkeypatch.setattr(bot_mode_dm, "message_agent_authorized", lambda _: True)
+    monkeypatch.setattr(fmd, "drain_config", lambda: fmd.DrainConfig(target="emulator", emulator_host="fake"))
+
+    def drained(*_):
+        entered.set()
+        assert release.wait(2)
+        done.set()
+        raise RuntimeError("drained turn failed")
+
+    monkeypatch.setattr(fmd, "drain_agent_turn", drained)
+    agent = SimpleNamespace(session_id="chat")
+    assert fmd.schedule_drain_agent_turn(agent, home, []) is True
+    assert entered.wait(2)
+    assert not done.is_set()
+    def _next_api_turn():
+        follower_started.set()
+        with fmd.api_turn_lock(home, "chat"):
+            next_turn.set()
+
+    follower = threading.Thread(target=_next_api_turn, daemon=True)
+    follower.start()
+    assert follower_started.wait(2)
+    assert not next_turn.is_set()
+    release.set()
+    assert done.wait(2)
+    assert next_turn.wait(2)
+    follower.join(timeout=2)
+
+
+@pytest.mark.platforms("posix")
+def test_api_bot_chat_turn_blocks_idle_cron_claim(monkeypatch, tmp_path):
+    from tools import bot_mode_dm
+    from tools.bot_relay import TurnBusyError, acquire_turn_lock
+
+    home = tmp_path / "profiles" / ME
+    agent = SimpleNamespace(session_id="chat")
+    monkeypatch.setattr(bot_mode_dm, "message_agent_authorized", lambda _: True)
+    monkeypatch.setattr(fmd, "drain_config", lambda: fmd.DrainConfig(target="emulator", emulator_host="fake"))
+    with fmd.api_turn_lock(home, "chat", agent=agent):
+        with pytest.raises(TurnBusyError):
+            with acquire_turn_lock(tmp_path, ME, timeout_seconds=0):
+                pass
+
+
+def test_api_drain_worker_keeps_each_profile_scope(monkeypatch, tmp_path):
+    from hermes_constants import get_hermes_home, reset_hermes_home_override, set_hermes_home_override
+    from tools import bot_mode_dm
+
+    seen = []
+    done = threading.Event()
+    monkeypatch.setattr(bot_mode_dm, "message_agent_authorized", lambda _: True)
+    monkeypatch.setattr(fmd, "drain_config", lambda: fmd.DrainConfig(target="emulator", emulator_host="fake"))
+
+    def drained(agent, home, history):
+        seen.append((str(home), str(get_hermes_home())))
+        done.set()
+
+    monkeypatch.setattr(fmd, "drain_agent_turn", drained)
+    for name in ("a", "b", "a"):
+        home = tmp_path / "profiles" / name
+        token = set_hermes_home_override(home)
+        try:
+            done.clear()
+            assert fmd.schedule_drain_agent_turn(SimpleNamespace(session_id="chat"), home)
+            assert done.wait(2)
+        finally:
+            reset_hermes_home_override(token)
+    assert seen == [(str(tmp_path / "profiles" / name), str(tmp_path / "profiles" / name))
+                    for name in ("a", "b", "a")]
 
 
 # ---------- ordering + exactly once ----------

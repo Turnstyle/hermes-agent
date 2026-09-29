@@ -37,7 +37,8 @@ def _drain_quiet_bot_chat(cli, history) -> None:
     store = fmd.store_for(config)
     me = fmd.bot_identity(_agent_home(cli.agent))
     for _ in range(5):
-        claimed = fmd.claim_next(store, me, limit=config.limit)
+        claimed = fmd.claim_next(store, me, limit=config.limit,
+                                 queued_timeout_seconds=config.queued_timeout_seconds)
         if claimed is None:
             return
         try:

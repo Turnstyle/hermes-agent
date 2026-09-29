@@ -4319,6 +4319,11 @@ class APIServerAdapter(OpenAICompatRoutesMixin, BasePlatformAdapter):
                     )
                     if relay_metadata:
                         conversation_kwargs["relay_metadata"] = relay_metadata
+                    from tools.bot_mode_dm import _agent_home
+                    from tools.fleet_message_drain import api_turn_lock, schedule_drain_agent_turn
+                    agent_home = _agent_home(agent)
+                    turn_lock = api_turn_lock(agent_home, session_id or getattr(agent, "session_id", None),
+                                              agent=agent)
                     approval_token = None
                     if approval_notify_callback is not None and approval_session_key:
                         # Same machinery as /v1/runs (_run_agent_sync): the contextvar scopes
@@ -4328,26 +4333,26 @@ class APIServerAdapter(OpenAICompatRoutesMixin, BasePlatformAdapter):
                         approval_token = set_current_session_key(approval_session_key)
                         register_gateway_notify(approval_session_key, approval_notify_callback)
                     try:
-                        with notification_turn(agent, muted=muted, session_id=session_id or ""):
-                            result = agent.run_conversation(**conversation_kwargs)
+                        with turn_lock:
+                            with notification_turn(agent, muted=muted, session_id=session_id or ""):
+                                result = agent.run_conversation(**conversation_kwargs)
+                            result, usage = self._finish_turn_result(
+                                agent, result, session_id, route=route, requested_runtime=requested_runtime,
+                                route_source=route_source, confirmed_runtime_lock=confirmed_runtime_lock)
+                            if (isinstance(result, dict) and not result.get("failed")
+                                    and not result.get("partial") and not result.get("interrupted")
+                                    and result.get("completed") is not False):
+                                try:
+                                    schedule_drain_agent_turn(agent, agent_home, result.get("messages"),
+                                                              session_id=session_id)
+                                except Exception:
+                                    logger.warning("api_server fleet message drain dispatch failed", exc_info=True)
                     finally:
                         if approval_token is not None:
                             from tools.approval_context import reset_current_session_key
                             _api_runs._unregister_approval_notify(approval_session_key)
                             with suppress(Exception):
                                 reset_current_session_key(approval_token)
-                    result, usage = self._finish_turn_result(
-                        agent, result, session_id, route=route, requested_runtime=requested_runtime,
-                        route_source=route_source, confirmed_runtime_lock=confirmed_runtime_lock)
-                    if (isinstance(result, dict) and not result.get("failed")
-                            and not result.get("partial") and not result.get("interrupted")
-                            and result.get("completed") is not False):
-                        try:
-                            from tools.bot_mode_dm import _agent_home
-                            from tools.fleet_message_drain import drain_agent_turn
-                            drain_agent_turn(agent, _agent_home(agent), result.get("messages"))
-                        except Exception:
-                            logger.warning("api_server fleet message drain failed", exc_info=True)
                     if muted and isinstance(result, dict):
                         # Project presentation only after finishing the source outcome. Keep
                         # the agent's result, transcript, failure flags and usage intact.

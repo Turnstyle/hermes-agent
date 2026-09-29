@@ -209,7 +209,7 @@ class TestStartRun:
         from tools import fleet_message_drain as fmd
 
         calls = []
-        monkeypatch.setattr(fmd, "drain_agent_turn", lambda agent, home, history: calls.append(agent))
+        monkeypatch.setattr(fmd, "schedule_drain_agent_turn", lambda agent, home, history, **kw: calls.append(agent))
         agent = MagicMock()
         agent.session_id = None
         agent._session_db = None

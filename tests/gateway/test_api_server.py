@@ -14,6 +14,7 @@ Tests cover:
 
 import asyncio
 import json
+import threading
 import time
 import types
 import uuid
@@ -410,10 +411,43 @@ class TestAgentExecution:
         agent._memory_manager = None
         agent.run_conversation.return_value = {"final_response": "ok"}
         calls = []
-        monkeypatch.setattr(fmd, "drain_agent_turn", lambda a, home, history: calls.append((a, home, history)))
+        monkeypatch.setattr(fmd, "schedule_drain_agent_turn", lambda a, home, history, **kw: calls.append((a, home, history)))
         with patch.object(adapter, "_create_agent", return_value=agent):
             await adapter._run_agent(user_message="hello", conversation_history=[], session_id="chat")
         assert len(calls) == 1 and calls[0][0] is agent
+
+    @pytest.mark.asyncio
+    async def test_api_result_returns_before_failed_drained_turn_finishes(self, adapter, monkeypatch):
+        from tools import bot_mode_dm, fleet_message_drain as fmd
+
+        agent = MagicMock()
+        agent.session_id = "chat"
+        agent._session_db = None
+        agent._memory_manager = None
+        agent.run_conversation.return_value = {"final_response": "first answer"}
+        started = threading.Event()
+        release = threading.Event()
+        finished = threading.Event()
+        monkeypatch.setattr(bot_mode_dm, "message_agent_authorized", lambda _: True)
+        monkeypatch.setattr(fmd, "drain_config", lambda: fmd.DrainConfig(target="emulator", emulator_host="fake"))
+
+        def drained(*_):
+            started.set()
+            try:
+                assert release.wait(2)
+                raise RuntimeError("drain failed")
+            finally:
+                finished.set()
+
+        monkeypatch.setattr(fmd, "drain_agent_turn", drained)
+        with patch.object(adapter, "_create_agent", return_value=agent):
+            result, _usage = await asyncio.wait_for(
+                adapter._run_agent(user_message="hello", conversation_history=[], session_id="chat"), 2)
+        assert result["final_response"] == "first answer"
+        assert started.wait(2) and not finished.is_set()
+        release.set()
+        assert finished.wait(2)
+        assert result["final_response"] == "first answer"
 
     @pytest.mark.asyncio
     async def test_run_agent_uses_session_id_as_task_id(self, adapter):
