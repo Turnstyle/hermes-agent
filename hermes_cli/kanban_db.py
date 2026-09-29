@@ -2680,7 +2680,12 @@ def reassign_task(
     reason: Optional[str] = None,
 ) -> bool:
     """Reassign (None unassigns); a running task is refused unless
-    ``reclaim_first`` releases its claim — the "this profile's model is broken" path."""
+    ``reclaim_first`` releases its claim — the "this profile's model is broken" path.
+
+    An own-card handback may close a run only after the recorded worker is
+    proven gone. While that PID is still the spawned worker, the claim stays
+    so the card cannot become ready for a second worker.
+    """
     from agent.delegation_context import is_delegated_child_process_context, kanban_path_is_fenced
 
     fenced = kanban_path_is_fenced(kanban_home()) or is_delegated_child_process_context()
@@ -2692,9 +2697,18 @@ def reassign_task(
     try:
         if is_own_card and not reclaim_first:
             row = conn.execute(
-                "SELECT status, claim_lock, worker_pid FROM tasks WHERE id = ?", (task_id,),
+                "SELECT status, claim_lock, worker_pid, worker_started_at FROM tasks WHERE id = ?",
+                (task_id,),
             ).fetchone()
             if row and row["status"] == "running" and row["claim_lock"] is not None:
+                # Closing the run and clearing the claim would mark the card
+                # ready while the original PID keeps executing. The terminal
+                # reaper will not consider that PID until its grace window
+                # elapses, so a dispatcher can claim the same card for a
+                # second worker. Leave the live claim in place until the
+                # recorded worker is proven gone.
+                if _worker_alive(row["worker_pid"], row["worker_started_at"]):
+                    return False
                 termination = {
                     "prev_pid": int(row["worker_pid"]) if row["worker_pid"] else None,
                     "host_local": True,

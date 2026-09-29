@@ -8,7 +8,9 @@ Verifies:
 5. Single-task fanout=false promotion re-routing to node builder with audit comment.
 6. Dispatcher-level re-routing of execution cards from decompose-only profiles to builder.
 7. Dispatcher retention of decomposition/planning cards on decompose-only profiles.
-8. Scoped worker CLI fence allowing own-card reassignments during handbacks while blocking foreign card mutations.
+8. Scoped worker CLI fence blocking foreign-card mutations. An own-card
+   handback leaves a still-live worker's claim in place so the card cannot
+   be claimed by a second worker.
 """
 
 from __future__ import annotations
@@ -563,14 +565,52 @@ def test_env_spoof_other_card_foreign_running_claim_two_cards(tmp_path):
     assert int(row["worker_pid"]) == _FOREIGN_WORKER_PID
 
 
+def test_live_own_card_handback_stays_unclaimable(kanban_home):
+    """A handback while the recorded worker is alive must not ready the card.
+
+    Uses a real throwaway-board claim and this process as the live worker, then
+    a second claim_task. The first run stays open and the second claim loses.
+    """
+    with kbc.connect_closing() as conn:
+        task_id = kb.create_task(conn, title="live claimed card", assignee="worker-profile")
+        with kb.write_txn(conn):
+            conn.execute("UPDATE tasks SET status = 'ready' WHERE id = ?", (task_id,))
+        claimed = kb.claim_task(conn, task_id)
+        assert claimed is not None
+        dispatch_mod._set_worker_pid(conn, task_id, os.getpid())
+        assert kb.is_task_claimed_by_caller(conn, task_id) is True
+        lock_before = claimed.claim_lock
+        run_before = claimed.current_run_id
+
+        ok = kb.reassign_task(conn, task_id, "builder-profile")
+
+        assert ok is False
+        updated = kb.get_task(conn, task_id)
+        assert updated.status == "running"
+        assert updated.assignee == "worker-profile"
+        assert updated.claim_lock == lock_before
+        assert int(updated.worker_pid) == os.getpid()
+        assert updated.current_run_id == run_before
+        open_run = conn.execute(
+            "SELECT ended_at, outcome, worker_pid FROM task_runs WHERE id = ?",
+            (run_before,),
+        ).fetchone()
+        assert open_run["ended_at"] is None
+        assert open_run["outcome"] is None
+        assert int(open_run["worker_pid"]) == os.getpid()
+        assert kb.claim_task(conn, task_id) is None
+        still = kb.get_task(conn, task_id)
+        assert still.status == "running"
+        assert still.claim_lock == lock_before
+        assert int(still.worker_pid) == os.getpid()
+
+
 def test_dispatcher_claimed_card_reassign_by_worker(tmp_path):
-    """A running task with a dispatcher-recorded claim matching the caller's process tree
-    can be reassigned without --reclaim even in a child context.
+    """CLI handback of a live ancestor claim does not release it for a second worker.
     """
     home = tmp_path / "hermes"
     home.mkdir()
 
-    # Create and claim task via DB directly
     db_path = home / "kanban.db"
     conn = kbc.connect(db_path)
     task_id = kb.create_task(conn, title="running claimed card", assignee="worker-profile")
@@ -578,12 +618,10 @@ def test_dispatcher_claimed_card_reassign_by_worker(tmp_path):
         conn.execute("UPDATE tasks SET status = 'ready' WHERE id = ?", (task_id,))
     claimed = kb.claim_task(conn, task_id)
     assert claimed is not None
-    # Set worker_pid to current Python PID so the spawned CLI process is a child
+    # This process is an ancestor of the CLI child, so the child sees a live own-card claim.
     dispatch_mod._set_worker_pid(conn, task_id, os.getpid())
     conn.close()
 
-    # In delegated child context, since the worker_pid matches this parent process,
-    # reassign without --reclaim should SUCCEED
     res_reassign = _run_hermes_cli(
         home,
         "kanban",
@@ -594,20 +632,17 @@ def test_dispatcher_claimed_card_reassign_by_worker(tmp_path):
             "HERMES_DELEGATED_CHILD_CONTEXT": "1",
         },
     )
-    assert res_reassign.returncode == 0, res_reassign.stderr
+    assert res_reassign.returncode != 0
 
     conn = kbc.connect(db_path)
     updated = kb.get_task(conn, task_id)
-    assert updated.assignee == "builder-profile"
-    assert updated.claim_lock is None
-    assert updated.worker_pid is None
+    assert updated.status == "running"
+    assert updated.assignee == "worker-profile"
+    assert updated.claim_lock is not None
+    assert int(updated.worker_pid) == os.getpid()
     open_runs = conn.execute(
         "SELECT id FROM task_runs WHERE task_id = ? AND ended_at IS NULL", (task_id,),
     ).fetchall()
-    assert open_runs == []
-    last_run = conn.execute(
-        "SELECT outcome FROM task_runs WHERE task_id = ? ORDER BY id DESC LIMIT 1", (task_id,),
-    ).fetchone()
-    assert last_run is not None
-    assert last_run["outcome"] == "reclaimed"
+    assert len(open_runs) == 1
+    assert kb.claim_task(conn, task_id) is None
     conn.close()
