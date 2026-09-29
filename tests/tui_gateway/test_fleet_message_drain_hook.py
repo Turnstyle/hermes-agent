@@ -84,6 +84,16 @@ def test_query_is_scoped_to_this_bot(env):
     assert env.store.get("theirs").fields["status"] == "queued"
 
 
+def test_tui_claim_uses_configured_queued_timeout(env):
+    env.monkeypatch.setattr(fmd, "drain_config", lambda cfg=None: fmd.DrainConfig(
+        target="emulator", emulator_host="fake", queued_timeout_seconds=600))
+    env.store.seed("ten-minutes", msg(11))
+    turn_end(env)
+    row = env.store.get("ten-minutes").fields
+    assert row["status"] == "expired" and "10 minutes" in row["sender_notice"]
+    assert not env.submitted
+
+
 def test_notify_wake_runs_as_a_wake_turn(env):
     env.store.seed("w-1", msg(5, kind="notify_wake", body="Kanban t_x is done"))
     turn_end(env)

@@ -18,6 +18,23 @@ from agent.context_compressor import _DB_PERSISTED_MARKER
 from tools.bot_relay import RESUME_UNANSWERED_TURN_ENV
 
 
+def test_quiet_bot_chat_uses_configured_queued_timeout(monkeypatch, tmp_path):
+    from hermes_cli.cli_single_query import _drain_quiet_bot_chat
+    from tests.tools.test_fleet_message_drain import ME, NOW, MemoryStore, msg
+
+    home = tmp_path / "profiles" / ME
+    store = MemoryStore()
+    store.seed("too-old", msg(11))
+    monkeypatch.setattr(fmd, "drain_config", lambda: fmd.DrainConfig(
+        target="emulator", emulator_host="fake", queued_timeout_seconds=600))
+    monkeypatch.setattr(fmd, "store_for", lambda _: store)
+    monkeypatch.setattr(fmd, "utcnow", lambda: NOW)
+    agent = SimpleNamespace(_session_title_hint="Bot Chat", _session_db=SimpleNamespace(db_path=home / "state.db"))
+    _drain_quiet_bot_chat(SimpleNamespace(agent=agent), [])
+    row = store.get("too-old").fields
+    assert row["status"] == "expired" and "10 minutes" in row["sender_notice"]
+
+
 def test_bot_chat_quiet_turn_drains_one_message_without_changing_stdout(monkeypatch, capsys, tmp_path):
     from hermes_cli import quiet_single_query as qsq
 
