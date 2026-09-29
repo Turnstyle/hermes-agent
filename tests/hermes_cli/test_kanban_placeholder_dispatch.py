@@ -210,9 +210,9 @@ def test_watcher_paging_predicate_ignores_policy_and_capacity_holds(kanban_home_
     assert held == "active_pr=1"
 
     # Paging predicate check:
-    can_dispatch = counts.get("spawnable", 0) > 0 and not held
+    stalled = kbd.eligible_work_stalled([res], counts.get("spawnable", 0))
     bad_ticks = 0
-    bad_ticks = bad_ticks + 1 if can_dispatch and not res.spawned else 0
+    bad_ticks = bad_ticks + 1 if stalled else 0
     assert bad_ticks == 0, "Policy-held card must not increment bad_ticks"
 
 
@@ -331,6 +331,163 @@ async def test_gateway_watcher_capacity_held_does_not_page(kanban_home_with_prof
     # Verify capacity hold is logged non-paging and does not page
     assert "dispatch held back: host cap: 1 running of 1 (non-paging)" in caplog.text
     assert "kanban dispatcher stuck" not in caplog.text
+
+
+def test_eligible_work_stalled_matrix():
+    """Verify eligible_work_stalled correctly distinguishes holds from mixed blockages."""
+    from hermes_cli.kanban_db_dispatch import DispatchResult, eligible_work_stalled
+
+    # 1. Zero spawnable ready work -> False
+    res = DispatchResult()
+    res.respawn_guarded.append(("t1", "active_pr"))
+    assert eligible_work_stalled([res], 0) is False
+
+    # 2. Spawnable work, but worker spawned -> False
+    res2 = DispatchResult()
+    res2.spawned.append(("t2", "sage", "/tmp/ws"))
+    assert eligible_work_stalled([res2], 1) is False
+
+    # 3. Host capacity held -> False
+    res3 = DispatchResult()
+    res3.capacity_held = "host cap: 12 running of 12"
+    assert eligible_work_stalled([res3], 3) is False
+
+    # 4. Critical memory pressure -> False
+    res4 = DispatchResult()
+    res4.memory_pressure = "critical"
+    assert eligible_work_stalled([res4], 2) is False
+
+    # 5. Profile capped -> False
+    res5 = DispatchResult()
+    res5.skipped_per_profile_capped.append(("t5", "sage", 1))
+    assert eligible_work_stalled([res5], 1) is False
+
+    # 6. Profile busy -> False
+    res6 = DispatchResult()
+    res6.profile_busy.append("t6")
+    assert eligible_work_stalled([res6], 1) is False
+
+    # 7. Rate limited -> False
+    res7 = DispatchResult()
+    res7.rate_limited.append("t7")
+    assert eligible_work_stalled([res7], 1) is False
+
+    # 8. Mixed failure: held card + claim/lease error card -> True
+    held_res = DispatchResult()
+    held_res.respawn_guarded.append(("t_held", "active_pr"))
+    fail_res = DispatchResult()
+    fail_res.claim_errors.append(("t_fail", "claim: verified execution lease required before running"))
+    assert eligible_work_stalled([held_res, fail_res], 1) is True
+    # Also when on the same board
+    mixed_res = DispatchResult()
+    mixed_res.respawn_guarded.append(("t_held", "active_pr"))
+    mixed_res.claim_errors.append(("t_fail", "claim: verified execution lease required before running"))
+    assert eligible_work_stalled([mixed_res], 1) is True
+
+    # 9. Mixed failure: held card + auto_blocked card -> True
+    ab_res = DispatchResult()
+    ab_res.respawn_guarded.append(("t_held", "active_pr"))
+    ab_res.auto_blocked.append("t_fail")
+    assert eligible_work_stalled([ab_res], 1) is True
+
+    # 10. More spawnable cards than accounted for by holds -> True
+    part_res = DispatchResult()
+    part_res.skipped_per_profile_capped.append(("t_capped", "sage", 1))
+    assert eligible_work_stalled([part_res], 2) is True
+
+    # 11. Unrelated respawn_guarded hold does not mask unheld spawnable card -> True
+    guarded_res = DispatchResult()
+    guarded_res.respawn_guarded.append(("t_held", "active_pr"))
+    assert eligible_work_stalled([guarded_res], 1) is True
+
+
+@pytest.mark.asyncio
+async def test_gateway_watcher_mixed_held_and_failing_card_pages(kanban_home_with_profiles, monkeypatch, caplog):
+    """Mixed failure: one active_pr held card and one card failing lease must increment bad_ticks and page."""
+    import asyncio
+    import logging
+    from gateway.kanban_watchers import GatewayKanbanWatchersMixin
+
+    caplog.set_level(logging.INFO)
+
+    with kbc.connect() as conn:
+        # 1. Held card (active_pr)
+        tid_held = kb.create_task(conn, title="guarded task", assignee="sage")
+        kb.add_comment(conn, tid_held, author="sage", body="Opened https://github.com/example/repo/pull/123 for review.")
+
+        # 2. Eligible card that fails lease
+        tid_fail = kb.create_task(conn, title="failing lease task", assignee="sage")
+
+        # Install SQLite trigger simulating execution lease refusal
+        conn.execute(f"""
+            CREATE TRIGGER test_lease_fence BEFORE UPDATE OF status ON tasks
+            WHEN NEW.id = '{tid_fail}' AND NEW.status = 'running'
+            BEGIN
+                SELECT RAISE(ABORT, 'verified execution lease required before running');
+            END;
+        """)
+
+    class TestRunner(GatewayKanbanWatchersMixin):
+        def __init__(self):
+            self._running = True
+            self._kanban_dispatcher_lock_handle = None
+            self._ticks = 0
+
+        async def _sleep_between_ticks(self, interval: float) -> None:
+            self._ticks += 1
+            if self._ticks >= 6:
+                self._running = False
+
+    runner = TestRunner()
+
+    real_sleep = asyncio.sleep
+    async def fake_sleep(delay):
+        if delay == 5:
+            return None
+        await real_sleep(0)
+
+    monkeypatch.setattr(asyncio, "sleep", fake_sleep)
+
+    await runner._kanban_dispatcher_watcher()
+
+    # Verify that:
+    # 1. Dispatch held back is logged for the guarded card
+    assert "dispatch held back: active_pr=1" in caplog.text
+    # 2. Dispatcher stuck warning IS emitted after 6 ticks (not masked by the active_pr hold!)
+    assert "kanban dispatcher stuck: ready queue non-empty for 6 consecutive ticks but 0 workers spawned." in caplog.text
+    assert "Last tick held back: active_pr=1." in caplog.text
+
+
+def test_cli_daemon_on_tick_mixed_held_and_failing_card(kanban_home_with_profiles, monkeypatch, capsys):
+    """CLI daemon _cmd_daemon must increment bad_ticks and warn when eligible work fails alongside a hold."""
+    import argparse
+    from hermes_cli import kanban_ops
+    from hermes_cli.kanban_db_dispatch import DispatchResult
+
+    with kbc.connect() as conn:
+        # Held card (active_pr)
+        tid_held = kb.create_task(conn, title="guarded task", assignee="sage")
+        kb.add_comment(conn, tid_held, author="sage", body="Opened https://github.com/example/repo/pull/123 for review.")
+        # Eligible card that fails lease
+        tid_fail = kb.create_task(conn, title="failing lease task", assignee="sage")
+
+    res = DispatchResult()
+    res.respawn_guarded.append((tid_held, "active_pr"))
+    res.claim_errors.append((tid_fail, "claim: verified execution lease required before running"))
+
+    def fake_run_daemon(interval, max_spawn, failure_limit, on_tick):
+        for _ in range(6):
+            on_tick(res)
+
+    monkeypatch.setattr(kanban_ops.kbd, "run_daemon", fake_run_daemon)
+
+    args = argparse.Namespace(interval=5, max=None, failure_limit=3, verbose=False, pidfile=None, force=True)
+    ret = kanban_ops._cmd_daemon(args)
+    assert ret == 0
+
+    captured = capsys.readouterr()
+    assert "WARN dispatcher stuck: ready queue non-empty for 6 consecutive ticks" in captured.err
+    assert "Last tick held back: active_pr=1." in captured.err
 
 
 
