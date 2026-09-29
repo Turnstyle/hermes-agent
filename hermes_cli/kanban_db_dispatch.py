@@ -349,9 +349,6 @@ def eligible_work_stalled(
     guards (active_pr, recent_success, rate_limited), capacity limits (host/board
     caps, memory pressure), profile busy/concurrency caps, or placeholder profiles.
     """
-    if ready_spawnable <= 0:
-        return False
-
     res_list: list["DispatchResult"] = []
     for item in results:
         if item is None:
@@ -363,14 +360,27 @@ def eligible_work_stalled(
         if res is not None and isinstance(res, DispatchResult):
             res_list.append(res)
 
+    # 1. Explicit claim/lease refusal or auto-blocked failure on eligible cards.
+    # An explicit failure must NEVER be masked by worker spawns on other cards,
+    # capacity holds on other boards, or the card being removed to blocked status.
+    has_claim_or_spawn_errors = any(
+        bool(getattr(r, "claim_errors", None)) or bool(getattr(r, "auto_blocked", None))
+        for r in res_list
+    )
+    if has_claim_or_spawn_errors:
+        return True
+
+    if ready_spawnable <= 0:
+        return False
+
     if not res_list:
         return True
 
-    # 1. If any worker spawned this tick, the dispatcher made progress.
+    # 2. If any worker spawned this tick and no cards explicitly failed, the dispatcher made progress.
     if any(bool(r.spawned) for r in res_list):
         return False
 
-    # 2. Host-wide capacity or critical memory pressure halts all spawns host-wide.
+    # 3. Host-wide capacity or critical memory pressure halts all spawns host-wide.
     host_capacity_held = any(
         (getattr(r, "capacity_held", None) or "").startswith("host cap")
         or getattr(r, "memory_pressure", None) == "critical"
@@ -378,14 +388,6 @@ def eligible_work_stalled(
     )
     if host_capacity_held:
         return False
-
-    # 3. Explicit claim/lease refusal or auto-blocked failure on eligible cards.
-    has_claim_or_spawn_errors = any(
-        bool(getattr(r, "claim_errors", None)) or bool(getattr(r, "auto_blocked", None))
-        for r in res_list
-    )
-    if has_claim_or_spawn_errors:
-        return True
 
     # 4. If all reporting boards are held by board capacity caps or locked DBs,
     # then no board had capacity to dispatch.

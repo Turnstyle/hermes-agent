@@ -400,6 +400,27 @@ def test_eligible_work_stalled_matrix():
     guarded_res.respawn_guarded.append(("t_held", "active_pr"))
     assert eligible_work_stalled([guarded_res], 1) is True
 
+    # 12. Successful spawn does not mask failing card (claim error) -> True
+    spawn_fail_res = DispatchResult()
+    spawn_fail_res.spawned.append(("t_ok", "sage", "/tmp"))
+    spawn_fail_res.claim_errors.append(("t_fail", "claim: verified execution lease required"))
+    assert eligible_work_stalled([spawn_fail_res], 1) is True
+
+    # 13. Successful spawn does not mask auto-blocked failing card -> True
+    spawn_ab_res = DispatchResult()
+    spawn_ab_res.spawned.append(("t_ok", "sage", "/tmp"))
+    spawn_ab_res.auto_blocked.append("t_fail")
+    assert eligible_work_stalled([spawn_ab_res], 1) is True
+
+    # 14. Host capacity hold on one board does not mask claim error on another -> True
+    cap_b1 = ("board1", DispatchResult(capacity_held="host cap: 2 running of 2"))
+    err_b2 = ("board2", DispatchResult(claim_errors=[("t_fail", "claim: lease refused")]))
+    assert eligible_work_stalled([cap_b1, err_b2], 1) is True
+
+    # 15. Auto-blocked card after ready row removed (count=0) -> True
+    ab_empty_res = DispatchResult(auto_blocked=["t_fail"])
+    assert eligible_work_stalled([ab_empty_res], 0) is True
+
 
 @pytest.mark.asyncio
 async def test_gateway_watcher_mixed_held_and_failing_card_pages(kanban_home_with_profiles, monkeypatch, caplog):
@@ -458,6 +479,61 @@ async def test_gateway_watcher_mixed_held_and_failing_card_pages(kanban_home_wit
     assert "Last tick held back: active_pr=1." in caplog.text
 
 
+@pytest.mark.asyncio
+async def test_gateway_watcher_mixed_spawned_and_failing_card_pages(kanban_home_with_profiles, monkeypatch, caplog):
+    """Mixed progress & failure: active worker spawns must not mask a persistently failing card."""
+    import asyncio
+    import logging
+    from gateway.kanban_watchers import GatewayKanbanWatchersMixin
+    from hermes_cli.kanban_db_dispatch import DispatchResult
+
+    caplog.set_level(logging.INFO)
+
+    res = DispatchResult()
+    res.spawned.append(("t_spawned", "sage", "/tmp/ws"))
+    res.claim_errors.append(("t_fail", "claim: verified execution lease required before running"))
+
+    class FakeDispatcher:
+        def auto_decompose_tick(self, per_tick):
+            pass
+
+        def tick_once(self):
+            return [("default", res)]
+
+        def ready_counts(self):
+            return {"spawnable": 1, "placeholder": 0}
+
+    class TestRunner(GatewayKanbanWatchersMixin):
+        def __init__(self):
+            self._running = True
+            self._kanban_dispatcher_lock_handle = None
+            self._ticks = 0
+
+        async def _sleep_between_ticks(self, interval: float) -> None:
+            self._ticks += 1
+            if self._ticks >= 6:
+                self._running = False
+
+    monkeypatch.setattr("gateway.kanban_watchers._KanbanDispatcher", lambda _kb, _settings: FakeDispatcher())
+
+    real_sleep = asyncio.sleep
+    async def fake_sleep(delay):
+        if delay == 5:
+            return None
+        await real_sleep(0)
+
+    monkeypatch.setattr(asyncio, "sleep", fake_sleep)
+
+    runner = TestRunner()
+    await runner._kanban_dispatcher_watcher()
+
+    # Verify that:
+    # 1. Spawn is logged
+    assert "spawned=1" in caplog.text
+    # 2. Stuck warning IS emitted after 6 ticks with accurate text reflecting that workers spawned!
+    assert "kanban dispatcher stuck: ready queue non-empty for 6 consecutive ticks but eligible tasks failing despite active spawns." in caplog.text
+
+
 def test_cli_daemon_on_tick_mixed_held_and_failing_card(kanban_home_with_profiles, monkeypatch, capsys):
     """CLI daemon _cmd_daemon must increment bad_ticks and warn when eligible work fails alongside a hold."""
     import argparse
@@ -486,8 +562,35 @@ def test_cli_daemon_on_tick_mixed_held_and_failing_card(kanban_home_with_profile
     assert ret == 0
 
     captured = capsys.readouterr()
-    assert "WARN dispatcher stuck: ready queue non-empty for 6 consecutive ticks" in captured.err
-    assert "Last tick held back: active_pr=1." in captured.err
+    assert "WARN dispatcher stuck: ready queue non-empty for 6 consecutive ticks but 0 workers spawned successfully. Last tick held back: active_pr=1." in captured.err
+
+
+def test_cli_daemon_on_tick_mixed_spawned_and_failing_card(kanban_home_with_profiles, monkeypatch, capsys):
+    """CLI daemon _cmd_daemon must increment bad_ticks and warn when eligible work fails alongside active spawns."""
+    import argparse
+    from hermes_cli import kanban_ops
+    from hermes_cli.kanban_db_dispatch import DispatchResult
+
+    with kbc.connect() as conn:
+        tid_spawn = kb.create_task(conn, title="spawned task", assignee="sage")
+        tid_fail = kb.create_task(conn, title="failing lease task", assignee="sage")
+
+    res = DispatchResult()
+    res.spawned.append((tid_spawn, "sage", "/tmp/ws"))
+    res.claim_errors.append((tid_fail, "claim: verified execution lease required before running"))
+
+    def fake_run_daemon(interval, max_spawn, failure_limit, on_tick):
+        for _ in range(6):
+            on_tick(res)
+
+    monkeypatch.setattr(kanban_ops.kbd, "run_daemon", fake_run_daemon)
+
+    args = argparse.Namespace(interval=5, max=None, failure_limit=3, verbose=False, pidfile=None, force=True)
+    ret = kanban_ops._cmd_daemon(args)
+    assert ret == 0
+
+    captured = capsys.readouterr()
+    assert "WARN dispatcher stuck: ready queue non-empty for 6 consecutive ticks but eligible tasks failing despite active spawns." in captured.err
 
 
 
