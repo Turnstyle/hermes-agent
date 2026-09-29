@@ -158,6 +158,11 @@ Hermes has two entry points: start the terminal UI with `hermes`, or run the gat
 
 For the full command lists, see the [CLI guide](https://hermes-agent.nousresearch.com/docs/user-guide/cli) and the [Messaging Gateway guide](https://hermes-agent.nousresearch.com/docs/user-guide/messaging).
 
+On macOS and Linux, local non-PTY `terminal(background=true)` jobs write to their profile's
+`logs/process-output/` directory and survive a gateway restart by default. Set
+`terminal.kill_background_on_gateway_stop: true` in `config.yaml` to stop them with the gateway.
+Cron-owned, sandbox, and PTY jobs still stop; interactive PTY survival is outside this behavior.
+
 ---
 
 ## Documentation

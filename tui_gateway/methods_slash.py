@@ -338,9 +338,17 @@ def _mirror_reload_mcp(sid, session, agent, arg) -> None:
         agent.reload_mcp_tools()
 
 
-def _mirror_stop(sid, session, agent, arg) -> None:
+def _mirror_stop(sid, session, agent, arg) -> str:
     from tools.process_registry import process_registry
-    process_registry.kill_all()
+    owners = frozenset(getattr(agent, "_process_owner_task_ids", ()) or ()) if agent else frozenset()
+    session_key = session.get("session_key")
+    if owners:
+        process_registry.kill_all(owner_task_ids=owners)
+    elif session_key:
+        process_registry.kill_all(session_key=session_key)
+    else:
+        return "/stop could not identify this session's processes; no processes were killed"
+    return ""
 
 
 # name → mirror(sid, session, agent, arg); a falsy return means "no warning".

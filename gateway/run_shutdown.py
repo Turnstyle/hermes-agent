@@ -1694,8 +1694,17 @@ class GatewayShutdownMixin:
                 logger.info(fmt, phase, n)
 
         def _kill_processes() -> None:
-            from tools.process_registry import process_registry
-            _count_step("Shutdown (%s): killed %d tool subprocess(es)", process_registry.kill_all)
+            from tools.process_registry import ProcessRegistry, process_registry
+            try:
+                kill_all = bool(ProcessRegistry._config_value(
+                    "terminal", "kill_background_on_gateway_stop", False))
+            except Exception:
+                logger.warning("Could not read terminal.kill_background_on_gateway_stop; using default")
+                kill_all = False
+            _count_step(
+                "Shutdown (%s): killed %d tool subprocess(es)",
+                lambda: process_registry.kill_all(spare_restart_safe=not kill_all))
+            process_registry._write_checkpoint()
 
         def _mark_cron_interrupted() -> list:
             # kill_all() is global: a cron job mid-dispatch lost its tool subprocess and its agent thread may
