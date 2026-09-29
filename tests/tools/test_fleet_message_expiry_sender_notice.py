@@ -23,3 +23,16 @@ def test_expired_queued_doc_records_sender_notice_without_delivery():
     assert status["status"] == "expired"
     assert status["notice"]
     assert fmd.sender_delivery_status(store, "other-sender", doc_id) is None
+
+
+def test_queued_timeout_records_loud_sender_notice_before_24_hour_expiry():
+    store = MemoryStore()
+    doc_id = uid("timed-out")
+    store.seed(doc_id, msg(31, sender="tb-cndr"))
+
+    assert fmd.claim_next(store, "tb-king", now=NOW, queued_timeout_seconds=1800) is None
+    status = fmd.sender_delivery_status(store, "tb-cndr", doc_id)
+    assert status["status"] == "expired"
+    assert "NOT delivered" in status["notice"]
+    assert "30 minutes" in status["notice"]
+    assert "delivered_at" not in store.get(doc_id).fields

@@ -1,17 +1,17 @@
-"""Turn-end drain of a bot's own queued ``fleet_messages_v1`` docs (Mission Control Firestore).
+"""Turn-end and idle drain of a bot's own queued ``fleet_messages_v1`` docs.
 
 A Bot Chat DM or notify-subscribe wake that hit ``target_busy`` stays in the durable registry with
-``status='queued'`` (write-first sender). When this bot's canonical Bot Chat finishes a turn, the
-TUI gateway's post-turn hook (``tui_gateway.session_notifications._drain_fleet_messages_once``)
-calls :func:`claim_next`, which runs exactly ONE equality-only query:
+``status='queued'`` (write-first sender). The TUI, CLI and API Bot Chat turn-end paths,
+plus the idle paths, call :func:`claim_next`, which runs exactly ONE equality-only query:
 
     to == <this bot> AND status == 'queued'  LIMIT 50
 
 The returned page is sorted by created_at and document id locally before the caller's limit
 is applied. No composite index is needed.
 
-It never runs while the bot is idle: the post-turn hook is its only caller, so no turn end means no
-Firestore read. Expired docs seen in the page are marked expired so they cannot starve fresh docs.
+An idle TUI owner polls at a bounded interval; a profile's no-agent cron can run
+``python -m tools.fleet_message_drain idle-tick`` for a Bot Chat without a live UI owner.
+Both paths use the same atomic claim and hand-off. Expired docs cannot starve fresh docs.
 
 Status transitions this module performs (every write carries an ``updateTime`` precondition, so a
 doc that anyone else touched in between is never overwritten):
@@ -26,12 +26,12 @@ doc that anyone else touched in between is never overwritten):
     read      -> failed      the same, once attempts reaches max_attempts (doc kept, never deleted)
     delivered -> queued      the session got busy between claim and hand-off (no attempt counted)
     queued    -> rejected    the doc is malformed for this reader (unknown kind / missing body)
-    queued    -> expired     its expiry passed before the drain saw it
+    queued    -> expired     its 24-hour expiry or queued delivery timeout passed
 
 ``replied`` is left to the reply path: the injected input tells the bot to answer the sender with
 ``message_agent``; a sender-side write may then mark the doc ``replied``.
 
-One message is handed over per turn end. Its own turn end runs the next query, so ordering holds,
+One message is handed over per query. The next turn or idle tick runs the next query, so ordering holds,
 nothing is claimed that is not about to run, and a crash leaves at most one doc in delivered/read.
 The separate ``reclaim-stale`` maintenance command recovers those claims after the age threshold;
 it does not add a read to the turn-end path.
@@ -47,6 +47,7 @@ The feature is dark by default. Config (profile ``config.yaml``)::
       limit: 10                    # locally selected page size (1..50)
       max_attempts: 5
       timeout_seconds: 5
+      queued_timeout_seconds: 1800 # queued without delivery -> expired with sender notice
 
 Security: the query filters ``to == me``, every returned doc is re-checked for ``to == me`` before
 any write, and writes are limited to the status bookkeeping fields below. Firestore IAM/rules stay
@@ -107,6 +108,7 @@ class DrainConfig:
     limit: int = 10
     max_attempts: int = 5
     timeout_seconds: float = 5.0
+    queued_timeout_seconds: int = 1800
 
 
 def drain_config(cfg: Optional[dict] = None) -> Optional[DrainConfig]:
@@ -136,13 +138,15 @@ def drain_config(cfg: Optional[dict] = None) -> Optional[DrainConfig]:
         limit = max(1, min(MAX_LIMIT, int(section.get("limit", 10))))
         max_attempts = max(1, int(section.get("max_attempts", 5)))
         timeout = max(0.5, float(section.get("timeout_seconds", 5)))
+        queued_timeout = max(1, int(section.get("queued_timeout_seconds", 1800)))
     except (TypeError, ValueError):
         logger.warning("fleet message drain: bad numeric setting in fleet_messages; skipping")
         return None
     return DrainConfig(target=target, emulator_host=host,
                        project=str(section.get("project") or DEFAULT_PROJECT),
                        database=str(section.get("database") or DEFAULT_DATABASE),
-                       limit=limit, max_attempts=max_attempts, timeout_seconds=timeout)
+                       limit=limit, max_attempts=max_attempts, timeout_seconds=timeout,
+                       queued_timeout_seconds=queued_timeout)
 
 
 def drain_config_for_home(profile_home: Path | str) -> Optional[DrainConfig]:
@@ -471,10 +475,18 @@ def _expire_sender_notice(doc_id: str, recipient: Any) -> str:
             "it was NOT delivered.")
 
 
-def claim_next(store: Any, me: str, *, limit: int = 10, now: Optional[datetime.datetime] = None) -> Optional[Claimed]:
-    """Run the ONE turn-end query and atomically claim the oldest claimable doc (queued -> delivered).
+def _queued_timeout_sender_notice(doc_id: str, recipient: Any, seconds: int) -> str:
+    label = str(recipient or "recipient")
+    duration = f"{seconds // 60} minutes" if seconds % 60 == 0 else f"{seconds} seconds"
+    return (f"Queued message {doc_id} to @{label} was NOT delivered: it remained queued "
+            f"for {duration} without an available Bot Chat turn.")
 
-    Expires docs past ``expires_at`` and skips docs addressed to anyone else. A doc whose claim
+
+def claim_next(store: Any, me: str, *, limit: int = 10, now: Optional[datetime.datetime] = None,
+               queued_timeout_seconds: int = 1800, allow_claim: bool = True) -> Optional[Claimed]:
+    """Run one recipient query and atomically claim the oldest claimable doc (queued -> delivered).
+
+    Expires docs past ``expires_at`` or the queued timeout and skips foreign docs. A doc whose claim
     precondition fails was moved by someone else (late sender success, a racing turn end): skipped.
     """
     now = now or utcnow()
@@ -493,16 +505,23 @@ def claim_next(store: Any, me: str, *, limit: int = 10, now: Optional[datetime.d
             except Exception:
                 logger.warning("fleet message drain: could not reject malformed doc %s", row.doc_id, exc_info=True)
             continue
-        if parse_ts(fields["expires_at"]) <= now:
-            notice = _expire_sender_notice(row.doc_id, fields.get("to"))
+        expired_at = parse_ts(fields["expires_at"])
+        queued_timed_out = now - parse_ts(fields["created_at"]) >= datetime.timedelta(
+            seconds=queued_timeout_seconds)
+        if expired_at <= now or queued_timed_out:
+            notice = (_expire_sender_notice(row.doc_id, fields.get("to")) if expired_at <= now else
+                      _queued_timeout_sender_notice(row.doc_id, fields.get("to"), queued_timeout_seconds))
             try:
                 store.update(row.doc_id, {"status": "expired", "expired_at": now_s, "updated_at": now_s,
-                                          "sender_notice": notice, "sender_notice_at": now_s},
+                                          "sender_notice": notice, "sender_notice_at": now_s,
+                                          "last_error": "queued_delivery_timeout" if queued_timed_out else "expired"},
                              row.update_time)
             except PreconditionFailed:
                 pass
             except Exception:
                 logger.warning("fleet message drain: could not expire doc %s", row.doc_id, exc_info=True)
+            continue
+        if not allow_claim:
             continue
         try:
             new_ut = store.update(row.doc_id, {"status": "delivered", "delivered_at": now_s, "updated_at": now_s},
@@ -520,7 +539,7 @@ def turn_end_drain_query(
     profile_home: Path | str,
     cfg: Optional[dict] = None,
 ) -> Optional[tuple[DrainConfig, Any, Optional[Claimed]]]:
-    """The turn-end Firestore query (expire + claim). Shared by the TUI hook and ``-Q`` exit.
+    """The turn-end Firestore query (expire + claim). Shared by TUI, CLI and API turns.
 
     Returns ``(config, store, claimed)`` when drain is enabled (``claimed`` may be None after the
     query). Returns ``None`` when :func:`drain_config` is disabled for this profile."""
@@ -528,8 +547,98 @@ def turn_end_drain_query(
     if config is None:
         return None
     store = store_for(config)
-    claimed = claim_next(store, bot_identity(profile_home), limit=config.limit)
+    claimed = claim_next(store, bot_identity(profile_home), limit=config.limit,
+                         queued_timeout_seconds=config.queued_timeout_seconds)
     return config, store, claimed
+
+
+def drain_agent_turn(agent: Any, profile_home: Path | str, history: Optional[list] = None) -> bool:
+    """Use the same turn-end claim for an API-server Bot Chat turn's next input."""
+    from tools.bot_mode_dm import message_agent_authorized
+
+    if not message_agent_authorized(agent):
+        return False
+    triplet = turn_end_drain_query(profile_home)
+    if triplet is None:
+        return False
+    config, store, claimed = triplet
+    if claimed is None or not mark_read(store, claimed):
+        return False
+    try:
+        text, author, _metadata = render_input(claimed)
+        kwargs = {"turn_author": author} if author is not None else {}
+        outcome = agent.run_conversation(
+            user_message=text, conversation_history=history, task_id=getattr(agent, "session_id", None),
+            **kwargs)
+        settled = isinstance(outcome, dict) and not outcome.get("failed") and not outcome.get("partial") \
+            and outcome.get("completed") is not False
+        finish(store, claimed, {"status": "settled" if settled else "failed",
+                                "error": outcome.get("error", "") if isinstance(outcome, dict) else "no result"},
+               max_attempts=config.max_attempts)
+    except Exception as exc:
+        record_error(store, claimed, str(exc), max_attempts=config.max_attempts)
+        raise
+    return True
+
+
+def idle_tick(profile_home: Path | str, *, config: Optional[DrainConfig] = None, store: Any = None,
+              busy: Optional[Callable[[], bool]] = None,
+              run_turn: Optional[Callable[[str, Optional[dict], dict], dict]] = None,
+              now: Optional[datetime.datetime] = None) -> bool:
+    """Expire queued timeouts and hand over at most one doc when this Bot Chat is idle.
+
+    The no-agent cron command holds the profile's cross-process turn lock around this call.
+    A live TUI owner uses its own admitted-session hook instead.
+    """
+    config = config or drain_config()
+    if config is None:
+        return False
+    store = store if store is not None else store_for(config)
+    home = Path(profile_home)
+    busy = busy or (lambda: _idle_bot_chat_busy(home))
+    occupied = busy()
+    claimed = claim_next(store, bot_identity(home), limit=config.limit, now=now,
+                         queued_timeout_seconds=config.queued_timeout_seconds, allow_claim=not occupied)
+    if claimed is None:
+        return False
+    if busy():
+        release(store, claimed, now=now)
+        return False
+    if not mark_read(store, claimed, now=now):
+        return False
+    try:
+        text, author, metadata = render_input(claimed)
+        outcome = (run_turn or (lambda t, a, m: _idle_cli_turn(home, t, a)))(text, author, metadata)
+        finish(store, claimed, outcome, max_attempts=config.max_attempts, now=now)
+    except Exception as exc:
+        record_error(store, claimed, str(exc), max_attempts=config.max_attempts, now=now)
+        raise
+    return True
+
+
+def _idle_bot_chat_busy(home: Path) -> bool:
+    from tools.bot_live_delivery import find_canonical_owner
+    return find_canonical_owner(home) is not None
+
+
+def _idle_cli_turn(home: Path, text: str, author: Optional[dict]) -> dict:
+    """Run the claimed input in the recipient's canonical Bot Chat through its CLI."""
+    import tempfile
+    from tools.bot_relay import BOT_CHAT_TURN_ARGS, TURN_ATTEMPT_TIMEOUT_SECONDS, _hermes_cli, delivery_env
+
+    with tempfile.NamedTemporaryFile(mode="w", encoding="utf-8", prefix="fleet-msg-", suffix=".txt",
+                                     delete=False) as payload:
+        payload.write(text)
+        path = Path(payload.name)
+    try:
+        argv = [_hermes_cli(), "-p", bot_identity(home), *BOT_CHAT_TURN_ARGS, "--query-file", str(path)]
+        proc = subprocess.run(argv, env=delivery_env(author, home), stdin=subprocess.DEVNULL,
+                              capture_output=True, text=True, check=False,
+                              timeout=TURN_ATTEMPT_TIMEOUT_SECONDS)
+        return {"status": "settled" if proc.returncode == 0 else "failed",
+                "error": f"Bot Chat turn exited {proc.returncode}" if proc.returncode else ""}
+    finally:
+        path.unlink(missing_ok=True)
 
 
 def sender_delivery_status(store: Any, sender: str, message_id: str) -> Optional[dict]:
@@ -600,7 +709,7 @@ def release(store: Any, claimed: Claimed, now: Optional[datetime.datetime] = Non
 
 def record_error(store: Any, claimed: Claimed, error: str, *, max_attempts: int,
                  now: Optional[datetime.datetime] = None) -> bool:
-    """attempts+1 and last_error; requeue for the next turn end, or ``failed`` at max_attempts.
+    """attempts+1 and last_error; requeue for the next drain, or ``failed`` at max_attempts.
     The doc is never deleted either way."""
     with claimed.lock:
         if claimed.finished:
@@ -699,6 +808,7 @@ def main(argv: Optional[list[str]] = None) -> int:
     reclaim.add_argument("--older-than", type=int, default=1800, metavar="SECONDS")
     reclaim.add_argument("--target", choices=("live", "emulator"))
     reclaim.add_argument("--dry-run", action="store_true")
+    subparsers.add_parser("idle-tick", help="expire queued timeouts and deliver one idle Bot Chat message")
     args = parser.parse_args(argv)
     if args.command == "enqueue":
         try:
@@ -715,6 +825,29 @@ def main(argv: Optional[list[str]] = None) -> int:
             print(f"fleet message enqueue: {reason[0] if reason else type(exc).__name__}", file=sys.stderr)
             return 1
         print(json.dumps({"status": "queued", "message_id": message_id, "reply_relayed": False}))
+        return 0
+    if args.command == "idle-tick":
+        from hermes_constants import get_hermes_home
+        from tools.bot_mode_probe import _hermes_root
+        from tools.bot_relay import TurnBusyError, acquire_turn_lock
+
+        home = Path(get_hermes_home())
+        config = drain_config()
+        if config is None:
+            print(json.dumps({"status": "disabled"}))
+            return 0
+        try:
+            with acquire_turn_lock(_hermes_root(home), bot_identity(home), timeout_seconds=0):
+                delivered = idle_tick(home, config=config)
+        except TurnBusyError:
+            # A busy recipient can still receive its 30-minute failure notice.
+            idle_tick(home, config=config, busy=lambda: True)
+            delivered = False
+        except Exception as exc:
+            reason = str(exc).splitlines()
+            print(f"fleet message idle-tick: {reason[0] if reason else type(exc).__name__}", file=sys.stderr)
+            return 1
+        print(json.dumps({"status": "delivered" if delivered else "idle"}))
         return 0
     # This standalone cron command owns its stderr contract even if the credential
     # fallback or config loader logs a warning before raising.
@@ -760,10 +893,10 @@ def render_input(claimed: Claimed) -> tuple[str, Optional[dict], dict]:
     task = f" for task {f['task_id']}" if f.get("task_id") else ""
     if claimed.kind == "notify_wake":
         header = (f"[Queued fleet notification {claimed.doc_id}{task}, held while you were busy; "
-                  f"delivered at your turn end{attempt_note}.]")
+                  f"delivered as your next turn{attempt_note}.]")
         return f"{header}\n{body}", None, {"notification_category": "result"}
     header = (f"[Queued fleet message {claimed.doc_id} from @{sender}{task}, held while you were busy "
-              f"(target_busy); delivered at your turn end{attempt_note}. The sender is not waiting on "
+              f"(target_busy); delivered as your next turn{attempt_note}. The sender is not waiting on "
               f"this turn: if a reply is needed, send it with message_agent to @{sender}.]")
     text = body if body.lstrip().startswith("Message from ") else f"Message from 🤖 {sender} (@{sender}): {body}"
     author = {"id": f"bot:{sender}", "name": sender, "is_bot": True}

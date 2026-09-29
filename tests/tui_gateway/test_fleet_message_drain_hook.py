@@ -1,17 +1,15 @@
 """Gateway wiring of the fleet_messages_v1 turn-end drain (tui_gateway ``_drain_fleet_messages_once``).
 
-Proves: the drain runs from the post-turn follow-ups only (never from the idle poller), claims the
-oldest queued doc once per turn end, hands it to the Bot Chat as the next turn, records the turn's
+Proves: the post-turn and idle hooks claim the oldest queued doc one at a time, hand it to
+the Bot Chat as the next turn, record the turn's
 outcome on the doc, and gives an unstarted claim back instead of losing it.
 """
 from __future__ import annotations
 
 import contextlib
-import dis
 import queue
 import threading
 import time
-import types
 from types import SimpleNamespace
 
 import pytest
@@ -63,7 +61,7 @@ def turn_end(env):
 
 
 def test_each_turn_end_delivers_the_next_queued_doc_once_in_order(env):
-    for doc_id, minutes in (("m-2", 20), ("m-3", 5), ("m-1", 40)):
+    for doc_id, minutes in (("m-2", 20), ("m-3", 5), ("m-1", 25)):
         env.store.seed(doc_id, msg(minutes))
     for _ in range(5):          # more turn ends than messages
         turn_end(env)
@@ -71,7 +69,7 @@ def test_each_turn_end_delivers_the_next_queued_doc_once_in_order(env):
     assert [env.store.get(d).fields["status"] for d in ("m-1", "m-2", "m-3")] == ["done"] * 3
     assert env.store.reads == 5  # exactly one query per turn end
     first = env.submitted[0]
-    assert "hello 40" in first.text and "m-1" in first.text
+    assert "hello 25" in first.text and "m-1" in first.text
     assert first.kwargs["turn_author"] == {"id": "bot:tb-cndr", "name": "tb-cndr", "is_bot": True}
     assert env.session["running"] is False
 
@@ -233,13 +231,12 @@ def test_disabled_config_builds_no_store(env):
     assert env.server._drain_fleet_messages_once("live", env.session) is False
 
 
-def test_idle_poller_loop_makes_no_firestore_read(env):
-    """The per-session poller runs all its idle work (mailbox, /loop, kanban, completions) for a while;
-    the Firestore store must not see one query."""
+def test_idle_poller_delivers_queued_doc(env):
     env.store.seed("m-idle", msg(5))
     server = env.server
     env.monkeypatch.setattr(server, "_BOT_DELIVERY_POLL_SECONDS", 0.05, raising=False)
     env.monkeypatch.setattr(server, "_KANBAN_POLL_SECONDS", 0.05, raising=False)
+    env.monkeypatch.setattr(server, "_FLEET_MESSAGE_POLL_SECONDS", 0.05, raising=False)
     env.monkeypatch.setattr(server, "_notif_poll_kanban", lambda sid, session: None)
     stop = threading.Event()
     worker = threading.Thread(target=server._notification_poller_scoped_loop, args=(stop, "live", env.session))
@@ -248,28 +245,5 @@ def test_idle_poller_loop_makes_no_firestore_read(env):
     stop.set()
     worker.join(timeout=10)
     assert not worker.is_alive()
-    assert env.store.reads == 0 and env.store.commits == 0
-    assert env.store.get("m-idle").fields["status"] == "queued"
-
-
-def _referenced_names(fn) -> set:
-    names, stack = set(), [fn.__code__]
-    while stack:
-        code = stack.pop()
-        names.update(code.co_names)
-        stack.extend(c for c in code.co_consts if isinstance(c, types.CodeType))
-    return names
-
-
-def test_only_the_post_turn_followups_call_the_drain():
-    """Static guard for the no-idle-polling rule: no other gateway function references the drain."""
-    from tui_gateway import server
-
-    callers = sorted(name for name, obj in vars(server).items()
-                     if isinstance(obj, types.FunctionType) and name != "_drain_fleet_messages_once"
-                     and "_drain_fleet_messages_once" in _referenced_names(obj))
-    assert callers == ["_run_post_turn_followups"]
-    importers = sorted(name for name, obj in vars(server).items()
-                       if isinstance(obj, types.FunctionType) and "fleet_message_drain" in _referenced_names(obj))
-    assert importers == ["_drain_fleet_messages_once"]
-    assert dis  # keep the import honest for readers checking bytecode by hand
+    assert env.store.get("m-idle").fields["status"] == "done"
+    assert [s.rid for s in env.submitted] == ["__fleet_msg__m-idle"]
