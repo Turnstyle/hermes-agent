@@ -508,13 +508,14 @@ KANBAN_CREATE_SCHEMA = _schema(
 KANBAN_UNBLOCK_SCHEMA = _schema(
     "kanban_unblock",
     (
-        "Unblock a Kanban task. It moves to ready when all parents are done, "
+        "Unblock a blocked/scheduled Kanban task or a block-loop-held triage task. "
+        "It moves to ready when all parents are done, "
         "or todo while any parent remains open. Orchestrator-only — only "
         "profiles with the kanban toolset can unblock routed work; "
         "dispatcher-spawned task workers never see this tool."
     ),
     {
-        "task_id": _prop("string", "Blocked task id to move to ready or parent-gated todo."),
+        "task_id": _prop("string", "Parked task id to move to ready or parent-gated todo."),
     },
     ["task_id"],
 )

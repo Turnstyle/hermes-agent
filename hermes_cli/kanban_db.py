@@ -2128,6 +2128,13 @@ _HOLD_RELEASE_EVENT_KINDS = ("unblocked", "promoted_manual")
 _TURNER_HOLD_MARKER = "hold for turner"
 
 
+def _has_unreleased_block_loop(conn: sqlite3.Connection, task_id: str) -> bool:
+    """Only an explicit unblock after the latest breaker trip releases its hold."""
+    return _newest_event_kind(
+        conn, task_id, ("block_loop_detected", "unblocked"),
+    ) == "block_loop_detected"
+
+
 def _has_turner_hold(
     conn: sqlite3.Connection, task_id: str, block_kind: Optional[str],
     title: str, body: Optional[str],
@@ -3877,10 +3884,11 @@ def _landing_status_after_parents(conn: sqlite3.Connection, task_id: str) -> str
 
 
 def unblock_task(conn: sqlite3.Connection, task_id: str) -> bool:
-    """``blocked``/``scheduled`` -> its resumable phase (parent re-gated; ``review``
-    when that is where it left off), closing any leaked run first. A ``todo``
-    row holding an unreleased Turner hold is also accepted: the
-    ``unblocked`` event is what releases it for ``recompute_ready``."""
+    """Unblock a parked task, including triage with an active block-loop hold.
+
+    Restore its resumable phase with parent re-gating and close any leaked run.
+    Other triage rows remain outside this transition.
+    """
     now = int(time.time())
     with write_txn(conn):
         hold_row = conn.execute(
@@ -3894,6 +3902,11 @@ def unblock_task(conn: sqlite3.Connection, task_id: str) -> bool:
             )
         ):
             unblockable = ("todo",)
+        elif (
+            hold_row is not None and hold_row["status"] == "triage"
+            and _has_unreleased_block_loop(conn, task_id)
+        ):
+            unblockable = ("triage",)
         resume_status = (
             _resume_status_from_events(conn, task_id)
             if hold_row is not None and hold_row["status"] == "blocked"

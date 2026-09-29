@@ -6,9 +6,8 @@ gateway's auto-decompose tick listed every triage task and promoted it straight
 back to ``todo`` on the next tick, so a Turner-gated card looped forever
 (TurnerBook card t_e398fd6b, evidence in t_4a323dd5).
 
-The hold lasts until a human touches the card: an ``edited`` (title/body),
-``assigned`` or direct ``status`` event after the latest ``block_loop_detected``
-releases it.
+The hold lasts until an explicit unblock after the latest
+``block_loop_detected`` event. Other event kinds have automatic writers.
 """
 
 from __future__ import annotations
@@ -68,18 +67,26 @@ def test_block_loop_triage_task_is_not_listed_for_auto_decompose(kanban_home: Pa
     assert fresh in ids
 
 
-def test_human_edit_releases_the_hold(kanban_home: Path) -> None:
+def test_edit_event_does_not_release_the_hold(kanban_home: Path) -> None:
     with kbc.connect_closing() as conn:
         tid = _block_loop_to_triage(conn)
         assert kb.edit_task(conn, tid, body="Turner answered: go ahead")
-    assert tid in kanban_decompose.list_triage_ids()
+    assert tid not in kanban_decompose.list_triage_ids()
 
 
-def test_human_reassign_releases_the_hold(kanban_home: Path) -> None:
+def test_reassignment_without_human_provenance_does_not_release_hold(kanban_home: Path) -> None:
     with kbc.connect_closing() as conn:
         tid = _block_loop_to_triage(conn)
         assert kb.assign_task(conn, tid, "other-worker")
-    assert tid in kanban_decompose.list_triage_ids()
+    assert tid not in kanban_decompose.list_triage_ids()
+
+
+def test_same_assignee_assignment_does_not_release_hold(kanban_home: Path) -> None:
+    with kbc.connect_closing() as conn:
+        tid = _block_loop_to_triage(conn)
+        assert kb.assign_task(conn, tid, "worker")
+        assert kb.list_events(conn, tid)[-1].payload["from"] == "worker"
+    assert tid not in kanban_decompose.list_triage_ids()
 
 
 def test_bot_assignment_event_does_not_release_hold(kanban_home: Path) -> None:
@@ -92,17 +99,69 @@ def test_bot_assignment_event_does_not_release_hold(kanban_home: Path) -> None:
             )
     assert tid not in kanban_decompose.list_triage_ids()
     with kbc.connect_closing() as conn:
-        assert kb.assign_task(conn, tid, "other-worker")
-    assert tid in kanban_decompose.list_triage_ids()
+        assert kb.unblock_task(conn, tid)
+        assert kanban_decompose._held_by_block_loop(conn, tid) is False
 
 
-def test_dashboard_status_move_releases_the_hold(kanban_home: Path) -> None:
+def test_status_event_does_not_release_the_hold(kanban_home: Path) -> None:
     """The dashboard drag path writes a raw ``status`` event (plugin_api._set_status_direct)."""
+    from plugins.kanban.dashboard import plugin_api
+
+    with kbc.connect_closing() as conn:
+        tid = _block_loop_to_triage(conn)
+        assert plugin_api._set_status_direct(conn, tid, "triage")
+    assert tid not in kanban_decompose.list_triage_ids()
+
+
+def test_descendant_invalidation_status_event_does_not_release_hold(kanban_home: Path) -> None:
     with kbc.connect_closing() as conn:
         tid = _block_loop_to_triage(conn)
         with kb.write_txn(conn):
-            kb._append_event(conn, tid, "status", {"status": "triage", "requested_status": "triage"})
-    assert tid in kanban_decompose.list_triage_ids()
+            kb._append_event(conn, tid, "status", {
+                "status": "todo", "reason": "ancestor_reopened", "parent": "parent",
+            })
+    assert tid not in kanban_decompose.list_triage_ids()
+
+
+def test_recompute_ready_event_does_not_release_hold(kanban_home: Path) -> None:
+    with kbc.connect_closing() as conn:
+        tid = _block_loop_to_triage(conn)
+        # A repaired legacy row can be promoted by recompute_ready. Its bot
+        # event is promoted (not status), and it cannot release the hold.
+        with kb.write_txn(conn):
+            conn.execute(
+                "UPDATE tasks SET status='todo', block_kind=NULL WHERE id=?", (tid,),
+            )
+        assert kb.recompute_ready(conn) == 1
+        assert kb.list_events(conn, tid)[-1].kind == "promoted"
+        assert kanban_decompose._held_by_block_loop(conn, tid)
+
+
+def test_explicit_unblock_releases_triage_hold(kanban_home: Path) -> None:
+    with kbc.connect_closing() as conn:
+        tid = _block_loop_to_triage(conn)
+        assert kb.unblock_task(conn, tid)
+        assert kb.get_task(conn, tid).status == "ready"
+        assert kb.list_events(conn, tid)[-1].kind == "unblocked"
+        assert not kanban_decompose._held_by_block_loop(conn, tid)
+
+
+def test_dashboard_ready_action_explicitly_unblocks_triage_hold(kanban_home: Path) -> None:
+    from plugins.kanban.dashboard import plugin_api
+
+    with kbc.connect_closing() as conn:
+        tid = _block_loop_to_triage(conn)
+        assert plugin_api._drag_to(conn, tid, "ready")
+        assert kb.get_task(conn, tid).status == "ready"
+        assert kb.list_events(conn, tid)[-1].kind == "unblocked"
+        assert not kanban_decompose._held_by_block_loop(conn, tid)
+
+
+def test_unblock_does_not_accept_plain_triage(kanban_home: Path) -> None:
+    with kbc.connect_closing() as conn:
+        tid = kb.create_task(conn, title="plain triage", triage=True)
+        assert not kb.unblock_task(conn, tid)
+        assert kb.get_task(conn, tid).status == "triage"
 
 
 def test_comment_does_not_release_the_hold(kanban_home: Path) -> None:
@@ -123,7 +182,7 @@ def test_second_block_loop_after_release_holds_again(kanban_home: Path) -> None:
     with kbc.connect_closing() as conn:
         tid = _block_loop_to_triage(conn)
         assert kb.edit_task(conn, tid, body="try again")
-        assert kb.specify_triage_task(conn, tid)
+        assert kb.unblock_task(conn, tid)
         _make_running(conn, tid)
         assert kb.block_task(conn, tid, reason="needs Turner", kind="needs_input")
         assert kb.get_task(conn, tid).status == "triage"

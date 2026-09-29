@@ -419,40 +419,15 @@ def _is_protected_fleet_mirror(conn, task_id: str) -> bool:
     return False
 
 
-# Human-authored events that release a block-loop hold: a title/body edit, a
-# reassignment, or a direct status move (dashboard drag). Comments and
-# priority changes do not: bots write those too.
-_BLOCK_LOOP_RELEASE_KINDS = ("edited", "assigned", "status")
-
-
 def _held_by_block_loop(conn, task_id: str) -> bool:
-    """True when the task's latest ``block_loop_detected`` has no human touch after it.
+    """True when the task's latest breaker trip has no explicit unblock after it.
 
     The unblock-loop breaker parks a task in ``triage`` for a human; promoting
     it straight back to ``todo`` restarts the very loop it broke. Fails closed
     (held) on a lookup error.
     """
     try:
-        row = conn.execute(
-            "SELECT MAX(id) FROM task_events WHERE task_id=? AND kind='block_loop_detected'",
-            (task_id,),
-        ).fetchone()
-        last_loop = row[0] if row else None
-        if last_loop is None:
-            return False
-        placeholders = ",".join("?" for _ in _BLOCK_LOOP_RELEASE_KINDS)
-        release_events = conn.execute(
-            f"SELECT kind, payload FROM task_events WHERE task_id=? AND id>? "
-            f"AND kind IN ({placeholders}) ORDER BY id",
-            (task_id, last_loop, *_BLOCK_LOOP_RELEASE_KINDS),
-        )
-        for event in release_events:
-            if event["kind"] != "assigned":
-                return False
-            payload = kb._json_or(event["payload"])
-            if isinstance(payload, dict) and payload.get("source") != "kanban.default_assignee":
-                return False
-        return True
+        return kb._has_unreleased_block_loop(conn, task_id)
     except Exception:
         logger.warning("block-loop hold lookup failed for %s; treating as held", task_id)
         return True
@@ -462,7 +437,7 @@ def list_triage_ids(*, tenant: Optional[str] = None) -> list[str]:
     """Return task ids in the triage column that auto-decompose may promote.
 
     Excludes protected Fleet mirrors and tasks the unblock-loop breaker sent
-    to triage for a human (until a human edits, reassigns or moves them).
+    to triage for a human (until an explicit unblock).
     """
     with kbc.connect_closing() as conn:
         rows = kb.list_tasks(conn, status="triage", tenant=tenant, limit=1000)

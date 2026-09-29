@@ -553,12 +553,15 @@ _RUNNING_DIRECT_MSG = "Cannot set status to 'running' directly; use the dispatch
 
 
 def _drag_to(conn, task_id: str, s: str) -> bool:
-    """Drag-drop into ready/todo/triage: blocked/scheduled -> ready re-opens via ``unblock_task``;
+    """Drag-drop into ready/todo/triage: held states -> ready re-open via ``unblock_task``;
     leaving ``review`` goes through ``reopen_review_task`` (stale-run recovery, parent re-gate,
     ``review_reopened`` event) instead of a raw write; ``triage`` needs no current-state query."""
     current = kanban_db.get_task(conn, task_id) if s != "triage" else None
-    if s == "ready" and current and current.status in ("blocked", "scheduled"):
-        return kanban_db.unblock_task(conn, task_id)
+    if s == "ready" and current:
+        if current.status in ("blocked", "scheduled") or (
+            current.status == "triage" and kanban_db._has_unreleased_block_loop(conn, task_id)
+        ):
+            return kanban_db.unblock_task(conn, task_id)
     if current is not None and current.status == "review":
         return kanban_db.reopen_review_task(conn, task_id)
     return _set_status_direct(conn, task_id, s)
