@@ -25,8 +25,18 @@ def board(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     home.mkdir()
     monkeypatch.setenv("HERMES_KANBAN_HOME", str(home))
     monkeypatch.setenv("HERMES_HOME", str(home))
-    kb.init_db()
-    return home
+    monkeypatch.setenv("HERMES_KANBAN_DB", str(home / "kanban.db"))
+    monkeypatch.setenv("HERMES_KANBAN_BOARD", "default")
+    monkeypatch.setenv("HERMES_KANBAN_WORKSPACES_ROOT", str(home / "kanban" / "workspaces"))
+    monkeypatch.setenv("HERMES_KANBAN_ATTACHMENTS_ROOT", str(home / "kanban" / "attachments"))
+    with kb.scoped_current_board("default"):
+        kb.board_dir().mkdir(parents=True, exist_ok=True)
+        kb.init_db()
+        yield home
+
+
+def _cache_path() -> Path:
+    return kb.board_dir("default") / "pr-state.json"
 
 
 def _card(conn, number: int, *, second: int | None = None) -> str:
@@ -47,9 +57,8 @@ def _cache(path: Path, **entries: tuple[str, int]) -> None:
 @pytest.mark.parametrize("pr_state,expected", [
     ("MERGED", None), ("CLOSED", None), ("OPEN", "active_pr"),
 ])
-def test_terminal_states_lift_only_ready_guard(board, monkeypatch, pr_state, expected):
-    path = board / "pr-cache.json"
-    monkeypatch.setattr(state, "cache_path", lambda: path)
+def test_terminal_states_lift_only_ready_guard(board, pr_state, expected):
+    path = _cache_path()
     _cache(path, **{"owner/repo#51": (pr_state, int(time.time()))})
     with kbc.connect_closing() as conn:
         task_id = _card(conn, 51)
@@ -60,9 +69,8 @@ def test_terminal_states_lift_only_ready_guard(board, monkeypatch, pr_state, exp
 
 
 @pytest.mark.parametrize("cache_kind", ["stale", "missing", "corrupt", "malformed", "future"])
-def test_untrusted_cache_keeps_hold(board, monkeypatch, cache_kind):
-    path = board / "pr-cache.json"
-    monkeypatch.setattr(state, "cache_path", lambda: path)
+def test_untrusted_cache_keeps_hold(board, cache_kind):
+    path = _cache_path()
     now = int(time.time())
     if cache_kind == "stale":
         _cache(path, **{"owner/repo#51": ("MERGED", now - state.PR_STATE_MAX_AGE_SECONDS - 1)})
@@ -77,9 +85,8 @@ def test_untrusted_cache_keeps_hold(board, monkeypatch, cache_kind):
         assert kbd.check_respawn_guard(conn, task_id) == "active_pr"
 
 
-def test_every_triggering_pr_must_be_terminal(board, monkeypatch):
-    path = board / "pr-cache.json"
-    monkeypatch.setattr(state, "cache_path", lambda: path)
+def test_every_triggering_pr_must_be_terminal(board):
+    path = _cache_path()
     now = int(time.time())
     _cache(path, **{"owner/repo#51": ("MERGED", now), "owner/repo#52": ("OPEN", now)})
     with kbc.connect_closing() as conn:
@@ -90,8 +97,7 @@ def test_every_triggering_pr_must_be_terminal(board, monkeypatch):
 
 
 def test_dispatch_diagnostics_record_lift(board, monkeypatch):
-    path = board / "pr-cache.json"
-    monkeypatch.setattr(state, "cache_path", lambda: path)
+    path = _cache_path()
     monkeypatch.setattr(kbd, "_profile_exists_fn", lambda: lambda _name: True)
     monkeypatch.setattr(state.subprocess, "run", lambda *a, **k: pytest.fail("dispatcher called gh"))
     _cache(path, **{"owner/repo#51": ("MERGED", int(time.time()))})
@@ -103,7 +109,7 @@ def test_dispatch_diagnostics_record_lift(board, monkeypatch):
 
 
 def test_refresh_timeout_does_not_write_failed_pr(board, monkeypatch):
-    path = board / "pr-cache.json"
+    path = _cache_path()
     with kbc.connect_closing() as conn:
         _card(conn, 51)
 
@@ -118,7 +124,7 @@ def test_refresh_timeout_does_not_write_failed_pr(board, monkeypatch):
 
 
 def test_refresh_cap_and_atomic_replace(board, monkeypatch):
-    path = board / "pr-cache.json"
+    path = _cache_path()
     _cache(path, **{"owner/repo#99": ("OPEN", int(time.time()))})
     with kbc.connect_closing() as conn:
         for number in (51, 52, 53):
@@ -160,6 +166,21 @@ def test_configured_relative_cache_path_is_board_local(board):
         "kanban:\n  pr_state_cache_path: cache/prs.json\n", encoding="utf-8",
     )
     assert state.cache_path() == kb.board_dir() / "cache/prs.json"
+
+
+@pytest.mark.parametrize("configured", ["absolute", "traversal"])
+def test_cache_path_outside_board_cannot_lift_hold(board, caplog, configured):
+    outside = board / "kanban" / "boards" / "outside.json"
+    _cache(outside, **{"owner/repo#51": ("MERGED", int(time.time()))})
+    value = str(outside) if configured == "absolute" else "../outside.json"
+    (board / "config.yaml").write_text(
+        f"kanban:\n  pr_state_cache_path: {json.dumps(value)}\n", encoding="utf-8",
+    )
+    with kbc.connect_closing() as conn, caplog.at_level("WARNING", logger=state.__name__):
+        task_id = _card(conn, 51)
+        assert kbd.check_respawn_guard(conn, task_id) == "active_pr"
+        assert kbd.check_respawn_guard(conn, task_id) == "active_pr"
+    assert len([record for record in caplog.records if record.name == state.__name__]) == 1
 
 
 def test_malformed_cache_path_config_keeps_hold(board):

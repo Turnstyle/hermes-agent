@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 import json
+import logging
 import os
 import subprocess
 import tempfile
+import threading
 import time
 from pathlib import Path
 from typing import Optional
@@ -14,6 +16,9 @@ PR_STATE_MAX_AGE_SECONDS = 1800
 PR_REFRESH_MAX = 20
 PR_REFRESH_TIMEOUT_SECONDS = 5
 _STATES = frozenset({"OPEN", "CLOSED", "MERGED"})
+_LOG = logging.getLogger(__name__)
+_WARNED_OUTSIDE_PATHS: set[tuple[Path, Path]] = set()
+_WARN_LOCK = threading.Lock()
 
 
 def cache_path() -> Path:
@@ -26,10 +31,25 @@ def cache_path() -> Path:
     configured = kanban.get("pr_state_cache_path")
     if configured not in (None, "") and not isinstance(configured, str):
         raise ValueError("kanban.pr_state_cache_path must be a path string")
-    if isinstance(configured, str) and configured.strip():
-        path = Path(configured).expanduser()
-        return path if path.is_absolute() else kb.board_dir() / path
-    return kb.board_dir() / "pr-state.json"
+    # Resolve both sides so traversal and symlinks cannot import another board's evidence.
+    board_dir = kb.board_dir().resolve()
+    path = (
+        Path(configured).expanduser()
+        if isinstance(configured, str) and configured.strip()
+        else Path("pr-state.json")
+    )
+    resolved = (path if path.is_absolute() else board_dir / path).resolve()
+    if not resolved.is_relative_to(board_dir):
+        warning_key = (board_dir, resolved)
+        with _WARN_LOCK:
+            if warning_key not in _WARNED_OUTSIDE_PATHS:
+                _WARNED_OUTSIDE_PATHS.add(warning_key)
+                _LOG.warning(
+                    "Kanban PR state cache path is outside its board directory; "
+                    "active_pr hold remains"
+                )
+        raise ValueError("kanban.pr_state_cache_path must remain inside the board directory")
+    return resolved
 
 
 def pr_cache_key(pr: tuple[str, str, int]) -> str:
