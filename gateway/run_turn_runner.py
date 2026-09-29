@@ -1946,6 +1946,9 @@ class TurnRunner:
             turn_route, platform_key, combined_ephemeral, max_iterations, reasoning_config, pr,
         )
         agent._pre_agent_fallback_active = bool(pre_agent_fallback_entry)
+        if pre_agent_fallback_entry:
+            from agent.fast_mode import activate_initial_fallback
+            activate_initial_fallback(agent, pre_agent_fallback_entry)
         if pending_fallback_notice:
             # Reuse the in-agent one-shot notice so the pre-agent provider switch is user-visible too.
             agent._pending_fallback_notice = pending_fallback_notice

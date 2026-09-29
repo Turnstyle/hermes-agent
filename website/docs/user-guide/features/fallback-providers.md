@@ -39,6 +39,41 @@ fallback_providers:
 
 Each entry requires both `provider` and `model`. Entries missing either field are ignored.
 
+An entry may set its own `service_tier`. The primary keeps `agent.service_tier`; a fallback
+uses only the tier on its own entry. An omitted tier explicitly means normal, even when the
+primary is in priority mode:
+
+```yaml
+agent:
+  service_tier: normal
+fallback_providers:
+  - provider: openai-codex
+    model: gpt-6-sol
+    service_tier: priority
+  - provider: xai-oauth
+    model: grok-4.7  # omitted service_tier means normal
+```
+
+Accepted values are `normal`, `default`, `standard`, `off`, `none`, or empty (normal);
+`fast`, `priority`, or `on` (priority); and `auto` or `cold` (bounded fast windows).
+Invalid values are config errors. At runtime an invalid tier is logged and treated as normal.
+The same rule applies to the legacy `fallback_model` key.
+
+The request gate is `hermes_cli.models.resolve_fast_mode_overrides`, called by
+`agent.fast_mode.effective_request_overrides`. It uses the actual provider, model and endpoint;
+unsupported routes send no fast field and warn once per provider/model for each agent.
+
+| Fallback route | Fast field sent |
+|----------------|-----------------|
+| OpenAI at `api.openai.com`, or `openai-codex` at `chatgpt.com`, with eligible non-Codex `gpt-*` or `o*` models | `service_tier: priority` |
+| Anthropic at `api.anthropic.com`, Opus 4.8/5/5.5 | `speed: fast` |
+| xAI at `api.x.ai`, Grok 4.6 family | `service_tier: priority` |
+| Other routes, including `xai-oauth`, OpenRouter, Copilot and custom proxies | No fast field; one warning |
+
+The gate is defined in `hermes_cli.models._fast_mode_route_supported` and
+`resolve_fast_mode_overrides`; the Codex transport also strips unsupported xAI tiers in
+`agent.transports.codex.ResponsesApiTransport.build_kwargs`.
+
 When a rate-limit response names its reset time, the primary is benched until exactly then (a provider that says nothing gets the exponential 60 s → 4 h backoff). Optionally, skip the switch when the primary reopens soon:
 
 ```yaml

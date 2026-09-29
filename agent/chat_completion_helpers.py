@@ -2101,6 +2101,8 @@ def try_activate_fallback(agent, reason: "FailoverReason | None" = None, reset_a
             if hasattr(agent, "_transport_cache"):
                 agent._transport_cache.clear()
             agent._fallback_activated = True
+            from agent.fast_mode import bind_fallback_service_tier
+            bind_fallback_service_tier(agent, fb)
 
             _rebind_fallback_credential_pool(agent, fb_provider, fb_model)
             if fb_provider == "moa":
@@ -2224,6 +2226,8 @@ def _iteration_summary_api_messages(agent, messages: list) -> list:
 
 def _managed_summary_call(agent, api_request_id: str, request, callback, *, retry_count: int):
     from agent import relay_llm
+    from agent.fast_mode import record_sent_service_tier
+    record_sent_service_tier(agent, request)
     return relay_llm.execute_current(
         request, callback,
         name=str(getattr(agent, "provider", "") or "provider"), model_name=str(getattr(agent, "model", "") or ""),
@@ -2254,6 +2258,8 @@ def _codex_summary_attempt(agent, api_messages: list, api_request_id: str):
         codex_kwargs.pop("tools", None)
         codex_kwargs.pop("tool_choice", None)
         codex_kwargs.pop("parallel_tool_calls", None)
+        from agent.fast_mode import record_sent_service_tier
+        record_sent_service_tier(agent, codex_kwargs)
         # Route through the same seam as normal Codex turns: a direct _run_codex_stream
         # bypasses the stale/TTFB watchdogs, interrupt handling and client cleanup, so an
         # unattended cron summary could wedge forever (#70943).

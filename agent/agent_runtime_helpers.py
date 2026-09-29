@@ -1246,6 +1246,10 @@ def _revert_credential_rotation(agent) -> None:
 def restore_primary_runtime(agent) -> bool:
     """Restore the primary runtime at the start of a new turn so fallback stays turn-scoped
     (long-lived CLI agents and the gateway's cached agents)."""
+    if getattr(agent, "_initial_fallback_entry", None) is not None:
+        # Credential resolution constructed this agent on the fallback itself. There is no
+        # primary client snapshot to restore; keep the entry tier until a new agent is built.
+        return False
     if not agent._fallback_activated:
         # Reset the index even without activation: a failed _try_activate_fallback() can strand
         # _fallback_index past the chain end and silently block future fallbacks.
@@ -1321,6 +1325,8 @@ def restore_primary_runtime(agent) -> bool:
         if saved_reasoning is not None:
             agent.reasoning_config = dict(saved_reasoning)
         agent._fallback_activated = False
+        agent._fallback_service_tier = None
+        agent._fallback_service_tier_entry = None
         agent._fallback_index = 0
         agent._rate_limit_backoff_count = 0
         # Reset the stale-call circuit breaker: its streak measured the fallback provider.
@@ -2268,6 +2274,9 @@ def _build_primary_runtime_snapshot(agent, api_mode) -> Dict[str, Any]:
 def _finish_switch(agent, new_provider, old_norm, new_norm) -> None:
     """Post-switch bookkeeping: fallback reset/prune, request_overrides, billing route."""
     agent._fallback_activated = False
+    agent._initial_fallback_entry = None
+    agent._fallback_service_tier = None
+    agent._fallback_service_tier_entry = None
     agent._provider_fallback_active = False
     agent._provider_fallback_route = None
     agent._fallback_index = 0

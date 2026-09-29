@@ -592,6 +592,9 @@ def _run_agent(
             # commands via HERMES_YOLO_MODE=1, skill secret capture degrades gracefully.
             clarify_callback=_oneshot_clarify_callback,
         )
+        if fallback_entry is not None:
+            from agent.fast_mode import activate_initial_fallback
+            activate_initial_fallback(agent, fallback_entry)
         # Belt-and-braces: no streaming display callbacks may bypass our stdout capture.
         agent.suppress_status_output = True
         agent.stream_delta_callback = None

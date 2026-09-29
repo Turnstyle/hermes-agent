@@ -1141,6 +1141,32 @@ def _validate_fallback_model(fb: Any, issues: List[ConfigIssue]) -> None:
                         suffix=" — fallback will be disabled")
 
 
+def _validate_fallback_service_tiers(config: Dict[str, Any], issues: List[ConfigIssue]) -> None:
+    from agent.fast_mode import ALLOWED_SERVICE_TIERS, parse_fallback_service_tier
+
+    for key in ("fallback_providers", "fallback_model"):
+        raw = config.get(key)
+        entries = raw if isinstance(raw, list) else [raw] if isinstance(raw, dict) else []
+        for index, entry in enumerate(entries):
+            if not isinstance(entry, dict) or "service_tier" not in entry:
+                continue
+            _, valid = parse_fallback_service_tier(entry["service_tier"])
+            if not valid:
+                label = f"{key}[{index}]" if isinstance(raw, list) else key
+                _issue(issues, "error", f"{label}.service_tier has an invalid value",
+                       f"Allowed values: {ALLOWED_SERVICE_TIERS}")
+
+
+def _validate_fallback_providers(raw: Any, issues: List[ConfigIssue]) -> None:
+    if not isinstance(raw, list):
+        _issue(issues, "error", f"fallback_providers should be a list, got {type(raw).__name__}",
+               "Use a list of entries with provider and model")
+        return
+    _validate_entry_list(raw, "fallback_providers", issues, _FB_REQUIRED_FIELDS,
+                         non_dict=("error", "fallback_providers[{i}] should be a dict, got {type}",
+                                   "Each entry needs provider + model"))
+
+
 def _validate_web_backends(config: Dict[str, Any], issues: List[ConfigIssue]) -> None:
     """A stale web backend selection otherwise fails only at the first web_search/web_extract
     call with a generic "no registered provider" error; warn at startup instead."""
@@ -1223,9 +1249,13 @@ def validate_config_structure(config: Optional[Dict[str, Any]] = None) -> List["
     _validate_timezone(config, issues)
     cp = config.get("custom_providers")
     fb = config.get("fallback_model")
+    fp = config.get("fallback_providers")
     for value, validator in ((cp, _validate_custom_providers), (fb, _validate_fallback_model)):
         if value is not None:
             validator(value, issues)
+    if fp is not None:
+        _validate_fallback_providers(fp, issues)
+    _validate_fallback_service_tiers(config, issues)
 
     if isinstance(cp, dict) and "fallback_model" not in config and "fallback_model" in (cp or {}):
         _issue(issues, "error", "fallback_model appears inside custom_providers instead of at root level",
