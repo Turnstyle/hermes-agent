@@ -2224,13 +2224,15 @@ class TestSystemdCgroupIsolation:
             value for value in properties if value.startswith("MemoryMax=")
         )
         assert int(memory_max.split("=", 1)[1]) > 0
-        # The original shell command must still be present at the tail,
-        # after the ``--`` separator that prevents systemd-run from
-        # interpreting command flags as its own.
+        # The file-backed command must remain after the separator so
+        # systemd-run cannot interpret shell flags as its own.
         assert "--" in argv, "systemd-run argv must use -- to separate command"
         sep_idx = argv.index("--")
-        assert "/bin/bash" in argv[sep_idx:]
-        assert "set +m; echo hello" in argv[sep_idx:]
+        assert argv[sep_idx + 1:-1] == ["/bin/bash", "-lic"]
+        shell_command = argv[-1]
+        assert shell_command.startswith("set +m; ( echo hello ) > ")
+        assert f"> {shlex.quote(session.output_log_path)} 2>&1" in shell_command
+        assert f"> {shlex.quote(session.exit_file_path)}" in shell_command
         # systemd-run --scope gives the worker a new cgroup but NOT a new
         # session (#70716 regression: start_new_session was False, so the
         # worker kept the parent's session + controlling terminal → SIGTTIN/
