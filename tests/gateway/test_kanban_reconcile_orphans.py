@@ -157,13 +157,29 @@ class TestDispatchOnceReconciles:
         tid = kb.create_task(conn, title="zombie", assignee="w")
         _orphan_running(conn, tid)
 
+        # A real tick reconciles; max_spawn=0 keeps the requeued card from
+        # being spawned in the same tick (the reclaim phase runs first).
         result = kbd.dispatch_once(conn, spawn_fn=lambda *a, **k: (True, ""),
-                                  dry_run=True)
+                                  max_spawn=0)
 
         assert tid in result.reconciled_orphans
         assert conn.execute(
             "SELECT status FROM tasks WHERE id=?", (tid,)
         ).fetchone()["status"] == "ready"
+
+    def test_dry_run_does_not_reconcile_orphans(self, conn):
+        """A dry run skips the whole reclaim phase, reconcile included."""
+        tid = kb.create_task(conn, title="zombie", assignee="w")
+        _orphan_running(conn, tid)
+
+        result = kbd.dispatch_once(conn, spawn_fn=lambda *a, **k: (True, ""),
+                                  dry_run=True)
+
+        assert result.reclaim_phase == "skipped (dry-run)"
+        assert result.reconciled_orphans == []
+        assert conn.execute(
+            "SELECT status FROM tasks WHERE id=?", (tid,)
+        ).fetchone()["status"] == "running"
 
     def test_dispatch_once_reconcile_can_be_disabled(self, conn):
         """kanban.reconcile_orphans=false plumbs through as
@@ -172,7 +188,7 @@ class TestDispatchOnceReconciles:
         _orphan_running(conn, tid)
 
         result = kbd.dispatch_once(conn, spawn_fn=lambda *a, **k: (True, ""),
-                                  dry_run=True, reconcile_orphans=False)
+                                  max_spawn=0, reconcile_orphans=False)
 
         assert result.reconciled_orphans == []
         assert conn.execute(

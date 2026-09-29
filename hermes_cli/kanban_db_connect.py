@@ -752,6 +752,24 @@ def connect_closing(db_path: Optional[Path] = None, *, board: Optional[str] = No
             conn.close()
 
 
+@contextlib.contextmanager
+def connect_readonly_closing(db_path: Optional[Path] = None, *, board: Optional[str] = None):
+    """Open an existing live board without initialization or write transactions."""
+    path = db_path if db_path is not None else _kb.kanban_db_path(board=board)
+    if not path.is_file():
+        raise ValueError(f"Kanban board is not initialized: {path}")
+    conn = sqlite3.connect(path.resolve().as_uri() + "?mode=ro", uri=True)
+    try:
+        conn.row_factory = sqlite3.Row
+        conn.text_factory = _kb._lossy_text
+        conn.execute("PRAGMA query_only=ON")
+        if not _schema_is_present(conn):
+            raise ValueError(f"Kanban board is not initialized: {path}")
+        yield conn
+    finally:
+        conn.close()
+
+
 def init_db(db_path: Optional[Path] = None, *, board: Optional[str] = None) -> Path:
     """Create the schema if it doesn't exist; return the path used. Unlike
     :func:`connect`'s cached first-time auto-init, this always re-runs the
