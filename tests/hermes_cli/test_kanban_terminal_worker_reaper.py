@@ -65,7 +65,7 @@ def test_worker_alive_after_completion_is_reaped_on_dispatch_tick(conn):
         run = conn.execute("SELECT worker_pid, worker_started_at, ended_at FROM task_runs WHERE id=?", (run_id,)).fetchone()
         assert run["ended_at"] is not None and run["worker_pid"] == proc.pid and run["worker_started_at"] is not None
 
-        result = kbd.dispatch_once(conn, spawn_fn=lambda *a, **k: 0, dry_run=True, max_spawn=0)
+        result = kbd.dispatch_once(conn, spawn_fn=lambda *a, **k: 0, max_spawn=0)
 
         assert result.reaped_terminal_workers == [tid]
         assert proc.wait(timeout=10) is not None

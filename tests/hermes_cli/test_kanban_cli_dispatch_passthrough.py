@@ -26,6 +26,8 @@ def isolated_kanban_home(monkeypatch):
     for mod in list(sys.modules.keys()):
         if mod.startswith("hermes_cli") or mod.startswith("hermes_state") or mod == "hermes_constants":
             del sys.modules[mod]
+    from hermes_cli import kanban_db
+    kanban_db.init_db()
     yield test_home
 
 
@@ -94,5 +96,4 @@ def test_cli_max_flag_overrides_config_max_spawn(isolated_kanban_home, monkeypat
     assert captured.get("max_spawn") == 2, (
         f"CLI --max=2 must override config kanban.max_spawn=10; got {captured.get('max_spawn')!r}"
     )
-
 

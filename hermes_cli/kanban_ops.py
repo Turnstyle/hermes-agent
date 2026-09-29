@@ -81,7 +81,8 @@ def _cmd_dispatch(args: argparse.Namespace) -> int:
     except Exception:
         default_assignee = max_in_progress_per_profile = max_in_progress = None
         max_spawn = getattr(args, "max", None)
-    with kbc.connect_closing() as conn:
+    connection = kbc.connect_readonly_closing if args.dry_run else kbc.connect_closing
+    with connection() as conn:
         res = kbd.dispatch_once(
             conn,
             dry_run=args.dry_run,
@@ -96,6 +97,7 @@ def _cmd_dispatch(args: argparse.Namespace) -> int:
             **{k: getattr(res, k)
                for k in ("reclaimed", "crashed", "timed_out", "stale", "auto_blocked", "promoted",
                          "reaped_terminal_workers")},
+            **({"reclaim_phase": res.reclaim_phase} if args.dry_run else {}),
             "spawned": [
                 {"task_id": tid, "assignee": who, "workspace": ws} for (tid, who, ws) in res.spawned
             ],
@@ -118,6 +120,8 @@ def _cmd_dispatch(args: argparse.Namespace) -> int:
         }, ascii=True)
         return 0
     print(f"Reclaimed:    {res.reclaimed}")
+    if args.dry_run:
+        print(f"Reclaim phase: {res.reclaim_phase}")
     if res.reaped_terminal_workers:
         print(f"Reaped workers of finished tasks: {', '.join(res.reaped_terminal_workers)}")
     for label, items in (

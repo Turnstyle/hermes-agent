@@ -213,6 +213,8 @@ class DispatchResult:
     """
 
     reclaimed: int = 0
+    reclaim_phase: Optional[str] = None
+    """Set when the reclaim and promotion phase was skipped for a dry run."""
     promoted: int = 0
     reconciled_orphans: list[str] = field(default_factory=list)
     """``running`` cards requeued by :func:`reconcile_orphaned_running` (broken
@@ -2381,7 +2383,7 @@ def count_running_tasks(conn: sqlite3.Connection) -> int:
         return 0
 
 
-def count_running_tasks_other_boards(board: Optional[str] = None) -> int:
+def count_running_tasks_other_boards(board: Optional[str] = None, *, dry_run: bool = False) -> int:
     """Total CLAIMED ``running`` tasks across every board EXCEPT ``board``.
 
     Caps bound the HOST, but each board's tick only sees its own DB; without
@@ -2407,12 +2409,16 @@ def count_running_tasks_other_boards(board: Optional[str] = None) -> int:
                 continue
             if not path.exists():
                 continue
-            other = _kbc.connect(board=slug)
-            try:
-                total += count_running_tasks(other)
-            finally:
-                with contextlib.suppress(Exception):
-                    other.close()
+            if dry_run:
+                with _kbc.connect_readonly_closing(board=slug) as other:
+                    total += count_running_tasks(other)
+            else:
+                other = _kbc.connect(board=slug)
+                try:
+                    total += count_running_tasks(other)
+                finally:
+                    with contextlib.suppress(Exception):
+                        other.close()
         except Exception:
             continue
     return total
@@ -2452,7 +2458,7 @@ def dispatch_once(
     max_in_progress_per_profile: Optional[int] = None,
     reconcile_orphans: bool = True,
 ) -> DispatchResult:
-    """Run one dispatcher tick under the board's single-writer lock.
+    """Run one dispatcher tick (dry runs use a lock-free diagnostic path).
 
     Wraps :func:`_dispatch_once_locked` in the non-blocking :func:`_dispatch_tick_lock`
     so two dispatchers on one ``kanban.db`` never race a write tick on WAL
@@ -2475,6 +2481,11 @@ def dispatch_once(
             max_in_progress_per_profile=max_in_progress_per_profile,
             reconcile_orphans=reconcile_orphans,
         )
+
+    if dry_run:
+        # Diagnostics never take the file-backed dispatch lock, checkpoint WAL,
+        # or invoke observer hooks (which may write outside the board).
+        return _locked_tick()
 
     try:
         db_path = _kb.kanban_db_path(board=board)
@@ -2730,6 +2741,7 @@ def _tick_spawn_budget(
     max_spawn: Optional[int],
     max_in_progress: Optional[int],
     board: Optional[str],
+    dry_run: bool = False,
 ) -> tuple[bool, Optional[int]]:
     """``(may_spawn, spawn_budget)`` for this tick; ``budget None`` = uncapped.
 
@@ -2755,7 +2767,7 @@ def _tick_spawn_budget(
         spawn_budget = max_spawn - running_count
 
     if max_in_progress is not None:
-        total_running = running_count + count_running_tasks_other_boards(board)
+        total_running = running_count + count_running_tasks_other_boards(board, dry_run=dry_run)
         if total_running >= max_in_progress:
             _note_capacity_held(
                 result, f"host cap: {total_running} running of {max_in_progress}",
@@ -2767,8 +2779,8 @@ def _tick_spawn_budget(
 
     # Memory-pressure guard: a static cap can't see the host's actual state.
     # critical -> spawn nothing this tick; elevated -> at most one new worker.
-    # Reclaim/promotion already ran, so bookkeeping stays live; deferred tasks
-    # wait for a later tick. "unknown" imposes no restriction.
+    # Normal ticks have already run reclaim/promotion; deferred tasks wait for
+    # a later tick. "unknown" imposes no restriction.
     pressure = _memory_pressure_level()
     if pressure == "critical":
         result.memory_pressure = pressure
@@ -2868,12 +2880,16 @@ def _dispatch_once_locked(
     the PID so later ticks catch crashes before the TTL. Cap semantics:
     :func:`_tick_spawn_budget`."""
     result = DispatchResult()
-    _run_reclaim_phase(
-        conn, result, stale_timeout_seconds=stale_timeout_seconds,
-        failure_limit=failure_limit, reconcile_orphans=reconcile_orphans, board=board,
-    )
+    if dry_run:
+        result.reclaim_phase = "skipped (dry-run)"
+    else:
+        _run_reclaim_phase(
+            conn, result, stale_timeout_seconds=stale_timeout_seconds,
+            failure_limit=failure_limit, reconcile_orphans=reconcile_orphans, board=board,
+        )
     may_spawn, spawn_budget = _tick_spawn_budget(
         conn, result, max_spawn=max_spawn, max_in_progress=max_in_progress, board=board,
+        dry_run=dry_run,
     )
     if not may_spawn:
         return result
