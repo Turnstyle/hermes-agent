@@ -167,6 +167,7 @@ class TestCLIJudgeGate:
 
         fake_task = types.SimpleNamespace(
             id="t_goal",
+            status="ready",
             goal_mode=goal_mode,
             title="Finish report",
             body="acceptance: criteria",
