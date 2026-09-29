@@ -3,58 +3,81 @@
 from __future__ import annotations
 
 import argparse
+import atexit
 import os
-import sys
+import shutil
 import tempfile
 import unittest
 import uuid
 from pathlib import Path
 from unittest import mock
 
-HERMETIC_SCRATCH = Path(
-    os.environ.get(
-        "DECOMP_HERMETIC_SCRATCH",
-        "/Users/turner/.hermes/profiles/tb-cndr/cache/scratch/"
-        "decomposition-repair-20260924/hermetic_homes",
-    )
-).resolve()
-LIVE_FLEET_BOARD_DB = Path(
-    "/Users/turner/.hermes/kanban/boards/fleet/kanban.db"
-).resolve()
+# Capture the real home before this module redirects HERMES_HOME.
 REAL_KANBAN_ROOT = (Path.home() / ".hermes").resolve()
+LIVE_FLEET_BOARD_DB = (
+    Path.home() / ".hermes" / "kanban" / "boards" / "fleet" / "kanban.db"
+).resolve()
 
-HERMETIC_SCRATCH.mkdir(parents=True, exist_ok=True)
+HERMETIC_SCRATCH = Path(
+    tempfile.mkdtemp(prefix="kanban-block-comment-hermetic-")
+).resolve()
+atexit.register(shutil.rmtree, HERMETIC_SCRATCH, ignore_errors=True)
+
+_HERMETIC_ENV_KEYS = (
+    "HERMES_HOME",
+    "HERMES_KANBAN_HOME",
+    "HERMES_KANBAN_DB",
+    "HERMES_KANBAN_BOARD",
+)
+
+
+def _push_hermetic_env(home: Path) -> dict[str, str | None]:
+    prior = {key: os.environ.get(key) for key in _HERMETIC_ENV_KEYS}
+    os.environ["HERMES_HOME"] = str(home)
+    os.environ["HERMES_KANBAN_HOME"] = str(home)
+    os.environ["HERMES_KANBAN_DB"] = str(home / "kanban.db")
+    os.environ.pop("HERMES_KANBAN_BOARD", None)
+    return prior
+
+
+def _restore_env(prior: dict[str, str | None]) -> None:
+    for key, value in prior.items():
+        if value is None:
+            os.environ.pop(key, None)
+        else:
+            os.environ[key] = value
+
+
 _ISOLATED_HOME = Path(
     tempfile.mkdtemp(prefix=f"kanban-test-{uuid.uuid4().hex[:8]}-", dir=str(HERMETIC_SCRATCH))
 ).resolve()
-os.environ["HERMES_HOME"] = str(_ISOLATED_HOME)
-os.environ["HERMES_KANBAN_HOME"] = str(_ISOLATED_HOME)
-os.environ["HERMES_KANBAN_DB"] = str(_ISOLATED_HOME / "kanban.db")
-os.environ.pop("HERMES_KANBAN_BOARD", None)
+_PREFLIGHT_ENV = _push_hermetic_env(_ISOLATED_HOME)
+try:
+    # Do not drop hermes_cli.kanban* from sys.modules. kanban_db_path reads
+    # the env on each call, and replacing the module splits identity with
+    # tests imported later in the same process.
+    from hermes_cli import kanban_db as _kanban_db_preflight  # noqa: E402
 
-for _mod_name in list(sys.modules):
-    if _mod_name.startswith("hermes_cli.kanban") or _mod_name == "hermes_cli.kanban_db_connect":
-        del sys.modules[_mod_name]
-
-from hermes_cli import kanban_db as _kanban_db_preflight  # noqa: E402
-
-_RESOLVED_DB = _kanban_db_preflight.kanban_db_path().expanduser().resolve()
-if not str(_RESOLVED_DB).startswith(str(HERMETIC_SCRATCH)):
-    raise RuntimeError(
-        f"kanban_db_path {_RESOLVED_DB} is not under hermetic scratch {HERMETIC_SCRATCH}"
-    )
-if _RESOLVED_DB == LIVE_FLEET_BOARD_DB:
-    raise RuntimeError(f"kanban_db_path resolved to live fleet board {LIVE_FLEET_BOARD_DB}")
+    _RESOLVED_DB = _kanban_db_preflight.kanban_db_path().expanduser().resolve()
+    if not str(_RESOLVED_DB).startswith(str(HERMETIC_SCRATCH)):
+        raise RuntimeError(
+            f"kanban_db_path {_RESOLVED_DB} is not under hermetic scratch {HERMETIC_SCRATCH}"
+        )
+    if _RESOLVED_DB == LIVE_FLEET_BOARD_DB:
+        raise RuntimeError(f"kanban_db_path resolved to live fleet board {LIVE_FLEET_BOARD_DB}")
+finally:
+    _restore_env(_PREFLIGHT_ENV)
 
 
 def _refuse_live_db_path_without_open() -> None:
     os.environ["HERMES_KANBAN_DB"] = str(LIVE_FLEET_BOARD_DB)
-    for name in list(sys.modules):
-        if name.startswith("hermes_cli.kanban"):
-            del sys.modules[name]
     from hermes_cli import kanban_db as kb
 
-    resolved = kb.kanban_db_path().expanduser().resolve()
+    # Lexical absolute path only. Path.resolve() realpaths into the live home
+    # and the test I/O guard treats that as opening the fleet board.
+    resolved = kb.kanban_db_path().expanduser()
+    if not resolved.is_absolute():
+        resolved = Path(os.path.abspath(resolved))
     if resolved != LIVE_FLEET_BOARD_DB:
         raise AssertionError(f"expected live path resolution, got {resolved}")
     try:
@@ -69,10 +92,8 @@ class KanbanBlockCommentOrderTests(unittest.TestCase):
         self._test_home = Path(
             tempfile.mkdtemp(prefix="case-", dir=str(HERMETIC_SCRATCH))
         ).resolve()
-        os.environ["HERMES_HOME"] = str(self._test_home)
-        os.environ["HERMES_KANBAN_HOME"] = str(self._test_home)
-        os.environ["HERMES_KANBAN_DB"] = str(self._test_home / "kanban.db")
-        os.environ.pop("HERMES_KANBAN_BOARD", None)
+        self.addCleanup(shutil.rmtree, self._test_home, ignore_errors=True)
+        self.addCleanup(_restore_env, _push_hermetic_env(self._test_home))
         from hermes_cli import kanban_db as kb
 
         kb.init_db()
@@ -98,9 +119,6 @@ class KanbanBlockCommentOrderTests(unittest.TestCase):
                 os.environ.pop("HERMES_KANBAN_DB", None)
             if prior_home is not None:
                 os.environ["HERMES_KANBAN_HOME"] = prior_home
-            for name in list(sys.modules):
-                if name.startswith("hermes_cli.kanban"):
-                    del sys.modules[name]
 
     def test_block_does_not_comment_when_block_task_fails(self):
         from hermes_cli import kanban as kanban_cli
