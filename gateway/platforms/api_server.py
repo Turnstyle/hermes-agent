@@ -116,6 +116,8 @@ _CAPABILITY_ENDPOINTS = (
     ("run_approval", ("POST", "/v1/runs/{run_id}/approval")),
     ("run_steer", ("POST", "/v1/runs/{run_id}/steer")),
     ("run_stop", ("POST", "/v1/runs/{run_id}/stop")), ("skills", ("GET", "/v1/skills")),
+    ("peer_ping", ("POST", "/v1/peer/ping")),
+    ("peer_ping_status", ("GET", "/v1/peer/ping/{key}")),
     ("toolsets", ("GET", "/v1/toolsets")), ("sessions", ("GET", "/api/sessions")),
     ("session_create", ("POST", "/api/sessions")),
     ("session", ("GET", "/api/sessions/{session_id}")),
@@ -168,6 +170,7 @@ from gateway.display_config import resolve_display_setting
 from gateway.platforms import api_server_room_dispatch as _room_dispatch
 from gateway.platforms import api_server_room_grants as _room_grants
 from gateway.platforms import api_server_runs as _api_runs
+from gateway.platforms import api_server_peer_ping as _peer_ping
 from gateway.platforms.api_server_openai_routes import OpenAICompatRoutesMixin
 from gateway.platforms.api_server_memory_sessions import ApiServerMemorySessions
 from gateway.platforms.base import (
@@ -1710,6 +1713,8 @@ class APIServerAdapter(OpenAICompatRoutesMixin, BasePlatformAdapter):
             ("GET", "/v1/models", self._handle_models),
             ("GET", "/api/model/options", self._handle_model_options),
             ("GET", "/v1/capabilities", self._handle_capabilities),
+            ("POST", "/v1/peer/ping", self._handle_peer_ping),
+            ("GET", "/v1/peer/ping/{key:.+}", self._handle_peer_ping_status),
             # Browser-control (gated on browser.extension_control.enabled + API key): POST
             # mints a short-lived ticket, WS consumes it; artifacts are bounded + scope-bound.
             ("POST", "/v1/browser-control/register", self._handle_browser_control_register),
@@ -2509,6 +2514,9 @@ class APIServerAdapter(OpenAICompatRoutesMixin, BasePlatformAdapter):
                 "chat_completions": True, "chat_completions_streaming": True,
                 "responses_api": True, "responses_streaming": True, "run_submission": True,
                 "runs_idempotency": _api_runs._idempotency_capabilities(self, store_type=RunIdempotencyStore),
+                "peer_ping": {"supported": True, "durable": True,
+                              "retention_seconds": _peer_ping.RETENTION_SECONDS,
+                              "max_body_bytes": _peer_ping.MAX_BODY_BYTES},
                 **_STATIC_FEATURE_FLAGS,
                 "cors": bool(self._cors_origins),
                 # Always advertised for feature-detection; enabled follows config.
@@ -2532,6 +2540,12 @@ class APIServerAdapter(OpenAICompatRoutesMixin, BasePlatformAdapter):
                         "cloud": "authenticated-gateway-rpc"}}},
             "endpoints": {name: {"method": m, "path": p} for name, (m, p) in _CAPABILITY_ENDPOINTS},
         })
+
+    async def _handle_peer_ping(self, request: "web.Request") -> "web.Response":
+        return await _peer_ping.handle_post(self, request)
+
+    async def _handle_peer_ping_status(self, request: "web.Request") -> "web.Response":
+        return await _peer_ping.handle_get(self, request)
 
     # -- Browser-extension control (authenticated local/VPS API) ----------------------
 
