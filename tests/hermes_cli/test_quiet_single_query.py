@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import os
 import datetime
+import shutil
 from types import SimpleNamespace
 
 import cli
@@ -251,6 +252,19 @@ def test_turn_report_is_written_before_the_exit_linger_and_the_path_is_not_inher
     assert seen["report_at_linger"] == {"pid": os.getpid(), "exit_code": 0, "error": "", "reply": "ok"}
     # Another process's record is not this child's report.
     assert qsq.read_turn_report(str(report), os.getpid() + 1) is None
+
+
+def test_late_follow_up_does_not_recreate_abandoned_report_directory(tmp_path):
+    from hermes_cli.quiet_single_query import write_turn_report
+
+    report_dir = tmp_path / "one-shot-report"
+    report_dir.mkdir()
+    report = report_dir / "turn.json"
+    write_turn_report(str(report), exit_code=0)
+    assert report.exists()
+    shutil.rmtree(report_dir)
+    write_turn_report(str(report), exit_code=0, reply="late follow-up")
+    assert not report_dir.exists()
 
 
 def test_a_follow_up_turn_rewrites_the_report_with_the_answer_it_displaces(monkeypatch, tmp_path):

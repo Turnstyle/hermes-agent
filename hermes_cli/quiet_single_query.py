@@ -83,6 +83,10 @@ def write_turn_report(path: str | None, *, exit_code: int, error: str = "", repl
         return
     from utils import atomic_json_write
 
+    # A short-lived spawner may remove its private report directory while this
+    # child is still lingering. A later follow-up must not recreate that directory.
+    if not os.path.isdir(os.path.dirname(path) or "."):
+        return
     record = {"pid": os.getpid(), "exit_code": int(exit_code), "error": str(error or ""), "reply": str(reply or "")}
     # 0600 from creation: the record now carries the turn's answer, like the 0600 query file beside it.
     with contextlib.suppress(Exception):
@@ -109,7 +113,8 @@ REPORTED_TURN_EXIT_GRACE_SECONDS = 2.0
 
 def run_reported_turn(argv: list, *, env: MutableMapping[str, str], report_path: str, timeout: float,
                       exit_grace: float | None = REPORTED_TURN_EXIT_GRACE_SECONDS, cwd: str | None = None,
-                      encoding: str | None = None) -> subprocess.CompletedProcess:
+                      encoding: str | None = None, stdout: int = subprocess.PIPE,
+                      stderr: int = subprocess.PIPE) -> subprocess.CompletedProcess:
     """Run one ``hermes chat -Q`` delivery child; *timeout* bounds the TURN, not the process.
 
     The child records its turn at *report_path* (``write_turn_report``) the moment the turn ends,
@@ -132,13 +137,15 @@ def run_reported_turn(argv: list, *, env: MutableMapping[str, str], report_path:
     PYTHONIOENCODING=cp1252) while the gateway parent is not started in UTF-8 mode, so the
     locale default mangled or lost accented replies (#115894); on POSIX the child keeps the
     locale codec, so the locale default stays correct there (#66566).
+    A short-lived spawner that needs only the report may pass DEVNULL for both streams:
+    its exit then cannot close a pipe while the lingering child prints its final answer.
     """
     from hermes_cli._subprocess_compat import windows_hide_flags
 
     if encoding is None and sys.platform == "win32":
         encoding = "utf-8"
     proc = subprocess.Popen(
-        argv, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+        argv, stdin=subprocess.DEVNULL, stdout=stdout, stderr=stderr, text=True,
         encoding=encoding, errors="replace", env={**env, TURN_REPORT_FILE_ENV: report_path},
         cwd=cwd, creationflags=windows_hide_flags())
     streams: dict = {}
