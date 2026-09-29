@@ -75,6 +75,7 @@ _REMOTE_RUNS_BODY = """
             target_profile TEXT NOT NULL,
             run_id TEXT NOT NULL,
             session_id TEXT NOT NULL,
+            busy_retry_count INTEGER NOT NULL DEFAULT 0 CHECK (busy_retry_count >= 0),
             created_at REAL NOT NULL,
             updated_at REAL NOT NULL,
             PRIMARY KEY (
@@ -342,6 +343,7 @@ _LEGACY_COLUMNS = (
     ("hosted_rooms", "authority_gateway_id", "TEXT NOT NULL", "'legacy'"),
     ("hosted_rooms", "authority_epoch", "INTEGER NOT NULL", "1"),
     ("hosted_rooms", "event_bytes", "INTEGER NOT NULL", "0"),
+    ("hosted_room_remote_runs", "busy_retry_count", "INTEGER NOT NULL", "0"),
     ("hosted_room_events", "actor_json", "TEXT NOT NULL", f"'{_LEGACY_ACTOR_JSON}'"),
     ("hosted_room_events", "authority_epoch", "INTEGER", None))
 _EVENT_BYTES_BACKFILL = """UPDATE hosted_rooms
@@ -788,7 +790,9 @@ def _remote_run_identity(record: Mapping[str, Any]) -> tuple[Any, ...]:
     return tuple(record[column] for column in _REMOTE_RUN_IDENTITY_COLUMNS)
 
 
-def upsert_remote_run_receipt(db_path: DbPath, *, record: Mapping[str, Any], now: float | None = None) -> None:
+def upsert_remote_run_receipt(
+    db_path: DbPath, *, record: Mapping[str, Any], now: float | None = None,
+    previous_run_id: str | None = None) -> None:
     """Durably bind one logical peer task attempt to its remote run handle."""
     timestamp = _now(now)
     identity = _remote_run_identity(record)
@@ -796,6 +800,13 @@ def upsert_remote_run_receipt(db_path: DbPath, *, record: Mapping[str, Any], now
     with _transaction(db_path, immediate=True) as conn:
         existing = conn.execute(_SELECT_REMOTE_RUN, identity).fetchone()
         if existing is not None:
+            if (previous_run_id is not None and existing["run_id"] == previous_run_id
+                    and existing["session_id"] == record["session_id"]):
+                conn.execute(
+                    f"""UPDATE hosted_room_remote_runs
+                        SET run_id=?, busy_retry_count=?, updated_at=? WHERE {_REMOTE_RUN_WHERE}""",
+                    (record["run_id"], int(existing["busy_retry_count"]) + 1, timestamp, *identity))
+                return
             if (*_remote_run_identity(existing), existing["run_id"], existing["session_id"]) != immutable:
                 raise HostedRoomError("remote run receipt conflicts with its logical task")
             conn.execute(

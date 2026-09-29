@@ -6,6 +6,7 @@ import errno
 import hashlib
 import json
 import logging
+import math
 import re
 import socket
 import time
@@ -41,7 +42,9 @@ _RECEIPT_SCOPE_FIELDS = (
 _TERMINAL_RUN_STATES = frozenset({"completed", "failed", "interrupted", "cancelled"})
 _ACTIVE_RUN_STATES = frozenset({"queued", "running", "waiting_for_approval", "stopping"})
 _KNOWN_RUN_STATES = _TERMINAL_RUN_STATES | _ACTIVE_RUN_STATES
-_RUN_STATUS_KEYS = ("run_id", "status", "output", "error", "approval", "last_event")
+_RUN_STATUS_KEYS = (
+    "run_id", "status", "output", "error", "approval", "last_event", "reason", "retry_after")
+_MAX_TARGET_BUSY_RETRIES = 3
 # Older target gateways wrap these inside the generic dispatch error; normalize locally.
 _LEGACY_DISPATCH_MESSAGE_CODES = (
     ("room grant", "invalid_room_grant"),
@@ -223,6 +226,8 @@ class PeerRunsHTTPClient:
         self._observation_key: tuple[str, int] | None = None
         self._status_cache: dict[str, dict[str, Any]] = {}
         self._recovery_backoff: dict[tuple[str, int], dict[str, Any]] = {}
+        self._dispatches: dict[tuple[str, int], HostedMemberDispatch] = {}
+        self._busy_retries: dict[tuple[str, int], dict[str, Any]] = {}
         self._terminal_receipts: set[tuple[str, int]] = set()
         self._room_scope: dict[str, Any] | None = None
 
@@ -252,6 +257,8 @@ class PeerRunsHTTPClient:
         for table in (
                 self._runs, self._status_cache, self._recovery_backoff, self._terminal_receipts):
             table.clear()
+        self._dispatches.clear()
+        self._busy_retries.clear()
 
     def _receipt(self, task_id: str, execution_generation: int) -> dict[str, Any] | None:
         """Return the in-memory receipt, falling back to the durable store."""
@@ -276,6 +283,8 @@ class PeerRunsHTTPClient:
         self._observation_key = key
         self._status_cache.clear()
         self._recovery_backoff.clear()
+        self._dispatches = {key: self._dispatches[key]} if key in self._dispatches else {}
+        self._busy_retries = {key: self._busy_retries[key]} if key in self._busy_retries else {}
 
     def _request(
         self, path: str, *, method: str = "GET", body: Mapping[str, Any] | None = None,
@@ -359,6 +368,7 @@ class PeerRunsHTTPClient:
         self.bind_room_scope(**{f: getattr(checked, f) for f in _RECEIPT_SCOPE_FIELDS})
         self.bind_observation(
             task_id=checked.task_id, execution_generation=checked.execution_generation)
+        self._dispatches[(checked.task_id, checked.execution_generation)] = checked
         return checked
 
     def dispatch(self, *, dispatch: Mapping[str, Any], grant: str) -> Mapping[str, Any]:
@@ -398,7 +408,9 @@ class PeerRunsHTTPClient:
             "execution_generation": checked.execution_generation, "run_id": run_id,
             "session_id": session_id, "replayed": replayed}
 
-    def _admit_dispatch(self, checked: HostedMemberDispatch, *, grant: str) -> Mapping[str, Any]:
+    def _admit_dispatch(
+        self, checked: HostedMemberDispatch, *, grant: str,
+        previous_run_id: str | None = None) -> Mapping[str, Any]:
         session_id = self._session_id(checked, grant=grant)
 
         def admit() -> dict[str, Any]:
@@ -418,13 +430,23 @@ class PeerRunsHTTPClient:
         run_id = str(result.get("run_id") or "")
         if not run_id:
             raise PeerRunsHTTPError("peer did not return a run id")
+        if previous_run_id is not None and run_id == previous_run_id:
+            raise PeerRunsHTTPError("peer did not re-admit target busy run")
+        previous = self._receipt(checked.task_id, checked.execution_generation)
+        if previous_run_id is not None and (
+                previous is None or previous["run_id"] != previous_run_id):
+            raise PeerRunsHTTPError("target busy retry receipt changed")
         receipt = {
             "run_id": run_id, "session_id": session_id,
             **{field: getattr(checked, field) for field in _RECEIPT_SCOPE_FIELDS},
-            "task_id": checked.task_id, "execution_generation": checked.execution_generation}
+            "task_id": checked.task_id, "execution_generation": checked.execution_generation,
+            "busy_retry_count": (
+                int(previous.get("busy_retry_count") or 0) + 1
+                if previous_run_id is not None else 0)}
         if self.receipt_db_path is not None:
             from gateway import hosted_rooms
-            hosted_rooms.upsert_remote_run_receipt(self.receipt_db_path, record=receipt)
+            hosted_rooms.upsert_remote_run_receipt(
+                self.receipt_db_path, record=receipt, previous_run_id=previous_run_id)
         self._runs[(checked.task_id, checked.execution_generation)] = receipt
         self._status_cache.pop(run_id, None)
         return self._accepted(
@@ -458,6 +480,16 @@ class PeerRunsHTTPClient:
 
     def _poll_receipt(self, record: Mapping[str, Any], *, grant: str) -> dict[str, Any]:
         run_id, now = str(record["run_id"]), self.clock()
+        key = (str(record["task_id"]), int(record["execution_generation"]))
+        busy = self._busy_retries.get(key)
+        if busy is not None and now >= busy["next_attempt_at"]:
+            checked = self._dispatches.get(key)
+            if checked is None:
+                raise PeerRunsHTTPError("target busy retry lost its dispatch")
+            self._admit_dispatch(checked, grant=grant, previous_run_id=run_id)
+            record = self._receipt(*key)
+            run_id = str(record["run_id"])
+            self._busy_retries.pop(key, None)
         cached = self._status_cache.get(run_id)
         if cached is not None:
             status = cached["status"]
@@ -482,6 +514,25 @@ class PeerRunsHTTPClient:
             self._status_cache = {run_id: {"status": previous, "error": exc, **entry}}
             raise
         self._status_cache = {run_id: {"status": status, **entry}}
+        if status.get("status") == "failed" and status.get("reason") == "target_busy":
+            retries = int(record.get("busy_retry_count") or 0)
+            if retries < _MAX_TARGET_BUSY_RETRIES and key in self._dispatches:
+                try:
+                    retry_after = float(status.get("retry_after") or 30)
+                except (TypeError, ValueError):
+                    retry_after = 30
+                if not math.isfinite(retry_after):
+                    retry_after = 30
+                retry_after = min(600, max(0.1, retry_after))
+                self._busy_retries[key] = {
+                    "next_attempt_at": now + retry_after}
+                pending = {"run_id": run_id, "status": "running"}
+                self._status_cache = {run_id: {
+                    "status": pending, "delay": delay, "next_poll_at": now + retry_after}}
+                return pending
+            status = {**status, "error": "Target busy, retries exhausted."}
+            self._status_cache = {run_id: {"status": status, **entry}}
+            self._busy_retries.pop(key, None)
         if status.get("status") in _TERMINAL_RUN_STATES:
             self._terminal_receipts.add(
                 (str(record["task_id"]), int(record["execution_generation"])))
@@ -550,8 +601,16 @@ class PeerRunsHTTPClient:
         record = self._receipt(task_id, execution_generation)
         if record is None:
             return None
+        grant = self._require_room_grant(grant)
+        key = (str(task_id), int(execution_generation))
+        if key in self._busy_retries:
+            self._busy_retries.pop(key)
+            stopped = {"run_id": str(record["run_id"]), "status": "cancelled"}
+            self._status_cache = {stopped["run_id"]: {"status": stopped}}
+            self._terminal_receipts.add(key)
+            return stopped
         result = self._post_run_action(
-            record, "stop", body={}, grant=self._require_room_grant(grant))
+            record, "stop", body={}, grant=grant)
         if result.get("status") in _TERMINAL_RUN_STATES:
             self._terminal_receipts.add((str(task_id), int(execution_generation)))
         return result

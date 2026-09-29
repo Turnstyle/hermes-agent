@@ -185,6 +185,123 @@ def test_scoped_peer_runs_client_uses_logical_session_and_durable_run(peer_serve
     ]
 
 
+def test_target_busy_retries_same_room_task_then_settles_or_exhausts(tmp_path):
+    grant = "signed.room.grant"
+    for exhaust in (False, True):
+        now = [0.0]
+        client = PeerRunsHTTPClient(
+            base_url="https://peer.example.test", api_key="",
+            receipt_db_path=tmp_path / ("exhaust.db" if exhaust else "settle.db"),
+            clock=lambda: now[0],
+        )
+        posts = []
+
+        def peer(path, **kwargs):
+            if path == "/v1/runs":
+                posts.append(kwargs)
+                return {"run_id": f"run-{len(posts)}", "status": "started"}
+            assert path == f"/v1/runs/run-{len(posts)}"
+            if exhaust or len(posts) == 1:
+                return {"run_id": f"run-{len(posts)}", "status": "failed",
+                        "reason": "target_busy", "error": "Target session is busy; retry this turn.",
+                        **({"retry_after": 30} if exhaust else {})}
+            return {"run_id": f"run-{len(posts)}", "status": "completed",
+                    "output": "Remote review complete."}
+
+        client._request = peer
+        accepted = client.dispatch(dispatch=_dispatch(), grant=grant)
+        history_args = {"room_id": "room-1", "profile": "reviewer",
+                        "session_id": accepted["session_id"], "grant": grant}
+        assert client.history(**history_args) == []
+        assert client.status(**history_args)["active"] is True
+        for attempt in range(1, 4 if exhaust else 2):
+            now[0] = attempt * 30
+            history = client.history(**history_args)
+            if attempt < 3 and exhaust:
+                assert history == []
+            if attempt == 1 and exhaust:
+                restarted = PeerRunsHTTPClient(
+                    base_url="https://peer.example.test", api_key="",
+                    receipt_db_path=client.receipt_db_path, clock=lambda: now[0])
+                restarted._request = peer
+                assert restarted.recover_dispatch(dispatch=_dispatch(), grant=grant)["replayed"]
+                assert restarted.history(**history_args) == []
+                client = restarted
+        if exhaust:
+            assert history[0]["status"] == "failed"
+            assert "target busy, retries exhausted" in history[0]["content"].lower()
+            assert len(posts) == 4
+        else:
+            assert history == [{"role": "assistant", "task_id": "task-1",
+                                "execution_generation": 1, "status": "settled",
+                                "message_id": "peer-run:run-2",
+                                "content": "Remote review complete."}]
+            assert len(posts) == 2
+        assert {post["headers"]["Idempotency-Key"] for post in posts} == {"room:task-1:1"}
+        assert all(post["body"] == posts[0]["body"] for post in posts)
+        from gateway import hosted_rooms
+        stored = hosted_rooms.remote_run_receipt(
+            client.receipt_db_path, record=_dispatch())
+        assert stored["busy_retry_count"] == (3 if exhaust else 1)
+
+    client = PeerRunsHTTPClient(base_url="https://peer.example.test", api_key="")
+    posts = []
+
+    def ordinary_failure(path, **kwargs):
+        if path == "/v1/runs":
+            posts.append(kwargs)
+            return {"run_id": "run-final", "status": "started"}
+        return {"run_id": "run-final", "status": "failed", "error": "Different failure"}
+
+    client._request = ordinary_failure
+    accepted = client.dispatch(dispatch=_dispatch(), grant=grant)
+    history = client.history(
+        room_id="room-1", profile="reviewer", session_id=accepted["session_id"], grant=grant)
+    assert history[0]["status"] == "failed" and history[0]["content"] == "Different failure"
+    assert len(posts) == 1
+
+    now = [0.0]
+    cancelled = PeerRunsHTTPClient(
+        base_url="https://peer.example.test", api_key="", clock=lambda: now[0])
+    cancelled_posts = []
+
+    def busy_until_cancelled(path, **kwargs):
+        if path == "/v1/runs":
+            cancelled_posts.append(kwargs)
+            return {"run_id": "run-busy", "status": "started"}
+        return {"run_id": "run-busy", "status": "failed", "reason": "target_busy"}
+
+    cancelled._request = busy_until_cancelled
+    accepted = cancelled.dispatch(dispatch=_dispatch(), grant=grant)
+    cancelled_history = {
+        "room_id": "room-1", "profile": "reviewer",
+        "session_id": accepted["session_id"], "grant": grant}
+    assert cancelled.history(**cancelled_history) == []
+    assert cancelled.stop_receipt(
+        task_id="task-1", execution_generation=1, grant=grant)["status"] == "cancelled"
+    now[0] = 30
+    assert cancelled.history(**cancelled_history) == []
+    assert len(cancelled_posts) == 1
+
+    from gateway.platforms.api_server_run_idempotency import RunIdempotencyStore
+
+    store = RunIdempotencyStore(str(tmp_path / "idempotency.db"))
+    scope, key, fingerprint = "room-member", "room:task-1:1", "same-payload"
+    try:
+        assert store.reserve(scope, key, fingerprint, "run-1", {"status": "queued"})[0] == "created"
+        store.update_status("run-1", {"status": "failed", "reason": "target_busy"})
+        assert store.reserve(
+            scope, key, fingerprint, "run-2", {"status": "queued"},
+            retry_target_busy=True)[0] == "created"
+        outcome, record = store.reserve(
+            scope, key, fingerprint, "run-3", {"status": "queued"},
+            retry_target_busy=True)
+        assert outcome == "reused" and record["run_id"] == "run-2"
+        assert store.lookup(scope, key, "different-payload")[0] == "conflict"
+    finally:
+        store.close()
+
+
 def test_scoped_peer_runs_client_stops_exact_run(peer_server):
     client = PeerRunsHTTPClient(base_url=peer_server, api_key="")
     dispatch = _dispatch()

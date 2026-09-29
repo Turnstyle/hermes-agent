@@ -131,7 +131,8 @@ class RunIdempotencyStore:
                 raise
 
     def reserve(self, scope: str, key: str, fingerprint: str, run_id: str, status: Dict[str, Any], *,
-                owner_pid: int = 0, owner_started: int = 0, retention_until: float = 0):
+                owner_pid: int = 0, owner_started: int = 0, retention_until: float = 0,
+                retry_target_busy: bool = False):
         """Atomically reserve a key; return ``(outcome, stored_record)``."""
         now = time.time()
         retention_until = max(0.0, float(retention_until or 0))
@@ -140,6 +141,18 @@ class RunIdempotencyStore:
             self._prune_stale_terminal_locked(now)
             row = self._conn.execute(_SELECT_BY_KEY, (scope, key)).fetchone()
             if row is not None:
+                previous = json.loads(row[2])
+                if (retry_target_busy and hmac.compare_digest(row[0], fingerprint)
+                        and previous.get("status") == "failed"
+                        and previous.get("reason") == "target_busy"):
+                    self._conn.execute(
+                        """UPDATE run_idempotency SET run_id=?, status_json=?, owner_pid=?,
+                           owner_started=?, retention_until=MAX(retention_until, ?),
+                           updated_at=? WHERE scope=? AND idempotency_key=?""",
+                        (run_id, encoded, int(owner_pid or 0), int(owner_started or 0),
+                         retention_until, now, scope, key))
+                    self._conn.commit()
+                    return "created", {"run_id": run_id, "status": status}
                 if retention_until:
                     self._conn.execute(_EXTEND_RETENTION_BY_KEY, (retention_until, scope, key, fingerprint))
                 self._conn.commit()

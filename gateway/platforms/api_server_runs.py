@@ -680,7 +680,11 @@ async def _handle_runs(self, request: "web.Request", *, _api_server) -> "web.Res
         outcome, record = self._run_idempotency_store.lookup(
             idempotency_scope, idempotency_key, idempotency_fingerprint,
             retention_until=_room_retention_until(request))
-        if outcome == "conflict" or (outcome == "reused" and record is not None):
+        retry_target_busy = bool(
+            room_dispatch and outcome == "reused" and record is not None
+            and record["status"].get("status") == "failed"
+            and record["status"].get("reason") == "target_busy")
+        if not retry_target_busy and (outcome == "conflict" or (outcome == "reused" and record is not None)):
             return _replay_or_conflict(self, request, outcome, record, gateway_session_key, _openai_error)
     # Enforce concurrency only for a genuinely new run.
     limited = self._concurrency_limited_response()
@@ -721,7 +725,7 @@ async def _handle_runs(self, request: "web.Request", *, _api_server) -> "web.Res
         outcome, record = self._run_idempotency_store.reserve(
             idempotency_scope, idempotency_key, idempotency_fingerprint, run_id, initial_status,
             owner_pid=self._run_owner_pid, owner_started=self._run_owner_started,
-            retention_until=_room_retention_until(request))
+            retention_until=_room_retention_until(request), retry_target_busy=bool(room_dispatch))
         if outcome != "created":
             _forget_run(
                 self, run_id, self._run_streams, self._run_streams_created, self._run_approval_sessions,
