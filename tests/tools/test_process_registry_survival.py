@@ -135,6 +135,8 @@ def test_recovery_reads_output_exit_and_notifies_once(tmp_path, before_recovery)
         assert result["exit_code"] == 9
         assert "after parent" in registry.read_log(info["id"])["output"]
         assert Path(info["log"]).read_text().strip() == "after parent"
+        assert _until(lambda: any(evt.get("type") == "completion"
+                                  for evt in list(registry.completion_queue.queue)))
         notices = [evt for evt in list(registry.completion_queue.queue) if evt.get("type") == "completion"]
         assert len(notices) == 1
         assert notices[0]["exit_code"] == 9
