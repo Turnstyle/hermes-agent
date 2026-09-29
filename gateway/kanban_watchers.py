@@ -333,12 +333,17 @@ class GatewayKanbanWatchersMixin:
                 now = int(time.time())
                 if bad_ticks >= _HEALTH_WINDOW and now - last_warn_at >= 300:
                     held = _kbd.describe_suppression(res for _slug, res in (results or []))
+                    spawn_clause = (
+                        "eligible tasks failing despite active spawns"
+                        if any_spawned
+                        else "0 workers spawned"
+                    )
                     logger.warning(
                         "kanban dispatcher stuck: ready queue non-empty for "
-                        "%d consecutive ticks but 0 workers spawned.%s Check "
+                        "%d consecutive ticks but %s.%s Check "
                         "profile health (venv, PATH, credentials) and "
                         "`hermes kanban list --status ready`.",
-                        bad_ticks, f" Last tick held back: {held}." if held else "",
+                        bad_ticks, spawn_clause, f" Last tick held back: {held}." if held else "",
                     )
                     last_warn_at = now
             except asyncio.CancelledError:
