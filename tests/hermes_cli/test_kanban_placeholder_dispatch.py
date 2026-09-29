@@ -421,6 +421,36 @@ def test_eligible_work_stalled_matrix():
     ab_empty_res = DispatchResult(auto_blocked=["t_fail"])
     assert eligible_work_stalled([ab_empty_res], 0) is True
 
+    # 16. Spawn error below breaker limit not masked by successful spawn -> True
+    spawn_err_res = DispatchResult(
+        spawned=[("t_ok", "sage", "/tmp")],
+        spawn_errors=[("t_fail", "process spawn failed")],
+    )
+    assert eligible_work_stalled([spawn_err_res], 1) is True
+
+    # 17. Foreign claim errors alone with ready_spawnable=0 -> False (not stalled)
+    foreign_err_res = DispatchResult(
+        claim_errors=[("t_foreign", "claim: verified execution lease required")],
+        foreign_claim_errors=[("t_foreign", "claim: verified execution lease required")],
+    )
+    assert eligible_work_stalled([foreign_err_res], 0) is False
+
+    # 18. Foreign claim errors alongside successful spawn -> False (progress made, foreign error ignored)
+    foreign_spawn_res = DispatchResult(
+        spawned=[("t_ok", "sage", "/tmp")],
+        claim_errors=[("t_foreign", "claim: verified execution lease required")],
+        foreign_claim_errors=[("t_foreign", "claim: verified execution lease required")],
+    )
+    assert eligible_work_stalled([foreign_spawn_res], 0) is False
+
+    # 19. Eligible claim errors alongside successful spawn -> True (must not be masked)
+    eligible_claim_spawn_res = DispatchResult(
+        spawned=[("t_ok", "sage", "/tmp")],
+        claim_errors=[("t_local", "claim: verified execution lease required")],
+        eligible_claim_errors=[("t_local", "claim: verified execution lease required")],
+    )
+    assert eligible_work_stalled([eligible_claim_spawn_res], 1) is True
+
 
 @pytest.mark.asyncio
 async def test_gateway_watcher_mixed_held_and_failing_card_pages(kanban_home_with_profiles, monkeypatch, caplog):
@@ -591,6 +621,173 @@ def test_cli_daemon_on_tick_mixed_spawned_and_failing_card(kanban_home_with_prof
 
     captured = capsys.readouterr()
     assert "WARN dispatcher stuck: ready queue non-empty for 6 consecutive ticks but eligible tasks failing despite active spawns." in captured.err
+
+
+@pytest.mark.asyncio
+async def test_gateway_watcher_foreign_only_work_does_not_page(tmp_path, monkeypatch, caplog):
+    """Foreign Fleet mirrors must not trigger false alarms during 6 real watcher ticks (Finding 1)."""
+    import asyncio
+    import logging
+    from gateway.kanban_watchers import GatewayKanbanWatchersMixin
+
+    caplog.set_level(logging.INFO)
+
+    home = tmp_path / ".hermes"
+    home.mkdir()
+    sage_dir = home / "profiles" / "sage"
+    sage_dir.mkdir(parents=True)
+    (sage_dir / "config.yaml").write_text("{}\n", encoding="utf-8")
+    monkeypatch.setenv("HERMES_HOME", str(home))
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+    kb.init_db()
+
+    NODE = "snowdrop"
+    with kbc.connect() as conn:
+        # Install fleet adapter and issue map
+        conn.execute("""CREATE TABLE IF NOT EXISTS fleet_kanban_issue_map (
+            local_task_id TEXT PRIMARY KEY,
+            issue_id TEXT,
+            raw_title TEXT,
+            canonical_body TEXT,
+            source_node TEXT,
+            current_node TEXT,
+            source_profile TEXT
+        )""")
+        conn.execute(f"""CREATE TRIGGER IF NOT EXISTS fleet_kanban_task_insert
+            AFTER INSERT ON tasks
+            BEGIN
+                INSERT INTO fleet_kanban_issue_map(
+                    local_task_id,issue_id,raw_title,canonical_body,source_node,current_node,source_profile
+                ) VALUES(NEW.id,'fk_' || lower(hex(randomblob(4))),NEW.title,NEW.body,'{NODE}',NULL,'p');
+            END""")
+        # Create a foreign-mapped ready row
+        tid_foreign = kb.create_task(conn, title="foreign card", assignee="sage")
+        conn.execute(
+            "UPDATE fleet_kanban_issue_map SET source_node = 'max', current_node = NULL WHERE local_task_id = ?",
+            (tid_foreign,),
+        )
+        # Verified execution lease fence trigger simulating remote node lease requirement
+        conn.execute("""
+            CREATE TRIGGER test_lease_fence BEFORE UPDATE OF status ON tasks
+            WHEN NEW.status = 'running'
+            BEGIN
+                SELECT RAISE(ABORT, 'verified execution lease required before running');
+            END;
+        """)
+
+    class TestRunner(GatewayKanbanWatchersMixin):
+        def __init__(self):
+            self._running = True
+            self._kanban_dispatcher_lock_handle = None
+            self._ticks = 0
+
+        async def _sleep_between_ticks(self, interval: float) -> None:
+            self._ticks += 1
+            if self._ticks >= 6:
+                self._running = False
+
+    runner = TestRunner()
+
+    real_sleep = asyncio.sleep
+    async def fake_sleep(delay):
+        if delay == 5:
+            return None
+        await real_sleep(0)
+
+    monkeypatch.setattr(asyncio, "sleep", fake_sleep)
+
+    await runner._kanban_dispatcher_watcher()
+
+    # Verify that:
+    # 1. Foreign-only work does NOT page after 6 consecutive ticks
+    assert "kanban dispatcher stuck" not in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_gateway_watcher_spawn_exception_below_breaker_limit_pages(kanban_home_with_profiles, monkeypatch, caplog):
+    """Eligible card failing spawn below breaker limit must page even when another card spawns each tick (Finding 2)."""
+    import asyncio
+    import logging
+    from gateway.kanban_watchers import GatewayKanbanWatchersMixin
+    from hermes_cli.kanban_db_dispatch import DispatchResult
+
+    caplog.set_level(logging.INFO)
+
+    tick_count = 0
+
+    class FakeDispatcher:
+        def auto_decompose_tick(self, per_tick):
+            pass
+
+        def tick_once(self):
+            nonlocal tick_count
+            tick_count += 1
+            res = DispatchResult()
+            # New card spawns each tick
+            res.spawned.append((f"t_spawned_{tick_count}", "sage", "/tmp/ws"))
+            # Failing eligible card throws exception below 10-attempt breaker limit
+            res.spawn_errors.append(("t_failing_eligible", "process spawn failed: exec format error"))
+            return [("default", res)]
+
+        def ready_counts(self):
+            return {"spawnable": 1, "placeholder": 0}
+
+    class TestRunner(GatewayKanbanWatchersMixin):
+        def __init__(self):
+            self._running = True
+            self._kanban_dispatcher_lock_handle = None
+            self._ticks = 0
+
+        async def _sleep_between_ticks(self, interval: float) -> None:
+            self._ticks += 1
+            if self._ticks >= 6:
+                self._running = False
+
+    monkeypatch.setattr("gateway.kanban_watchers._KanbanDispatcher", lambda _kb, _settings: FakeDispatcher())
+
+    real_sleep = asyncio.sleep
+    async def fake_sleep(delay):
+        if delay == 5:
+            return None
+        await real_sleep(0)
+
+    monkeypatch.setattr(asyncio, "sleep", fake_sleep)
+
+    runner = TestRunner()
+    await runner._kanban_dispatcher_watcher()
+
+    # Stuck warning MUST be emitted after 6 ticks despite active spawns
+    assert "kanban dispatcher stuck: ready queue non-empty for 6 consecutive ticks but eligible tasks failing despite active spawns." in caplog.text
+
+
+def test_cli_daemon_spawn_exception_below_breaker_limit_warns(kanban_home_with_profiles, monkeypatch, capsys):
+    """CLI daemon must accumulate bad_ticks and warn when eligible spawn throws below breaker limit alongside active spawns."""
+    import argparse
+    from hermes_cli import kanban_ops
+    from hermes_cli.kanban_db_dispatch import DispatchResult
+
+    with kbc.connect() as conn:
+        tid_failing = kb.create_task(conn, title="failing spawn task", assignee="sage")
+
+    tick_count = 0
+    def fake_run_daemon(interval, max_spawn, failure_limit, on_tick):
+        nonlocal tick_count
+        for _ in range(6):
+            tick_count += 1
+            res = DispatchResult()
+            res.spawned.append((f"t_spawned_{tick_count}", "sage", "/tmp/ws"))
+            res.spawn_errors.append((tid_failing, "process spawn failed: exec format error"))
+            on_tick(res)
+
+    monkeypatch.setattr(kanban_ops.kbd, "run_daemon", fake_run_daemon)
+
+    args = argparse.Namespace(interval=5, max=None, failure_limit=10, verbose=False, pidfile=None, force=True)
+    ret = kanban_ops._cmd_daemon(args)
+    assert ret == 0
+
+    captured = capsys.readouterr()
+    assert "WARN dispatcher stuck: ready queue non-empty for 6 consecutive ticks but eligible tasks failing despite active spawns." in captured.err
+
 
 
 
