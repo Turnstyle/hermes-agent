@@ -1,10 +1,10 @@
 """``hermes peer`` — bot-to-bot DMs across machines/gateways.
 
-A *peer* is another Hermes gateway running the ``api_server`` platform; its stock
-API is the transport (no new server surface). ``dm`` resolves the remote canonical
+A *peer* is another Hermes gateway running the ``api_server`` platform. ``dm`` resolves the remote canonical
 "Bot Chat" session (creating it when missing) and runs ONE synchronous turn — the
 cross-machine twin of ``hermes -p <bot> chat --in ~ -c "Bot Chat"``. ``run``/``status``
-/``stop`` do the same turn through the async Runs API. Peer labels/URLs live in
+/``stop`` do the same turn through the async Runs API. ``ping`` creates a
+no-agent ingress receipt and ``ping-status`` reads it back. Peer labels/URLs live in
 config.yaml (``bot_peers``); the key lives in ``~/.hermes/.env`` as
 ``HERMES_PEER_<NAME>_KEY``. ``<peer>/<profile>`` targets the ``/p/<profile>/`` mirror.
 """
@@ -12,8 +12,11 @@ config.yaml (``bot_peers``); the key lives in ``~/.hermes/.env`` as
 from __future__ import annotations
 
 import argparse
+import datetime as dt
+import hashlib
 import json
 import re
+import socket
 import sys
 import urllib.error
 import urllib.parse
@@ -200,6 +203,76 @@ def _peer_run_durability(base: str, key: str) -> bool | None:
     if not isinstance(contract, dict) or not contract.get("supported"):
         return None
     return bool(contract.get("durable"))
+
+
+def _peer_ping_supported(base: str, key: str) -> bool:
+    """Fail closed on old peers or uncertain capability reads; never use /chat."""
+    capabilities = _request(f"{base}/v1/capabilities", key)
+    features = capabilities.get("features")
+    contract = features.get("peer_ping") if isinstance(features, dict) else None
+    return isinstance(contract, dict) and contract.get("supported") is True and contract.get("durable") is True
+
+
+def _ping_url(base: str, idempotency_key: str) -> str:
+    return f"{base}/v1/peer/ping/{urllib.parse.quote(idempotency_key, safe='')}"
+
+
+def _peer_ping_status(args, peer_name: str, profile: str | None, base: str, key: str) -> int:
+    ping_key = args.ping_key.strip() if isinstance(args.ping_key, str) else args.ping_key
+    if not isinstance(ping_key, str) or not ping_key or len(ping_key) > 255 or re.search(r"[\r\n\x00]", ping_key):
+        print("Idempotency key must be 1-255 characters without control newlines.", file=sys.stderr)
+        return 2
+    try:
+        if not _peer_ping_supported(base, key):
+            raise RuntimeError("peer does not advertise durable peer_ping support")
+        record = _request(_ping_url(base, ping_key), key)
+    except (urllib.error.URLError, TimeoutError, OSError, RuntimeError) as exc:
+        return _peer_failure(peer_name, exc)
+    if record.get("idempotency_key") != ping_key:
+        print(f"Peer '{peer_name}' returned a mismatched ping receipt.", file=sys.stderr)
+        return 1
+    return _emit(args, {"peer": peer_name, "profile": profile, **record},
+                 [f"{ping_key}: received at {record.get('received_at')}"])
+
+
+def _peer_ping(args, peer_name: str, profile: str | None, base: str, key: str) -> int:
+    ping_key = args.idempotency_key.strip() if isinstance(args.idempotency_key, str) else args.idempotency_key
+    if not isinstance(ping_key, str) or not ping_key or len(ping_key) > 255 or re.search(r"[\r\n\x00]", ping_key):
+        print("Idempotency key must be 1-255 characters without control newlines.", file=sys.stderr)
+        return 2
+    sender_node = socket.gethostname().split(".")[0]
+    if not _PEER_NAME_RE.fullmatch(sender_node):
+        # Hostnames can be mixed-case or contain dots; send a stable safe label.
+        sender_node = "node-" + hashlib.sha256(socket.gethostname().encode()).hexdigest()[:16]
+    nonce = hashlib.sha256(f"{sender_node}:{ping_key}".encode()).hexdigest()
+    body = {"idempotency_key": ping_key, "nonce": nonce,
+            "payload_sha256": hashlib.sha256(nonce.encode()).hexdigest(),
+            "sender_node": sender_node,
+            "sent_at": dt.datetime.now(dt.timezone.utc).isoformat()}
+    uncertain_post = False
+    try:
+        if not _peer_ping_supported(base, key):
+            raise RuntimeError("peer does not advertise durable peer_ping support")
+        try:
+            _request(f"{base}/v1/peer/ping", key, method="POST", body=body)
+        except urllib.error.HTTPError:
+            raise
+        except (urllib.error.URLError, TimeoutError, OSError):
+            # Outcome uncertain. Read the receipt, and never send a second POST.
+            uncertain_post = True
+        record = _request(_ping_url(base, ping_key), key)
+    except (urllib.error.URLError, TimeoutError, OSError, RuntimeError) as exc:
+        if uncertain_post:
+            print(f"Peer '{peer_name}' POST outcome is uncertain; readback failed. "
+                  "Do not resend until the receipt can be checked.", file=sys.stderr)
+        return _peer_failure(peer_name, exc)
+    if (record.get("idempotency_key") != ping_key
+            or record.get("payload_sha256") != body["payload_sha256"]
+            or record.get("sender_node") != sender_node):
+        print(f"Peer '{peer_name}' returned a mismatched ping receipt.", file=sys.stderr)
+        return 1
+    return _emit(args, {"peer": peer_name, "profile": profile, **record},
+                 [f"{ping_key}: received at {record.get('received_at')}"])
 
 
 def _peer_failure(peer_name: str, exc: Exception) -> int:
@@ -407,7 +480,7 @@ def cmd_peer(args) -> int:
     action = getattr(args, "peer_action", None)
     if action in _REGISTRY_ACTIONS:
         return _REGISTRY_ACTIONS[action](args)
-    if action not in {"dm", "run", "status", "stop"}:
+    if action not in {"dm", "run", "status", "stop", "ping", "ping-status"}:
         print("Unknown peer action. See: hermes peer --help", file=sys.stderr)
         return 2
     try:
@@ -419,6 +492,10 @@ def cmd_peer(args) -> int:
         print(str(exc), file=sys.stderr)
         return 1
     base = _base_url(peer, profile)
+    if action == "ping-status":
+        return _peer_ping_status(args, peer_name, profile, base, key)
+    if action == "ping":
+        return _peer_ping(args, peer_name, profile, base, key)
     if action in {"status", "stop"}:
         return _peer_run_ctl(args, action, peer_name, profile, base, key)
     message = _message_from_args(args)
@@ -448,6 +525,8 @@ def build_peer_parser(subparsers) -> None:
             "  hermes peer run spark --idempotency-key ticket-123 < long-task.txt\n"
             "  hermes peer status spark run_abc123\n"
             "  hermes peer stop spark run_abc123\n"
+            "  hermes peer ping spark --idempotency-key canary-123\n"
+            "  hermes peer ping-status spark canary-123\n"
             "  hermes peer remove spark\n"
             "\n"
             "Exit codes: 0 ok, 1 delivery/peer error, 2 usage error."),
@@ -481,5 +560,14 @@ def build_peer_parser(subparsers) -> None:
     _remote("run", "Start a long peer turn asynchronously and return its run ID", run_id=False)
     _remote("status", "Read the status and final output of an asynchronous peer run", run_id=True)
     _remote("stop", "Stop one asynchronous peer run without affecting another turn", run_id=True)
+
+    ping = peer_sub.add_parser("ping", help="Create and read back a no-agent peer ingress receipt")
+    ping.add_argument("target", help="<peer> or <peer>/<agent>")
+    ping.add_argument("--idempotency-key", required=True, help="Stable ping receipt key")
+    ping.add_argument("--json", action="store_true", default=False)
+    ping_status = peer_sub.add_parser("ping-status", help="Read a no-agent peer ingress receipt")
+    ping_status.add_argument("target", help="<peer> or <peer>/<agent>")
+    ping_status.add_argument("ping_key", help="Ping idempotency key")
+    ping_status.add_argument("--json", action="store_true", default=False)
 
     parser.set_defaults(func=cmd_peer)
