@@ -428,7 +428,7 @@ class TestAgentExecution:
         started = threading.Event()
         release = threading.Event()
         finished = threading.Event()
-        monkeypatch.setattr(bot_mode_dm, "message_agent_authorized", lambda _: True)
+        monkeypatch.setattr(bot_mode_dm, "is_canonical_bot_chat", lambda _: True)
         monkeypatch.setattr(fmd, "drain_config", lambda: fmd.DrainConfig(target="emulator", emulator_host="fake"))
 
         def drained(*_):
