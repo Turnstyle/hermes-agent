@@ -127,10 +127,10 @@ def message_agent_tool_schema() -> dict:
     }
 
 
-def message_agent_authorized(agent: Any) -> bool:
-    """The ``message_agent`` gate: a protocol-enabled agent whose session is a managed
-    Bot-Mode canonical Bot Chat. Session-stable, so it is prompt-cache safe to re-evaluate
-    on every tool-snapshot rebuild. Never raises."""
+def is_canonical_bot_chat(agent: Any) -> bool:
+    """A protocol-enabled agent whose session is a managed Bot-Mode canonical Bot Chat.
+    The strict gate: Bot-Chat-only machinery (the fleet message drain) keys on this, never on
+    the wider ``message_agent_authorized``. Never raises."""
     try:
         if not getattr(agent, "_bot_mode_protocol", True):
             return False
@@ -139,6 +139,78 @@ def message_agent_authorized(agent: Any) -> bool:
         # Managed-install check, NOT section non-emptiness: a SOUL.md carrying the
         # legacy protocol text gets an empty section but must still get the tool.
         return _session_title(agent) == BOT_CHAT_TITLE and is_bot_mode_managed(_agent_home(agent))
+    except Exception:  # pragma: no cover — must never break a turn
+        logger.debug("is_canonical_bot_chat failed", exc_info=True)
+        return False
+
+
+# carry (fleet t_2e0ceb41): per-profile opt-in that lets a messaging-gateway session (Slack, a
+# Meet voice bridge, ...) carry message_agent. Key: ``bot_mode.message_agent_platforms`` in the
+# PROFILE's own config.yaml — a list of gateway platform names (``agent.platform``), e.g. [slack].
+_SURFACE_CFG_KEY = "message_agent_platforms"
+# Never widened by config: the local CLI/TUI already has a Bot Chat, and these surfaces are
+# internal runners whose sender identity / reply routing is not a human-facing chat.
+_SURFACE_NEVER = frozenset({"", "cli", "tui", "cron", "subagent", "kanban", "batch"})
+
+
+def message_agent_surfaces(home: str | os.PathLike | None) -> frozenset[str]:
+    """Platforms the profile at ``home`` opted into for message_agent outside Bot Chat
+    (lower-cased, never-list removed). Empty on any read problem. Never raises."""
+    try:
+        from tools.bot_mode_probe import _read_yaml_dict
+
+        cfg = _read_yaml_dict(Path(str(home)) / "config.yaml", _SURFACE_CFG_KEY) if home else None
+        raw = ((cfg or {}).get("bot_mode") or {}).get(_SURFACE_CFG_KEY)
+        if isinstance(raw, str):
+            raw = [raw]
+        if not isinstance(raw, (list, tuple)):
+            return frozenset()
+        return frozenset(str(p).strip().lower() for p in raw if str(p).strip()) - _SURFACE_NEVER
+    except Exception:  # pragma: no cover — defensive
+        logger.debug("message_agent_surfaces read failed", exc_info=True)
+        return frozenset()
+
+
+def _surface_authorized(agent: Any) -> bool:
+    """A non-Bot-Chat gateway session on a managed install whose profile opted its platform in.
+    Memoized on the agent so the tool list stays byte-stable for the session (prompt-cache safe):
+    a config edit takes effect on the next new session / agent rebuild, not mid-session. The memo
+    is keyed by the resolved home, so a call made before the gateway bound the profile home can
+    never poison the answer for the bound turn."""
+    try:
+        home = _agent_home(agent)
+    except Exception:  # pragma: no cover — defensive
+        return False
+    memo = getattr(agent, "_message_agent_surface_ok", None)
+    if isinstance(memo, dict) and isinstance(memo.get(home), bool):
+        return memo[home]
+    ok = False
+    try:
+        platform = str(getattr(agent, "platform", "") or "").strip().lower()
+        if platform and platform not in _SURFACE_NEVER and getattr(agent, "_bot_mode_protocol", True):
+            from tools.bot_mode_probe import is_bot_mode_managed
+
+            ok = platform in message_agent_surfaces(home) and is_bot_mode_managed(home)
+    except Exception:  # pragma: no cover — must never break a turn
+        logger.debug("message_agent surface gate failed", exc_info=True)
+        ok = False
+    with contextlib.suppress(Exception):
+        if not isinstance(memo, dict):
+            memo = {}
+            agent._message_agent_surface_ok = memo
+        memo[home] = ok
+    return ok
+
+
+def message_agent_authorized(agent: Any) -> bool:
+    """The ``message_agent`` gate: the canonical Bot Chat (``is_canonical_bot_chat``), or a
+    gateway session whose platform the profile opted in via ``bot_mode.message_agent_platforms``.
+    Session-stable, so it is prompt-cache safe to re-evaluate on every tool-snapshot rebuild.
+    Never raises."""
+    try:
+        if not getattr(agent, "_bot_mode_protocol", True):
+            return False
+        return is_canonical_bot_chat(agent) or _surface_authorized(agent)
     except Exception:  # pragma: no cover — must never break a turn
         logger.debug("message_agent_authorized failed", exc_info=True)
         return False
@@ -216,9 +288,10 @@ def message_agent_tool(target: str = "", message: str = "", task_id: Optional[st
         )
         from tools.bot_relay import BOT_CHAT_TURN_ARGS, _hermes_cli
 
-        if _session_title(agent) != BOT_CHAT_TITLE:
-            return _err("message_agent is only available in a Bot Mode 'Bot Chat' session. "
-                        "This session is not one; do not retry.")
+        if _session_title(agent) != BOT_CHAT_TITLE and not _surface_authorized(agent):
+            return _err("message_agent is only available in a Bot Mode 'Bot Chat' session "
+                        "(or a gateway platform listed in this profile's bot_mode.message_agent_platforms). "
+                        "This session is neither; do not retry.")
         if not is_bot_mode_managed(home):
             return _err("This install is not Bot-Mode-managed (no bot roster); "
                         "message_agent is unavailable. Do not retry.")
@@ -1215,7 +1288,15 @@ def _delivery_main(args: list[str]) -> int:
 
 
 def _agent_home(agent: Any) -> str:
-    """The calling agent's OWN home (session-db derived), not ambient env."""
+    """The calling agent's OWN home: a bound HERMES_HOME override first (the messaging gateway
+    multiplexes profiles and binds the profile home per turn — same precedence as
+    ``agent/system_prompt._agent_home``), else session-db derived, never ambient env first."""
+    with contextlib.suppress(Exception):
+        from hermes_constants import get_hermes_home_override
+
+        override = get_hermes_home_override()
+        if override:
+            return str(override)
     with contextlib.suppress(Exception):
         db_path = getattr(getattr(agent, "_session_db", None), "db_path", None)
         if db_path:

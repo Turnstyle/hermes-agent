@@ -359,6 +359,16 @@ def _bot_mode_parts(agent: Any) -> List[str]:
             # user-initiated capability change in an eternal session.
             parts.append(epoch_line(_agent_home(agent)))
             agent._bot_chat_timeless_prompt = True
+        elif _title != BOT_CHAT_TITLE:
+            # carry t_2e0ceb41: a gateway session (Slack, Meet bridge) whose profile opted its
+            # platform into message_agent gets the same teammate roster so it can pick a recipient.
+            # No epoch line / timeless flag: this is an ordinary dated chat, not the eternal Bot Chat.
+            from tools.bot_mode_dm import _surface_authorized
+
+            if _surface_authorized(agent):
+                _section = get_bot_mode_protocol_section(_agent_home(agent))
+                if _section:
+                    parts.append(_section)
     except Exception:
         pass
     return parts
