@@ -605,9 +605,9 @@ def turn_end_drain_query(
 
 def drain_agent_turn(agent: Any, profile_home: Path | str, history: Optional[list] = None) -> bool:
     """Claim one API Bot Chat message and run its canonical CLI turn with a turn deadline."""
-    from tools.bot_mode_dm import message_agent_authorized
+    from tools.bot_mode_dm import is_canonical_bot_chat
 
-    if not message_agent_authorized(agent):
+    if not is_canonical_bot_chat(agent):
         return False
     if _reported_linger_busy(Path(profile_home)):
         return False
@@ -651,8 +651,8 @@ def api_turn_lock(profile_home: Path | str, session_id: str | None, *, agent: An
 
 
 def _api_drain_enabled(agent: Any) -> bool:
-    from tools.bot_mode_dm import message_agent_authorized
-    return message_agent_authorized(agent) and drain_config() is not None
+    from tools.bot_mode_dm import is_canonical_bot_chat
+    return is_canonical_bot_chat(agent) and drain_config() is not None
 
 
 def schedule_drain_agent_turn(agent: Any, profile_home: Path | str, history: Optional[list] = None,

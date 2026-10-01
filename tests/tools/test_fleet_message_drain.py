@@ -298,7 +298,7 @@ def test_api_agent_turn_uses_same_claim_and_records_settled_receipt(monkeypatch,
     monkeypatch.setattr(fmd, "drain_config", lambda cfg=None: config)
     monkeypatch.setattr(fmd, "store_for", lambda cfg: store)
     monkeypatch.setattr(fmd, "utcnow", lambda: NOW)
-    monkeypatch.setattr(bot_mode_dm, "message_agent_authorized", lambda agent: True)
+    monkeypatch.setattr(bot_mode_dm, "is_canonical_bot_chat", lambda agent: True)
     calls = []
     monkeypatch.setattr(fmd, "_idle_cli_turn", lambda home, text, author: (
         calls.append((home, text, author)) or {"status": "settled"}))
@@ -318,7 +318,7 @@ def test_api_drain_dispatch_returns_before_turn_and_serializes_next_turn(monkeyp
     done = threading.Event()
     follower_started = threading.Event()
     next_turn = threading.Event()
-    monkeypatch.setattr(bot_mode_dm, "message_agent_authorized", lambda _: True)
+    monkeypatch.setattr(bot_mode_dm, "is_canonical_bot_chat", lambda _: True)
     monkeypatch.setattr(fmd, "drain_config", lambda: fmd.DrainConfig(target="emulator", emulator_host="fake"))
 
     def drained(*_):
@@ -354,7 +354,7 @@ def test_api_turn_does_not_wait_for_profile_flock(monkeypatch, tmp_path):
 
     home = tmp_path / "profiles" / ME
     agent = SimpleNamespace(session_id="chat")
-    monkeypatch.setattr(bot_mode_dm, "message_agent_authorized", lambda _: True)
+    monkeypatch.setattr(bot_mode_dm, "is_canonical_bot_chat", lambda _: True)
     monkeypatch.setattr(fmd, "drain_config", lambda: fmd.DrainConfig(target="emulator", emulator_host="fake"))
     with acquire_turn_lock(tmp_path, ME, timeout_seconds=0):
         start = fmd.time.monotonic()
@@ -370,7 +370,7 @@ def test_api_drain_burst_has_one_worker_per_profile(monkeypatch, tmp_path):
     entered = threading.Event()
     release = threading.Event()
     done = threading.Event()
-    monkeypatch.setattr(bot_mode_dm, "message_agent_authorized", lambda _: True)
+    monkeypatch.setattr(bot_mode_dm, "is_canonical_bot_chat", lambda _: True)
     monkeypatch.setattr(fmd, "drain_config", lambda: fmd.DrainConfig(target="emulator", emulator_host="fake"))
 
     def drained(*_):
@@ -398,7 +398,7 @@ def test_api_drain_retries_after_profile_flock_is_busy(monkeypatch, tmp_path):
     store = MemoryStore()
     store.seed("flock-busy-message", msg(5))
     done = threading.Event()
-    monkeypatch.setattr(bot_mode_dm, "message_agent_authorized", lambda _: True)
+    monkeypatch.setattr(bot_mode_dm, "is_canonical_bot_chat", lambda _: True)
     monkeypatch.setattr(fmd, "drain_config", lambda cfg=None: fmd.DrainConfig(target="emulator", emulator_host="fake"))
     monkeypatch.setattr(fmd, "store_for", lambda cfg: store)
     monkeypatch.setattr(fmd, "utcnow", lambda: NOW)
@@ -434,7 +434,7 @@ def test_api_request_does_not_wait_for_drained_turn(monkeypatch, tmp_path):
     entered = threading.Event()
     release = threading.Event()
     done = threading.Event()
-    monkeypatch.setattr(bot_mode_dm, "message_agent_authorized", lambda _: True)
+    monkeypatch.setattr(bot_mode_dm, "is_canonical_bot_chat", lambda _: True)
     monkeypatch.setattr(fmd, "drain_config", lambda: fmd.DrainConfig(target="emulator", emulator_host="fake"))
 
     def drained(*_):
@@ -470,7 +470,7 @@ def test_api_drain_timeout_requeues_and_releases_profile_lock(monkeypatch, tmp_p
     monkeypatch.setattr(fmd, "drain_config", lambda cfg=None: config)
     monkeypatch.setattr(fmd, "store_for", lambda cfg: store)
     monkeypatch.setattr(fmd, "utcnow", lambda: NOW)
-    monkeypatch.setattr(bot_mode_dm, "message_agent_authorized", lambda _: True)
+    monkeypatch.setattr(bot_mode_dm, "is_canonical_bot_chat", lambda _: True)
     monkeypatch.setattr(fmd, "_idle_cli_turn", lambda *_: (_ for _ in ()).throw(
         fmd.subprocess.TimeoutExpired("fake-hermes", 1)))
     done = threading.Event()
@@ -645,7 +645,7 @@ def test_api_drain_worker_keeps_each_profile_scope(monkeypatch, tmp_path):
 
     seen = []
     done = threading.Event()
-    monkeypatch.setattr(bot_mode_dm, "message_agent_authorized", lambda _: True)
+    monkeypatch.setattr(bot_mode_dm, "is_canonical_bot_chat", lambda _: True)
     monkeypatch.setattr(fmd, "drain_config", lambda: fmd.DrainConfig(target="emulator", emulator_host="fake"))
 
     def drained(agent, home, history):
