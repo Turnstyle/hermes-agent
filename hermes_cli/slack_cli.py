@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import sys
+from collections.abc import Mapping
 from pathlib import Path
 
 SLACK_LONG_DESCRIPTION_MIN_CHARACTERS = 175
@@ -12,7 +13,8 @@ SLACK_LONG_DESCRIPTION_MAX_CHARACTERS = 4000
 
 def _build_full_manifest(
     bot_name: str, bot_description: str, include_assistant: bool = True,
-    messaging_experience: str | None = None, long_description: str | None = None) -> dict:
+    messaging_experience: str | None = None, long_description: str | None = None,
+    slash_aliases: Mapping[str, str] | None = None) -> dict:
     """Build a full Slack manifest: display info + slash list from ``COMMAND_REGISTRY``.
 
     Other sections (OAuth scopes, socket mode) are sensible Hermes defaults, tweakable in the Slack
@@ -31,7 +33,7 @@ def _build_full_manifest(
             "messages_tab_enabled": True,
             "messages_tab_read_only_enabled": False},
         "bot_user": {"display_name": bot_name[:80], "always_online": True},
-        "slash_commands": slack_app_manifest()["features"]["slash_commands"][:_SLACK_MAX_SLASH_COMMANDS]}
+        "slash_commands": slack_app_manifest(slash_aliases=slash_aliases)["features"]["slash_commands"][:_SLACK_MAX_SLASH_COMMANDS]}
 
     bot_scopes = [
         "app_mentions:read", "channels:history", "channels:read", "chat:write", "commands",

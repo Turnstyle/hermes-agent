@@ -23,6 +23,7 @@ from hermes_cli.commands_platforms import (
     slack_native_slashes,
     validate_slack_slash_aliases,
 )
+from hermes_cli.slack_cli import _build_full_manifest
 from plugins.platforms.slack.adapter import SlackAdapter
 
 
@@ -270,6 +271,7 @@ class TestSlackSlashAliasesZeroChangeWithoutAliases:
         assert SlackAdapter._slash_command_text(command_hermes) == "/compress"
 
     def test_manifest_identical_without_aliases(self):
+        import json
         native_slashes = slack_native_slashes()
         expected_manifest = {
             "features": {
@@ -292,6 +294,11 @@ class TestSlackSlashAliasesZeroChangeWithoutAliases:
         assert manifest_default == expected_manifest
         assert manifest_explicit_none == expected_manifest
         assert manifest_empty_dict == expected_manifest
+
+        # Compare serialized JSON bytes for exact byte identity with base
+        bytes_default = json.dumps(manifest_default, indent=2, ensure_ascii=False) + "\n"
+        bytes_expected = json.dumps(expected_manifest, indent=2, ensure_ascii=False) + "\n"
+        assert bytes_default == bytes_expected
 
 
 class TestSlackSlashAliasesManifestGeneration:
@@ -369,8 +376,10 @@ class TestSlackSlashAliasesManifestGeneration:
         assert "/cos-status" in slash_by_cmd
 
     def test_manifest_respects_50_command_cap_on_real_registry(self, caplog):
-        """M1 requirement: card's 5-alias config on real registry yields at most 50 commands,
-        and the overflow is warned and deterministic (native commands never dropped)."""
+        """T1 requirement: on the REAL registry, with the card's 5 aliases
+        (cos-busy->busy, cos-stop->stop, cos-queue->queue, cos-steer->steer, cos-status->status):
+        all 5 /cos-* are in the manifest, /hermes is in it, and the total is <= 50.
+        Both manifest paths (slack_app_manifest and _build_full_manifest)."""
         card_aliases = {
             "cos-busy": "busy",
             "cos-stop": "stop",
@@ -379,53 +388,193 @@ class TestSlackSlashAliasesManifestGeneration:
             "cos-status": "status",
         }
         with caplog.at_level(logging.WARNING, logger="hermes_cli.commands"):
-            manifest = slack_app_manifest(slash_aliases=card_aliases)
+            manifest_app = slack_app_manifest(slash_aliases=card_aliases)
 
-        slashes = manifest["features"]["slash_commands"]
-        assert len(slashes) <= 50
-        assert len(slashes) == 50
+        slashes_app = manifest_app["features"]["slash_commands"]
+        assert len(slashes_app) <= 50
+        assert len(slashes_app) == 50
 
-        # Native commands are never dropped
-        native_slashes = slack_native_slashes()
-        native_cmds = {f"/{name}" for name, _d, _h in native_slashes}
-        manifest_cmds = {entry["command"] for entry in slashes}
-        assert native_cmds.issubset(manifest_cmds)
+        app_cmds = {entry["command"] for entry in slashes_app}
+        # All 5 /cos-* are in the manifest
+        for alias in card_aliases.keys():
+            assert f"/{alias}" in app_cmds
+        # /hermes is in it
+        assert "/hermes" in app_cmds
 
-        # Overflow warnings logged for all 5 aliases
-        warnings = [r.getMessage() for r in caplog.records if r.levelno == logging.WARNING]
-        for alias in sorted(card_aliases.keys()):
-            assert any(f"Refusing slash alias '{alias}' in manifest: manifest command cap (50) reached" in w for w in warnings)
+        # Exactly ONE warning listing the trimmed names is logged
+        trim_warnings = [
+            r.getMessage() for r in caplog.records
+            if r.levelno == logging.WARNING and "Trimmed native slash command" in r.getMessage()
+        ]
+        assert len(trim_warnings) == 1
+        # The trimmed names are the lowest-priority 5 commands on real registry
+        for trimmed_name in ("usage", "restart", "help", "commands", "reload-skills"):
+            assert trimmed_name in trim_warnings[0]
+
+        # Path 2: _build_full_manifest in hermes_cli.slack_cli
+        caplog.clear()
+        manifest_full = _build_full_manifest("Hermes", "desc", slash_aliases=card_aliases)
+        slashes_full = manifest_full["features"]["slash_commands"]
+        assert len(slashes_full) <= 50
+        assert len(slashes_full) == 50
+        full_cmds = {entry["command"] for entry in slashes_full}
+        for alias in card_aliases.keys():
+            assert f"/{alias}" in full_cmds
+        assert "/hermes" in full_cmds
+
+        trim_warnings_full = [
+            r.getMessage() for r in caplog.records
+            if r.levelno == logging.WARNING and "Trimmed native slash command" in r.getMessage()
+        ]
+        assert len(trim_warnings_full) == 1
 
     def test_manifest_deterministic_trimming_with_partial_slots(self, monkeypatch, caplog):
-        """M1 requirement: when partial slots remain under the 50-command cap, excess aliases
-        are trimmed deterministically (alphabetical order) with warnings logged."""
-        dummy_natives = [(f"native-{i:02d}", f"desc-{i}", "") for i in range(48)]
+        """T2 requirement: trim order is deterministic: plugin natives go first,
+        then built-in alias names, then canonical names, and one warning lists
+        exactly the trimmed names."""
+        dummy_natives = [
+            ("hermes", "Talk to Hermes", ""),
+        ]
+        # 40 canonicals, 5 built-in aliases, 4 plugins = 50 total natives
+        dummy_natives += [(f"canon-{i:02d}", f"Canon {i}", "") for i in range(1, 41)]
+        dummy_natives += [(f"alias-{i:02d}", f"Alias {i}", "") for i in range(1, 6)]
+        dummy_natives += [(f"plugin-{i:02d}", f"Plugin {i}", "") for i in range(1, 5)]
+        assert len(dummy_natives) == 50
+
         monkeypatch.setattr("hermes_cli.commands_platforms.slack_native_slashes", lambda: dummy_natives)
 
-        aliases = {
-            "cos-e": "busy",
-            "cos-b": "busy",
-            "cos-a": "busy",
-            "cos-d": "busy",
-            "cos-c": "busy",
-        }
+        # Configure 10 aliases: max_native_slots = 50 - 10 = 40.
+        # hermes must be kept (1).
+        # Need to trim 10 natives:
+        # All 4 plugins first (plugin-04, 03, 02, 01),
+        # then all 5 built-in aliases (alias-05, 04, 03, 02, 01),
+        # then 1 canonical (canon-40) last!
+        ten_aliases = {f"cos-{i:02d}": "busy" for i in range(1, 11)}
         with caplog.at_level(logging.WARNING, logger="hermes_cli.commands"):
-            manifest = slack_app_manifest(slash_aliases=aliases)
+            manifest = slack_app_manifest(slash_aliases=ten_aliases)
 
         slashes = manifest["features"]["slash_commands"]
         assert len(slashes) == 50
-        cmd_names = [entry["command"] for entry in slashes]
+        cmd_names = [e["command"] for e in slashes]
 
-        # First 48 are the native commands
-        assert cmd_names[:48] == [f"/{name}" for name, _d, _h in dummy_natives]
-        # Next 2 slots are deterministically filled by sorted aliases: cos-a, cos-b
-        assert cmd_names[48:] == ["/cos-a", "/cos-b"]
+        # All 10 aliases are in manifest
+        for alias in ten_aliases:
+            assert f"/{alias}" in cmd_names
 
-        # Excess aliases cos-c, cos-d, cos-e are warned
+        # hermes is in manifest
+        assert "/hermes" in cmd_names
+
+        # All plugins and all aliases were trimmed from manifest
+        for i in range(1, 5):
+            assert f"/plugin-{i:02d}" not in cmd_names
+        for i in range(1, 6):
+            assert f"/alias-{i:02d}" not in cmd_names
+        # canon-40 was trimmed; canon-01 to canon-39 are kept
+        assert "/canon-40" not in cmd_names
+        for i in range(1, 40):
+            assert f"/canon-{i:02d}" in cmd_names
+
+        # Exactly ONE warning listing the trimmed names in deterministic order
+        trim_warnings = [
+            r.getMessage() for r in caplog.records
+            if r.levelno == logging.WARNING and "Trimmed native slash command" in r.getMessage()
+        ]
+        assert len(trim_warnings) == 1
+        msg = trim_warnings[0]
+
+        # Verify all trimmed names are in the warning
+        assert "plugin-04" in msg
+        assert "alias-05" in msg
+        assert "canon-40" in msg
+
+        # Verify trim order: plugin natives go first, then built-in alias names, then canonical names
+        idx_plugin = msg.find("plugin-04")
+        idx_alias = msg.find("alias-05")
+        idx_canon = msg.find("canon-40")
+        assert idx_plugin < idx_alias < idx_canon
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("chat_type", ["dm", "group"])
+    async def test_trimmed_native_dispatches_via_hermes_subcommand(self, chat_type):
+        """T3 requirement: a trimmed native (e.g. usage) still dispatches via
+        '/hermes <command>' through the adapter's slash handler, with the same authorization as before."""
+        channel_id = "D12345" if chat_type == "dm" else "C12345"
+        raw_cmd_native = {
+            "command": "/usage",
+            "text": "details",
+            "user_id": "UUSER",
+            "channel_id": channel_id,
+            "team_id": "TTEAM",
+            "thread_ts": "1234.5678",
+        }
+        raw_cmd_via_hermes = {
+            "command": "/hermes",
+            "text": "usage details",
+            "user_id": "UUSER",
+            "channel_id": channel_id,
+            "team_id": "TTEAM",
+            "thread_ts": "1234.5678",
+        }
+
+        # 1. Direct native slash (still supported by Bolt slash pattern)
+        adapter_native = _build_adapter(extra={})
+        await adapter_native._handle_slash_command(raw_cmd_native)
+        event_native: MessageEvent = adapter_native.handle_message.await_args.args[0]
+
+        # 2. Via /hermes usage
+        card_aliases = {
+            "cos-busy": "busy",
+            "cos-stop": "stop",
+            "cos-queue": "queue",
+            "cos-steer": "steer",
+            "cos-status": "status",
+        }
+        adapter_trimmed = _build_adapter(extra={"slash_aliases": card_aliases})
+        await adapter_trimmed._handle_slash_command(raw_cmd_via_hermes)
+        event_via_hermes: MessageEvent = adapter_trimmed.handle_message.await_args.args[0]
+
+        # Assert identical MessageEvent attributes and authorization
+        assert event_via_hermes.text == event_native.text == "/usage details"
+        assert event_via_hermes.message_type == event_native.message_type == MessageType.COMMAND
+        assert event_via_hermes.source.chat_id == event_native.source.chat_id == channel_id
+        assert event_via_hermes.source.chat_type == event_native.source.chat_type == chat_type
+        assert event_via_hermes.source.user_id == event_native.source.user_id == "UUSER"
+        assert event_via_hermes.source.scope_id == event_native.source.scope_id == "TTEAM"
+        assert event_via_hermes.source.thread_id == event_native.source.thread_id == "1234.5678"
+
+        # Also verify that the Bolt slash regex still matches both the trimmed native and aliases
+        adapter_trimmed._register_bolt_handlers()
+        assert adapter_trimmed._slash_pattern.match("/usage") is not None
+        assert adapter_trimmed._slash_pattern.match("/cos-busy") is not None
+        assert adapter_trimmed._slash_pattern.match("/hermes") is not None
+
+    def test_aliases_exceeding_slots_keep_first_in_config_order_and_warn(self, caplog):
+        """T4 requirement: if aliases alone exceed available slots (50 minus /hermes = 49),
+        keep the first ones in config order and warn for the excess."""
+        many_aliases = {f"alias-{i:02d}": "busy" for i in range(1, 53)}
+        with caplog.at_level(logging.WARNING, logger="hermes_cli.commands"):
+            manifest = slack_app_manifest(slash_aliases=many_aliases)
+
+        slashes = manifest["features"]["slash_commands"]
+        assert len(slashes) == 50
+        cmd_names = [e["command"] for e in slashes]
+
+        # /hermes is always kept
+        assert "/hermes" in cmd_names
+
+        # First 49 aliases kept in config order
+        expected_kept = [f"/alias-{i:02d}" for i in range(1, 50)]
+        for kept in expected_kept:
+            assert kept in cmd_names
+
+        # Aliases 50, 51, 52 are dropped
+        for dropped in ("alias-50", "alias-51", "alias-52"):
+            assert f"/{dropped}" not in cmd_names
+
+        # Warnings logged for dropped excess aliases
         warnings = [r.getMessage() for r in caplog.records if r.levelno == logging.WARNING]
-        assert any("cos-c" in w and "manifest command cap (50) reached" in w for w in warnings)
-        assert any("cos-d" in w and "manifest command cap (50) reached" in w for w in warnings)
-        assert any("cos-e" in w and "manifest command cap (50) reached" in w for w in warnings)
+        for dropped in ("alias-50", "alias-51", "alias-52"):
+            assert any(f"Refusing slash alias '{dropped}' in manifest: manifest command cap (50) reached" in w for w in warnings)
 
 
 class TestSlackSlashAliasesPluginAndWrapperTargetRefusal:

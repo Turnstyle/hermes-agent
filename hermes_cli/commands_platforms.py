@@ -569,37 +569,115 @@ def slack_app_manifest(
 ) -> dict[str, Any]:
     """``features.slash_commands`` manifest portion only (decoupled from the rest of the manifest
     users configure in the Slack UI); ``request_url`` is schema-required, ignored in Socket Mode.
-    Keeps the total manifest at or under _SLACK_MAX_SLASH_COMMANDS (50). Aliases count against
-    the cap; native commands are never dropped to make room, and excess aliases are trimmed
-    deterministically with a logged warning.
+    Keeps the total manifest at or under _SLACK_MAX_SLASH_COMMANDS (50). Operator-configured
+    slash aliases outrank native entries in the 50-slot manifest. When over 50, native entries
+    are trimmed from the lowest-priority end (plugin commands first, then built-in aliases, then
+    canonical names; /hermes is never trimmed), logging one warning listing the trimmed names.
+    If aliases alone exceed available slots (50 minus /hermes = 49), the first 49 in config order
+    are kept and excess aliases are warned. With no aliases, output is identical to base.
     """
+    if slash_aliases is None:
+        slash_aliases = _slack_slash_aliases_config()
+
+    valid_aliases: dict[str, str] = {}
+    if slash_aliases is not None:
+        valid_aliases = validate_slack_slash_aliases(slash_aliases)
+
+    native_list = slack_native_slashes()
+
+    # If no valid aliases configured, preserve zero-change behavior identical to base
+    if not valid_aliases:
+        slashes = []
+        for name, desc, usage in native_list:
+            entry = {"command": f"/{name}", "description": desc or f"Run /{name}",
+                     "should_escape": False, "url": request_url}
+            if usage:
+                entry["usage_hint"] = usage
+            slashes.append(entry)
+        return {"features": {"slash_commands": slashes[:_SLACK_MAX_SLASH_COMMANDS]}}
+
+    # Rule (6): if aliases alone exceed available slots (50 minus /hermes = 49),
+    # keep the first ones in config order and warn.
+    max_alias_slots = _SLACK_MAX_SLASH_COMMANDS - 1
+    alias_items = list(valid_aliases.items())
+    accepted_alias_items = alias_items[:max_alias_slots]
+    dropped_alias_items = alias_items[max_alias_slots:]
+
+    for alias, _ in dropped_alias_items:
+        logger.warning(
+            "[Slack] Refusing slash alias '%s' in manifest: manifest command cap (%d) reached",
+            alias,
+            _SLACK_MAX_SLASH_COMMANDS,
+        )
+
+    accepted_aliases = dict(accepted_alias_items)
+    num_aliases = len(accepted_aliases)
+    max_native_slots = max(1, _SLACK_MAX_SLASH_COMMANDS - num_aliases)
+
+    # Order native commands by priority:
+    # 0. /hermes (never trimmed)
+    # 1. canonical commands
+    # 2. built-in alias names
+    # 3. plugin commands
+    available = _gateway_available_commands()
+    canonical_names = {cmd.name.lower() for cmd in available}
+    builtin_alias_names = {a.lower() for cmd in available for a in cmd.aliases}
+    plugin_names = {name.lower() for name, _d, _h in _iter_plugin_command_entries()}
+
+    hermes_entries: list[tuple[str, str, str]] = []
+    canonical_entries: list[tuple[str, str, str]] = []
+    alias_entries: list[tuple[str, str, str]] = []
+    plugin_entries: list[tuple[str, str, str]] = []
+
+    for item in native_list:
+        clean = item[0].lstrip("/").lower()
+        if clean == "hermes":
+            hermes_entries.append(item)
+        elif clean in canonical_names:
+            canonical_entries.append(item)
+        elif clean in builtin_alias_names:
+            alias_entries.append(item)
+        elif clean in plugin_names:
+            plugin_entries.append(item)
+        else:
+            if "plugin" in clean:
+                plugin_entries.append(item)
+            elif "alias" in clean:
+                alias_entries.append(item)
+            else:
+                canonical_entries.append(item)
+
+    ordered_natives = hermes_entries + canonical_entries + alias_entries + plugin_entries
+
+    if len(ordered_natives) > max_native_slots:
+        kept_natives = ordered_natives[:max_native_slots]
+        trimmed_natives = ordered_natives[max_native_slots:]
+    else:
+        kept_natives = ordered_natives
+        trimmed_natives = []
+
+    # Rule (4): log ONE warning listing the trimmed names in deterministic trim order
+    # (plugin natives first, then built-in alias names, then canonical names)
+    if trimmed_natives:
+        trimmed_names = [e[0] for e in reversed(trimmed_natives)]
+        logger.warning(
+            "[Slack] Trimmed native slash command(s) from manifest to accommodate aliases "
+            "(still reachable via '/hermes <command>'): %s",
+            ", ".join(trimmed_names),
+        )
+
+    # Build manifest entries for kept natives
     slashes = []
-    for name, desc, usage in slack_native_slashes():
+    for name, desc, usage in kept_natives:
         entry = {"command": f"/{name}", "description": desc or f"Run /{name}",
                  "should_escape": False, "url": request_url}
         if usage:
             entry["usage_hint"] = usage
         slashes.append(entry)
 
-    if slash_aliases is None:
-        slash_aliases = _slack_slash_aliases_config()
-
-    if slash_aliases is not None:
-        valid_aliases = validate_slack_slash_aliases(slash_aliases)
-        available_slots = max(0, _SLACK_MAX_SLASH_COMMANDS - len(slashes))
-        sorted_alias_names = sorted(valid_aliases.keys())
-        accepted_aliases = {
-            alias: valid_aliases[alias]
-            for alias in sorted_alias_names[:available_slots]
-        }
-        for alias in sorted_alias_names[available_slots:]:
-            logger.warning(
-                "[Slack] Refusing slash alias '%s' in manifest: manifest command cap (%d) reached",
-                alias,
-                _SLACK_MAX_SLASH_COMMANDS,
-            )
-        if accepted_aliases:
-            slashes.extend(slack_alias_manifest_entries(accepted_aliases, request_url=request_url))
+    # Append alias entries
+    if accepted_aliases:
+        slashes.extend(slack_alias_manifest_entries(accepted_aliases, request_url=request_url))
 
     return {"features": {"slash_commands": slashes[:_SLACK_MAX_SLASH_COMMANDS]}}
 

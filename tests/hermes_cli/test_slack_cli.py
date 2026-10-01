@@ -154,9 +154,28 @@ class TestSlackFullManifest:
             assert event in bot_events
 
     def test_full_manifest_respects_50_command_cap(self):
-        """M1 requirement: CLI full manifest retains at most 50 slash commands."""
+        """M1 requirement: CLI full manifest retains at most 50 slash commands,
+        and includes configured aliases on the real registry."""
         manifest = _build_full_manifest("Hermes", "Your Hermes agent on Slack")
         assert len(manifest["features"]["slash_commands"]) <= 50
+
+        card_aliases = {
+            "cos-busy": "busy",
+            "cos-stop": "stop",
+            "cos-queue": "queue",
+            "cos-steer": "steer",
+            "cos-status": "status",
+        }
+        manifest_with_aliases = _build_full_manifest(
+            "Hermes", "Your Hermes agent on Slack", slash_aliases=card_aliases
+        )
+        slashes = manifest_with_aliases["features"]["slash_commands"]
+        assert len(slashes) <= 50
+        assert len(slashes) == 50
+        cmds = {entry["command"] for entry in slashes}
+        for alias in card_aliases:
+            assert f"/{alias}" in cmds
+        assert "/hermes" in cmds
 
 
 
