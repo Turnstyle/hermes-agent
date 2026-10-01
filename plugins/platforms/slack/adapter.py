@@ -11,7 +11,7 @@ import re
 import time
 import unicodedata
 from dataclasses import dataclass, field
-from typing import Awaitable, Callable, ClassVar, Dict, Optional, Any, Tuple, List
+from typing import Awaitable, Callable, ClassVar, Dict, Optional, Any, Tuple, List, Mapping
 
 import aiohttp
 
@@ -1110,6 +1110,9 @@ class SlackAdapter(BasePlatformAdapter):
         # Slash-command contexts so send() can route the first reply ephemerally. Keyed
         # (team_id, channel_id, user_id), two-part when no team id → {"response_url", "ts"}.
         self._slash_command_contexts: Dict[Tuple[str, ...], Dict[str, Any]] = {}
+        # Slash command aliases (platforms.slack.extra.slash_aliases)
+        self._slash_aliases: Dict[str, str] = self._resolve_slash_aliases()
+        self._slash_pattern: Optional[Any] = None
         # Native streaming state per chat_id: {"ts", "draft_id", "sent", "started"}.
         # ``sent`` is raw pre-mrkdwn text; the API is append-only so deltas diff against it.
         self._active_streams: Dict[str, Dict[str, Any]] = {}
@@ -1123,6 +1126,15 @@ class SlackAdapter(BasePlatformAdapter):
         self._socket_watchdog_task: Optional[asyncio.Task] = None
         self._socket_reconnect_lock = asyncio.Lock()
         self._socket_handler_started_monotonic: Optional[float] = None
+
+    def _resolve_slash_aliases(self) -> Dict[str, str]:
+        """Validate and resolve profile-scoped slash command aliases from ``extra.slash_aliases``."""
+        extra = self.config.extra if isinstance(getattr(self.config, "extra", None), dict) else {}
+        raw = extra.get("slash_aliases")
+        if not raw:
+            return {}
+        from hermes_cli.commands_platforms import validate_slack_slash_aliases
+        return validate_slack_slash_aliases(raw, logger_instance=logger)
 
     async def _close_workspace_clients(self) -> None:
         """Close any Slack SDK clients that may own aiohttp sessions."""
@@ -1657,11 +1669,16 @@ class SlackAdapter(BasePlatformAdapter):
         # deliver undeclared commands at all.
         from hermes_cli.commands_platforms import slack_native_slashes
         _slash_names = [name for name, _d, _h in slack_native_slashes()]
+        if getattr(self, "_slash_aliases", None):
+            for alias_name in sorted(self._slash_aliases.keys()):
+                if alias_name not in _slash_names:
+                    _slash_names.append(alias_name)
         if _slash_names:
             _slash_pattern = re.compile(
                 r"^/(?:" + "|".join(re.escape(n) for n in _slash_names) + r")$")
         else:  # pragma: no cover - registry always non-empty
             _slash_pattern = re.compile(r"^/hermes$")
+        self._slash_pattern = _slash_pattern
 
         @self._app.command(_slash_pattern)
         async def handle_hermes_command(ack, command):
@@ -5907,7 +5924,7 @@ class SlackAdapter(BasePlatformAdapter):
         team_id = command.get("team_id", "")
         if team_id and channel_id:
             self._remember_channel_team(channel_id, team_id)
-        text = self._slash_command_text(command)
+        text = self._slash_command_text(command, getattr(self, "_slash_aliases", None))
         thread_id = self._slash_thread_id(command)
         is_dm = str(channel_id).startswith("D")
         if is_dm and self._slack_disable_dms():
@@ -5936,12 +5953,17 @@ class SlackAdapter(BasePlatformAdapter):
             _slash_user_id.reset(_slash_user_id_token)
 
     @staticmethod
-    def _slash_command_text(command: dict) -> str:
+    def _slash_command_text(command: dict, aliases: Optional[Mapping[str, str]] = None) -> str:
         """Gateway message text for a slash payload. Native slashes keep Slack's raw argument
         payload verbatim (internal/trailing spacing). ``/hermes`` (or a missing ``command``) maps
         ``<subcommand> [args]`` via the registry, else free-form text is a regular question."""
         slash_name = (command.get("command") or "").lstrip("/").strip()
         raw_text = str(command.get("text") or "")
+        if aliases:
+            target = aliases.get(slash_name) or aliases.get(slash_name.lower())
+            if target:
+                target_clean = target.lstrip("/").strip()
+                return f"/{target_clean}" if not raw_text else f"/{target_clean} {raw_text}"
         if slash_name not in {"hermes", ""}:
             return f"/{slash_name}" if not raw_text else f"/{slash_name} {raw_text}"
         legacy_text = raw_text.strip()

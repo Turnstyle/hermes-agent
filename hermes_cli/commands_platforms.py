@@ -372,7 +372,7 @@ _SLACK_NAME_LIMIT = 32
 _SLACK_INVALID_CHARS = re.compile(r"[^a-z0-9_\-]")
 _SLACK_RESERVED_COMMANDS = frozenset({
     "me", "status", "away", "dnd", "shrug", "remind", "msg", "feed", "who", "collapse", "expand",
-    "leave", "join", "open", "search", "topic", "mute", "pro", "shortcuts"})
+    "leave", "join", "open", "search", "topic", "mute", "pro", "shortcuts", "archive"})
 
 # Canonical commands deliberately routed through ``/hermes <command>`` on Slack only: the registry
 # sits at Slack's 50-slash cap, so rather than let the clamp silently drop whichever command sorts
@@ -388,6 +388,136 @@ _SLACK_VIA_HERMES_ONLY = frozenset({
 def _sanitize_slack_name(raw: str) -> str:
     """Lowercase, strip chars outside ``[a-z0-9_-]`` and edge ``-_``, clamp to 32."""
     return _SLACK_INVALID_CHARS.sub("", raw.lower()).strip("-_")[:_SLACK_NAME_LIMIT]
+
+
+def _slack_command_target_info(target: str) -> tuple[str, str] | None:
+    """Return (description, args_hint) for an existing gateway command or registered alias,
+    or None if target is not a valid gateway command."""
+    t = str(target or "").lstrip("/").strip().lower()
+    if not t:
+        return None
+    for cmd in _gateway_available_commands():
+        if t == cmd.name.lower() or t in (a.lower() for a in cmd.aliases):
+            return cmd.description, cmd.args_hint or ""
+    for name, desc, hint in _iter_plugin_command_entries():
+        if t == name.lower():
+            return desc, hint or ""
+    return None
+
+
+def _slack_slash_aliases_config() -> dict[str, str]:
+    """Read ``platforms.slack.extra.slash_aliases`` from active profile config."""
+    try:
+        from hermes_cli.config import read_raw_config
+        node: Any = read_raw_config() or {}
+    except Exception:
+        node = {}
+    for key in ("platforms", "slack", "extra", "slash_aliases"):
+        node = node.get(key) if isinstance(node, Mapping) else None
+    if isinstance(node, Mapping):
+        return {str(k): str(v) for k, v in node.items()}
+    return {}
+
+
+def validate_slack_slash_aliases(
+    raw_aliases: Any,
+    *,
+    logger_instance: logging.Logger | None = None,
+) -> dict[str, str]:
+    """Validate and sanitize platforms.slack.extra.slash_aliases entries.
+
+    Rules:
+    - Target must be an existing gateway command (canonical name, registered alias, or plugin command).
+    - Alias names are sanitized like other Slack names (_sanitize_slack_name rules).
+    - Alias names must not be empty after sanitization.
+    - Alias names must not be Slack-reserved (_SLACK_RESERVED_COMMANDS).
+    - Alias names must not collide with an existing native slash name (slack_native_slashes).
+    - Alias names must be unique.
+    - Invalid entries are logged with ONE clear warning line each and skipped.
+    - Never raises / crashes.
+    """
+    log = logger_instance or logger
+    if not isinstance(raw_aliases, Mapping):
+        if raw_aliases is not None:
+            log.warning(
+                "[Slack] Refusing platforms.slack.extra.slash_aliases: expected a mapping of alias -> target, got %s",
+                type(raw_aliases).__name__,
+            )
+        return {}
+
+    native_names = {name for name, _d, _h in slack_native_slashes()}
+    valid_aliases: dict[str, str] = {}
+
+    for raw_alias, raw_target in raw_aliases.items():
+        alias_clean = str(raw_alias).lstrip("/").strip()
+        sanitized_alias = _sanitize_slack_name(alias_clean)
+
+        if not sanitized_alias:
+            log.warning(
+                "[Slack] Refusing slash alias '%s': invalid alias name after sanitization",
+                raw_alias,
+            )
+            continue
+
+        if sanitized_alias in _SLACK_RESERVED_COMMANDS:
+            log.warning(
+                "[Slack] Refusing slash alias '%s': '%s' is a Slack-reserved command",
+                raw_alias,
+                sanitized_alias,
+            )
+            continue
+
+        if sanitized_alias in native_names:
+            log.warning(
+                "[Slack] Refusing slash alias '%s': '%s' collides with an existing native slash command",
+                raw_alias,
+                sanitized_alias,
+            )
+            continue
+
+        if sanitized_alias in valid_aliases:
+            log.warning(
+                "[Slack] Refusing slash alias '%s': '%s' is already registered as an alias",
+                raw_alias,
+                sanitized_alias,
+            )
+            continue
+
+        target_clean = str(raw_target).lstrip("/").strip().lower()
+        info = _slack_command_target_info(target_clean)
+        if info is None:
+            log.warning(
+                "[Slack] Refusing slash alias '%s': target '%s' is not an existing gateway command",
+                raw_alias,
+                raw_target,
+            )
+            continue
+
+        valid_aliases[sanitized_alias] = target_clean
+
+    return valid_aliases
+
+
+def slack_alias_manifest_entries(
+    aliases: Mapping[str, str],
+    request_url: str = "https://hermes-agent.local/slack/commands",
+) -> list[dict[str, Any]]:
+    """Build manifest slash_commands entries for valid Slack slash aliases."""
+    entries: list[dict[str, Any]] = []
+    for alias_name, target in aliases.items():
+        info = _slack_command_target_info(target)
+        target_desc, target_hint = info if info else ("", "")
+        desc = f"Alias for /{target} — {target_desc}" if target_desc else f"Alias for /{target}"
+        entry: dict[str, Any] = {
+            "command": f"/{alias_name}",
+            "description": desc[:140] or f"Run /{alias_name}",
+            "should_escape": False,
+            "url": request_url,
+        }
+        if target_hint:
+            entry["usage_hint"] = target_hint[:100]
+        entries.append(entry)
+    return entries
 
 
 def slack_native_slashes() -> list[tuple[str, str, str]]:
@@ -417,7 +547,9 @@ def slack_native_slashes() -> list[tuple[str, str, str]]:
 
 
 def slack_app_manifest(
-    request_url: str = "https://hermes-agent.local/slack/commands") -> dict[str, Any]:
+    request_url: str = "https://hermes-agent.local/slack/commands",
+    slash_aliases: Mapping[str, str] | None = None,
+) -> dict[str, Any]:
     """``features.slash_commands`` manifest portion only (decoupled from the rest of the manifest
     users configure in the Slack UI); ``request_url`` is schema-required, ignored in Socket Mode."""
     slashes = []
@@ -427,6 +559,14 @@ def slack_app_manifest(
         if usage:
             entry["usage_hint"] = usage
         slashes.append(entry)
+
+    if slash_aliases is None:
+        slash_aliases = _slack_slash_aliases_config()
+
+    if slash_aliases:
+        valid_aliases = validate_slack_slash_aliases(slash_aliases)
+        slashes.extend(slack_alias_manifest_entries(valid_aliases, request_url=request_url))
+
     return {"features": {"slash_commands": slashes}}
 
 
