@@ -153,4 +153,10 @@ class TestSlackFullManifest:
         for event in ("message.im", "message.channels", "message.groups", "app_mention"):
             assert event in bot_events
 
+    def test_full_manifest_respects_50_command_cap(self):
+        """M1 requirement: CLI full manifest retains at most 50 slash commands."""
+        manifest = _build_full_manifest("Hermes", "Your Hermes agent on Slack")
+        assert len(manifest["features"]["slash_commands"]) <= 50
+
+
 

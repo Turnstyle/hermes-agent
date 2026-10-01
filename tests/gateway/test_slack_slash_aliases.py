@@ -297,7 +297,12 @@ class TestSlackSlashAliasesZeroChangeWithoutAliases:
 class TestSlackSlashAliasesManifestGeneration:
     """Requirement (f): the manifest with aliases includes exactly the valid alias entries."""
 
-    def test_manifest_includes_valid_aliases_with_descriptions_and_hints(self):
+    def test_manifest_includes_valid_aliases_with_descriptions_and_hints(self, monkeypatch):
+        # Provide available slots under the 50-command cap so all 5 aliases can be included
+        monkeypatch.setattr(
+            "hermes_cli.commands_platforms.slack_native_slashes",
+            lambda: [("hermes", "Talk to Hermes", "[args]")],
+        )
         aliases = {
             "cos-busy": "busy",
             "cos-stop": "stop",
@@ -336,6 +341,11 @@ class TestSlackSlashAliasesManifestGeneration:
         assert queue_entry["usage_hint"] == "[<prompt>|list|edit N <prompt>|rm N|move A B|clear]"
 
     def test_manifest_reads_from_raw_config(self, monkeypatch):
+        # Provide available slots under the 50-command cap
+        monkeypatch.setattr(
+            "hermes_cli.commands_platforms.slack_native_slashes",
+            lambda: [("hermes", "Talk to Hermes", "[args]")],
+        )
         # When slash_aliases is None, read from profile config
         mock_raw_config = {
             "platforms": {
@@ -357,3 +367,131 @@ class TestSlackSlashAliasesManifestGeneration:
 
         assert "/cos-busy" in slash_by_cmd
         assert "/cos-status" in slash_by_cmd
+
+    def test_manifest_respects_50_command_cap_on_real_registry(self, caplog):
+        """M1 requirement: card's 5-alias config on real registry yields at most 50 commands,
+        and the overflow is warned and deterministic (native commands never dropped)."""
+        card_aliases = {
+            "cos-busy": "busy",
+            "cos-stop": "stop",
+            "cos-queue": "queue",
+            "cos-steer": "steer",
+            "cos-status": "status",
+        }
+        with caplog.at_level(logging.WARNING, logger="hermes_cli.commands"):
+            manifest = slack_app_manifest(slash_aliases=card_aliases)
+
+        slashes = manifest["features"]["slash_commands"]
+        assert len(slashes) <= 50
+        assert len(slashes) == 50
+
+        # Native commands are never dropped
+        native_slashes = slack_native_slashes()
+        native_cmds = {f"/{name}" for name, _d, _h in native_slashes}
+        manifest_cmds = {entry["command"] for entry in slashes}
+        assert native_cmds.issubset(manifest_cmds)
+
+        # Overflow warnings logged for all 5 aliases
+        warnings = [r.getMessage() for r in caplog.records if r.levelno == logging.WARNING]
+        for alias in sorted(card_aliases.keys()):
+            assert any(f"Refusing slash alias '{alias}' in manifest: manifest command cap (50) reached" in w for w in warnings)
+
+    def test_manifest_deterministic_trimming_with_partial_slots(self, monkeypatch, caplog):
+        """M1 requirement: when partial slots remain under the 50-command cap, excess aliases
+        are trimmed deterministically (alphabetical order) with warnings logged."""
+        dummy_natives = [(f"native-{i:02d}", f"desc-{i}", "") for i in range(48)]
+        monkeypatch.setattr("hermes_cli.commands_platforms.slack_native_slashes", lambda: dummy_natives)
+
+        aliases = {
+            "cos-e": "busy",
+            "cos-b": "busy",
+            "cos-a": "busy",
+            "cos-d": "busy",
+            "cos-c": "busy",
+        }
+        with caplog.at_level(logging.WARNING, logger="hermes_cli.commands"):
+            manifest = slack_app_manifest(slash_aliases=aliases)
+
+        slashes = manifest["features"]["slash_commands"]
+        assert len(slashes) == 50
+        cmd_names = [entry["command"] for entry in slashes]
+
+        # First 48 are the native commands
+        assert cmd_names[:48] == [f"/{name}" for name, _d, _h in dummy_natives]
+        # Next 2 slots are deterministically filled by sorted aliases: cos-a, cos-b
+        assert cmd_names[48:] == ["/cos-a", "/cos-b"]
+
+        # Excess aliases cos-c, cos-d, cos-e are warned
+        warnings = [r.getMessage() for r in caplog.records if r.levelno == logging.WARNING]
+        assert any("cos-c" in w and "manifest command cap (50) reached" in w for w in warnings)
+        assert any("cos-d" in w and "manifest command cap (50) reached" in w for w in warnings)
+        assert any("cos-e" in w and "manifest command cap (50) reached" in w for w in warnings)
+
+
+class TestSlackSlashAliasesPluginAndWrapperTargetRefusal:
+    """Requirement H1: Alias targets must be built-in gateway commands only.
+    Refuse '/hermes' (the Slack wrapper) explicitly, and refuse ANY plugin-registered
+    command name, with a logged warning and the alias dropped."""
+
+    def test_plugin_and_wrapper_targets_refused(self, tmp_path, monkeypatch, caplog):
+        from hermes_cli.plugins import PluginContext, PluginManager
+        from hermes_cli.plugins_manifest import PluginManifest
+
+        # Isolated HOME / HERMES_HOME
+        isolated_home = tmp_path / "home"
+        isolated_hermes_home = tmp_path / "hermes_home"
+        isolated_home.mkdir(parents=True, exist_ok=True)
+        isolated_hermes_home.mkdir(parents=True, exist_ok=True)
+        monkeypatch.setenv("HOME", str(isolated_home))
+        monkeypatch.setenv("HERMES_HOME", str(isolated_hermes_home))
+
+        # Real PluginManager registering 'hermes' and a custom non-wrapper plugin command
+        manager = PluginManager()
+        ctx = PluginContext(PluginManifest(name="test-plugin", source="user"), manager)
+
+        async def dummy_handler(raw_args):
+            return "dummy plugin executed"
+
+        reg_hermes = ctx.register_command("hermes", dummy_handler)
+        assert reg_hermes is not None
+        reg_custom = ctx.register_command("custom-cmd", dummy_handler)
+        assert reg_custom is not None
+        assert "hermes" in manager._plugin_commands
+        assert "custom-cmd" in manager._plugin_commands
+
+        monkeypatch.setattr("hermes_cli.plugins._ensure_plugins_discovered", lambda: manager)
+
+        alias_config = {
+            "cos-hermes": "/hermes",
+            "cos-custom": "/custom-cmd",
+            "cos-busy": "busy",
+        }
+
+        with caplog.at_level(logging.WARNING, logger="plugins.platforms.slack.adapter"):
+            adapter = _build_adapter(extra={"slash_aliases": alias_config})
+
+        # 'cos-hermes' and 'cos-custom' MUST BE REFUSED
+        assert "cos-hermes" not in adapter._slash_aliases
+        assert "cos-custom" not in adapter._slash_aliases
+        # Valid built-in target must be preserved
+        assert "cos-busy" in adapter._slash_aliases
+        assert adapter._slash_aliases == {"cos-busy": "busy"}
+
+        # Warnings must be logged for both refusals
+        warnings = [r.getMessage() for r in caplog.records if r.levelno == logging.WARNING]
+        assert any("cos-hermes" in msg and "Slack wrapper command" in msg for msg in warnings)
+        assert any("cos-custom" in msg and "plugin command" in msg for msg in warnings)
+
+
+class TestSlackSlashAliasesMalformedConfig:
+    """Requirement L1: Log a warning when the alias config is a malformed falsy value
+    ([], '', 0, False) or a non-mapping, instead of silently ignoring it."""
+
+    @pytest.mark.parametrize("falsy_val", [[], "", 0, False, [1, 2, 3], "invalid_string", 42])
+    def test_malformed_alias_config_refused_with_warning(self, falsy_val, caplog):
+        with caplog.at_level(logging.WARNING, logger="plugins.platforms.slack.adapter"):
+            adapter = _build_adapter(extra={"slash_aliases": falsy_val})
+
+        assert adapter._slash_aliases == {}
+        warnings = [r.getMessage() for r in caplog.records if r.levelno == logging.WARNING]
+        assert any("Refusing platforms.slack.extra.slash_aliases: expected a mapping" in w for w in warnings)

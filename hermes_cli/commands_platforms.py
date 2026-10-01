@@ -391,21 +391,18 @@ def _sanitize_slack_name(raw: str) -> str:
 
 
 def _slack_command_target_info(target: str) -> tuple[str, str] | None:
-    """Return (description, args_hint) for an existing gateway command or registered alias,
-    or None if target is not a valid gateway command."""
+    """Return (description, args_hint) for an existing built-in gateway command or registered alias,
+    or None if target is not a valid built-in gateway command."""
     t = str(target or "").lstrip("/").strip().lower()
-    if not t:
+    if not t or t == "hermes":
         return None
     for cmd in _gateway_available_commands():
         if t == cmd.name.lower() or t in (a.lower() for a in cmd.aliases):
             return cmd.description, cmd.args_hint or ""
-    for name, desc, hint in _iter_plugin_command_entries():
-        if t == name.lower():
-            return desc, hint or ""
     return None
 
 
-def _slack_slash_aliases_config() -> dict[str, str]:
+def _slack_slash_aliases_config() -> Any:
     """Read ``platforms.slack.extra.slash_aliases`` from active profile config."""
     try:
         from hermes_cli.config import read_raw_config
@@ -416,7 +413,7 @@ def _slack_slash_aliases_config() -> dict[str, str]:
         node = node.get(key) if isinstance(node, Mapping) else None
     if isinstance(node, Mapping):
         return {str(k): str(v) for k, v in node.items()}
-    return {}
+    return node
 
 
 def validate_slack_slash_aliases(
@@ -427,7 +424,9 @@ def validate_slack_slash_aliases(
     """Validate and sanitize platforms.slack.extra.slash_aliases entries.
 
     Rules:
-    - Target must be an existing gateway command (canonical name, registered alias, or plugin command).
+    - Target must be an existing built-in gateway command (canonical name or registered alias).
+    - Target must NOT be '/hermes' (the Slack wrapper command).
+    - Target must NOT be a plugin-registered command.
     - Alias names are sanitized like other Slack names (_sanitize_slack_name rules).
     - Alias names must not be empty after sanitization.
     - Alias names must not be Slack-reserved (_SLACK_RESERVED_COMMANDS).
@@ -446,6 +445,7 @@ def validate_slack_slash_aliases(
         return {}
 
     native_names = {name for name, _d, _h in slack_native_slashes()}
+    plugin_names = {name.lower() for name, _d, _h in _iter_plugin_command_entries()}
     valid_aliases: dict[str, str] = {}
 
     for raw_alias, raw_target in raw_aliases.items():
@@ -484,6 +484,23 @@ def validate_slack_slash_aliases(
             continue
 
         target_clean = str(raw_target).lstrip("/").strip().lower()
+
+        if target_clean == "hermes":
+            log.warning(
+                "[Slack] Refusing slash alias '%s': target '%s' is the Slack wrapper command and cannot be targeted by an alias",
+                raw_alias,
+                raw_target,
+            )
+            continue
+
+        if target_clean in plugin_names:
+            log.warning(
+                "[Slack] Refusing slash alias '%s': target '%s' is a plugin command; aliases must target built-in gateway commands only",
+                raw_alias,
+                raw_target,
+            )
+            continue
+
         info = _slack_command_target_info(target_clean)
         if info is None:
             log.warning(
@@ -551,7 +568,11 @@ def slack_app_manifest(
     slash_aliases: Mapping[str, str] | None = None,
 ) -> dict[str, Any]:
     """``features.slash_commands`` manifest portion only (decoupled from the rest of the manifest
-    users configure in the Slack UI); ``request_url`` is schema-required, ignored in Socket Mode."""
+    users configure in the Slack UI); ``request_url`` is schema-required, ignored in Socket Mode.
+    Keeps the total manifest at or under _SLACK_MAX_SLASH_COMMANDS (50). Aliases count against
+    the cap; native commands are never dropped to make room, and excess aliases are trimmed
+    deterministically with a logged warning.
+    """
     slashes = []
     for name, desc, usage in slack_native_slashes():
         entry = {"command": f"/{name}", "description": desc or f"Run /{name}",
@@ -563,11 +584,24 @@ def slack_app_manifest(
     if slash_aliases is None:
         slash_aliases = _slack_slash_aliases_config()
 
-    if slash_aliases:
+    if slash_aliases is not None:
         valid_aliases = validate_slack_slash_aliases(slash_aliases)
-        slashes.extend(slack_alias_manifest_entries(valid_aliases, request_url=request_url))
+        available_slots = max(0, _SLACK_MAX_SLASH_COMMANDS - len(slashes))
+        sorted_alias_names = sorted(valid_aliases.keys())
+        accepted_aliases = {
+            alias: valid_aliases[alias]
+            for alias in sorted_alias_names[:available_slots]
+        }
+        for alias in sorted_alias_names[available_slots:]:
+            logger.warning(
+                "[Slack] Refusing slash alias '%s' in manifest: manifest command cap (%d) reached",
+                alias,
+                _SLACK_MAX_SLASH_COMMANDS,
+            )
+        if accepted_aliases:
+            slashes.extend(slack_alias_manifest_entries(accepted_aliases, request_url=request_url))
 
-    return {"features": {"slash_commands": slashes}}
+    return {"features": {"slash_commands": slashes[:_SLACK_MAX_SLASH_COMMANDS]}}
 
 
 def slack_subcommand_map() -> dict[str, str]:

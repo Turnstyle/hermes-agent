@@ -18,7 +18,7 @@ def _build_full_manifest(
     Other sections (OAuth scopes, socket mode) are sensible Hermes defaults, tweakable in the Slack
     UI after pasting.
     """
-    from hermes_cli.commands_platforms import slack_app_manifest
+    from hermes_cli.commands_platforms import _SLACK_MAX_SLASH_COMMANDS, slack_app_manifest
     if messaging_experience is None:
         messaging_experience = "assistant" if include_assistant else "none"
     messaging_experience = str(messaging_experience).strip().lower()
@@ -31,7 +31,7 @@ def _build_full_manifest(
             "messages_tab_enabled": True,
             "messages_tab_read_only_enabled": False},
         "bot_user": {"display_name": bot_name[:80], "always_online": True},
-        "slash_commands": slack_app_manifest()["features"]["slash_commands"]}
+        "slash_commands": slack_app_manifest()["features"]["slash_commands"][:_SLACK_MAX_SLASH_COMMANDS]}
 
     bot_scopes = [
         "app_mentions:read", "channels:history", "channels:read", "chat:write", "commands",
@@ -113,8 +113,8 @@ def slack_manifest_command(args) -> int:
         messaging_experience = "assistant"
 
     if slashes_only:
-        from hermes_cli.commands_platforms import slack_app_manifest
-        manifest = slack_app_manifest()["features"]["slash_commands"]
+        from hermes_cli.commands_platforms import _SLACK_MAX_SLASH_COMMANDS, slack_app_manifest
+        manifest = slack_app_manifest()["features"]["slash_commands"][:_SLACK_MAX_SLASH_COMMANDS]
     else:
         manifest = _build_full_manifest(
             name, description, messaging_experience=messaging_experience,

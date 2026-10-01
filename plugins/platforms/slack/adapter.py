@@ -1130,8 +1130,10 @@ class SlackAdapter(BasePlatformAdapter):
     def _resolve_slash_aliases(self) -> Dict[str, str]:
         """Validate and resolve profile-scoped slash command aliases from ``extra.slash_aliases``."""
         extra = self.config.extra if isinstance(getattr(self.config, "extra", None), dict) else {}
+        if "slash_aliases" not in extra:
+            return {}
         raw = extra.get("slash_aliases")
-        if not raw:
+        if raw is None:
             return {}
         from hermes_cli.commands_platforms import validate_slack_slash_aliases
         return validate_slack_slash_aliases(raw, logger_instance=logger)
@@ -5963,7 +5965,8 @@ class SlackAdapter(BasePlatformAdapter):
             target = aliases.get(slash_name) or aliases.get(slash_name.lower())
             if target:
                 target_clean = target.lstrip("/").strip()
-                return f"/{target_clean}" if not raw_text else f"/{target_clean} {raw_text}"
+                if target_clean.lower() != "hermes":
+                    return f"/{target_clean}" if not raw_text else f"/{target_clean} {raw_text}"
         if slash_name not in {"hermes", ""}:
             return f"/{slash_name}" if not raw_text else f"/{slash_name} {raw_text}"
         legacy_text = raw_text.strip()
