@@ -1243,7 +1243,7 @@ def _revert_credential_rotation(agent) -> None:
     agent._credential_pool_revert_id = None
 
 
-def restore_primary_runtime(agent) -> bool:
+def restore_primary_runtime(agent, force: bool = False) -> bool:
     """Restore the primary runtime at the start of a new turn so fallback stays turn-scoped
     (long-lived CLI agents and the gateway's cached agents)."""
     if not agent._fallback_activated:
@@ -1257,7 +1257,7 @@ def restore_primary_runtime(agent) -> bool:
     # leaves _fallback_index >= len(_fallback_chain) while _fallback_activated stays False. The next turn
     # skips this block entirely, stranding the index and silently blocking all future fallback attempts for
     # the session. Fixes #20465.
-    if getattr(agent, "_rate_limited_until", 0) > time.monotonic():
+    if not force and getattr(agent, "_rate_limited_until", 0) > time.monotonic():
         return False  # primary still in rate-limit cooldown, stay on fallback
     rt = agent._primary_runtime
     primary_provider = str((rt or {}).get("provider") or "").strip().lower()
@@ -1282,7 +1282,7 @@ def restore_primary_runtime(agent) -> bool:
     blocked, prefetched_pool, prefetched = _primary_reset_gate_blocks(
         agent, rt, primary_provider, primary_runtime_base_url, _matches_primary, _load_primary_pool
     )
-    if blocked:
+    if not force and blocked:
         return False
     agent._restore_wait_logged = False
     fallback_route = getattr(agent, "_provider_fallback_route", None)
@@ -1343,6 +1343,82 @@ def restore_primary_runtime(agent) -> bool:
     except Exception as e:
         logger.warning("Failed to restore primary runtime: %s", e)
         return False
+
+
+def apply_fallback_chain_to_agent(agent: Any, chain: list | None = None) -> bool:
+    """Keep an agent's fallback chain aligned with current profile config (H20).
+
+    Re-reads the chain from profile config (load_config_readonly), drops entries no longer in
+    config, clears _unavailable_fallback_keys on real change, and when the currently ACTIVE fallback
+    is no longer in config, switches off it at once (restores primary or moves to next allowed entry).
+    Pinned chains (delegated children, cron jobs) are never overridden.
+    """
+    if agent is None:
+        return False
+    if getattr(agent, "_fallback_chain_pinned", False):
+        return False
+
+    if chain is not None:
+        new_chain = list(chain)
+    else:
+        try:
+            from hermes_cli.config_effective import load_user_config_effective
+            from hermes_cli.fallback_config import get_fallback_chain
+            cfg = load_user_config_effective(fail_closed=True)
+            new_chain = get_fallback_chain(cfg)
+        except Exception:
+            logger.debug(
+                "apply_fallback_chain_to_agent: config read failed; keeping last known-good chain",
+                exc_info=True,
+            )
+            return False
+
+    old_chain = list(getattr(agent, "_fallback_chain", []) or [])
+    chain_changed = (old_chain != new_chain)
+
+    if chain_changed:
+        if hasattr(agent, "_unavailable_fallback_keys") and agent._unavailable_fallback_keys is not None:
+            agent._unavailable_fallback_keys.clear()
+        agent._fallback_chain = new_chain
+        agent._fallback_model = new_chain[0] if new_chain else None
+
+    # Check active fallback status
+    if getattr(agent, "_fallback_activated", False):
+        from hermes_cli.fallback_config import _entry_identity
+        new_identities = [_entry_identity(e) for e in new_chain]
+        curr_provider = getattr(agent, "provider", "")
+        curr_model = getattr(agent, "model", "")
+        curr_identity = (
+            str(curr_provider or "").strip().lower(),
+            str(curr_model or "").strip().lower(),
+            str(getattr(agent, "base_url", "") or "").strip().lower().rstrip("/"),
+        )
+        active_in_chain = any(
+            curr_identity == ident
+            for ident in new_identities
+        )
+        if not active_in_chain:
+            logger.info(
+                "Active fallback %s (%s) is no longer in fallback config; switching off it.",
+                curr_model, curr_provider,
+            )
+            if hasattr(agent, "_restore_primary_runtime"):
+                agent._restore_primary_runtime(force=True)
+            if new_chain and getattr(agent, "_rate_limited_until", 0) > time.monotonic():
+                agent._fallback_index = 0
+                if hasattr(agent, "_try_activate_fallback"):
+                    from agent.error_classifier import FailoverReason
+                    agent._try_activate_fallback(reason=FailoverReason.rate_limit)
+        else:
+            for idx, ident in enumerate(new_identities):
+                if curr_identity == ident:
+                    agent._fallback_index = idx + 1
+                    break
+    else:
+        if chain_changed:
+            agent._fallback_index = 0
+
+    return chain_changed
 
 
 # Transient transport failures worth one more attempt with a rebuilt client / connection pool.

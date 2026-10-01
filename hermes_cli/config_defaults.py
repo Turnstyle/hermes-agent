@@ -571,6 +571,14 @@ DEFAULT_CONFIG = {
         # models (their 50% trigger sat at 500K, so compaction never fired) while every lower
         # ratio trigger still wins; null = ratio-only.
         "threshold_tokens": 256_000,
+        # metered_threshold_tokens: token cap applied specifically to metered / pay-per-token
+        # providers (openai-codex, anthropic, xai-oauth), where 200-245K uncompacted context
+        # resends incur high costs even with high prompt caching rates. Clamped to context length.
+        # Compression triggers at min(ratio_threshold, threshold_tokens, metered_threshold_tokens).
+        # null = disabled (falls back to threshold_tokens).
+        "metered_threshold_tokens": 150_000,
+        # metered_providers: list of provider identifiers subject to metered_threshold_tokens.
+        "metered_providers": ["openai-codex", "anthropic", "xai-oauth"],
         # "progress_notices": False,    # opt-in (#52995): when True, routine compression
         "target_ratio": 0.20,         # fraction of threshold to preserve as recent tail
         # tail_mode: "lean" = clamped 2.5%-of-window tail (10K floor / 25K cap) plus chunked

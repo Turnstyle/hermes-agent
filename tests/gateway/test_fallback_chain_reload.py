@@ -49,25 +49,37 @@ def test_refresh_fallback_model_rereads_config(tmp_path, monkeypatch):
 
 
 def test_apply_fallback_chain_skips_while_cooldown_holds_fallback():
-    """Do not clobber a live fallback activation during its cooldown window."""
+    """Under H20, chain updates live even during active fallback; if active fallback is removed, switches off it."""
+    from unittest.mock import MagicMock
     from gateway.run import GatewayRunner
+    from agent.error_classifier import FailoverReason
 
     live = [{"provider": "deepseek", "model": "deepseek-v4-flash"}]
+    new_chain = [{"provider": "openrouter", "model": "anthropic/claude-sonnet-4.6"}]
     agent = SimpleNamespace(
+        provider="deepseek",
+        model="deepseek-v4-flash",
+        base_url="",
         _fallback_chain=live,
         _fallback_model=live[0],
         _fallback_index=1,
         _fallback_activated=True,
         _rate_limited_until=time.monotonic() + 30,
+        _restore_primary_runtime=MagicMock(),
+        _try_activate_fallback=MagicMock(),
     )
     GatewayRunner._apply_fallback_chain_to_agent(
         agent,
-        [{"provider": "openrouter", "model": "anthropic/claude-sonnet-4.6"}],
+        new_chain,
     )
 
-    assert agent._fallback_chain == live
-    assert agent._fallback_index == 1
-    assert agent._fallback_activated is True
+    # Chain is updated to new config
+    assert agent._fallback_chain == new_chain
+    assert agent._fallback_model == new_chain[0]
+    # Because deepseek was removed from config, agent switches off it immediately
+    agent._restore_primary_runtime.assert_called_once_with(force=True)
+    # And falls back to the new chain because primary is still rate limited
+    agent._try_activate_fallback.assert_called_once_with(reason=FailoverReason.rate_limit)
 
 
 

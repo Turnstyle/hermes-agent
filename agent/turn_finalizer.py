@@ -523,6 +523,10 @@ def finalize_turn(
         and (api_call_count < agent.max_iterations or str(_turn_exit_reason).startswith("text_response("))
     )
 
+    if completed and not getattr(agent, "_fallback_activated", False):
+        from agent.fallback_cooldown import decay_rate_limit_backoff
+        decay_rate_limit_backoff(agent)
+
     _rollback_interrupted_preflight_display(agent, interrupted)
 
     _cleanup_errors: List[str] = []

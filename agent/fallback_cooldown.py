@@ -49,7 +49,7 @@ def _arm_rate_limit_cooldown(
 
     ``reset_at`` is an absolute wall-clock timestamp while ``_rate_limited_until`` is monotonic;
     convert through a duration so wall-clock epoch values never enter the monotonic comparison.
-    Missing, invalid, or expired provider resets retain the 60s → 2m → ... → 4h fallback.
+    Missing, invalid, or expired provider resets retain the 60s → 2m → ... → 30m fallback.
     Only arm when leaving the primary: chain-switching from an active fallback means the primary
     was not the failing source. Return the armed cooldown in seconds, or None when not armed.
     """
@@ -66,7 +66,8 @@ def _arm_rate_limit_cooldown(
         backoff_seconds = math.ceil(provider_delay)
         source = "provider reset"
     else:
-        backoff_seconds = min(60 * (2 ** backoff_count), 14400)
+        cap = 1800 if (getattr(agent, "_long_lived_session", False) or getattr(agent, "_user_turn_count", 0) > 0) else 14400
+        backoff_seconds = min(60 * (2 ** backoff_count), cap)
         source = "exponential fallback"
     agent._rate_limited_until = time.monotonic() + backoff_seconds
     logging.info(
@@ -74,6 +75,13 @@ def _arm_rate_limit_cooldown(
         backoff_count, backoff_seconds, backoff_seconds / 60, backoff_count + 1, source,
     )
     return backoff_seconds
+
+
+def decay_rate_limit_backoff(agent) -> None:
+    """Decay the exponential rate-limit backoff counter after a successful primary turn."""
+    count = getattr(agent, "_rate_limit_backoff_count", 0)
+    if count > 0:
+        agent._rate_limit_backoff_count = count - 1
 
 
 def _mark_entitlement_rejected_model(agent, api_error) -> bool:
