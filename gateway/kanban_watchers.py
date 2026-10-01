@@ -47,6 +47,11 @@ class GatewayKanbanWatchersMixin:
         """Clear notifier-visible ownership before releasing the OS lock."""
         handle = getattr(self, "_kanban_dispatcher_lock_handle", None)
         self._kanban_dispatcher_lock_handle = None
+        try:
+            from hermes_cli import kanban_db_connect as _kbc
+            _kbc.close_all_wal_keepalives()
+        except Exception:
+            pass
         _release_singleton_lock(handle)
 
     async def _sleep_between_ticks(self, interval: float) -> None:

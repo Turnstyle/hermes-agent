@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import contextlib
 import hashlib
+import os
 import random
 import re
 import secrets
@@ -28,7 +29,197 @@ from typing import Optional
 # Connection helpers
 # ---------------------------------------------------------------------------
 
-_INITIALIZED_PATHS: set[str] = set()
+# canonical path -> (conn, st_dev, st_ino)
+_WAL_KEEPALIVES: dict[str, tuple[sqlite3.Connection, int, int]] = {}
+_WAL_KEEPALIVE_LOCK = threading.RLock()
+_KEEPALIVE_LOGGED: set[str] = set()
+
+
+def _wal_keepalive_enabled() -> bool:
+    val = os.environ.get("HERMES_KANBAN_WAL_KEEPALIVE", "").strip().lower()
+    return val not in {"0", "false", "no", "off"}
+
+
+def _canonical_db_key(path: Path | str) -> str:
+    try:
+        return str(Path(path).resolve())
+    except OSError:
+        return str(path)
+
+
+def is_wal_keepalive_active(db_path: Optional[Path | str] = None, *, board: Optional[str] = None) -> bool:
+    """Whether a WAL keepalive connection is actively open for this board."""
+    path = Path(db_path) if db_path is not None else _kb.kanban_db_path(board=board)
+    key = _canonical_db_key(path)
+    with _WAL_KEEPALIVE_LOCK:
+        entry = _WAL_KEEPALIVES.get(key)
+        if entry is None:
+            return False
+        conn, _, _ = entry
+        try:
+            conn.execute("SELECT 1")
+            return True
+        except Exception:
+            return False
+
+
+def close_wal_keepalive(db_path: Optional[Path | str] = None, *, board: Optional[str] = None) -> bool:
+    """Close and untrack the WAL keepalive connection for this board, if any.
+    Returns True if an active connection was closed."""
+    path = Path(db_path) if db_path is not None else _kb.kanban_db_path(board=board)
+    key = _canonical_db_key(path)
+    with _WAL_KEEPALIVE_LOCK:
+        entry = _WAL_KEEPALIVES.pop(key, None)
+        if entry is None:
+            return False
+        conn, _, _ = entry
+        with contextlib.suppress(Exception):
+            conn.close()
+        return True
+
+
+def close_all_wal_keepalives() -> None:
+    """Close and untrack all WAL keepalive connections in this process."""
+    with _WAL_KEEPALIVE_LOCK:
+        keys = list(_WAL_KEEPALIVES.keys())
+        for key in keys:
+            entry = _WAL_KEEPALIVES.pop(key, None)
+            if entry is not None:
+                conn, _, _ = entry
+                with contextlib.suppress(Exception):
+                    conn.close()
+
+
+def ensure_wal_keepalive(db_path: Optional[Path | str] = None, *, board: Optional[str] = None) -> Optional[sqlite3.Connection]:
+    """Ensure a long-lived, NO-TRANSACTION keepalive connection is held for this board.
+
+    Keeps SQLite's WAL companion files (-wal and -shm) alive across writers so read-only
+    openers do not fail with SQLITE_CANTOPEN (error 14, 'unable to open database file').
+    Requirements:
+    (a) Never holds open read or write transactions: opened with isolation_level=None and
+        PRAGMA query_only=ON, so it never blocks checkpoints or writers.
+    (b) Tracked via connect_tracked so byte probes are refused while open, protecting POSIX
+        locks from silent cancellation.
+    (c) Closed before repair/backup/file replace; validates file inode and reopens on new file.
+    (d) Opt-out via HERMES_KANBAN_WAL_KEEPALIVE=0; logs once per board at INFO level.
+    (e) Does not create missing boards and does not run schema/migration writes.
+    """
+    if not _wal_keepalive_enabled():
+        return None
+
+    path = Path(db_path) if db_path is not None else _kb.kanban_db_path(board=board)
+    try:
+        resolved = path.resolve()
+        stat = resolved.stat()
+    except OSError:
+        return None
+    if stat.st_size == 0 or not resolved.is_file():
+        return None
+
+    key = str(resolved)
+    with _WAL_KEEPALIVE_LOCK:
+        existing = _WAL_KEEPALIVES.get(key)
+        if existing is not None:
+            conn, recorded_dev, recorded_ino = existing
+            if recorded_dev == stat.st_dev and recorded_ino == stat.st_ino:
+                return conn
+            # Inode changed! File was replaced on disk. Close old keepalive.
+            _WAL_KEEPALIVES.pop(key, None)
+            with contextlib.suppress(Exception):
+                conn.close()
+
+        from hermes_cli.sqlite_safe_read import connect_tracked
+        busy_timeout_ms = _resolve_busy_timeout_ms()
+        conn = connect_tracked(
+            resolved,
+            connect_fn=sqlite3.connect,
+            isolation_level=None,
+            timeout=busy_timeout_ms / 1000.0,
+        )
+        try:
+            conn.execute(f"PRAGMA busy_timeout={busy_timeout_ms}")
+            conn.execute("PRAGMA query_only=ON")
+            conn.execute("SELECT 1 FROM sqlite_master LIMIT 1").fetchone()
+        except BaseException:
+            with contextlib.suppress(Exception):
+                conn.close()
+            raise
+
+        _WAL_KEEPALIVES[key] = (conn, stat.st_dev, stat.st_ino)
+        if key not in _KEEPALIVE_LOGGED:
+            _KEEPALIVE_LOGGED.add(key)
+            _kb._log.info("kanban WAL keepalive started for board %s (%s)", board or resolved.name, key)
+        return conn
+
+
+class _InitializedPathsSet(set):
+    """Path set that closes any WAL keepalive when a board's initialization state is discarded."""
+
+    def discard(self, element: Any) -> None:
+        super().discard(element)
+        with contextlib.suppress(Exception):
+            close_wal_keepalive(str(element))
+
+    def remove(self, element: Any) -> None:
+        super().remove(element)
+        with contextlib.suppress(Exception):
+            close_wal_keepalive(str(element))
+
+    def clear(self) -> None:
+        super().clear()
+        with contextlib.suppress(Exception):
+            close_all_wal_keepalives()
+
+
+def open_readonly_with_retry(
+    db_path: Path | str,
+    *,
+    timeout: float = 8.0,
+    initial_delay: float = 0.05,
+    max_delay: float = 0.5,
+    connect_timeout: float = 2.0,
+    query_only: bool = True,
+    factory: type = sqlite3.Connection,
+) -> sqlite3.Connection:
+    """Open a SQLite database in read-only mode with bounded retry on SQLITE_CANTOPEN.
+
+    When the last connection to a WAL database closes, SQLite deletes -wal and -shm.
+    A read-only opener cannot create them and fails with 'unable to open database file'
+    (SQLITE_CANTOPEN, error 14) until a writer reopens the database. This helper retries
+    with short backoff for up to ~8s total, forcing the first read inside the retry loop
+    because sqlite3.connect alone does not touch the file. Non-CANTOPEN errors are NOT
+    retried.
+    """
+    path = Path(db_path).resolve()
+    uri = path.as_uri() + "?mode=ro"
+    deadline = time.monotonic() + max(0.1, timeout)
+    delay = max(0.01, initial_delay)
+
+    while True:
+        conn = None
+        try:
+            conn = sqlite3.connect(uri, uri=True, timeout=connect_timeout, factory=factory)
+            if query_only:
+                conn.execute("PRAGMA query_only=ON")
+            # Force the first read inside the retry loop: sqlite3.connect alone does not touch the file!
+            conn.execute("PRAGMA schema_version").fetchone()
+            return conn
+        except sqlite3.OperationalError as exc:
+            if conn is not None:
+                with contextlib.suppress(Exception):
+                    conn.close()
+            msg = str(exc).lower()
+            if "unable to open database file" not in msg:
+                raise
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise
+            sleep_time = min(delay, remaining)
+            time.sleep(sleep_time)
+            delay = min(delay * 2.0, max_delay)
+
+
+_INITIALIZED_PATHS: set[str] = _InitializedPathsSet()
 _INIT_LOCK = threading.RLock()
 _SQLITE_HEADER = b"SQLite format 3\x00"
 DEFAULT_BUSY_TIMEOUT_MS = 120_000
@@ -353,6 +544,7 @@ def _backup_corrupt_db(path: Path) -> Optional[Path]:
     # Pin the resolved parent (``resolve()`` collapses ``..`` and symlinks); we
     # only ever write inside it.
     resolved = path.resolve()
+    close_wal_keepalive(resolved)
     parent = resolved.parent
     base_name = resolved.name  # basename only
     # Fingerprinting reads the whole file — a close()-on-a-database-file hazard
@@ -528,6 +720,7 @@ def _guard_existing_db_is_healthy(path: Path) -> None:
         return
     # Quarantine FIRST — both the repair and fail-closed paths preserve the
     # pre-touch bytes before anything mutates the file.
+    close_wal_keepalive(resolved)
     backup = _backup_corrupt_db(resolved)
     index_names = _repairable_index_names(messages or [])
     if index_names:
@@ -581,6 +774,8 @@ def repair_db(db_path: Optional[Path] = None, *, board: Optional[str] = None) ->
         resolved = path
     if _missing_or_empty(resolved):
         return RepairResult(status="missing", db_path=resolved)
+
+    close_wal_keepalive(resolved)
 
     with _cross_process_init_lock(resolved):
         messages, reason = _probe_for_corruption(resolved)
@@ -677,7 +872,7 @@ def connect(db_path: Optional[Path] = None, *, board: Optional[str] = None) -> s
     if kanban_path_is_fenced(path):
         # Reads must not enter schema/backfill write transactions. Never create a
         # missing board or migrate on a descendant's behalf; the owner initializes it.
-        conn = sqlite3.connect(path.resolve().as_uri() + "?mode=ro", uri=True)
+        conn = open_readonly_with_retry(path)
         conn.row_factory = sqlite3.Row
         conn.text_factory = _kb._lossy_text
         if not _schema_is_present(conn):
@@ -758,11 +953,10 @@ def connect_readonly_closing(db_path: Optional[Path] = None, *, board: Optional[
     path = db_path if db_path is not None else _kb.kanban_db_path(board=board)
     if not path.is_file():
         raise ValueError(f"Kanban board is not initialized: {path}")
-    conn = sqlite3.connect(path.resolve().as_uri() + "?mode=ro", uri=True)
+    conn = open_readonly_with_retry(path)
     try:
         conn.row_factory = sqlite3.Row
         conn.text_factory = _kb._lossy_text
-        conn.execute("PRAGMA query_only=ON")
         if not _schema_is_present(conn):
             raise ValueError(f"Kanban board is not initialized: {path}")
         yield conn

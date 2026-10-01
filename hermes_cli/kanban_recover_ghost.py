@@ -33,7 +33,8 @@ def _columns(conn: sqlite3.Connection, table: str) -> set[str]:
 
 
 def _read_only(path: Path) -> sqlite3.Connection:
-    conn = sqlite3.connect(path.resolve().as_uri() + "?mode=ro", uri=True, timeout=10)
+    from hermes_cli.kanban_db_connect import open_readonly_with_retry
+    conn = open_readonly_with_retry(path, connect_timeout=10.0)
     conn.row_factory = sqlite3.Row
     return conn
 

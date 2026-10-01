@@ -181,14 +181,17 @@ class _KanbanDispatcher:
         fingerprint = self.board_db_fingerprint(slug)
         if not self._quarantine_lifted(slug, fingerprint):
             return None
+        db_path = self.kb.kanban_db_path(slug)
         kwargs = {k: v for k, v in asdict(self.settings).items() if k != "interval"}
         try:
             # No explicit init_db(): connect() runs the migration once per
             # process (see the matching note in the notifier collector).
-            conn = _kbc().connect(board=slug)
+            conn = _kbc().connect(db_path=db_path, board=slug)
+            _kbc().ensure_wal_keepalive(db_path=db_path, board=slug)
             return _kbd().dispatch_once(conn, board=slug, **kwargs)
         except Exception as exc:
             if self.is_corrupt_board_db_error(exc):
+                _kbc().close_wal_keepalive(db_path=db_path, board=slug)
                 self.disabled_corrupt_boards[slug] = (fingerprint, time.monotonic())
                 logger.error(
                     "kanban dispatcher: board %s database %s is not a valid "
