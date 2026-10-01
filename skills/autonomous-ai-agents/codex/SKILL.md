@@ -41,19 +41,19 @@ that Codex auth is missing.
 ## One-Shot Tasks
 
 ```
-terminal(command="codex exec 'Add dark mode toggle to settings'", workdir="~/project", pty=true)
+terminal(command="codex exec 'Add dark mode toggle to settings'", workdir="~/project", timeout=300, pty=true)
 ```
 
 For scratch work (Codex needs a git repo):
 ```
-terminal(command="cd $(mktemp -d) && git init && codex exec 'Build a snake game in Python'", pty=true)
+terminal(command="cd $(mktemp -d) && git init && codex exec 'Build a snake game in Python'", timeout=300, pty=true)
 ```
 
 ## Background Mode (Long Tasks)
 
 ```
-# Start in background with PTY
-terminal(command="codex exec --sandbox workspace-write 'Refactor the auth module'", workdir="~/project", background=true, pty=true)
+# Start in background with PTY and wall-clock timeout
+terminal(command="codex exec --sandbox workspace-write 'Refactor the auth module'", workdir="~/project", background=true, timeout=600, pty=true)
 # Returns session_id
 
 # Monitor progress
@@ -101,7 +101,7 @@ human/agent confirmation before committing broad changes.
 Clone to a temp directory for safe review:
 
 ```
-terminal(command="REVIEW=$(mktemp -d) && git clone https://github.com/user/repo.git $REVIEW && cd $REVIEW && gh pr checkout 42 && codex review --base origin/main", pty=true)
+terminal(command="REVIEW=$(mktemp -d) && git clone https://github.com/user/repo.git $REVIEW && cd $REVIEW && gh pr checkout 42 && codex review --base origin/main", timeout=300, pty=true)
 ```
 
 ## Parallel Issue Fixing with Worktrees
@@ -111,9 +111,9 @@ terminal(command="REVIEW=$(mktemp -d) && git clone https://github.com/user/repo.
 terminal(command="git worktree add -b fix/issue-78 ~/.hermes/cache/scratch/issue-78 main", workdir="~/project")
 terminal(command="git worktree add -b fix/issue-99 ~/.hermes/cache/scratch/issue-99 main", workdir="~/project")
 
-# Launch Codex in each
-terminal(command="codex --sandbox workspace-write exec 'Fix issue #78: <description>. Commit when done.'", workdir="~/.hermes/cache/scratch/issue-78", background=true, pty=true)
-terminal(command="codex --sandbox workspace-write exec 'Fix issue #99: <description>. Commit when done.'", workdir="~/.hermes/cache/scratch/issue-99", background=true, pty=true)
+# Launch Codex in each with timeout
+terminal(command="codex --sandbox workspace-write exec 'Fix issue #78: <description>. Commit when done.'", workdir="~/.hermes/cache/scratch/issue-78", background=true, timeout=600, pty=true)
+terminal(command="codex --sandbox workspace-write exec 'Fix issue #99: <description>. Commit when done.'", workdir="~/.hermes/cache/scratch/issue-99", background=true, timeout=600, pty=true)
 
 # Monitor
 process(action="list")
@@ -132,13 +132,21 @@ terminal(command="git worktree remove ~/.hermes/cache/scratch/issue-78", workdir
 # Fetch all PR refs
 terminal(command="git fetch origin '+refs/pull/*/head:refs/remotes/origin/pr/*'", workdir="~/project")
 
-# Review multiple PRs in parallel
-terminal(command="codex exec 'Review PR #86. git diff origin/main...origin/pr/86'", workdir="~/project", background=true, pty=true)
-terminal(command="codex exec 'Review PR #87. git diff origin/main...origin/pr/87'", workdir="~/project", background=true, pty=true)
+# Review multiple PRs in parallel with timeout
+terminal(command="codex exec 'Review PR #86. git diff origin/main...origin/pr/86'", workdir="~/project", background=true, timeout=300, pty=true)
+terminal(command="codex exec 'Review PR #87. git diff origin/main...origin/pr/87'", workdir="~/project", background=true, timeout=300, pty=true)
 
 # Post results
 terminal(command="gh pr comment 86 --body '<review>'", workdir="~/project")
 ```
+
+## Resource Budgets & Guards
+
+Child Codex CLI lanes can consume unbounded tokens if not guarded. Follow these limits:
+
+1. **Reasoning effort default**: Default reasoning effort to `high` (never `xhigh` or `max`). If configuring `~/.codex/config.toml`, set `model_reasoning_effort = "high"`.
+2. **Wall-clock timeout**: Always pass a strict `timeout` (e.g. `timeout=300` for one-shots, `timeout=600` for complex multi-file edits) to `terminal(...)` calls.
+3. **Per-lane token budget guard**: Non-interactive Codex child lanes run autonomously without turn prompts. Calling scripts and fleet lane runners (e.g. `edge-lane.sh`) must enforce per-lane token budget caps and kill processes exceeding allocated budgets.
 
 ## Rules
 
@@ -149,3 +157,6 @@ terminal(command="gh pr comment 86 --body '<review>'", workdir="~/project")
 5. **Background for long tasks** — use `background=true` and monitor with `process` tool
 6. **Don't interfere** — monitor with `poll`/`log`, be patient with long-running tasks
 7. **Parallel is fine** — run multiple Codex processes at once for batch work
+8. **Default reasoning effort `high`** — never default child lanes or helpers to `xhigh` or `max`
+9. **Always set a wall-clock timeout** — pass `timeout=...` on all `terminal(...)` commands
+10. **Enforce token budget guards** — monitor background processes; programmatic per-lane token enforcement belongs in fleet lane runners

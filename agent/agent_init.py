@@ -1076,6 +1076,42 @@ def _init_fallback_chain(agent, fallback_model):
     agent._fallback_activated = getattr(agent, "_fallback_activated", False)
     # Legacy attribute kept for backward compat (tests, external callers)
     agent._fallback_model = agent._fallback_chain[0] if agent._fallback_chain else None
+    pinned_marker = bool(
+        getattr(fallback_model, "_pinned", False)
+        or getattr(fallback_model, "_declared", False)
+        or getattr(agent, "_fallback_chain_pinned", False)
+    )
+    if not pinned_marker:
+        try:
+            from hermes_cli.fallback_config import _SCOPED_CHAIN_PINNED
+            if _SCOPED_CHAIN_PINNED.get():
+                pinned_marker = True
+        except Exception:
+            pass
+
+    if not pinned_marker and fallback_model is None:
+        is_cron = (getattr(agent, "platform", None) == "cron" or os.environ.get("HERMES_CRON_SESSION") == "1")
+        is_delegate = (
+            getattr(agent, "platform", None) == "subagent"
+            or getattr(agent, "side_agent", False)
+            or getattr(agent, "_delegate_depth", 0) > 0
+        )
+        if not is_delegate:
+            try:
+                from agent.delegation_context import is_delegated_child_context
+                is_delegate = is_delegated_child_context()
+            except Exception:
+                pass
+        if (is_cron or is_delegate) and (getattr(agent, "provider", None) or getattr(agent, "base_url", None)):
+            pinned_marker = True
+
+    try:
+        from hermes_cli.fallback_config import _SCOPED_CHAIN_PINNED
+        _SCOPED_CHAIN_PINNED.set(False)
+    except Exception:
+        pass
+
+    agent._fallback_chain_pinned = pinned_marker
     chain = agent._fallback_chain
     if chain and not agent.quiet_mode:
         labels = [f"{f['model']} ({f['provider']})" for f in chain]
@@ -1521,6 +1557,20 @@ def _parse_compression_config(agent, _agent_cfg) -> CompressionSettings:
     threshold_tokens = cfg.get("threshold_tokens", cfg_get(DEFAULT_CONFIG, "compression", "threshold_tokens"))
     if threshold_tokens is not None:
         threshold_tokens = _positive_int(threshold_tokens)
+    metered_threshold_tokens = cfg.get(
+        "metered_threshold_tokens",
+        cfg_get(DEFAULT_CONFIG, "compression", "metered_threshold_tokens"),
+    )
+    if metered_threshold_tokens is not None:
+        metered_threshold_tokens = _positive_int(metered_threshold_tokens)
+    metered_providers = cfg.get(
+        "metered_providers",
+        cfg_get(DEFAULT_CONFIG, "compression", "metered_providers"),
+    )
+    if not isinstance(metered_providers, (list, tuple, set)):
+        metered_providers = ["openai-codex", "anthropic", "xai-oauth"]
+    else:
+        metered_providers = [str(p).strip().lower() for p in metered_providers if p]
     # Non-system head messages to protect (system prompt is always protected); 0 is a
     # legitimate "system prompt + summary + tail".
     protect_first = max(0, int(cfg.get("protect_first_n", 3)))
@@ -1561,6 +1611,8 @@ def _parse_compression_config(agent, _agent_cfg) -> CompressionSettings:
             if isinstance(v, (int, float)) and not isinstance(v, bool)
         },
         threshold_tokens=threshold_tokens,
+        metered_threshold_tokens=metered_threshold_tokens,
+        metered_providers=metered_providers,
         checkpoint_required=checkpoint_required,
         # In-place compaction: no session-id rotation. default=True MUST match DEFAULT_CONFIG
         # (a False default flipped agents into rotation mode when the key was omitted).
@@ -1986,6 +2038,8 @@ def _build_context_engine(agent, _agent_cfg, cs, _custom_providers, _effective_c
             abort_on_summary_failure=cs.abort_on_summary_failure,
             max_tokens=_compressor_max_tokens(agent), model_thresholds=cs.model_thresholds,
             threshold_tokens_cap=cs.threshold_tokens,
+            metered_threshold_tokens=cs.metered_threshold_tokens,
+            metered_providers=cs.metered_providers,
             proactive_prune_tokens=cs.proactive_prune_tokens,
             proactive_prune_min_result_chars=cs.proactive_prune_min_chars,
             proactive_prune_min_reclaim_tokens=cs.proactive_prune_min_reclaim,
