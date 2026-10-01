@@ -571,6 +571,14 @@ DEFAULT_CONFIG = {
         # models (their 50% trigger sat at 500K, so compaction never fired) while every lower
         # ratio trigger still wins; null = ratio-only.
         "threshold_tokens": 256_000,
+        # metered_threshold_tokens: token cap applied specifically to metered / pay-per-token
+        # providers (openai-codex, anthropic, xai-oauth), where 200-245K uncompacted context
+        # resends incur high costs even with high prompt caching rates. Clamped to context length.
+        # Compression triggers at min(ratio_threshold, threshold_tokens, metered_threshold_tokens).
+        # null = disabled (falls back to threshold_tokens).
+        "metered_threshold_tokens": 150_000,
+        # metered_providers: list of provider identifiers subject to metered_threshold_tokens.
+        "metered_providers": ["openai-codex", "anthropic", "xai-oauth"],
         # "progress_notices": False,    # opt-in (#52995): when True, routine compression
         "target_ratio": 0.20,         # fraction of threshold to preserve as recent tail
         # tail_mode: "lean" = clamped 2.5%-of-window tail (10K floor / 25K cap) plus chunked
@@ -1346,7 +1354,7 @@ DEFAULT_CONFIG = {
         # waiting on a multi-minute completion) restarts the window; a frozen one is caught.
         "child_timeout_seconds": 0,
         # Subagent effort: "ultra" | "max" | "xhigh" | "high" | "medium" | "low" | "minimal" |
-        # "none" (empty = inherit)
+        # "none" (empty = inherit parent; parents on xhigh/max/ultra default to high)
         "reasoning_effort": "",
         # Max parallel children per batch AND max concurrent background delegation units; async
         # dispatches beyond it run synchronously. Floor 1, no ceiling.
@@ -2415,7 +2423,7 @@ DEFAULT_CONFIG = {
     # (SuperGrok OAuth or XAI_API_KEY) AND the toolset is enabled in `hermes tools`.
     "x_search": {
         # xAI model for the Responses call; any Grok model with x_search access works.
-        "model": "grok-4.5",
+        "model": "grok-4.7",
         # Reasoning effort for models that support it; null keeps the model default.
         "reasoning_effort": None,
         # Request timeout in seconds (minimum 30); complex queries can take 60-120s.

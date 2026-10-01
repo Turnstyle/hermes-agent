@@ -2,10 +2,13 @@
 
 from __future__ import annotations
 
+from contextvars import ContextVar
 import logging
 from typing import Any
 
 logger = logging.getLogger(__name__)
+
+_SCOPED_CHAIN_PINNED: ContextVar[bool] = ContextVar("_SCOPED_CHAIN_PINNED", default=False)
 
 
 def _normalized_base_url(value: Any) -> str:
@@ -120,6 +123,17 @@ def get_fallback_chain(config: dict[str, Any] | None) -> list[dict[str, Any]]:
     return chain
 
 
+class PinnedFallbackChain(list):
+    """A fallback chain explicitly pinned by an owner (cron, subagent delegation)."""
+    _pinned: bool = True
+
+
+class DeclaredFallbackChain(list):
+    """A fallback chain explicitly declared by an owner (e.g. unpinned child with explicit fallback_providers)."""
+    _pinned: bool = True
+    _declared: bool = True
+
+
 def scoped_fallback_chain(
     inherited: list[dict[str, Any]] | None, declared: Any, *, pinned: bool, owner: str,
 ) -> list[dict[str, Any]] | None:
@@ -134,11 +148,23 @@ def scoped_fallback_chain(
     """
     default = None if pinned else (inherited or None)
     if declared is None:
+        if pinned:
+            _SCOPED_CHAIN_PINNED.set(True)
+            return None
+        _SCOPED_CHAIN_PINNED.set(False)
         return default
-    if declared == []:
+    elif declared == []:
+        _SCOPED_CHAIN_PINNED.set(True)
         return None
-    normalized = get_fallback_chain({"fallback_providers": declared})
-    if not normalized:
-        logger.warning("%s fallback_providers has no usable routes; using the %s default",
-                       owner, "pinned" if pinned else "inherited")
-    return normalized or default
+    else:
+        normalized = get_fallback_chain({"fallback_providers": declared})
+        if not normalized:
+            logger.warning("%s fallback_providers has no usable routes; using the %s default",
+                           owner, "pinned" if pinned else "inherited")
+        result = normalized or default
+        _SCOPED_CHAIN_PINNED.set(True)
+        if pinned and isinstance(result, list):
+            return PinnedFallbackChain(result)
+        elif isinstance(result, list):
+            return DeclaredFallbackChain(result)
+        return result

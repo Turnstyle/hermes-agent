@@ -24,7 +24,7 @@ from tools.xai_http import DEFAULT_XAI_BASE_URL, hermes_xai_user_agent, resolve_
 
 logger = logging.getLogger(__name__)
 
-DEFAULT_X_SEARCH_MODEL = "grok-4.5"
+DEFAULT_X_SEARCH_MODEL = "grok-4.7"
 DEFAULT_X_SEARCH_TIMEOUT_SECONDS = 180
 DEFAULT_X_SEARCH_RETRIES = 2
 X_SEARCH_REASONING_EFFORTS = ("low", "medium", "high", "xhigh")
