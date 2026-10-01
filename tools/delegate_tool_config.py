@@ -562,6 +562,7 @@ def _resolve_child_runtime(
     # Reasoning: delegation.reasoning_effort > parent. Keep the raw value — a
     # YAML ``false`` must disable thinking, not coerce to "" and inherit.
     child_reasoning = getattr(parent_agent, "reasoning_config", None)
+    explicit_child_effort = False
     try:
         delegation_effort = delegation_cfg.get("reasoning_effort")
         if delegation_effort or delegation_effort is False:
@@ -571,8 +572,16 @@ def _resolve_child_runtime(
                 logger.warning("Unknown delegation.reasoning_effort '%s', inheriting parent level", delegation_effort)
             else:
                 child_reasoning = parsed
+                explicit_child_effort = True
     except Exception as exc:
         logger.debug("Could not load delegation reasoning_effort: %s", exc)
+
+    # H23: delegated children/helpers default to high when parent effort is xhigh/max/ultra
+    # and no explicit child effort is configured.
+    if not explicit_child_effort and isinstance(child_reasoning, dict):
+        effort = str(child_reasoning.get("effort") or "").strip().lower()
+        if effort in {"xhigh", "max", "ultra"}:
+            child_reasoning = {**child_reasoning, "effort": "high"}
 
     kwargs: Dict[str, Any] = {
         "base_url": effective_base_url, "api_key": override_api_key or parent_api_key, "model": effective_model,

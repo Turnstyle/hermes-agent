@@ -1411,7 +1411,7 @@ class TestDelegationReasoningEffort(unittest.TestCase):
     @patch("tools.delegate_tool._load_config")
     @patch("run_agent.AIAgent")
     def test_inherits_parent_reasoning_when_no_override(self, MockAgent, mock_cfg):
-        """With no delegation.reasoning_effort, child inherits parent's config."""
+        """With no delegation.reasoning_effort, child inherits parent's config (capped to high for xhigh)."""
         mock_cfg.return_value = {"max_iterations": 50, "reasoning_effort": ""}
         MockAgent.return_value = MagicMock()
         parent = _make_mock_parent()
@@ -1423,7 +1423,7 @@ class TestDelegationReasoningEffort(unittest.TestCase):
             task_count=1,
         )
         call_kwargs = MockAgent.call_args[1]
-        self.assertEqual(call_kwargs["reasoning_config"], {"enabled": True, "effort": "xhigh"})
+        self.assertEqual(call_kwargs["reasoning_config"], {"enabled": True, "effort": "high"})
 
     @patch("tools.delegate_tool._load_config")
     @patch("run_agent.AIAgent")

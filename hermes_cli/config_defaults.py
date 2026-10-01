@@ -1349,7 +1349,7 @@ DEFAULT_CONFIG = {
         # waiting on a multi-minute completion) restarts the window; a frozen one is caught.
         "child_timeout_seconds": 0,
         # Subagent effort: "ultra" | "max" | "xhigh" | "high" | "medium" | "low" | "minimal" |
-        # "none" (empty = inherit)
+        # "none" (empty = inherit parent; parents on xhigh/max/ultra default to high)
         "reasoning_effort": "",
         # Max parallel children per batch AND max concurrent background delegation units; async
         # dispatches beyond it run synchronously. Floor 1, no ceiling.
@@ -2402,7 +2402,7 @@ DEFAULT_CONFIG = {
     # (SuperGrok OAuth or XAI_API_KEY) AND the toolset is enabled in `hermes tools`.
     "x_search": {
         # xAI model for the Responses call; any Grok model with x_search access works.
-        "model": "grok-4.5",
+        "model": "grok-4.7",
         # Reasoning effort for models that support it; null keeps the model default.
         "reasoning_effort": None,
         # Request timeout in seconds (minimum 30); complex queries can take 60-120s.

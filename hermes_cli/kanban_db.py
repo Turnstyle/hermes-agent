@@ -2464,6 +2464,46 @@ def _claim_and_open_run(
     return run_id
 
 
+def _normalize_workspace_path(path: Optional[str]) -> str:
+    """Normalize a workspace path for comparison (expand ~ and resolve symlinks)."""
+    if not path:
+        return ""
+    p = os.path.expanduser(str(path).strip())
+    try:
+        return str(Path(p).resolve())
+    except Exception:
+        return os.path.normpath(p)
+
+
+def _is_workspace_busy(conn: sqlite3.Connection, task_id: str) -> Optional[str]:
+    """Check if task_id has workspace_kind in ('worktree', 'dir') with a non-null
+    workspace_path that matches the normalized workspace_path of any currently RUNNING task.
+    Returns the normalized path if busy, else None."""
+    trow = conn.execute(
+        "SELECT workspace_kind, workspace_path FROM tasks WHERE id = ?", (task_id,),
+    ).fetchone()
+    if not trow:
+        return None
+    kind = trow["workspace_kind"]
+    path = trow["workspace_path"]
+    if kind not in ("worktree", "dir") or not path:
+        return None
+    target_norm = _normalize_workspace_path(path)
+    if not target_norm:
+        return None
+    running_rows = conn.execute(
+        "SELECT id, workspace_kind, workspace_path FROM tasks "
+        "WHERE status = 'running' AND id != ? "
+        "  AND workspace_kind IN ('worktree', 'dir') AND workspace_path IS NOT NULL",
+        (task_id,),
+    ).fetchall()
+    for r in running_rows:
+        r_path = r["workspace_path"]
+        if r_path and _normalize_workspace_path(r_path) == target_norm:
+            return target_norm
+    return None
+
+
 def claim_task(
     conn: sqlite3.Connection, task_id: str, *, ttl_seconds: Optional[int] = None,
     claimer: Optional[str] = None,
@@ -2486,6 +2526,11 @@ def claim_task(
                 "WHERE id = ? AND status = 'ready'", (task_id,),
             )
             _append_event(conn, task_id, "claim_rejected", {"reason": "parents_not_done"})
+            return None
+        # Workspace guard (H24): prevent multiple running tasks on the same worktree / dir workspace
+        busy_path = _is_workspace_busy(conn, task_id)
+        if busy_path:
+            _append_event(conn, task_id, "claim_rejected", {"reason": "workspace_busy", "workspace_path": busy_path})
             return None
         # Close a leaked prior run so the CAS below doesn't strand it.
         _reclaim_dangling_run(
@@ -2520,6 +2565,10 @@ def claim_review_task(
                     conn, task_id, "dependency_wait",
                     {"reason": "parent_reopened", "source_status": "review"},
                 )
+            return None
+        busy_path = _is_workspace_busy(conn, task_id)
+        if busy_path:
+            _append_event(conn, task_id, "claim_rejected", {"reason": "workspace_busy", "workspace_path": busy_path})
             return None
         run_id = _claim_and_open_run(
             conn, task_id, "review", lock, expires, now, event_extra={"source_status": "review"},
