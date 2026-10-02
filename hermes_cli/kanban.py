@@ -1267,7 +1267,7 @@ def _run_triage_sweep(args: argparse.Namespace, verb: str, mod, run_one, json_ke
             return _err("kanban: --all cannot be used with --keep-spec", 2)
         if not args.task_id:
             return _err("kanban: specify --keep-spec requires a task id", 2)
-    if getattr(args, "expect_sha256", None) and not getattr(args, "keep_spec", False):
+    if getattr(args, "expect_sha256", None) is not None and not getattr(args, "keep_spec", False):
         return _err("kanban: --expect-sha256 requires --keep-spec", 2)
     author = getattr(args, "author", None) or _profile_author()
     want_json = bool(getattr(args, "json", False))
@@ -1312,7 +1312,7 @@ def _cmd_specify(args: argparse.Namespace) -> int:
     """Spec a triage task (or all) via the auxiliary LLM, promote to todo."""
     from hermes_cli import kanban_specify as spec
 
-    if getattr(args, "expect_sha256", None) and not getattr(args, "keep_spec", False):
+    if getattr(args, "expect_sha256", None) is not None and not getattr(args, "keep_spec", False):
         return _err("kanban: --expect-sha256 requires --keep-spec", 2)
 
     if getattr(args, "keep_spec", False):
@@ -1320,7 +1320,7 @@ def _cmd_specify(args: argparse.Namespace) -> int:
             return _err("kanban: --all cannot be used with --keep-spec", 2)
         if not args.task_id:
             return _err("kanban: specify --keep-spec requires a task id", 2)
-        if not getattr(args, "expect_sha256", None):
+        if getattr(args, "expect_sha256", None) is None:
             return _err("kanban: specify --keep-spec requires --expect-sha256", 2)
 
         expect_sha = getattr(args, "expect_sha256", "").strip().lower()
