@@ -599,7 +599,7 @@ hermes kanban gc [--event-retention-days N]            # 工作区 + 旧事件 +
 
 `hermes kanban specify <task_id> --keep-spec --expect-sha256 <hash> --author <owner>` 将任务从 `triage` 推进到 `todo`，无需调用 LLM，逐字保留标题和正文。
 - **事务内校验**：哈希在 SQLite 写入事务内直接校验，防止竞态条件。
-- **哈希编码**：紧凑 JSON `[title, body]` 的 UTF-8 字节的 SHA-256：`json.dumps([title, body], ensure_ascii=False, separators=(',',':'))` 无尾随换行符（`null` 正文与空字符串 `""` 区分，不进行空白裁剪或规范化）。
+- **哈希编码**：SHA-256 of the UTF-8 bytes of compact JSON [title,body] (ensure_ascii=False, separators (",",":"), no trailing newline; null body distinct from empty string).
 - **活动阻塞/保留**：当任务存在未释放的熔断器、粘性阻塞、needs_input 或 `HOLD FOR TURNER` 时拒绝操作。
 - **退出码**：`0` 成功，`1` 业务拒绝/失败，`2` 命令行用法错误（`--all` 与 `--keep-spec` 混用、缺少 id、缺少或无效的 `--expect-sha256`、缺少或空白 `--author`）。
 
