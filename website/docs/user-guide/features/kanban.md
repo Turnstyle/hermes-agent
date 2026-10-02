@@ -993,10 +993,19 @@ hermes kanban gc [--event-retention-days N]            # workspaces + old events
 #### Keeping original spec verbatim (`--keep-spec`)
 
 `hermes kanban specify <task_id> --keep-spec --expect-sha256 <hash> --author <owner>` releases a task from `triage` into `todo` without calling an LLM, keeping title and body verbatim.
+
+**Why keep-spec?** Moving a card out of triage must not rewrite instructions a human already reviewed: the model-backed `specify` path regenerates title and body, so a reviewed spec would be silently replaced; this path releases the exact reviewed text instead. The `--expect-sha256` hash binds the release to the exact bytes reviewed, so an edit after review refuses instead of releasing unreviewed text. Text preservation is exact: whitespace, trailing newlines, Unicode (`ensure_ascii=False`), and `null` body versus empty string `""` are distinct and never normalized. Hash and status are re-checked inside the same write transaction as the status change so a concurrent edit cannot slip between check and write, and active holds are refused, never cleared.
+
 - **In-transaction verification**: The hash is verified inside the SQLite write transaction immediately before promoting to prevent race conditions.
 - **Hash encoding**: SHA-256 of the UTF-8 bytes of compact JSON [title,body] (ensure_ascii=False, separators (",",":"), no trailing newline; null body distinct from empty string).
 - **Active holds**: Refuses if the task is subject to an active hold (block loop breaker, sticky block, needs_input, or `HOLD FOR TURNER`).
 - **Exit codes**: `0` on success, `1` on operational refusal / failure, `2` on command-line usage error (`--all` with `--keep-spec`, missing id, missing/invalid `--expect-sha256`, missing/blank `--author`).
+
+**Worked example: Computing the hash**:
+To compute `--expect-sha256` for a task with title `"My Title"` and body `"My Body"` (or `None` for a null body):
+```bash
+python3 -c "import hashlib, json; print(hashlib.sha256(json.dumps(['My Title', 'My Body'], ensure_ascii=False, separators=(',', ':')).encode('utf-8')).hexdigest())"
+```
 
 All commands are also available as a slash command in the interactive CLI and in the messaging gateway (see [`/kanban` slash command](#kanban-slash-command) below).
 

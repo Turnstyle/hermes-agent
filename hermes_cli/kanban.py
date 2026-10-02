@@ -1316,6 +1316,17 @@ def _cmd_specify(args: argparse.Namespace) -> int:
         return _err("kanban: --expect-sha256 requires --keep-spec", 2)
 
     if getattr(args, "keep_spec", False):
+        # Why keep-spec: moving a card out of triage must not rewrite instructions
+        # a human already reviewed. The model-backed path regenerates title/body,
+        # which would silently replace a reviewed spec; keep-spec releases the exact
+        # reviewed text instead.
+        # Guarantees:
+        # - Hash binds release to the exact reviewed bytes; post-review edits refuse.
+        # - Exact byte preservation: whitespace, newlines, Unicode (ensure_ascii=False),
+        #   and NULL vs "" are never normalized.
+        # - Hash and triage status are verified in the same write transaction as the
+        #   status change, so a concurrent edit cannot slip between check and write.
+        # - Active holds are refused, never cleared.
         if getattr(args, "all_triage", False):
             return _err("kanban: --all cannot be used with --keep-spec", 2)
         if not args.task_id:

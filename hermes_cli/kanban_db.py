@@ -4193,6 +4193,18 @@ def keep_spec_triage_task(
 ) -> tuple[bool, str, Optional[str], Optional[str], bool, Optional[str]]:
     """Verify in-txn SHA-256 and holds, promote triage -> todo, audit, and emit event.
 
+    Why this path exists and guarantees:
+    - Moving a card out of triage must not rewrite instructions a human already
+      reviewed: the model-backed specify path regenerates title/body, which would
+      silently discard human edits; this path releases the exact reviewed text instead.
+    - The expected hash binds the release to the exact bytes reviewed, so an edit
+      after review refuses instead of releasing unreviewed text.
+    - Preservation is exact: whitespace, trailing newlines, Unicode (ensure_ascii=False),
+      and NULL vs empty string are distinct and never normalized.
+    - Hash and status are re-checked inside the same write transaction as the status
+      change so a concurrent edit cannot slip between check and write.
+    - Holds are refused, never cleared, preserving active circuit breakers and markers.
+
     Returns (ok, reason, computed_sha256, status_after, committed, recompute_error).
     Enforces nonblank author, in-txn hash match, and active hold refusal inside
     a single IMMEDIATE write transaction. recompute_ready runs in a separate txn.

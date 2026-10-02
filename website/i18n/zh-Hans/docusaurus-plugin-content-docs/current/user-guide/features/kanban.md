@@ -598,10 +598,19 @@ hermes kanban gc [--event-retention-days N]            # 工作区 + 旧事件 +
 #### 逐字保留原始规格 (`--keep-spec`)
 
 `hermes kanban specify <task_id> --keep-spec --expect-sha256 <hash> --author <owner>` 将任务从 `triage` 推进到 `todo`，无需调用 LLM，逐字保留标题和正文。
+
+**为什么需要 keep-spec？** 将卡片移出分诊（triage）列时，绝不能重写人工已经审查过的指令。基于模型的 `specify` 路径会重新生成标题和正文，导致已审查的规格被静默覆盖；`--keep-spec` 则逐字发布经审查的原始文本。`--expect-sha256` 哈希将发布操作与审查时的确切字节绑定，确保审查后发生任何编辑时拒绝推进，防止未审查指令被发布。文本保留完全精确：空白字符、尾部换行符、Unicode（`ensure_ascii=False`）以及 `null` 正文与空字符串 `""` 均逐字节保留，绝不进行任何规范化。哈希与分诊状态在状态变更的同一 SQLite 写入事务内重新校验，防止并发编辑在校验与写入之间切入；所有活动阻塞/保留均直接拒绝，绝不静默清除。
+
 - **事务内校验**：哈希在 SQLite 写入事务内直接校验，防止竞态条件。
 - **哈希编码**：SHA-256 of the UTF-8 bytes of compact JSON [title,body] (ensure_ascii=False, separators (",",":"), no trailing newline; null body distinct from empty string).
 - **活动阻塞/保留**：当任务存在未释放的熔断器、粘性阻塞、needs_input 或 `HOLD FOR TURNER` 时拒绝操作。
 - **退出码**：`0` 成功，`1` 业务拒绝/失败，`2` 命令行用法错误（`--all` 与 `--keep-spec` 混用、缺少 id、缺少或无效的 `--expect-sha256`、缺少或空白 `--author`）。
+
+**计算哈希示例**：
+计算标题为 `"My Title"`、正文为 `"My Body"`（若正文为 null 则使用 `None`）的任务对应的 `--expect-sha256`：
+```bash
+python3 -c "import hashlib, json; print(hashlib.sha256(json.dumps(['My Title', 'My Body'], ensure_ascii=False, separators=(',', ':')).encode('utf-8')).hexdigest())"
+```
 
 所有命令也可以作为交互式 CLI 中的斜杠命令和消息 gateway 中使用（见下方[`/kanban` 斜杠命令](#kanban-slash-command)）。
 
