@@ -4167,7 +4167,10 @@ def specify_triage_task(
     return True
 
 
-HASH_ENCODING = "sha256(json.dumps([title, body], ensure_ascii=False, separators=(',',':')))"
+HASH_ENCODING = (
+    'SHA-256 of the UTF-8 bytes of compact JSON [title,body] '
+    '(ensure_ascii=False, separators (",",":"), no trailing newline; null body distinct from empty string)'
+)
 
 
 def compute_task_sha256(title: Optional[str], body: Optional[str]) -> str:
@@ -4221,14 +4224,14 @@ def keep_spec_triage_task(
         if _is_foreign_fleet_mirror(conn, task_id, installed_node_id):
             return False, "foreign fleet mirror cannot be promoted locally", None, "triage", False, None
 
+        if _has_turner_hold(conn, task_id, row["block_kind"], row["title"], row["body"]):
+            return False, "task has active hold (block_kind or HOLD FOR TURNER)", None, "triage", False, None
+
         if _has_unreleased_block_loop(conn, task_id):
             return False, "task has unreleased block loop hold", None, "triage", False, None
 
         if _has_sticky_block(conn, task_id):
             return False, "task has active sticky block hold", None, "triage", False, None
-
-        if _has_turner_hold(conn, task_id, row["block_kind"], row["title"], row["body"]):
-            return False, "task has active hold (block_kind or HOLD FOR TURNER)", None, "triage", False, None
 
         computed_sha256 = compute_task_sha256(row["title"], row["body"])
 
@@ -4250,7 +4253,7 @@ def keep_spec_triage_task(
             return False, "task moved out of triage concurrently", None, None, False, None
 
         comment_text = (
-            f"Specified (kept original spec, verified sha256 {computed_sha256[:8]}) and promoted to todo."
+            f"Specified by {clean_author} (kept original spec, verified sha256 {computed_sha256}) and promoted to todo."
         )
         _insert_comment(conn, task_id, clean_author, comment_text, int(time.time()))
 
@@ -4258,7 +4261,12 @@ def keep_spec_triage_task(
             conn,
             task_id,
             "specified",
-            {"kept_spec": True, "sha256": computed_sha256, "changed_fields": []},
+            {
+                "author": clean_author,
+                "kept_spec": True,
+                "sha256": computed_sha256,
+                "changed_fields": [],
+            },
         )
 
     committed = True

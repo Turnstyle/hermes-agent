@@ -994,7 +994,7 @@ hermes kanban gc [--event-retention-days N]            # workspaces + old events
 
 `hermes kanban specify <task_id> --keep-spec --expect-sha256 <hash> --author <owner>` releases a task from `triage` into `todo` without calling an LLM, keeping title and body verbatim.
 - **In-transaction verification**: The hash is verified inside the SQLite write transaction immediately before promoting to prevent race conditions.
-- **Hash encoding**: SHA-256 of the UTF-8 bytes of compact JSON `[title, body]`: `json.dumps([title, body], ensure_ascii=False, separators=(',',':'))` with no trailing newline (`null` body is distinct from empty string `""`, no whitespace stripping or normalization).
+- **Hash encoding**: SHA-256 of the UTF-8 bytes of compact JSON [title,body] (ensure_ascii=False, separators (",",":"), no trailing newline; null body distinct from empty string).
 - **Active holds**: Refuses if the task is subject to an active hold (block loop breaker, sticky block, needs_input, or `HOLD FOR TURNER`).
 - **Exit codes**: `0` on success, `1` on operational refusal / failure, `2` on command-line usage error (`--all` with `--keep-spec`, missing id, missing/invalid `--expect-sha256`, missing/blank `--author`).
 

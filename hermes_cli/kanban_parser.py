@@ -441,9 +441,8 @@ _SPECS = [
              help="Bypass auxiliary LLM specification; keep title and body verbatim and promote triage to todo. "
                   "Requires a single task_id, --expect-sha256, and --author. Incompatible with --all."),
         _arg("--expect-sha256", metavar="HEX",
-             help="Verify task content hash before promotion. Expected SHA-256 hex digest of "
-                  "compact JSON [title, body]: json.dumps([title, body], ensure_ascii=False, separators=(',',':')) "
-                  "with NO trailing newline (null body is distinct from empty string ''). "
+             help="Verify task content hash before promotion. Expected "
+                  'SHA-256 of the UTF-8 bytes of compact JSON [title,body] (ensure_ascii=False, separators (",",":"), no trailing newline; null body distinct from empty string). '
                   "Refuses promotion if hash mismatches. Requires --keep-spec."),
     ],
     help="Flesh out a triage-column task into a concrete spec (title + "

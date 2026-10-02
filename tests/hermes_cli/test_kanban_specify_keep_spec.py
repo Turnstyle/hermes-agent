@@ -184,8 +184,10 @@ def test_zero_model_calls_module_and_cli(kanban_home, monkeypatch, capsys):
     rc = _run_cli("specify", tid, "--keep-spec", "--expect-sha256", h, "--author", "reviewer")
     assert rc == 0
     out = capsys.readouterr().out
-    assert f"Kept spec for {tid} → ready" in out
-    assert "Encoding: sha256(json.dumps([title, body], ensure_ascii=False, separators=(',',':')))" in out
+    assert (
+        'Encoding: SHA-256 of the UTF-8 bytes of compact JSON [title,body] '
+        '(ensure_ascii=False, separators (",",":"), no trailing newline; null body distinct from empty string)'
+    ) in out
 
 
 # ---------------------------------------------------------------------------
@@ -228,11 +230,12 @@ def test_concurrent_edit_two_connection_interleaving(kanban_home):
         initial_hash = kb.compute_task_sha256("Concurrent Task", "V1 body")
 
     with kbc.connect() as conn1, kbc.connect() as conn2:
-        snap_before = _snapshot_task_state(conn1, tid)
-
         # Actor 2 modifies task concurrently in WAL
         conn2.execute("UPDATE tasks SET body = 'V2 body edited concurrently' WHERE id = ?", (tid,))
         conn2.commit()
+
+        # Capture snapshot after Actor 2's edit and immediately before Actor 1's attempt
+        snap_before_attempt = _snapshot_task_state(conn1, tid)
 
         # Actor 1 attempts keep_spec with stale initial_hash
         ok, reason, computed_hash, status_after, committed, recompute_err = kb.keep_spec_triage_task(
@@ -247,13 +250,17 @@ def test_concurrent_edit_two_connection_interleaving(kanban_home):
         assert status_after == "triage"
         assert "sha256 mismatch" in reason
 
+        # Assert full row, links, comments, and events snapshots unchanged (zero writes by Actor 1)
+        snap_after_attempt = _snapshot_task_state(conn1, tid)
+        assert snap_before_attempt == snap_after_attempt
+
         # Assert zero comments added by Actor 1
         comments = conn1.execute("SELECT * FROM task_comments WHERE task_id = ?", (tid,)).fetchall()
         assert len(comments) == 0
 
         # Assert no 'specified' events added by Actor 1
         events = conn1.execute("SELECT * FROM task_events WHERE task_id = ?", (tid,)).fetchall()
-        assert len(events) == len(snap_before[2])
+        assert len(events) == len(snap_before_attempt[2])
         assert all(e["kind"] != "specified" for e in events)
 
         # Title/body still reflect Actor 2's edit
@@ -289,12 +296,21 @@ def test_non_triage_status_refuses_zero_writes(kanban_home):
 
 
 def test_nonexistent_task_refuses(kanban_home):
-    """A missing task id is refused."""
+    """A missing task id is refused with zero writes across full snapshots."""
+    with kbc.connect() as conn:
+        tid_existing = _create_triage(conn, title="Existing Task", body="Existing Body")
+        snap_existing_before = _snapshot_task_state(conn, tid_existing)
+        snap_missing_before = _snapshot_task_state(conn, "t_nonexistent")
+
     h = "a" * 64
     outcome = spec.keep_spec_task("t_nonexistent", expect_sha256=h, author="author")
     assert outcome.ok is False
     assert outcome.committed is False
     assert outcome.reason == "task not found"
+
+    with kbc.connect() as conn:
+        assert snap_missing_before == _snapshot_task_state(conn, "t_nonexistent")
+        assert snap_existing_before == _snapshot_task_state(conn, tid_existing)
 
 
 # ---------------------------------------------------------------------------
@@ -353,8 +369,8 @@ def test_active_hold_sticky_block_refuses(kanban_home):
         assert snap_before2 == _snapshot_task_state(conn, tid2)
 
 
-def test_active_hold_turner_marker_and_needs_input_refuses(kanban_home):
-    """HOLD FOR TURNER marker or needs_input hold refuses promotion."""
+def test_active_hold_turner_marker_refuses(kanban_home):
+    """HOLD FOR TURNER marker in title or body refuses promotion."""
     # 1. HOLD FOR TURNER in title
     with kbc.connect() as conn:
         tid1 = _create_triage(conn, title="Important HOLD FOR TURNER fix", body="Details")
@@ -382,6 +398,58 @@ def test_active_hold_turner_marker_and_needs_input_refuses(kanban_home):
     assert outcome2.reason == "task has active hold (block_kind or HOLD FOR TURNER)"
     with kbc.connect() as conn:
         assert snap_before2 == _snapshot_task_state(conn, tid2)
+
+
+def test_active_hold_needs_input_refuses_and_unblocked_succeeds(kanban_home):
+    """A task with block_kind='needs_input' refuses while hold is active, and succeeds when unblocked."""
+    # 1. block_kind='needs_input' with hold-event ordering: 'unblocked' release followed by newest 'blocked'
+    with kbc.connect() as conn:
+        tid1 = _create_triage(conn, title="Needs input task 1", body="Needs input body 1")
+        conn.execute("UPDATE tasks SET block_kind = 'needs_input' WHERE id = ?", (tid1,))
+        # Earlier release event, followed by newest hold event
+        kb._append_event(conn, tid1, "unblocked", {"reason": "prior release"})
+        kb._append_event(conn, tid1, "blocked", {"reason": "waiting for operator clarification"})
+        conn.commit()
+        snap_before1 = _snapshot_task_state(conn, tid1)
+        h1 = kb.compute_task_sha256("Needs input task 1", "Needs input body 1")
+
+    outcome1 = spec.keep_spec_task(tid1, expect_sha256=h1, author="author")
+    assert outcome1.ok is False
+    assert outcome1.committed is False
+    assert outcome1.reason == "task has active hold (block_kind or HOLD FOR TURNER)"
+    with kbc.connect() as conn:
+        assert snap_before1 == _snapshot_task_state(conn, tid1)
+
+    # 2. block_kind='needs_input' with hold-event ordering: newest 'block_loop_detected' after release
+    with kbc.connect() as conn:
+        tid2 = _create_triage(conn, title="Needs input task 2", body="Needs input body 2")
+        conn.execute("UPDATE tasks SET block_kind = 'needs_input' WHERE id = ?", (tid2,))
+        kb._append_event(conn, tid2, "unblocked", {"reason": "prior release"})
+        kb._append_event(conn, tid2, "block_loop_detected", {"reason": "breaker trip"})
+        conn.commit()
+        snap_before2 = _snapshot_task_state(conn, tid2)
+        h2 = kb.compute_task_sha256("Needs input task 2", "Needs input body 2")
+
+    outcome2 = spec.keep_spec_task(tid2, expect_sha256=h2, author="author")
+    assert outcome2.ok is False
+    assert outcome2.committed is False
+    assert outcome2.reason == "task has active hold (block_kind or HOLD FOR TURNER)"
+    with kbc.connect() as conn:
+        assert snap_before2 == _snapshot_task_state(conn, tid2)
+
+    # 3. block_kind='needs_input' where the hold was released by 'unblocked' (must NOT refuse for that predicate)
+    with kbc.connect() as conn:
+        tid3 = _create_triage(conn, title="Released needs input", body="Released body")
+        conn.execute("UPDATE tasks SET block_kind = 'needs_input' WHERE id = ?", (tid3,))
+        kb._append_event(conn, tid3, "blocked", {"reason": "waiting for operator"})
+        kb._append_event(conn, tid3, "unblocked", {"reason": "operator answered questions"})
+        conn.commit()
+        h3 = kb.compute_task_sha256("Released needs input", "Released body")
+
+    outcome3 = spec.keep_spec_task(tid3, expect_sha256=h3, author="author")
+    assert outcome3.ok is True
+    assert outcome3.committed is True
+    assert outcome3.status_after in ("todo", "ready")
 
 
 def test_foreign_fleet_mirror_refuses(kanban_home, monkeypatch):
@@ -583,16 +651,25 @@ def test_audit_comment_and_event_payload(kanban_home):
         comments = kb.list_comments(conn, tid)
         events = kb.list_events(conn, tid)
 
+    # 1. Independent assertions on audit comment
     assert len(comments) == 1
     comment = comments[0]
     assert comment.author == "turner-review"
-    assert f"Specified (kept original spec, verified sha256 {h[:8]}) and promoted to todo." in comment.body
+    assert "turner-review" in comment.body
+    assert h in comment.body
+    assert f"Specified by turner-review (kept original spec, verified sha256 {h}) and promoted to todo." in comment.body
 
+    # 2. Independent assertions on specified event payload
     specified_events = [e for e in events if e.kind == "specified"]
     assert len(specified_events) == 1
     event = specified_events[0]
     payload = json.loads(event.payload) if isinstance(event.payload, str) else event.payload
+    assert payload["author"] == "turner-review"
+    assert payload["sha256"] == h
+    assert payload["kept_spec"] is True
+    assert payload["changed_fields"] == []
     assert payload == {
+        "author": "turner-review",
         "kept_spec": True,
         "sha256": h,
         "changed_fields": [],
@@ -670,48 +747,47 @@ def test_recompute_ready_failure_visibility(kanban_home, monkeypatch, capsys):
 # ---------------------------------------------------------------------------
 
 def test_cli_usage_errors(kanban_home, capsys):
-    """Usage errors return exit code 2."""
+    """Usage errors return exit code 2 and leave full DB snapshots unchanged (zero writes)."""
     valid_hash = "f" * 64
 
-    # 1. --all with --keep-spec
-    rc = _run_cli("specify", "--all", "--keep-spec", "--expect-sha256", valid_hash, "--author", "ace")
-    assert rc == 2
-    assert "--all cannot be used with --keep-spec" in capsys.readouterr().err
+    with kbc.connect() as conn:
+        tid = _create_triage(conn, title="Usage Error Task", body="Usage Body")
+        snap_before = _snapshot_task_state(conn, tid)
 
-    # 2. Missing task_id with --keep-spec
-    rc = _run_cli("specify", "--keep-spec", "--expect-sha256", valid_hash, "--author", "ace")
-    assert rc == 2
-    assert "specify --keep-spec requires a task id" in capsys.readouterr().err
+    commands = [
+        # 1. --all with --keep-spec
+        (["specify", "--all", "--keep-spec", "--expect-sha256", valid_hash, "--author", "ace"],
+         "--all cannot be used with --keep-spec"),
+        # 2. Missing task_id with --keep-spec
+        (["specify", "--keep-spec", "--expect-sha256", valid_hash, "--author", "ace"],
+         "specify --keep-spec requires a task id"),
+        # 3. Missing --expect-sha256 with --keep-spec
+        (["specify", tid, "--keep-spec", "--author", "ace"],
+         "specify --keep-spec requires --expect-sha256"),
+        # 4. --expect-sha256 without --keep-spec
+        (["specify", tid, "--expect-sha256", valid_hash, "--author", "ace"],
+         "--expect-sha256 requires --keep-spec"),
+        # 5. Invalid hex digest (length != 64)
+        (["specify", tid, "--keep-spec", "--expect-sha256", "abc123", "--author", "ace"],
+         "invalid sha256 hex digest"),
+        # 6. Invalid hex digest (non-hex characters)
+        (["specify", tid, "--keep-spec", "--expect-sha256", "z" * 64, "--author", "ace"],
+         "invalid sha256 hex digest"),
+        # 7. Missing --author
+        (["specify", tid, "--keep-spec", "--expect-sha256", valid_hash],
+         "specify --keep-spec requires --author"),
+        # 8. Blank --author
+        (["specify", tid, "--keep-spec", "--expect-sha256", valid_hash, "--author", "   "],
+         "author cannot be blank"),
+    ]
 
-    # 3. Missing --expect-sha256 with --keep-spec
-    rc = _run_cli("specify", "t_123", "--keep-spec", "--author", "ace")
-    assert rc == 2
-    assert "specify --keep-spec requires --expect-sha256" in capsys.readouterr().err
-
-    # 4. --expect-sha256 without --keep-spec
-    rc = _run_cli("specify", "t_123", "--expect-sha256", valid_hash, "--author", "ace")
-    assert rc == 2
-    assert "--expect-sha256 requires --keep-spec" in capsys.readouterr().err
-
-    # 5. Invalid hex digest (length != 64)
-    rc = _run_cli("specify", "t_123", "--keep-spec", "--expect-sha256", "abc123", "--author", "ace")
-    assert rc == 2
-    assert "invalid sha256 hex digest" in capsys.readouterr().err
-
-    # 6. Invalid hex digest (non-hex characters)
-    rc = _run_cli("specify", "t_123", "--keep-spec", "--expect-sha256", "z" * 64, "--author", "ace")
-    assert rc == 2
-    assert "invalid sha256 hex digest" in capsys.readouterr().err
-
-    # 7. Missing --author
-    rc = _run_cli("specify", "t_123", "--keep-spec", "--expect-sha256", valid_hash)
-    assert rc == 2
-    assert "specify --keep-spec requires --author" in capsys.readouterr().err
-
-    # 8. Blank --author
-    rc = _run_cli("specify", "t_123", "--keep-spec", "--expect-sha256", valid_hash, "--author", "   ")
-    assert rc == 2
-    assert "author cannot be blank" in capsys.readouterr().err
+    for argv, err_msg in commands:
+        rc = _run_cli(*argv)
+        assert rc == 2
+        assert err_msg in capsys.readouterr().err
+        with kbc.connect() as conn:
+            snap_after = _snapshot_task_state(conn, tid)
+        assert snap_before == snap_after
 
 
 # ---------------------------------------------------------------------------
@@ -719,10 +795,15 @@ def test_cli_usage_errors(kanban_home, capsys):
 # ---------------------------------------------------------------------------
 
 def test_json_shape_and_hash_encoding(kanban_home, capsys):
-    """--json output adheres to the required contract."""
+    """--json output adheres to the required contract and reports explicit hash_encoding."""
     with kbc.connect() as conn:
         tid = _create_triage(conn, title="JSON Task", body="JSON Body")
         h = kb.compute_task_sha256("JSON Task", "JSON Body")
+
+    expected_encoding = (
+        'SHA-256 of the UTF-8 bytes of compact JSON [title,body] '
+        '(ensure_ascii=False, separators (",",":"), no trailing newline; null body distinct from empty string)'
+    )
 
     # 1. Success case
     rc = _run_cli("specify", tid, "--keep-spec", "--expect-sha256", h, "--author", "tester", "--json")
@@ -737,7 +818,7 @@ def test_json_shape_and_hash_encoding(kanban_home, capsys):
     assert data["ok"] is True
     assert data["kept_spec"] is True
     assert data["sha256"] == h
-    assert data["hash_encoding"] == "sha256(json.dumps([title, body], ensure_ascii=False, separators=(',',':')))"
+    assert data["hash_encoding"] == expected_encoding
     assert data["status_after"] == "ready"
     assert data["committed"] is True
     assert data["recompute_error"] is None
@@ -752,6 +833,34 @@ def test_json_shape_and_hash_encoding(kanban_home, capsys):
     assert set(data_refuse.keys()) == expected_keys
     assert data_refuse["ok"] is False
     assert data_refuse["committed"] is False
+    assert data_refuse["hash_encoding"] == expected_encoding
     assert data_refuse["status_after"] == "triage"
     assert data_refuse["recompute_error"] is None
     assert "sha256 mismatch" in data_refuse["reason"]
+
+
+def test_parser_help_explicit_hash_encoding(capsys):
+    """Parser help for specify includes the explicit hash encoding contract string."""
+    from hermes_cli import kanban_parser
+
+    expected_encoding = (
+        'SHA-256 of the UTF-8 bytes of compact JSON [title,body] '
+        '(ensure_ascii=False, separators (",",":"), no trailing newline; null body distinct from empty string)'
+    )
+
+    # 1. Spec definition check
+    specify_args = next(args for name, _, args, _ in kanban_parser._SPECS if name == "specify")
+    expect_arg_kw = next(kw for flags, kw in specify_args if "--expect-sha256" in flags)
+    assert expected_encoding in expect_arg_kw["help"]
+
+    # 2. Rendered CLI help output check
+    root = argparse.ArgumentParser()
+    subp = root.add_subparsers(dest="cmd")
+    kanban_cli.build_parser(subp)
+    with pytest.raises(SystemExit):
+        root.parse_args(["kanban", "specify", "--help"])
+    help_out = capsys.readouterr().out
+    normalized_help = " ".join(help_out.split())
+    assert expected_encoding in normalized_help
+    assert "--keep-spec" in help_out
+    assert "--expect-sha256" in help_out
