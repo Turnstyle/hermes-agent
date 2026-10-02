@@ -22,7 +22,7 @@ import argparse
 import hashlib
 import json
 from pathlib import Path
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 import pytest
 
@@ -767,8 +767,14 @@ def test_cli_usage_errors(kanban_home, capsys):
         # 4. --expect-sha256 without --keep-spec
         (["specify", tid, "--expect-sha256", valid_hash, "--author", "ace"],
          "--expect-sha256 requires --keep-spec"),
+        # 4b. Empty --expect-sha256 without --keep-spec
+        (["specify", tid, "--expect-sha256", "", "--author", "ace"],
+         "--expect-sha256 requires --keep-spec"),
         # 5. Invalid hex digest (length != 64)
         (["specify", tid, "--keep-spec", "--expect-sha256", "abc123", "--author", "ace"],
+         "invalid sha256 hex digest"),
+        # 5b. Empty --expect-sha256 with --keep-spec (length == 0 != 64)
+        (["specify", tid, "--keep-spec", "--expect-sha256", "", "--author", "ace"],
          "invalid sha256 hex digest"),
         # 6. Invalid hex digest (non-hex characters)
         (["specify", tid, "--keep-spec", "--expect-sha256", "z" * 64, "--author", "ace"],
@@ -864,3 +870,75 @@ def test_parser_help_explicit_hash_encoding(capsys):
     assert expected_encoding in normalized_help
     assert "--keep-spec" in help_out
     assert "--expect-sha256" in help_out
+
+
+# ---------------------------------------------------------------------------
+# 14. Refuse empty --expect-sha256 without --keep-spec & regression checks
+# ---------------------------------------------------------------------------
+
+def test_empty_expect_sha256_without_keep_spec_refuses(kanban_home, monkeypatch, capsys):
+    """(1) --expect-sha256 '' without --keep-spec refuses exit 2, zero writes, and model call never reached."""
+    with kbc.connect() as conn:
+        tid = _create_triage(conn, title="Empty Hash No Keep Spec", body="Initial Body")
+        snap_before = _snapshot_task_state(conn, tid)
+
+    def _must_not_reach(*args, **kwargs):
+        raise AssertionError("model/specify path reached unexpectedly")
+
+    monkeypatch.setattr(spec, "_call_aux", _must_not_reach)
+    monkeypatch.setattr(spec, "specify_task", _must_not_reach)
+
+    rc = _run_cli("specify", tid, "--expect-sha256", "", "--author", "alice")
+    assert rc == 2
+    err = capsys.readouterr().err
+    assert "--expect-sha256 requires --keep-spec" in err
+
+    with kbc.connect() as conn:
+        snap_after = _snapshot_task_state(conn, tid)
+    assert snap_before == snap_after
+
+
+def test_normal_model_backed_specify_without_hash_flag_runs_unchanged(kanban_home, capsys):
+    """(2) normal model-backed specify with NO hash flag still runs unchanged."""
+    with kbc.connect() as conn:
+        tid = _create_triage(conn, title="rough task", body=None)
+
+    content = json.dumps({
+        "title": "Refined rough task",
+        "body": "**Goal**\nA concrete goal.\n\n**Approach**\n- Step 1\n\n**Acceptance criteria**\n- [ ] Done\n",
+    })
+    resp = MagicMock()
+    resp.choices = [MagicMock()]
+    resp.choices[0].message.content = content
+    mock_call_llm = MagicMock(return_value=resp)
+
+    with patch("agent.auxiliary_client.call_llm", mock_call_llm):
+        rc = _run_cli("specify", tid, "--author", "normal-author")
+
+    assert rc == 0
+    assert mock_call_llm.call_count == 1
+    out = capsys.readouterr().out
+    assert f"Specified {tid}" in out
+
+    with kbc.connect() as conn:
+        task = kb.get_task(conn, tid)
+    assert task.status in {"todo", "ready"}
+    assert task.title == "Refined rough task"
+    assert "**Goal**" in (task.body or "")
+
+
+def test_empty_expect_sha256_with_keep_spec_refuses(kanban_home, capsys):
+    """(3) --keep-spec with '' hash refuses exit 2 as invalid sha256 hex digest."""
+    with kbc.connect() as conn:
+        tid = _create_triage(conn, title="Empty Hash With Keep Spec", body="Initial Body")
+        snap_before = _snapshot_task_state(conn, tid)
+
+    rc = _run_cli("specify", tid, "--keep-spec", "--expect-sha256", "", "--author", "alice")
+    assert rc == 2
+    err = capsys.readouterr().err
+    assert "invalid sha256 hex digest" in err
+
+    with kbc.connect() as conn:
+        snap_after = _snapshot_task_state(conn, tid)
+    assert snap_before == snap_after
+
