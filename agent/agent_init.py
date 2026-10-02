@@ -1112,6 +1112,8 @@ def _init_fallback_chain(agent, fallback_model):
         pass
 
     agent._fallback_chain_pinned = pinned_marker
+    from hermes_cli.kanban_model_selection import bind_worker_selection
+    bind_worker_selection(agent)
     chain = agent._fallback_chain
     if chain and not agent.quiet_mode:
         labels = [f"{f['model']} ({f['provider']})" for f in chain]

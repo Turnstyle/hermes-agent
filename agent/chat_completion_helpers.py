@@ -1915,6 +1915,9 @@ def _candidate_pool_exhausted(agent, fb_provider: str, fb_model: str) -> bool:
 def _should_skip_fallback_candidate(agent, fb: dict, fb_key: tuple, fb_provider: str, fb_model: str, unavailable: set) -> bool:
     """True when the entry is already unavailable, malformed, locally unusable, or resolves
     to the backend that just failed (falling back to it would loop the failure)."""
+    from hermes_cli.kanban_model_selection import fallback_allowed
+    if not fallback_allowed(agent, fb_provider, fb_model):
+        return True
     if fb_key in unavailable:
         logger.debug("Fallback skip: %s previously marked unavailable", fb_key)
         return True
