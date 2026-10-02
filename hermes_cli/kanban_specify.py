@@ -76,6 +76,12 @@ class SpecifyOutcome:
     ok: bool
     reason: str = ""
     new_title: Optional[str] = None
+    kept_spec: bool = False
+    sha256: Optional[str] = None
+    hash_encoding: Optional[str] = None
+    status_after: Optional[str] = None
+    committed: bool = False
+    recompute_error: Optional[str] = None
 
 
 def _truncate(text: str, limit: int) -> str:
@@ -232,6 +238,48 @@ def specify_task(
         # Race: promoted/archived between our read and the write.
         return SpecifyOutcome(task_id, False, "task moved out of triage before promotion")
     return SpecifyOutcome(task_id, True, "specified", new_title=new_title)
+
+
+def keep_spec_task(
+    task_id: str,
+    *,
+    expect_sha256: str,
+    author: str,
+) -> SpecifyOutcome:
+    """Specify one triage task by keeping its original spec verbatim.
+
+    Guarantees zero model calls (bypasses _call_aux and specify_task).
+    Verifies hash in-transaction and promotes triage -> todo (and ready if parent-free).
+    """
+    if not author or not author.strip():
+        return SpecifyOutcome(
+            task_id=task_id,
+            ok=False,
+            reason="author cannot be blank",
+            kept_spec=False,
+            committed=False,
+        )
+
+    clean_author = author.strip()
+    with kbc.connect_closing() as conn:
+        ok, reason, computed_sha256, status_after, committed, recompute_err = kb.keep_spec_triage_task(
+            conn,
+            task_id,
+            expected_sha256=expect_sha256,
+            author=clean_author,
+        )
+
+    return SpecifyOutcome(
+        task_id=task_id,
+        ok=ok,
+        reason=reason,
+        kept_spec=ok,
+        sha256=computed_sha256,
+        hash_encoding=kb.HASH_ENCODING,
+        status_after=status_after,
+        committed=committed,
+        recompute_error=recompute_err,
+    )
 
 
 def list_triage_ids(*, tenant: Optional[str] = None) -> list[str]:
