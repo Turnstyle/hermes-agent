@@ -1262,6 +1262,13 @@ def _run_triage_sweep(args: argparse.Namespace, verb: str, mod, run_one, json_ke
     """Shared driver for ``specify`` / ``decompose``: validate ids (one task id XOR ``--all``), run
     ``run_one(tid, author=...)`` per id, print JSON or human lines, exit code."""
     all_flag = bool(getattr(args, "all_triage", False))
+    if getattr(args, "keep_spec", False):
+        if all_flag:
+            return _err("kanban: --all cannot be used with --keep-spec", 2)
+        if not args.task_id:
+            return _err("kanban: specify --keep-spec requires a task id", 2)
+    if getattr(args, "expect_sha256", None) and not getattr(args, "keep_spec", False):
+        return _err("kanban: --expect-sha256 requires --keep-spec", 2)
     author = getattr(args, "author", None) or _profile_author()
     want_json = bool(getattr(args, "json", False))
     tenant = getattr(args, "tenant", None)
@@ -1304,6 +1311,51 @@ def _retitled_suffix(outcome) -> str:
 def _cmd_specify(args: argparse.Namespace) -> int:
     """Spec a triage task (or all) via the auxiliary LLM, promote to todo."""
     from hermes_cli import kanban_specify as spec
+
+    if getattr(args, "expect_sha256", None) and not getattr(args, "keep_spec", False):
+        return _err("kanban: --expect-sha256 requires --keep-spec", 2)
+
+    if getattr(args, "keep_spec", False):
+        if getattr(args, "all_triage", False):
+            return _err("kanban: --all cannot be used with --keep-spec", 2)
+        if not args.task_id:
+            return _err("kanban: specify --keep-spec requires a task id", 2)
+        if not getattr(args, "expect_sha256", None):
+            return _err("kanban: specify --keep-spec requires --expect-sha256", 2)
+
+        expect_sha = getattr(args, "expect_sha256", "").strip().lower()
+        if len(expect_sha) != 64 or not all(c in "0123456789abcdef" for c in expect_sha):
+            return _err(f"kanban: specify --keep-spec: invalid sha256 hex digest: {getattr(args, 'expect_sha256', '')!r}", 2)
+
+        author_arg = getattr(args, "author", None)
+        if author_arg is None:
+            return _err("kanban: specify --keep-spec requires --author", 2)
+        if not author_arg.strip():
+            return _err("kanban: specify --keep-spec: author cannot be blank", 2)
+
+        outcome = spec.keep_spec_task(
+            args.task_id,
+            expect_sha256=expect_sha,
+            author=author_arg.strip(),
+        )
+
+        want_json = bool(getattr(args, "json", False))
+        if want_json:
+            fields = (
+                "task_id", "ok", "reason", "kept_spec", "sha256",
+                "hash_encoding", "status_after", "committed", "recompute_error",
+            )
+            print(json.dumps(_obj_dict(outcome, fields)))
+        elif outcome.ok:
+            short_hash = outcome.sha256[:8] if outcome.sha256 else "unknown"
+            print(f"Kept spec for {outcome.task_id} → {outcome.status_after} (sha256: {short_hash})")
+            print(f"Encoding: {outcome.hash_encoding or kb.HASH_ENCODING}")
+            if outcome.recompute_error:
+                print(f"warning: recompute_ready deferred: {outcome.recompute_error}")
+        else:
+            print(f"kanban: specify {outcome.task_id}: {outcome.reason}", file=sys.stderr)
+
+        return 0 if outcome.ok else 1
 
     return _run_triage_sweep(args, "specify", spec, spec.specify_task, "specified",
                              ("task_id", "ok", "reason", "new_title"),

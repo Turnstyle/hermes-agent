@@ -12,6 +12,7 @@ locks). Schema: tasks, task_links, task_comments, task_events, task_runs, attach
 from __future__ import annotations
 
 import contextlib
+import hashlib
 import json
 import os
 import re
@@ -4164,6 +4165,118 @@ def specify_triage_task(
     # flips to 'ready' now instead of idling until the next tick.
     recompute_ready(conn)
     return True
+
+
+HASH_ENCODING = "sha256(json.dumps([title, body], ensure_ascii=False, separators=(',',':')))"
+
+
+def compute_task_sha256(title: Optional[str], body: Optional[str]) -> str:
+    """Deterministic SHA-256 digest of compact JSON [title, body].
+
+    Payload is UTF-8 bytes of json.dumps([title, body], ensure_ascii=False, separators=(',',':'))
+    with NO trailing newline. null body is distinct from empty string ''.
+    No whitespace stripping or Unicode normalization is performed.
+    """
+    payload = json.dumps([title, body], ensure_ascii=False, separators=(",", ":"))
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
+def keep_spec_triage_task(
+    conn: sqlite3.Connection,
+    task_id: str,
+    *,
+    expected_sha256: str,
+    author: str,
+) -> tuple[bool, str, Optional[str], Optional[str], bool, Optional[str]]:
+    """Verify in-txn SHA-256 and holds, promote triage -> todo, audit, and emit event.
+
+    Returns (ok, reason, computed_sha256, status_after, committed, recompute_error).
+    Enforces nonblank author, in-txn hash match, and active hold refusal inside
+    a single IMMEDIATE write transaction. recompute_ready runs in a separate txn.
+    """
+    _assert_not_delegated_child_mutation()
+
+    if not author or not author.strip():
+        return False, "author cannot be blank", None, None, False, None
+    clean_author = author.strip()
+
+    if expected_sha256 is None:
+        return False, "expected_sha256 cannot be None", None, None, False, None
+    clean_expected = expected_sha256.strip().lower()
+    if len(clean_expected) != 64 or not all(c in "0123456789abcdef" for c in clean_expected):
+        return False, f"invalid sha256 hex digest: {expected_sha256!r}", None, None, False, None
+
+    with write_txn(conn):
+        row = conn.execute(
+            "SELECT id, status, title, body, block_kind, block_recurrences "
+            "FROM tasks WHERE id = ?",
+            (task_id,),
+        ).fetchone()
+        if row is None:
+            return False, "task not found", None, None, False, None
+        if row["status"] != "triage":
+            return False, f"task is not in triage (status is {row['status']!r})", None, row["status"], False, None
+
+        installed_node_id = _fleet_adapter_installed_node_id(conn)
+        if _is_foreign_fleet_mirror(conn, task_id, installed_node_id):
+            return False, "foreign fleet mirror cannot be promoted locally", None, "triage", False, None
+
+        if _has_unreleased_block_loop(conn, task_id):
+            return False, "task has unreleased block loop hold", None, "triage", False, None
+
+        if _has_sticky_block(conn, task_id):
+            return False, "task has active sticky block hold", None, "triage", False, None
+
+        if _has_turner_hold(conn, task_id, row["block_kind"], row["title"], row["body"]):
+            return False, "task has active hold (block_kind or HOLD FOR TURNER)", None, "triage", False, None
+
+        computed_sha256 = compute_task_sha256(row["title"], row["body"])
+
+        if computed_sha256.lower() != clean_expected:
+            return (
+                False,
+                f"sha256 mismatch: expected {clean_expected!r}, got {computed_sha256!r}",
+                computed_sha256,
+                "triage",
+                False,
+                None,
+            )
+
+        cur = conn.execute(
+            "UPDATE tasks SET status = 'todo' WHERE id = ? AND status = 'triage'",
+            (task_id,),
+        )
+        if cur.rowcount != 1:
+            return False, "task moved out of triage concurrently", None, None, False, None
+
+        comment_text = (
+            f"Specified (kept original spec, verified sha256 {computed_sha256[:8]}) and promoted to todo."
+        )
+        _insert_comment(conn, task_id, clean_author, comment_text, int(time.time()))
+
+        _append_event(
+            conn,
+            task_id,
+            "specified",
+            {"kept_spec": True, "sha256": computed_sha256, "changed_fields": []},
+        )
+
+    committed = True
+
+    recompute_err = None
+    try:
+        recompute_ready(conn)
+    except Exception as exc:
+        err_msg = str(exc).strip()
+        recompute_err = f"{type(exc).__name__}: {err_msg}" if err_msg else type(exc).__name__
+
+    final_row = conn.execute("SELECT status FROM tasks WHERE id = ?", (task_id,)).fetchone()
+    status_after = final_row["status"] if final_row else "todo"
+
+    if recompute_err is not None:
+        return True, f"kept_spec (recompute_ready deferred: {recompute_err})", computed_sha256, status_after, True, recompute_err
+
+    return True, "kept_spec", computed_sha256, status_after, True, None
 
 
 def archive_task(conn: sqlite3.Connection, task_id: str, *, signal_fn=None) -> bool:
