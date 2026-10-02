@@ -28,6 +28,9 @@ from pathlib import Path
 from typing import Any, Iterable, Optional
 
 from toolsets import get_toolset_names
+from hermes_cli.kanban_board_ops_transactions import (
+    promotion_in_scope,
+)
 
 _log = logging.getLogger(__name__)
 
@@ -2308,6 +2311,8 @@ def recompute_ready(conn: sqlite3.Connection, failure_limit: int = None) -> int:
         ).fetchall()
         for row in todo_rows:
             task_id = row["id"]
+            if not promotion_in_scope(conn, task_id):
+                continue
             cur_status = row["status"]
             # Ownership FIRST, before the sticky-block check or anything else: a
             # foreign-owned mirror is entirely out of scope for automatic

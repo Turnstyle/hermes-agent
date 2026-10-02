@@ -148,6 +148,17 @@ _BOARD_SPECS = [
 
 # Top-level ``hermes kanban <action>`` records, in ``--help`` order.
 _SPECS = [
+    _cmd("board-ops", children=("board_ops_action", [
+        _cmd("control", [
+            _arg("--disable", action="store_true"),
+            _arg("--human", required=True), _arg("--provenance", required=True),
+        ]),
+        _cmd("grant", [_arg("contract", help="Grant contract JSON file")]),
+        _cmd("revoke", [_arg("grant_id")]),
+        _cmd("request", [_arg("request_file", help="Exact durable request JSON file")]),
+        _cmd("list"), _cmd("receipt", [_arg("correlation")]),
+        _cmd("tick", help="Admitted executor only; process pending durable requests once"),
+    ]), help="Owner-admitted node-local Board Ops (default off)"),
     _cmd("init", help="Create kanban.db if missing (idempotent)"),
     _cmd("boards", children=("boards_action", _BOARD_SPECS),
          help="Manage kanban boards (one board per project / workstream)",

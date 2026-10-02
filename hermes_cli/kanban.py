@@ -32,6 +32,7 @@ from hermes_cli.kanban_ops import (
     _cmd_daemon, _kanban_config, _cmd_dispatch, _cmd_gc, _cmd_repair, _cmd_tail, _cmd_watch,
 )
 from hermes_cli.kanban_parser import build_parser  # noqa: F401  (re-exported: hermes_cli.main, run_slash)
+from hermes_cli.kanban_board_ops_cli import command as _cmd_board_ops
 
 
 # --- Flag parsing helpers ---
@@ -1389,6 +1390,7 @@ def _cmd_decompose(args: argparse.Namespace) -> int:
 
 
 _HANDLERS = {
+    "board-ops": _cmd_board_ops,
     "init": _cmd_init, "create": _cmd_create, "swarm": _cmd_swarm,
     "list": _cmd_list, "ls": _cmd_list, "show": _cmd_show,
     "assign": _cmd_assign, "set-model": _cmd_set_model,
