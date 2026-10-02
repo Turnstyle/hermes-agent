@@ -246,10 +246,18 @@ def keep_spec_task(
     expect_sha256: str,
     author: str,
 ) -> SpecifyOutcome:
-    """Specify one triage task by keeping its original spec verbatim.
+    """Specify one triage task by releasing its exact reviewed spec verbatim.
 
-    Guarantees zero model calls (bypasses _call_aux and specify_task).
-    Verifies hash in-transaction and promotes triage -> todo (and ready if parent-free).
+    Why this path exists and guarantees:
+    - Moving a card out of triage must not rewrite instructions a human already
+      reviewed: model-backed specify regenerates title/body, silently replacing
+      human edits; this path bypasses the LLM and releases the reviewed text.
+    - Binds release to exact reviewed bytes via expect_sha256; refuses post-review edits.
+    - Preserves exact bytes: whitespace, trailing newlines, Unicode (ensure_ascii=False),
+      and NULL vs "" are never normalized.
+    - Hash and triage status are verified in the same write transaction as the
+      status change, so a concurrent edit cannot slip between check and write.
+    - Active holds are refused, never cleared.
     """
     if not author or not author.strip():
         return SpecifyOutcome(
