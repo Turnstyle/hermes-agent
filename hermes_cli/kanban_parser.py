@@ -208,9 +208,10 @@ _SPECS = [
                   f"the dispatcher's kanban.failure_limit config (default "
                   f"{kb.DEFAULT_FAILURE_LIMIT})."),
         _arg("--model", dest="model_override",
-             help="Pin the worker to this model (passed as -m <model>) without "
+             help="Prefer this worker model (passed as -m <model>) without "
                   "changing the profile's configured model. Combine with --provider "
                   "when the model belongs to a different backend than the profile's default."),
+        _arg("--exact-model-reason", help="Task-essential model/eval identity reason; requires --model and --provider."),
         _arg("--provider", dest="provider_override",
              help="Provider the --model belongs to (passed as --provider <name> to "
                   "the worker). Requires --model."),
@@ -261,9 +262,14 @@ _SPECS = [
          help="Show a task with comments + events"),
     _cmd("assign", [_TASK_ID, _arg("profile", help="Profile name (or 'none' to unassign)")],
          help="Assign or reassign a task"),
+    _cmd("select-model", [
+        _TASK_ID,
+        _arg("--policy-file", required=True, help="Owner-exported canonical snapshot and task constraints JSON."),
+        _arg("--apply", action="store_true", help="Store policy for next dispatch; never release a hold."),
+    ], help="Preview a verified routine route or store explicit selection constraints"),
     _cmd("set-model", [
         _TASK_ID,
-        _arg("model", nargs="?", help="Model to pin the worker to (or 'none' to clear the override)"),
+        _arg("model", nargs="?", help="Worker model preference (or 'none' to clear the override)"),
         _arg("--provider",
              help="Provider the model belongs to (worker is spawned with "
                   "--provider <name>). Cleared together with the model."),

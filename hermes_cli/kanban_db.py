@@ -736,6 +736,7 @@ class Task:
     block_kind: Optional[str] = None
     block_recurrences: int = 0               # unblock-loop counter, see BLOCK_RECURRENCE_LIMIT
     completion_contract: Optional[str] = None
+    model_policy: Optional[dict] = None
 
     @classmethod
     def from_row(cls, row: sqlite3.Row) -> "Task":
@@ -750,6 +751,7 @@ class Task:
             # reachable on a DB never opened since the rename migration landed.
             consecutive_failures=g("consecutive_failures", g("spawn_failures", 0)),
             last_failure_error=g("last_failure_error", g("last_spawn_error")),
+            model_policy=json.loads(g("model_policy")) if g("model_policy") is not None else None,
             skills=skills_value,
             goal_mode=bool(g("goal_mode")),
             block_recurrences=int(g("block_recurrences") or 0),
@@ -924,6 +926,7 @@ CREATE TABLE IF NOT EXISTS tasks (
     -- Per-task model override. When set, the dispatcher passes -m <model>
     -- to the worker, overriding the profile's default model. NULL = use
     -- the profile default.
+    model_policy         TEXT,
     model_override       TEXT,
     -- Provider the model override belongs to. When set (alongside
     -- model_override), the dispatcher passes --provider <name> so the
@@ -1264,6 +1267,7 @@ def create_task(
     project_source_task_id: Optional[str] = None,
     creator_task_id: Optional[str] = None,
     completion_contract: Optional[str] = None,
+    exact_model_reason: Optional[str] = None,
 ) -> str:
     """Create a task (optionally under ``parents``); returns its id.
 
@@ -1271,8 +1275,9 @@ def create_task(
     forces ``triage``; ``initial_status="blocked"`` parks it for human ops.
     ``idempotency_key``: an existing non-archived task with the key is returned
     instead of a duplicate. ``max_runtime_seconds``: cap before the dispatcher
-    SIGTERMs and re-queues. ``model_override``/``provider_override`` pin the
-    worker model (provider requires model); ``reasoning_effort`` is independent.
+    SIGTERMs and re-queues. ``model_override``/``provider_override`` choose the
+    worker preference (provider requires model). ``exact_model_reason`` adds a
+    scoped lock; ``reasoning_effort`` is independent.
     ``creator_task_id``: inherit durable session/subscriptions independently of
     dependency edges; an explicit ``session_id`` still wins.
     ``project_source_task_id``: cross-profile fallback when ``project_id`` is not
@@ -1285,6 +1290,12 @@ def create_task(
 
     completion_contract = validate_contract(completion_contract)
     model_override, provider_override = _validate_model_override(model_override, provider_override)
+    model_policy = None
+    if exact_model_reason is not None:
+        from hermes_cli.kanban_model_selection import validate_policy
+        model_policy = validate_policy({"exact_reason": exact_model_reason})
+        if not model_override or not provider_override:
+            raise ValueError("exact-model constraints require model and provider")
     reasoning_effort = normalize_reasoning_effort(reasoning_effort)
     assignee = _canonical_assignee(assignee)
     if not title or not title.strip():
@@ -1363,8 +1374,8 @@ def create_task(
                         max_runtime_seconds,
                         skills, max_retries, model_override, provider_override,
                         reasoning_effort,
-                        goal_mode, goal_max_turns, session_id, completion_contract
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        goal_mode, goal_max_turns, session_id, completion_contract, model_policy
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
                         task_id, title.strip(), body, assignee, task_status, priority,
@@ -1374,6 +1385,7 @@ def create_task(
                         json.dumps(skills_list) if skills_list is not None else None,
                         _opt_int(max_retries), model_override, provider_override, reasoning_effort,
                         1 if goal_mode else 0, _positive_int_or_none(goal_max_turns), session_id, completion_contract,
+                        json.dumps(model_policy) if model_policy else None,
                     ),
                 )
                 for pid in parents:
@@ -1396,6 +1408,7 @@ def create_task(
                         "goal_mode": bool(goal_mode) or None,
                         "model_override": model_override,
                         "provider_override": provider_override,
+                        "model_policy": model_policy,
                     },
                 )
                 if task_status == "blocked":
@@ -1592,12 +1605,18 @@ def set_model_override(
     Allowed while ``running``: it applies on the NEXT dispatch, which is the
     rate-limit-recovery flow (set, then reclaim/retry)."""
     model, provider = _validate_model_override(model, provider)
-    return _set_task_override(
-        conn, task_id,
-        "UPDATE tasks SET model_override = ?, provider_override = ? WHERE id = ?", (model, provider),
-        "model_override_set", {"model": model, "provider": provider},
-        ("model_override", "provider_override"), archived_msg="cannot set model override",
-    )
+    with write_txn(conn):
+        task = get_task(conn, task_id)
+        if task is None:
+            return False
+        if task.status == "archived":
+            raise RuntimeError("cannot set model override on archived task")
+        if task.model_policy and task.model_policy.get("exact_reason") and (model, provider) != (task.model_override, task.provider_override):
+            raise ValueError("replace the exact-model policy explicitly before changing its route")
+        conn.execute("UPDATE tasks SET model_override = ?, provider_override = ? WHERE id = ?", (model, provider, task_id))
+        _append_event(conn, task_id, "model_override_set", {"model": model, "provider": provider})
+    notify_task_updated(conn, task_id, ("model_override", "provider_override"))
+    return True
 
 
 def _set_task_override(
