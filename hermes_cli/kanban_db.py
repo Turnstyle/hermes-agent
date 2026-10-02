@@ -2118,6 +2118,13 @@ _HOLD_RELEASE_EVENT_KINDS = ("unblocked", "promoted_manual")
 _TURNER_HOLD_MARKER = "hold for turner"
 
 
+def _has_unreleased_block_loop(conn: sqlite3.Connection, task_id: str) -> bool:
+    """Only an explicit unblock after the latest breaker trip releases its hold."""
+    return _newest_event_kind(
+        conn, task_id, ("block_loop_detected", "unblocked"),
+    ) == "block_loop_detected"
+
+
 def _has_turner_hold(
     conn: sqlite3.Connection, task_id: str, block_kind: Optional[str],
     title: str, body: Optional[str],
