@@ -253,3 +253,58 @@ def test_idle_drain_turn_kills_its_exact_child_at_the_turn_deadline(home, tmp_pa
     finally:
         bystander.kill()
         bystander.wait()
+
+
+def test_noncanonical_argv_fallback_child_is_bounded_and_killed(home, tmp_path, capsys):
+    """The fallback transport (argv that is not the canonical ``chat -Q`` command) used to wait with no
+    timeout: its hung child is killed at the turn deadline and the sender gets the same turn_timeout failure."""
+    launcher, marker = _launcher(tmp_path, report=False, ignore_term=False)
+    dm = tmp_path / "dm.txt"
+    dm.write_text("hello")
+
+    rc = bot_mode_dm._run_delivery_locked([str(launcher), "-p", "ops"], str(dm), stdin_file=False)
+
+    assert rc == 1
+    out = json.loads(capsys.readouterr().out.strip().splitlines()[-1])
+    assert out["reason"] == "turn_timeout" and out["reply_relayed"] is False
+    assert "NOT delivered" in out["error"]
+    assert all(_wait_gone(int(line.split()[0])) for line in _starts(marker))
+
+
+def test_peer_dm_child_that_hangs_is_killed_and_reported_ambiguous_without_resend(home, tmp_path, monkeypatch, capsys):
+    """``hermes peer dm`` (``stdin_file`` deliveries) may hang after sending: the exact child is killed at the
+    runner deadline, the sender is told the outcome is ambiguous, and the DM is never re-sent."""
+    monkeypatch.setattr(bot_mode_dm, "PEER_DM_RUNNER_TIMEOUT_SECONDS", 1.0)
+    launcher, marker = _launcher(tmp_path, report=False, ignore_term=False)
+    dm = tmp_path / "dm.txt"
+    dm.write_text("hello")
+    bystander = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"])
+    try:
+        rc = bot_mode_dm._run_delivery_locked([str(launcher), "-p", "ops", "peer", "dm", "spark"], str(dm), stdin_file=True)
+        assert rc == 1
+        out = json.loads(capsys.readouterr().out.strip().splitlines()[-1])
+        assert out["status"] == "ambiguous" and out["reply_relayed"] is False
+        assert "Do NOT resend" in out["error"] and "may or may not have reached" in out["error"]
+        starts = _starts(marker)
+        assert len(starts) == 1, "a timed-out peer DM must not be re-sent automatically"
+        assert _wait_gone(int(starts[0].split()[0]), timeout=5)
+        assert bystander.poll() is None
+    finally:
+        bystander.kill()
+        bystander.wait()
+
+
+def test_peer_dm_runner_deadline_outlasts_the_peer_clis_own_timeout(home, tmp_path, capsys):
+    """The CLI's own ``timeout_after_send`` notice (accepted, do not resend) must win over the runner's
+    last-resort kill on a slow turn, and a quick known failure still passes through as its exit code."""
+    from hermes_cli.subcommands.peer import DM_TIMEOUT_S
+
+    assert bot_mode_dm.PEER_DM_RUNNER_TIMEOUT_SECONDS > DM_TIMEOUT_S
+    failing = tmp_path / "hermes"
+    failing.write_text(f"#!{sys.executable}\nimport sys\nsys.stdin.read()\nraise SystemExit(3)\n")
+    failing.chmod(0o755)
+    dm = tmp_path / "dm.txt"
+    dm.write_text("hello")
+
+    assert bot_mode_dm._run_delivery_locked([str(failing), "-p", "ops", "peer", "dm", "spark"], str(dm), stdin_file=True) == 3
+    assert "ambiguous" not in capsys.readouterr().out
