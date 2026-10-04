@@ -158,8 +158,5 @@ No live services, Firestore, credentials, or real provider routes were exercised
 in this fix round. No push was made. Live route usability and authentication remain
 unverified; the full repository suite and Windows cleanup remain unverified.
 
-Commit delivery is blocked by the filesystem sandbox. Both `git add` and
-`git commit` failed to create the linked worktree's index lock at
-`/Users/sheldon/.hermes/hermes-agent/.git/worktrees/model-select-reader/index.lock`
-with `Operation not permitted`. That path is outside this session's writable
-roots. No commit was created and the four changed files remain unstaged.
+Commit: the maker sandbox could not write the linked-worktree index lock, so the
+King committed the maker's exact four files from the normal shell (a9f3817fb9).
