@@ -548,12 +548,22 @@ def _run_local_turn(argv: list[str], dm_file: str, *, env: Optional[dict[str, st
         if len(argv) < 3 or argv[1] != "-p" or tuple(argv[3:]) != BOT_CHAT_TURN_ARGS:
             return subprocess.run([*argv, "--query-file", dm_file], check=False, stdin=subprocess.DEVNULL,
                                   capture_output=True, text=True, encoding="utf-8", errors="replace", env=turn_env)
-        from hermes_cli.quiet_single_query import run_reported_turn
+        from hermes_cli.quiet_single_query import post_report_exit_wait_seconds, run_reported_turn
+        from tools import bot_relay
         report = f"{dm_file}.turn.json"
         try:
             return run_reported_turn(
                 [*argv, "--query-file", dm_file], env=os.environ if turn_env is None else turn_env,
-                report_path=report, timeout=None, exit_grace=None, encoding="utf-8")
+                report_path=report, timeout=bot_relay.TURN_ATTEMPT_TIMEOUT_SECONDS, exit_grace=None,
+                reported_linger=post_report_exit_wait_seconds(), encoding="utf-8")
+        except subprocess.TimeoutExpired:
+            # The child was killed (SIGTERM, then SIGKILL) without ever reporting its turn. Same shape as any
+            # failed attempt, so the retry policy below re-runs it (resuming the already-persisted DM row).
+            who = argv[2] if len(argv) > 2 else "the recipient"
+            return subprocess.CompletedProcess(
+                argv, 124, "", f"turn_timeout: @{who}'s Bot Chat turn did not finish within "
+                f"{bot_relay.TURN_ATTEMPT_TIMEOUT_SECONDS:g}s and its process was killed; this message was NOT "
+                "delivered and its turn was NOT completed.")
         finally:
             with contextlib.suppress(OSError):
                 os.unlink(report)
@@ -569,6 +579,16 @@ def _run_local_turn(argv: list[str], dm_file: str, *, env: Optional[dict[str, st
             if retry_lock is not None:
                 retry_lock()
             proc = _turn(retry_turn_env(env))
+    if proc.returncode != 0 and (proc.stderr or "").startswith("turn_timeout:"):
+        from tools.bot_failure_reasons import TURN_TIMEOUT
+        who = argv[argv.index("-p") + 1] if "-p" in argv[:-1] else "the teammate"
+        print(json.dumps({
+            "error": f"Delivery failed: @{who}'s Bot Chat turn timed out and was killed; this message was NOT "
+                     "delivered and the turn was NOT completed. Do not assume the teammate saw it.",
+            "reason": TURN_TIMEOUT,
+            "reply_relayed": False,
+        }))
+        return 1
     if proc.returncode != 0 and refused_not_owned(proc.stderr or ""):
         # The target's Bot Chat is held live by another surface (Desktop); the turn
         # never ran — tell the sender plainly instead of leaking a raw lease error.

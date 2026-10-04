@@ -17,6 +17,8 @@ from typing import Any
 RUNTIME_OFFLINE = "runtime_offline"
 QUEUED_EXPIRED = "queued_expired"
 DELIVERY_TIMEOUT = "delivery_timeout"
+# The recipient's Bot Chat turn never reported inside its per-attempt deadline; its child was killed.
+TURN_TIMEOUT = "turn_timeout"
 AGENT_BLOCKED = "agent_blocked"
 CANCELLED = "cancelled"
 # Target Bot Chat held by another live owner or delivery turn; nothing reached a model — queue/retry later.
@@ -42,7 +44,7 @@ TARGET_SCOPE_UNRESOLVED = "target_scope_unresolved"
 UNKNOWN = "unknown"
 
 ALL_REASONS = frozenset({
-    RUNTIME_OFFLINE, QUEUED_EXPIRED, DELIVERY_TIMEOUT, AGENT_BLOCKED, CANCELLED, TARGET_BUSY,
+    RUNTIME_OFFLINE, QUEUED_EXPIRED, DELIVERY_TIMEOUT, TURN_TIMEOUT, AGENT_BLOCKED, CANCELLED, TARGET_BUSY,
     REPLY_NOT_RELAYED,
     PROVIDER_AUTH_OR_ACCESS, PROVIDER_QUOTA_LIMIT, PROVIDER_RATE_LIMIT,
     PROVIDER_SERVER_ERROR, CONTEXT_OVERFLOW, MISSING_CONFIG, MODEL_UNAVAILABLE,
@@ -50,7 +52,7 @@ ALL_REASONS = frozenset({
 })
 
 #: Reasons a supervisor may retry automatically without human intervention.
-AUTO_RETRYABLE = frozenset({RUNTIME_OFFLINE, DELIVERY_TIMEOUT, PROVIDER_RATE_LIMIT, PROVIDER_SERVER_ERROR})
+AUTO_RETRYABLE = frozenset({RUNTIME_OFFLINE, DELIVERY_TIMEOUT, TURN_TIMEOUT, PROVIDER_RATE_LIMIT, PROVIDER_SERVER_ERROR})
 
 
 def is_auto_retryable(reason: str) -> bool:
@@ -85,6 +87,7 @@ _RULES: tuple[tuple[re.Pattern[str], str], ...] = tuple(
     for pat, code in (
         # Ownership refusal: no model call; relayed text prefixes the marker on the same line — match anywhere.
         (r"hermes-refusal-reason:\s*SESSION_NOT_OWNED|already has a live owner", TARGET_BUSY),
+        (r"(?m)^turn_timeout:", TURN_TIMEOUT),
         # The message text itself mentions an "API key" and a restart, so it must be claimed
         # before the auth/status rules can read it as a provider verdict. Two spellings reach here —
         # the generic ``UnscopedSecretError`` copy (secret name empty, so the lede is a stand-in) and

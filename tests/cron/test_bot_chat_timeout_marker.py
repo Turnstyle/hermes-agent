@@ -89,6 +89,9 @@ class _FakeProc:
         self.returncode = -9
         self.killed.set()
 
+    def terminate(self):
+        self.kill()
+
 
 def test_late_turn_report_books_delivery(tmp_path, monkeypatch):
     """Report appearing in the kill window = turn completed = booked, not a timeout."""
