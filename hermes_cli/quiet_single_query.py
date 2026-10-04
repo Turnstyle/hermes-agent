@@ -19,6 +19,7 @@ import subprocess
 import sys
 import threading
 import time
+import traceback
 from typing import Any, Callable, MutableMapping
 
 # Nested A→B→C is one extra turn; this caps a runaway message_agent chain.
@@ -84,15 +85,38 @@ def hard_exit_single_query(code: Any) -> None:
     os._exit(code if isinstance(code, int) else (0 if code is None else 1))
 
 
+def _failure_exit_code(exc: BaseException) -> int:
+    """Exit code for an exception that escaped a one-shot run; never 0.
+
+    A cleanup exception that replaced a pending ``SystemExit`` (raised inside the ``finally``)
+    keeps that exit's non-zero int code, so a refusal's 75 still reaches the dispatcher."""
+    if isinstance(exc, KeyboardInterrupt):
+        return 130
+    pending = exc.__context__
+    while pending is not None and not isinstance(pending, SystemExit):
+        pending = pending.__context__
+    if pending is not None and isinstance(pending.code, int) and pending.code != 0:
+        return pending.code
+    return 1
+
+
 @contextlib.contextmanager
 def single_query_hard_exit():
-    """Wrap a one-shot run: its ``SystemExit`` becomes ``hard_exit_single_query`` after every
-    ``finally`` inside the block (session flush, lease release, turn report) has already run."""
+    """Wrap a one-shot run: any way out of the block becomes ``hard_exit_single_query`` after every
+    ``finally`` inside it (session flush, lease release, turn report) has already run.
+
+    ``SystemExit`` keeps its code; an exception prints its traceback to stderr and exits 1
+    (``KeyboardInterrupt``: 130), because ordinary interpreter teardown is what hangs."""
     try:
         yield
     except SystemExit as exc:
         # Module-global lookup keeps the test seam (tests/conftest.py neutralizes it).
         globals()["hard_exit_single_query"](exc.code)
+        raise
+    except (Exception, KeyboardInterrupt) as exc:
+        with contextlib.suppress(Exception):
+            traceback.print_exc(file=sys.stderr)
+        globals()["hard_exit_single_query"](_failure_exit_code(exc))
         raise
 
 

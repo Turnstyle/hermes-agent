@@ -137,6 +137,104 @@ def test_single_query_system_exit_becomes_hard_exit(monkeypatch, code, kanban):
     assert cleaned == ["finally"] and seen == [code]
 
 
+_RAISING_CHILD = textwrap.dedent(
+    """
+    import sys, threading, types, importlib.abc, importlib.machinery
+    sys.path.insert(0, {repo!r})
+    import cli
+
+    gate = threading.Event()
+    started = threading.Event()
+
+    class _Loader(importlib.abc.Loader):
+        def create_module(self, spec):
+            return None
+        def exec_module(self, module):
+            started.set()
+            gate.wait()  # never set
+
+    class _Finder(importlib.abc.MetaPathFinder):
+        def find_spec(self, name, path, target=None):
+            if name == "_hermes_stuck_import":
+                return importlib.machinery.ModuleSpec(name, _Loader())
+            return None
+
+    sys.meta_path.insert(0, _Finder())
+    threading.Thread(target=lambda: __import__("_hermes_stuck_import"), daemon=False).start()
+    started.wait(10)
+
+    def boom(*a, **k):
+        raise RuntimeError("turn exploded")
+
+    def finalize(_cli):
+        print("CLEANUP_RAN", file=sys.stderr, flush=True)
+
+    cli._should_seed_interactive = lambda *a, **k: False
+    cli._finalize_single_query = finalize
+    stub = types.SimpleNamespace(
+        _claim_active_session=lambda *a, **k: True,
+        console=types.SimpleNamespace(print=lambda *a, **k: None),
+        _show_security_advisories=lambda: None,
+        chat=boom,
+    )
+    cli._run_single_query_mode(stub, "do the thing", None, False, True)
+    print("UNREACHABLE", file=sys.stderr, flush=True)
+    """
+)
+
+
+@pytest.mark.real_single_query_hard_exit
+def test_one_shot_exception_hard_exits_nonzero_after_cleanup_despite_parked_thread(tmp_path):
+    """A turn that raises must not fall into interpreter teardown (it joins the parked non-daemon
+    thread forever): cleanup runs, the traceback reaches stderr, and the exit code is non-zero."""
+    script = tmp_path / "raising_child.py"
+    script.write_text(_RAISING_CHILD.format(repo=str(REPO)), encoding="utf-8")
+    env = {k: v for k, v in os.environ.items() if not k.startswith("HERMES_KANBAN_")}
+    env["HERMES_HOME"] = str(tmp_path / "hermes")
+    (tmp_path / "hermes").mkdir(exist_ok=True)
+    proc = subprocess.Popen(
+        [sys.executable, str(script)], env=env, cwd=str(tmp_path),
+        stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+    )
+    try:
+        out, err = proc.communicate(timeout=60)
+    except subprocess.TimeoutExpired:
+        proc.kill()
+        out, err = proc.communicate()
+        pytest.fail(f"one-shot hung after an exception\nstderr tail:\n{err[-2000:]}")
+    assert proc.returncode == 1, err[-2000:]
+    assert "CLEANUP_RAN" in err and "RuntimeError: turn exploded" in err
+    assert "UNREACHABLE" not in err
+
+
+@pytest.mark.parametrize(
+    ("raised", "pending", "expected"),
+    [
+        (RuntimeError("turn"), None, 1),
+        (KeyboardInterrupt(), None, 130),
+        (RuntimeError("cleanup"), SystemExit(75), 75),
+        (RuntimeError("cleanup"), SystemExit(0), 1),
+        (RuntimeError("cleanup"), SystemExit("message"), 1),
+    ],
+)
+def test_single_query_exception_hard_exits_with_a_failure_code(monkeypatch, raised, pending, expected):
+    """An exception (including a cleanup one that replaced a pending SystemExit) exits through the
+    hard-exit boundary with a non-zero code, keeping a pending refusal code instead of turning it into 0."""
+    from hermes_cli import quiet_single_query as qsq
+
+    seen = []
+    monkeypatch.setattr(qsq, "hard_exit_single_query", seen.append)
+    with pytest.raises(type(raised)):
+        with qsq.single_query_hard_exit():
+            if pending is None:
+                raise raised
+            try:
+                raise pending
+            finally:
+                raise raised
+    assert seen == [expected]
+
+
 _SYNTHETIC = textwrap.dedent(
     """
     import sys, threading, importlib.abc, importlib.machinery
