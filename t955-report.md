@@ -90,3 +90,76 @@ Implementation commit: `781da981cc`.
 - tests/hermes_cli/fixtures/model_registry_luna.json
 
 Receipt files: t955-plan.md, t955-real-lookup.json, t955-report.md.
+
+## Fix round 1
+
+The round-1 fixes replace the proof and outage behavior described in the original
+receipt above. Base: `21df3f1eb91fec00ac9aed104dc44e9541580aa7`.
+
+- [x] Preserve owner proof and merge registry capabilities and quality.
+- [x] Enforce capability and quality requirements during registry outages.
+- [x] Resolve the registry once during worker binding.
+- [x] Add regression coverage, run the focused suite, and review the diff.
+
+`read_model_record` now returns provider/model identity, capabilities, and quality
+only. Resolution deep-copies the owner policy and enriches existing records for
+the exact node/profile/provider/model. It retains all owner proof fields and
+timestamps, owner uncertainty, and existing capabilities and quality. Capability
+names are combined; conflicting numeric quality uses the lower score. Registry
+metadata cannot introduce an owner record or upgrade a known low quality score.
+Missing, false, stale, foreign, or ambiguous owner proof remains ineligible.
+
+The selector always checks required capabilities and the task-class quality
+threshold. `validate_policy` has no default for `minimum_quality`; it requires an
+explicit value in [0, 1]. A positive threshold requires numeric quality evidence.
+A zero threshold permits absent quality, allowing owner-proven routine work with
+no stated requirements to continue during registry failure. Advice still applies
+to uncertain owner records and cannot waive proof, capabilities, quality, or holds.
+Ineligible routine selection returns `no_verified_eligible_route`, alongside the
+fixed registry failure code where applicable.
+
+Worker binding resolves one registry snapshot and uses it for both the decision
+and fallback chain, with one timestamp. Subsequent runtime fallback checks still
+refresh eligibility through the existing public path.
+
+Earlier fixture expectations were repaired where they encoded forbidden behavior:
+
+- The shared registry policy now supplies a fresh owner model-capabilities proof
+  record. Its no-requirement cases explicitly set `minimum_quality=0`.
+- Adapter assertions now require absence of proof and uncertainty metadata.
+- Numeric and low-quality cases retain a positive threshold. The exact case with
+  absent quality also requires 0.8 and remains rejected.
+- An exact route with fresh owner proof and no requirements can survive a registry
+  outage while preserving its exact identity. Its former rejection depended on
+  discarding owner evidence, so that expectation now asserts `exact_model_required`.
+- The public command and worker A→B→A fixture updates the owner record's profile
+  as well as the config profile and asserts one registry lookup per binding.
+
+Regression evidence:
+
+- New regression cases on the unchanged base selector and adapter: **9 failed,
+  2 passed**, with 20 existing cases deselected. Failures showed proof overwrite,
+  owner-record replacement, and capability/quality requirements bypassed on outage.
+- First combined post-fix run: **52 passed in 19.63s**.
+- Final run after adding registry-quality merge and conflicting owner-score cases:
+  `/Users/sheldon/.hermes/hermes-agent/venv/bin/python -m pytest tests/hermes_cli/test_kanban_model_registry.py tests/hermes_cli/test_kanban_model_selection.py -q --disable-warnings`
+  **54 passed in 20.81s**. Runs were serial in this scratch worktree, using the
+  brief's explicitly requested command. The 21 snapshot-only tests are unchanged.
+- `git diff --check`: passed. Changes are confined to the two allowed modules,
+  their registry tests, and this report.
+
+Changed test code: +90/-6 lines. Product code: +40/-26 lines. Report: +73 lines.
+No new test-only product API or flag was introduced. The two new parametrized
+regressions exercise successful fixture reads and missing-reader selection; the
+existing worker test also checks the single-lookup contract. The previous tests
+allowed fabricated proof and waived requirements, so they missed these bugs.
+
+No live services, Firestore, credentials, or real provider routes were exercised
+in this fix round. No push was made. Live route usability and authentication remain
+unverified; the full repository suite and Windows cleanup remain unverified.
+
+Commit delivery is blocked by the filesystem sandbox. Both `git add` and
+`git commit` failed to create the linked worktree's index lock at
+`/Users/sheldon/.hermes/hermes-agent/.git/worktrees/model-select-reader/index.lock`
+with `Operation not permitted`. That path is outside this session's writable
+roots. No commit was created and the four changed files remain unstaged.

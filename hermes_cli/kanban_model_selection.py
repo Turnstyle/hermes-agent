@@ -142,23 +142,19 @@ def _eligible_routes(policy, *, now):
                    if (m.get("node"), m.get("profile"), m.get("provider"), m.get("model")) ==
                    (policy["node"], policy["profile"], route["provider"], route["model"])]
         # Ambiguous exports cannot prove which record is authoritative.
-        advised_registry = "registry" in policy and not policy.get("exact_reason")
-        if len(matches) > 1 or (not matches and not advised_registry):
+        if len(matches) != 1:
             continue
-        meta = matches[0] if matches else {
-            "proof": {"authenticated": True, "usable": True, "observed_at": config["observed_at"]},
-            "uncertain": True,
-        }
+        meta = matches[0]
         proof = meta.get("proof", {})
         if proof.get("authenticated") is not True or proof.get("usable") is not True or not _fresh(proof.get("observed_at"), now):
             continue
         caps = meta.get("capabilities", [])
-        if not isinstance(caps, list) or (matches and not set(policy["required_capabilities"]).issubset(caps)):
+        if not isinstance(caps, list) or not set(policy["required_capabilities"]).issubset(caps):
             continue
         quality = meta.get("quality", {})
         score = quality.get(policy["task_class"]) if isinstance(quality, dict) else None
-        if score is None and advised_registry:
-            pass  # Fresh advisory below must explicitly approve unknown quality.
+        if score is None and policy["minimum_quality"] == 0:
+            pass  # No task-quality evidence is required by this policy.
         elif isinstance(score, bool) or not isinstance(score, (int, float)) or not math.isfinite(score) or not policy["minimum_quality"] <= score <= 1:
             continue
         failures = [f for f in policy.get("failed_routes", []) if
@@ -177,6 +173,10 @@ def _eligible_routes(policy, *, now):
 
 def select_model(task, policy=None, *, now=None):
     """Preview only. Selection does not claim, retry, release, or accept work."""
+    return _select_model(task, policy, now=now)
+
+
+def _select_model(task, policy=None, *, now=None, resolved_registry=None):
     policy = task.model_policy if policy is None else policy
     if policy is not None:
         validate_policy(policy)
@@ -196,7 +196,8 @@ def select_model(task, policy=None, *, now=None):
         raise ValueError("exact-model constraints require model and provider")
     from hermes_cli.kanban_model_registry import resolve_registry_policy
     timestamp = datetime.now(timezone.utc).timestamp() if now is None else now
-    resolved, registry_reason = resolve_registry_policy(policy, now=timestamp)
+    resolved, registry_reason = (resolve_registry_policy(policy, now=timestamp)
+                                 if resolved_registry is None else resolved_registry)
     if registry_reason:
         result["registry_reason"] = registry_reason
     routes = _eligible_routes(resolved, now=timestamp)
@@ -263,13 +264,17 @@ def bind_worker_selection(agent):
     task = owned_worker_policy()
     if task is None or task.model_policy is None:
         return
-    decision = select_model(task)
+    validate_policy(task.model_policy)
+    from hermes_cli.kanban_model_registry import resolve_registry_policy
+    timestamp = datetime.now(timezone.utc).timestamp()
+    resolved_registry = resolve_registry_policy(task.model_policy, now=timestamp)
+    decision = _select_model(task, now=timestamp, resolved_registry=resolved_registry)
     if decision["selected"] != {"provider": agent.provider, "model": agent.model}:
         raise ValueError("worker route does not match verified card selection")
     agent._routine_model_policy = task.model_policy
     agent._model_selection = decision
     agent._fallback_chain_pinned = True
-    routes = [] if task.model_policy.get("exact_reason") else eligible_routes(task.model_policy)
+    routes = [] if task.model_policy.get("exact_reason") else _eligible_routes(resolved_registry[0], now=timestamp)
     agent._fallback_chain = [r for r in routes if r != decision["selected"]]
     agent._fallback_index = 0
     agent._fallback_model = agent._fallback_chain[0] if agent._fallback_chain else None

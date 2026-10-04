@@ -27,8 +27,6 @@ def _score(value):
 
 def read_model_record(document_id, policy, *, now, timeout=LOOKUP_TIMEOUT_SECONDS):
     """Return a metadata-only snapshot record and a fixed, non-secret reason."""
-    from hermes_cli.kanban_model_selection import _fresh
-
     path = Path(os.environ.get('HERMES_FLEET_OPS') or DEFAULT_FLEET_OPS)
     if not path.is_file():
         return None, 'registry_reader_missing'
@@ -87,15 +85,8 @@ def read_model_record(document_id, policy, *, now, timeout=LOOKUP_TIMEOUT_SECOND
                 quality[key] = min(quality.get(key, 1), evaluation['score'])
     except (ValueError, TypeError, KeyError, AttributeError):
         return None, 'registry_invalid_record'
-    config = policy['snapshot']['fleet_profile_config_v1']
-    route = {'provider': provider, 'model': model}
-    verified = ((config.get('node'), config.get('profile')) == (policy['node'], policy['profile'])
-                and provider in config.get('credential_provider_names', [])
-                and route in config.get('model_chain', []) and _fresh(config.get('observed_at'), now))
-    meta = {**route, 'node': policy['node'], 'profile': policy['profile'],
-            'capabilities': caps, 'uncertain': True,
-            'proof': {'authenticated': verified, 'usable': verified,
-                      'observed_at': config.get('observed_at')}}
+    meta = {'provider': provider, 'model': model,
+            'capabilities': caps}
     if quality:
         meta['quality'] = quality
     return meta, 'registry_lookup_ok'
@@ -118,8 +109,26 @@ def resolve_registry_policy(policy, *, now):
         reasons.append(reason)
         if record is not None:
             records.append(record)
-    # Registry policies cannot smuggle authoritative capability claims through
-    # the fallback export. A failed lookup leaves quality unknown for advice.
-    resolved['snapshot']['model_capabilities'] = records
+    # Only owner records establish route identity and proof. Metadata can
+    # enrich a matching owner record, never introduce a new eligible route.
+    for owner in resolved['snapshot']['model_capabilities']:
+        if (owner.get('node'), owner.get('profile')) != (policy['node'], policy['profile']):
+            continue
+        for record in records:
+            if (owner.get('provider'), owner.get('model')) != (record['provider'], record['model']):
+                continue
+            caps = owner.get('capabilities', [])
+            if isinstance(caps, list):
+                owner['capabilities'] = caps + [c for c in record['capabilities'] if c not in caps]
+            quality = owner.get('quality', {})
+            if isinstance(quality, dict):
+                for task_class, score in record.get('quality', {}).items():
+                    if task_class not in quality:
+                        quality[task_class] = score
+                    elif _score(quality[task_class]):
+                        # Conflicting evidence cannot upgrade a known low score.
+                        quality[task_class] = min(quality[task_class], score)
+                if quality:
+                    owner['quality'] = quality
     reason = next((r for r in reasons if r != 'registry_lookup_ok'), 'registry_lookup_ok')
     return resolved, reason
