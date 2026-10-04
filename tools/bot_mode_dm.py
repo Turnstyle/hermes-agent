@@ -16,6 +16,7 @@ local → ``hermes -p <name> chat --in ~ -c "Bot Chat" --create-if-missing -Q
 from __future__ import annotations
 
 import contextlib
+from contextlib import ExitStack
 import hashlib
 import json
 import logging
@@ -59,6 +60,11 @@ _OWNER_CHECK_SECONDS = 15.0
 _BUSY_SLICE_SECONDS = 15.0
 # Busy fast-ack budget. The registry write returns well inside this; the lock probe must too.
 _FAST_ACK_SECONDS = 2.0
+# Last-resort bound on the ``hermes peer dm`` child (``stdin_file`` deliveries). The CLI's own HTTP wait
+# (``hermes_cli.subcommands.peer.DM_TIMEOUT_S``, 600s) already ends a slow turn with its "accepted, Do NOT
+# resend" notice, so this must outlast it by a startup margin: it only fires on a CLI that hangs past its
+# own deadline (e.g. in interpreter finalization), where the outcome is unknown.
+PEER_DM_RUNNER_TIMEOUT_SECONDS = 720.0
 
 # '<peer>/<agent>' — peer names are lowercase (``hermes peer`` normalizes them).
 _PEER_TARGET_RE = re.compile(r"^([a-z0-9][a-z0-9_-]{0,63})/([a-zA-Z0-9][a-zA-Z0-9_-]{0,63})$")
@@ -533,8 +539,19 @@ def _session_held_cls() -> type:
     return cls
 
 
+def _turn_timeout_result(argv: list[str]) -> "subprocess.CompletedProcess":
+    """The failed-attempt record for a Bot Chat child killed at its turn deadline."""
+    from tools import bot_relay
+
+    who = argv[2] if len(argv) > 2 else "the recipient"
+    return subprocess.CompletedProcess(
+        argv, 124, "", f"turn_timeout: @{who}'s Bot Chat turn did not finish within "
+        f"{bot_relay.TURN_ATTEMPT_TIMEOUT_SECONDS:g}s and its process was killed; this message was NOT "
+        "delivered and its turn was NOT completed.")
+
+
 def _run_local_turn(argv: list[str], dm_file: str, *, env: Optional[dict[str, str]] = None,
-                    busy_raises: bool = False) -> int:
+                    busy_raises: bool = False, retry_lock=None) -> int:
     """One Bot Chat turn via ``--query-file`` (plus one policy-gated retry); re-emits
     the transport's streams and returns its exit code. Transient failures re-run the
     same session; a context_overflow re-run lets the retried turn's pre-API compaction
@@ -545,8 +562,29 @@ def _run_local_turn(argv: list[str], dm_file: str, *, env: Optional[dict[str, st
     printed refusal byte-identical for every direct/legacy caller."""
 
     def _turn(turn_env=env):
-        return subprocess.run([*argv, "--query-file", dm_file], check=False, stdin=subprocess.DEVNULL,
-                              capture_output=True, text=True, encoding="utf-8", errors="replace", env=turn_env)
+        from tools import bot_relay
+        from tools.bot_relay import BOT_CHAT_TURN_ARGS
+        if len(argv) < 3 or argv[1] != "-p" or tuple(argv[3:]) != BOT_CHAT_TURN_ARGS:
+            try:
+                return subprocess.run([*argv, "--query-file", dm_file], check=False, stdin=subprocess.DEVNULL,
+                                      capture_output=True, text=True, encoding="utf-8", errors="replace", env=turn_env,
+                                      timeout=bot_relay.TURN_ATTEMPT_TIMEOUT_SECONDS)
+            except subprocess.TimeoutExpired:
+                return _turn_timeout_result(argv)
+        from hermes_cli.quiet_single_query import post_report_exit_wait_seconds, run_reported_turn
+        report = f"{dm_file}.turn.json"
+        try:
+            return run_reported_turn(
+                [*argv, "--query-file", dm_file], env=os.environ if turn_env is None else turn_env,
+                report_path=report, timeout=bot_relay.TURN_ATTEMPT_TIMEOUT_SECONDS, exit_grace=None,
+                reported_linger=post_report_exit_wait_seconds(), encoding="utf-8")
+        except subprocess.TimeoutExpired:
+            # The child was killed (SIGTERM, then SIGKILL) without ever reporting its turn. Same shape as any
+            # failed attempt, so the retry policy below re-runs it (resuming the already-persisted DM row).
+            return _turn_timeout_result(argv)
+        finally:
+            with contextlib.suppress(OSError):
+                os.unlink(report)
 
     proc = _turn()
     if proc.returncode != 0:
@@ -556,7 +594,19 @@ def _run_local_turn(argv: list[str], dm_file: str, *, env: Optional[dict[str, st
         # The re-run replays the same session and payload; the failed attempt already persisted the
         # user row, so the retried process is told to resume it (RESUME_UNANSWERED_TURN_ENV).
         if retry_action(classify_agent_error(turn_failure_text(proc.stdout, proc.stderr))) != RETRY_NONE:
+            if retry_lock is not None:
+                retry_lock()
             proc = _turn(retry_turn_env(env))
+    if proc.returncode != 0 and (proc.stderr or "").startswith("turn_timeout:"):
+        from tools.bot_failure_reasons import TURN_TIMEOUT
+        who = argv[argv.index("-p") + 1] if "-p" in argv[:-1] else "the teammate"
+        print(json.dumps({
+            "error": f"Delivery failed: @{who}'s Bot Chat turn timed out and was killed; this message was NOT "
+                     "delivered and the turn was NOT completed. Do not assume the teammate saw it.",
+            "reason": TURN_TIMEOUT,
+            "reply_relayed": False,
+        }))
+        return 1
     if proc.returncode != 0 and refused_not_owned(proc.stderr or ""):
         # The target's Bot Chat is held live by another surface (Desktop); the turn
         # never ran — tell the sender plainly instead of leaking a raw lease error.
@@ -935,7 +985,20 @@ def _run_delivery_locked(argv: list[str], dm_file: str, *, stdin_file: bool,
                 # after subprocess.run returns, not merely after stdin reaches EOF.
                 with open(dm_file, "r", encoding="utf-8-sig") as stream:
                     # Passing the file descriptor as stdin bypasses the BOM-aware decoder.
-                    return subprocess.run(argv, input=stream.read().encode("utf-8"), check=False, env=env).returncode
+                    try:
+                        return subprocess.run(argv, input=stream.read().encode("utf-8"), check=False, env=env,
+                                              timeout=PEER_DM_RUNNER_TIMEOUT_SECONDS).returncode
+                    except subprocess.TimeoutExpired:
+                        # The peer CLI may or may not have sent the DM before it hung, so the outcome is unknown:
+                        # report it ambiguous and never resend. Anything it printed is already above this line.
+                        print(json.dumps({
+                            "status": "ambiguous", "delivery_id": _dm_delivery_id(dm_file),
+                            "error": (f"The peer DM process did not exit within {PEER_DM_RUNNER_TIMEOUT_SECONDS:g}s and was "
+                                      "killed. The message may or may not have reached the peer, and its reply was not "
+                                      "confirmed. Do NOT resend automatically; if the peer's own output above reports "
+                                      "an outcome, trust that, otherwise check with the peer first."),
+                            "reply_relayed": False}))
+                        return 1
         # A busy target is a fast-ack, not an 1800s blind wait. One short lock probe, then
         # the checkout launcher writes fleet_messages_v1. Under 5s.
         from tools.fleet_message_enqueue import queued_ack
@@ -943,8 +1006,24 @@ def _run_delivery_locked(argv: list[str], dm_file: str, *, stdin_file: bool,
         can_queue = home is not None
         probe = min(_FAST_ACK_SECONDS, dm_queue_wait_seconds())
         try:
-            with _delivery_lock(argv, stdin_file=False, timeout_seconds=probe):
-                return _run_local_turn(argv, dm_file, env=env, busy_raises=can_queue)
+            from hermes_cli.quiet_single_query import release_lock_at_report
+            with ExitStack() as lock_stack:
+                lock_stack.enter_context(_delivery_lock(argv, stdin_file=False, timeout_seconds=probe))
+                released = False
+
+                def _release_reported_lock():
+                    nonlocal released
+                    lock_stack.close()
+                    released = True
+
+                def _retry_lock():
+                    if released:
+                        lock_stack.enter_context(_delivery_lock(
+                            argv, stdin_file=False, timeout_seconds=probe))
+
+                with release_lock_at_report(_release_reported_lock):
+                    return _run_local_turn(
+                        argv, dm_file, env=env, busy_raises=can_queue, retry_lock=_retry_lock)
         except (_session_held_cls(), TurnBusyError) as exc:
             if not can_queue:
                 raise

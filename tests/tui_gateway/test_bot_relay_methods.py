@@ -990,7 +990,8 @@ def test_reported_turn_still_lingering_at_the_cap_is_booked_from_its_latest_repo
         # Decoding stays pinned through the runner (#93590 sibling defect): without encoding= the
         # child's UTF-8 output is decoded with the locale codec — cp1252/GBK on Windows — mangling
         # non-ASCII replies; errors="replace" keeps a bad byte from raising instead of delivering.
-        assert popen.call_args.kwargs["encoding"] == "utf-8" and popen.call_args.kwargs["errors"] == "replace"
+        child_call = popen.call_args_list[0].kwargs  # the later calls are the detached reaper's
+        assert child_call["encoding"] == "utf-8" and child_call["errors"] == "replace"
     finally:
         for proc in procs:
             proc.kill()

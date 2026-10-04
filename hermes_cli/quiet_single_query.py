@@ -11,12 +11,14 @@ was never injected as a follow-up.
 from __future__ import annotations
 
 import contextlib
+import contextvars
 import json
 import os
 import subprocess
 import sys
 import threading
 import time
+import traceback
 from typing import Any, Callable, MutableMapping
 
 # Nested A→B→C is one extra turn; this caps a runaway message_agent chain.
@@ -52,13 +54,74 @@ def write_worker_busy_marker(reason: str) -> None:
 
 
 def exit_single_query(code: int) -> None:
-    """``sys.exit(code)`` for a one-shot turn; a Kanban worker first writes the exit trailer to its log."""
+    """``sys.exit(code)`` for a one-shot turn; a Kanban worker first writes the exit trailer to its log.
+
+    A one-shot's ``SystemExit`` is turned into a hard exit by ``_run_single_query_mode`` once its
+    ``finally`` cleanup (session flush + active-session lease release) has run; see
+    ``hard_exit_single_query``."""
     if os.environ.get("HERMES_KANBAN_TASK"):
         with contextlib.suppress(Exception):
             # stderr: stdout may be the ``--stream-json`` record stream, and the worker log
             # captures both streams.
             print(f"\n{KANBAN_WORKER_EXIT_TRAILER}{int(code)}", file=sys.stderr, flush=True)
     sys.exit(code)
+
+
+def hard_exit_single_query(code: Any) -> None:
+    """Exit a one-shot ``chat -q``/``-Q`` run without interpreter finalization.
+
+    ``Py_FinalizeEx`` joins non-daemon threads and takes the import lock; a background thread
+    parked mid-import left refused Kanban workers at 0% CPU for hours after printing
+    ``[kanban-worker-exit] rc=75``, and a Bot Chat DM child sat 10h14m in
+    ``Py_FinalizeEx -> gc -> import`` while its parent held the recipient's turn lock. Mirrors
+    ``main._exit_after_oneshot`` (#30387, #43055): flush, shut down logging, ``os._exit``. The caller
+    runs its cleanup first."""
+    for stream in (sys.stdout, sys.stderr):
+        with contextlib.suppress(Exception):
+            stream.flush()
+    with contextlib.suppress(Exception):
+        logging.shutdown()  # module-level import: no import-lock wait at exit
+    os._exit(code if isinstance(code, int) else (0 if code is None else 1))
+
+
+def _failure_exit_code(exc: BaseException) -> int:
+    """Exit code for an exception that escaped a one-shot run; never 0.
+
+    A cleanup exception that replaced a pending ``SystemExit`` (raised inside the ``finally``)
+    keeps that exit's non-zero int code, so a refusal's 75 still reaches the dispatcher."""
+    if isinstance(exc, KeyboardInterrupt):
+        return 130
+    pending = exc.__context__
+    while pending is not None and not isinstance(pending, SystemExit):
+        pending = pending.__context__
+    if pending is not None and isinstance(pending.code, int) and pending.code != 0:
+        return pending.code
+    return 1
+
+
+@contextlib.contextmanager
+def single_query_hard_exit():
+    """Wrap a one-shot run: any way out of the block becomes ``hard_exit_single_query`` after every
+    ``finally`` inside it (session flush, lease release, turn report) has already run.
+
+    ``SystemExit`` keeps its code; an exception prints its traceback to stderr and exits 1
+    (``KeyboardInterrupt``: 130), because ordinary interpreter teardown is what hangs."""
+    try:
+        yield
+    except SystemExit as exc:
+        # Module-global lookup keeps the test seam (tests/conftest.py neutralizes it).
+        globals()["hard_exit_single_query"](exc.code)
+        raise
+    except (Exception, KeyboardInterrupt) as exc:
+        with contextlib.suppress(Exception):
+            traceback.print_exc(file=sys.stderr)
+        globals()["hard_exit_single_query"](_failure_exit_code(exc))
+        raise
+
+
+# Old names, kept for external callers; in-tree code uses the ``single_query`` spellings.
+hard_exit_kanban_worker = hard_exit_single_query
+kanban_worker_hard_exit = single_query_hard_exit
 
 
 # A spawner that bounds only the TURN (the cron Bot Chat lane) hands the quiet child a report
@@ -68,6 +131,16 @@ def exit_single_query(code: int) -> None:
 # contract as HERMES_TURN_AUTHOR): nothing the turn spawns inherits it, and a nested one-shot
 # never writes over its host's report — the record also carries the writer's pid.
 TURN_REPORT_FILE_ENV = "HERMES_QUIET_TURN_REPORT_FILE"
+_report_callback = contextvars.ContextVar("quiet_turn_report_callback", default=None)
+
+
+@contextlib.contextmanager
+def release_lock_at_report(callback):
+    token = _report_callback.set(callback)
+    try:
+        yield
+    finally:
+        _report_callback.reset(token)
 
 
 def take_turn_report_path(environ: MutableMapping[str, str] = os.environ) -> str | None:
@@ -110,11 +183,107 @@ def read_turn_report(path: str, pid: int) -> dict | None:
 # booked instead of the report's summary.
 REPORTED_TURN_EXIT_GRACE_SECONDS = 2.0
 
+# A reported child may linger for nested ``notify_on_complete`` replies (the one-shot linger budget,
+# ``quiet_notify_linger_seconds()``) plus this slack for its own finalization; never past the cap.
+# A child still alive after that is hung (a 10h14m interpreter-exit import-lock deadlock held a
+# recipient's turn lock) and is terminated: SIGTERM, then SIGKILL after ``CHILD_TERM_GRACE_SECONDS``.
+POST_REPORT_EXIT_SLACK_SECONDS = 60.0
+POST_REPORT_EXIT_CAP_SECONDS = 900.0
+CHILD_TERM_GRACE_SECONDS = 10.0
 
-def run_reported_turn(argv: list, *, env: MutableMapping[str, str], report_path: str, timeout: float,
+
+def post_report_exit_wait_seconds() -> float:
+    """How long after its turn report a child may stay alive before it is terminated."""
+    return min(quiet_notify_linger_seconds() + POST_REPORT_EXIT_SLACK_SECONDS, POST_REPORT_EXIT_CAP_SECONDS)
+
+
+def process_start_stamp(pid: int) -> str | None:
+    """``ps`` start time of a live (non-zombie) process, or None; identifies a process across PID reuse."""
+    try:
+        out = subprocess.run(
+            ["ps", "-o", "stat=,lstart=", "-p", str(int(pid))], capture_output=True, text=True, timeout=10,
+            env={**os.environ, "LC_ALL": "C", "LANG": "C"}).stdout.strip()
+    except (OSError, subprocess.SubprocessError, ValueError):
+        return None
+    state, _, started = out.partition(" ")
+    if not started.strip() or state.startswith("Z"):
+        return None
+    return " ".join(started.split())
+
+
+def reap_after(pid: int, stamp: str, kill_at: float, grace: float, *, now=None, sleep=None, probe=None, send=None) -> str:
+    """Terminate exactly *pid* at wall-clock *kill_at* if it is still the process that had *stamp*.
+
+    SIGTERM, then SIGKILL once *grace* seconds pass without it exiting. Returns ``"gone"`` (already
+    exited, or the PID now belongs to another process: nothing is signalled), ``"terminated"`` or
+    ``"killed"``. Self-contained on purpose: ``spawn_detached_reaper`` runs this function's source,
+    with ``process_start_stamp``, in a fresh interpreter that outlives the spawner."""
+    import os
+    import signal
+    import time
+
+    now = now or time.time
+    sleep = sleep or time.sleep
+    probe = probe or process_start_stamp
+    send = send or os.kill
+    while now() < kill_at:
+        sleep(min(1.0, max(kill_at - now(), 0.01)))
+    if probe(pid) != stamp:
+        return "gone"
+    try:
+        send(pid, signal.SIGTERM)
+    except OSError:
+        return "gone"
+    end = now() + grace
+    while now() < end:
+        sleep(0.25)
+        if probe(pid) != stamp:
+            return "terminated"
+    if probe(pid) != stamp:
+        return "terminated"
+    try:
+        send(pid, signal.SIGKILL)
+    except OSError:
+        return "terminated"
+    return "killed"
+
+
+def spawn_detached_reaper(pid: int, kill_at_monotonic: float, grace: float) -> bool:
+    """Arrange for a lingering child to be terminated even after this process exits.
+
+    A Bot Chat delivery runner is detached and exits right after returning the reply, so an
+    in-process timer would die with it and leave the hung child behind. The reaper is a tiny
+    ``start_new_session`` interpreter that waits for the absolute deadline and then signals only that
+    PID, after re-checking its start time. Returns False (nothing armed) when the child's identity
+    cannot be pinned, e.g. no ``ps``."""
+    import inspect
+
+    if sys.platform == "win32":
+        return False
+    stamp = process_start_stamp(pid)
+    if stamp is None:
+        return False
+    kill_at = time.time() + max(kill_at_monotonic - time.monotonic(), 0.0)
+    source = "\n".join((
+        "import os, subprocess",
+        inspect.getsource(process_start_stamp),
+        inspect.getsource(reap_after),
+        f"reap_after({int(pid)}, {stamp!r}, {kill_at!r}, {float(grace)!r})",
+    ))
+    try:
+        subprocess.Popen([sys.executable, "-I", "-c", source], stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                         stderr=subprocess.DEVNULL, start_new_session=True, close_fds=True)
+    except OSError:
+        logging.getLogger(__name__).warning("could not spawn reaper for lingering quiet child %s", pid, exc_info=True)
+        return False
+    return True
+
+
+def run_reported_turn(argv: list, *, env: MutableMapping[str, str], report_path: str, timeout: float | None,
                       exit_grace: float | None = REPORTED_TURN_EXIT_GRACE_SECONDS, cwd: str | None = None,
                       encoding: str | None = None, stdout: int = subprocess.PIPE,
-                      stderr: int = subprocess.PIPE) -> subprocess.CompletedProcess:
+                      stderr: int = subprocess.PIPE, reported_linger: float | None = None,
+                      exit_wait: float | None = None, term_grace: float | None = None) -> subprocess.CompletedProcess:
     """Run one ``hermes chat -Q`` delivery child; *timeout* bounds the TURN, not the process.
 
     The child records its turn at *report_path* (``write_turn_report``) the moment the turn ends,
@@ -122,11 +291,15 @@ def run_reported_turn(argv: list, *, env: MutableMapping[str, str], report_path:
     ``terminal.oneshot_completion_wait_seconds``, whose default equals the delivery caps, so
     waiting for process exit booked every delivered turn that left a reply pending as a timeout
     and killed the linger (#113608, #114980). A child that exits is booked from its real exit
-    code and streams. A child still lingering once its report exists is booked from the report
-    and left running (a daemon thread drains and reaps it): after *exit_grace* seconds for a
-    spawner that needs only the outcome, or at the cap when *exit_grace* is None, for a spawner
-    that relays the printed answer — a teammate's reply during the linger may still become it.
-    Only a turn that never ends is killed, as ``subprocess.TimeoutExpired``.
+    code and streams. A child still lingering once its report exists is booked from the report:
+    after *exit_grace* seconds for a spawner that needs only the outcome; after *reported_linger*
+    seconds past the report for a spawner that relays the printed answer and must give the linger
+    its whole budget (a teammate's reply during it may still become that answer; the turn cap no
+    longer ends that wait); otherwise at the *timeout* cap. Whichever way it stops waiting, the
+    child is never left to hang: it dies at ``report + exit_wait`` (default
+    ``post_report_exit_wait_seconds()``) via ``spawn_detached_reaper``, which survives this process.
+    A turn that never ends is killed at *timeout* — SIGTERM, then SIGKILL after *term_grace*
+    (default ``CHILD_TERM_GRACE_SECONDS``) — and raised as ``subprocess.TimeoutExpired``.
 
     *cwd* pins the child's directory (a spawner sitting in a reaped scratch workspace must not
     hand its dead cwd on — the child dies at CLI startup, #102941). The pipes decode lossily
@@ -144,6 +317,8 @@ def run_reported_turn(argv: list, *, env: MutableMapping[str, str], report_path:
 
     if encoding is None and sys.platform == "win32":
         encoding = "utf-8"
+    if term_grace is None:
+        term_grace = CHILD_TERM_GRACE_SECONDS
     proc = subprocess.Popen(
         argv, stdin=subprocess.DEVNULL, stdout=stdout, stderr=stderr, text=True,
         encoding=encoding, errors="replace", env={**env, TURN_REPORT_FILE_ENV: report_path},
@@ -155,8 +330,10 @@ def run_reported_turn(argv: list, *, env: MutableMapping[str, str], report_path:
 
     drain = threading.Thread(target=_drain, name=f"quiet-turn-drain-{proc.pid}", daemon=True)
     drain.start()
-    deadline = time.monotonic() + timeout
+    deadline = time.monotonic() + timeout if timeout is not None else None
     report = None
+    reported_at = 0.0
+    killed = False
     while True:
         drain.join(timeout=exit_grace if report is not None and exit_grace is not None else 0.25)
         if not drain.is_alive():
@@ -164,12 +341,32 @@ def run_reported_turn(argv: list, *, env: MutableMapping[str, str], report_path:
         if report is not None and exit_grace is not None:
             break
         # Re-read while waiting for the cap: a follow-up turn rewrites the report with its answer.
-        report = read_turn_report(report_path, proc.pid) or report
-        if time.monotonic() >= deadline:
-            if report is not None:
+        current = read_turn_report(report_path, proc.pid)
+        if current is not None and report is None:
+            reported_at = time.monotonic()
+            if exit_wait is None:
+                exit_wait = post_report_exit_wait_seconds()
+            if current.get("exit_code") == 0:
+                callback = _report_callback.get()
+                if callback is not None:
+                    callback()
+        report = current or report
+        if report is not None:
+            now = time.monotonic()
+            if now >= reported_at + exit_wait:
                 break
-            proc.kill()
-            drain.join(timeout=5.0)
+            if reported_linger is not None:
+                if now >= reported_at + reported_linger:
+                    break
+            elif deadline is not None and now >= deadline:
+                break
+        elif deadline is not None and time.monotonic() >= deadline:
+            killed = True
+            proc.terminate()
+            drain.join(timeout=term_grace)
+            if drain.is_alive():
+                proc.kill()
+                drain.join(timeout=5.0)
             # A killed child cannot run further, but the turn may have ENDED (and delivered)
             # in the window between the last report check and the kill landing. Re-read once:
             # a report that appeared means the turn completed — book it instead of
@@ -178,7 +375,10 @@ def run_reported_turn(argv: list, *, env: MutableMapping[str, str], report_path:
             if report is not None:
                 break
             raise subprocess.TimeoutExpired(argv, timeout)
-    # Turn over, child still lingering for a nested reply: not this spawner's wait.
+    # Turn over, child still lingering for a nested reply: not this spawner's wait, and not its job
+    # to outlive its budget either.
+    if not killed and proc.poll() is None:
+        spawn_detached_reaper(proc.pid, reported_at + (exit_wait if exit_wait is not None else 0.0), term_grace)
     return subprocess.CompletedProcess(
         argv, int(report["exit_code"]), report.get("reply") or "", report.get("error") or "")
 
