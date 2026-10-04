@@ -1,0 +1,39 @@
+{
+  "model_id": "openai/gpt-6-luna",
+  "vendor": "OpenAI",
+  "fleet_access": [
+    "openai-codex"
+  ],
+  "context_window_tokens": 1050000,
+  "good_at": [
+    "Fast single-turn task breakdown and response generation",
+    "Kanban card state triage and simple patch edits"
+  ],
+  "best_fleet_uses": [
+    "subagent verification",
+    "fast bounded reading",
+    "log parsing",
+    "cheap classification"
+  ],
+  "job_type_verdicts": {
+    "build": "untested",
+    "analysis": "untested",
+    "review": "untested"
+  },
+  "public_evals": [
+    {
+      "date": "2026-09-24",
+      "reported_by": "independent",
+      "source_url": "https://artificialanalysis.ai/models/comparisons/gpt-6-sol-vs-gpt-5-6-luna",
+      "notes": "index points",
+      "score": 34,
+      "name": "Artificial Analysis Intelligence Index v4.3"
+    }
+  ],
+  "price_per_mtok": {
+    "input": 0.1,
+    "cached_input": 0.01,
+    "output": 0.5
+  },
+  "set_at": "2026-09-25T05:57:01Z"
+}
