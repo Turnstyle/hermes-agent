@@ -661,17 +661,17 @@ def _reset_foreground_exit_fence():
 
 
 @pytest.fixture(autouse=True)
-def _neutralize_kanban_worker_hard_exit(request, monkeypatch):
-    """A Kanban ``chat -q`` worker leaves via ``os._exit``; in-process tests that set
-    ``HERMES_KANBAN_TASK`` and expect ``SystemExit`` would kill pytest. No-op it by default;
-    ``@pytest.mark.real_kanban_hard_exit`` opts out (subprocess tests)."""
-    if request.node.get_closest_marker("real_kanban_hard_exit"):
+def _neutralize_single_query_hard_exit(request, monkeypatch):
+    """A one-shot ``chat -q``/``-Q`` run leaves via ``os._exit``; in-process tests that drive
+    ``_run_single_query_mode`` and expect ``SystemExit`` would kill pytest. No-op it by default;
+    ``@pytest.mark.real_single_query_hard_exit`` opts out (subprocess tests)."""
+    if request.node.get_closest_marker("real_single_query_hard_exit"):
         return
     try:
         from hermes_cli import quiet_single_query as _qsq
     except Exception:
         return
-    monkeypatch.setattr(_qsq, "hard_exit_kanban_worker", lambda code: None, raising=False)
+    monkeypatch.setattr(_qsq, "hard_exit_single_query", lambda code: None, raising=False)
 
 
 @pytest.fixture(autouse=True)

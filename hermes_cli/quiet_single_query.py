@@ -56,9 +56,9 @@ def write_worker_busy_marker(reason: str) -> None:
 def exit_single_query(code: int) -> None:
     """``sys.exit(code)`` for a one-shot turn; a Kanban worker first writes the exit trailer to its log.
 
-    A Kanban worker's ``SystemExit`` is turned into a hard exit by ``_run_single_query_mode`` once its
+    A one-shot's ``SystemExit`` is turned into a hard exit by ``_run_single_query_mode`` once its
     ``finally`` cleanup (session flush + active-session lease release) has run; see
-    ``hard_exit_kanban_worker``."""
+    ``hard_exit_single_query``."""
     if os.environ.get("HERMES_KANBAN_TASK"):
         with contextlib.suppress(Exception):
             # stderr: stdout may be the ``--stream-json`` record stream, and the worker log
@@ -67,13 +67,15 @@ def exit_single_query(code: int) -> None:
     sys.exit(code)
 
 
-def hard_exit_kanban_worker(code: Any) -> None:
-    """Exit a Kanban ``chat -q`` worker without interpreter finalization.
+def hard_exit_single_query(code: Any) -> None:
+    """Exit a one-shot ``chat -q``/``-Q`` run without interpreter finalization.
 
     ``Py_FinalizeEx`` joins non-daemon threads and takes the import lock; a background thread
-    parked mid-import left refused workers at 0% CPU for hours after printing
-    ``[kanban-worker-exit] rc=75``, holding their card. Mirrors ``main._exit_after_oneshot``
-    (#30387, #43055): flush, shut down logging, ``os._exit``. The caller runs its cleanup first."""
+    parked mid-import left refused Kanban workers at 0% CPU for hours after printing
+    ``[kanban-worker-exit] rc=75``, and a Bot Chat DM child sat 10h14m in
+    ``Py_FinalizeEx -> gc -> import`` while its parent held the recipient's turn lock. Mirrors
+    ``main._exit_after_oneshot`` (#30387, #43055): flush, shut down logging, ``os._exit``. The caller
+    runs its cleanup first."""
     for stream in (sys.stdout, sys.stderr):
         with contextlib.suppress(Exception):
             stream.flush()
@@ -82,19 +84,22 @@ def hard_exit_kanban_worker(code: Any) -> None:
     os._exit(code if isinstance(code, int) else (0 if code is None else 1))
 
 
-
 @contextlib.contextmanager
-def kanban_worker_hard_exit():
-    """Wrap a one-shot run: a Kanban worker's ``SystemExit`` becomes ``hard_exit_kanban_worker``
-    after every ``finally`` inside the block (session flush, lease release) has already run.
-    Outside Kanban the ``SystemExit`` propagates unchanged."""
+def single_query_hard_exit():
+    """Wrap a one-shot run: its ``SystemExit`` becomes ``hard_exit_single_query`` after every
+    ``finally`` inside the block (session flush, lease release, turn report) has already run."""
     try:
         yield
     except SystemExit as exc:
-        if os.environ.get("HERMES_KANBAN_TASK"):
-            # Module-global lookup keeps the test seam (tests/conftest.py neutralizes it).
-            globals()["hard_exit_kanban_worker"](exc.code)
+        # Module-global lookup keeps the test seam (tests/conftest.py neutralizes it).
+        globals()["hard_exit_single_query"](exc.code)
         raise
+
+
+# Old names, kept for external callers; in-tree code uses the ``single_query`` spellings.
+hard_exit_kanban_worker = hard_exit_single_query
+kanban_worker_hard_exit = single_query_hard_exit
+
 
 # A spawner that bounds only the TURN (the cron Bot Chat lane) hands the quiet child a report
 # path here. The child records the turn's outcome there the moment the turn ends, BEFORE the

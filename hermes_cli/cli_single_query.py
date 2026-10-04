@@ -668,10 +668,11 @@ def _run_single_query_mode(cli, query, image, quiet, oneshot, stream_json: bool 
     # isn't engaged) and takes the deterministic approvals.single_query_mode path instead of waiting the
     # full timeout. See #86878.
     os.environ["HERMES_SINGLE_QUERY_SESSION"] = "1"
-    from hermes_cli.quiet_single_query import exit_single_query, kanban_worker_hard_exit, write_worker_busy_marker
-    # Kanban workers leave via os._exit once cleanup ran: interpreter teardown can block forever
-    # on the import lock held by a background thread (hung rc=75 workers, Sheldon 2026-09-28).
-    with kanban_worker_hard_exit():
+    from hermes_cli.quiet_single_query import exit_single_query, single_query_hard_exit, write_worker_busy_marker
+    # Every one-shot leaves via os._exit once cleanup ran: interpreter teardown can block forever on
+    # the import lock held by a background thread (hung rc=75 Kanban workers, Sheldon 2026-09-28; a
+    # Bot Chat DM child that held its recipient's turn lock for 10h14m, 2026-10-03).
+    with single_query_hard_exit():
         if not cli._claim_active_session("cli", stderr=bool(quiet)):
             refusal_code = _session_refusal_exit_code(cli)
             if refusal_code != 1:
