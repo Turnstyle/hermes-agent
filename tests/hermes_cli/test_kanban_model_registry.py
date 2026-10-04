@@ -21,10 +21,13 @@ def registry_policy(tmp_path, monkeypatch):
     stamp = datetime.now(timezone.utc).isoformat()
     route = {'provider': 'openai', 'model': 'gpt-6-luna'}
     policy = {'node': 'fixture-node', 'profile': 'worker', 'task_class': 'review',
-              'required_capabilities': [], 'minimum_quality': 0.8,
+              'required_capabilities': [], 'minimum_quality': 0,
               'registry': {'model_ids': ['openai_gpt-6-luna']},
               'advisory': {'ok': True, 'observed_at': stamp, 'eligible_routes': [route]},
-              'snapshot': {'model_capabilities': [], 'fleet_profile_config_v1': {
+              'snapshot': {'model_capabilities': [{**route, 'node': 'fixture-node', 'profile': 'worker',
+                  'capabilities': [], 'uncertain': True,
+                  'proof': {'authenticated': True, 'usable': True, 'observed_at': stamp}}],
+                  'fleet_profile_config_v1': {
                   'node': 'fixture-node', 'profile': 'worker', 'model_chain': [route],
                   'credential_provider_names': ['openai'], 'observed_at': stamp}}}
     task = SimpleNamespace(id='fixture-task', assignee='worker', status='ready',
@@ -41,13 +44,13 @@ def test_registry_selection_preserves_evidence_boundaries(registry_policy, case)
     before = deepcopy(policy)
     meta, reason = read_model_record('openai_gpt-6-luna', policy, now=datetime.now(timezone.utc).timestamp())
     assert reason == 'registry_lookup_ok'
-    assert meta['uncertain'] is True
+    assert 'proof' not in meta and 'uncertain' not in meta
     assert 'quality' not in meta  # Unscaled benchmark and untested verdicts prove no task score.
     assert meta['provider'] == 'openai' and meta['model'] == 'gpt-6-luna'
     assert meta['capabilities'] == record['good_at'] + record['best_fleet_uses']
-    assert meta['proof']['authenticated'] is True
     assert policy == before
     if case in {'numeric', 'low_quality'}:
+        policy['minimum_quality'] = 0.8
         record['job_type_verdicts']['review'] = 0.9 if case == 'numeric' else 0.1
         script.write_text(f'print({json.dumps(record)!r})\n')
     if case == 'no_advice':
@@ -64,6 +67,7 @@ def test_registry_selection_preserves_evidence_boundaries(registry_policy, case)
                                   'observed_at': datetime.now(timezone.utc).isoformat(), 'kind': 'quota'}]
     if case == 'exact':
         policy['exact_reason'] = 'Fixture evaluation identity'
+        policy['minimum_quality'] = 0.8
     if case == 'capability':
         policy['required_capabilities'] = ['tools']
     result = select_model(task)
@@ -110,6 +114,16 @@ def test_registry_outage_uses_advised_chain_once_without_leaking_errors(registry
 def test_registry_public_command_and_worker_scope_a_b_a(registry_policy, tmp_path, monkeypatch, capsys):
     from hermes_cli import kanban_db as kb, kanban_db_connect as kbc
     from hermes_cli.kanban_model_selection import selection_command, bind_worker_selection, fallback_allowed
+    from hermes_cli import kanban_model_registry as registry
+
+    reads = []
+    reader = registry.read_model_record
+
+    def counted_reader(*args, **kwargs):
+        reads.append(args[0])
+        return reader(*args, **kwargs)
+
+    monkeypatch.setattr(registry, 'read_model_record', counted_reader)
 
     _, template, script, _ = registry_policy
     for profile in ('worker-a', 'worker-b', 'worker-a'):
@@ -122,6 +136,7 @@ def test_registry_public_command_and_worker_scope_a_b_a(registry_policy, tmp_pat
         policy = deepcopy(template)
         policy['profile'] = profile
         policy['snapshot']['fleet_profile_config_v1']['profile'] = profile
+        policy['snapshot']['model_capabilities'][0]['profile'] = profile
         with kbc.connect_closing() as conn:
             tid = kb.create_task(conn, title='Fixture registry routing', assignee=profile,
                                  model_override='gpt-6-luna', provider_override='openai')
@@ -137,7 +152,9 @@ def test_registry_public_command_and_worker_scope_a_b_a(registry_policy, tmp_pat
             assert task.status == 'ready'
         monkeypatch.setenv('HERMES_KANBAN_TASK', tid)
         agent = SimpleNamespace(provider='openai', model='gpt-6-luna')
+        reads.clear()
         bind_worker_selection(agent)
+        assert reads == ['openai_gpt-6-luna']
         assert agent._model_selection['selected'] == result['selected']
         assert agent._fallback_chain == []
         assert fallback_allowed(agent, 'openai', 'gpt-6-luna')
@@ -164,6 +181,73 @@ def test_registry_failures_cannot_lift_owner_holds(registry_policy, fault):
         script.unlink()
         policy['exact_reason'] = 'Exact fixture identity'
     result = select_model(task)
-    assert result['selected'] is None
+    assert result['selected'] == (policy['advisory']['eligible_routes'][0]
+                                  if fault == 'exact_outage' else None)
     if fault == 'exact_outage':
-        assert result['reason'] == 'exact_model_unavailable'
+        assert result['reason'] == 'exact_model_required'
+
+
+@pytest.mark.parametrize('proof_case', ['false', 'missing', 'stale', 'absent', 'wrong_profile', 'fresh', 'registry_quality', 'low_quality'])
+def test_registry_merges_metadata_without_granting_owner_proof(registry_policy, proof_case):
+    from hermes_cli.kanban_model_registry import resolve_registry_policy
+
+    task, policy, script, record = registry_policy
+    route = policy['advisory']['eligible_routes'][0]
+    stamp = policy['advisory']['observed_at']
+    owner = {**route, 'node': policy['node'], 'profile': policy['profile'],
+             'capabilities': ['owner-capability'], 'quality': {'review': 0.9},
+             'uncertain': False,
+             'proof': {'authenticated': True, 'usable': True, 'observed_at': stamp}}
+    if proof_case == 'false':
+        owner['proof'].update(authenticated=False, usable=False)
+    elif proof_case == 'missing':
+        owner.pop('proof')
+    elif proof_case == 'stale':
+        owner['proof']['observed_at'] = (datetime.now(timezone.utc) - timedelta(seconds=901)).isoformat()
+    elif proof_case == 'wrong_profile':
+        owner['profile'] = 'other'
+    if proof_case in {'registry_quality', 'low_quality'}:
+        record['job_type_verdicts']['review'] = 0.95
+        script.write_text(f'print({json.dumps(record)!r})\n')
+        owner['quality'] = {} if proof_case == 'registry_quality' else {'review': 0.1}
+    policy['minimum_quality'] = 0.8
+    policy['snapshot']['model_capabilities'] = [] if proof_case == 'absent' else [owner]
+    policy['required_capabilities'] = ['owner-capability', record['good_at'][0]]
+    before = deepcopy(policy)
+    resolved, reason = resolve_registry_policy(policy, now=datetime.now(timezone.utc).timestamp())
+    assert reason == 'registry_lookup_ok'
+    assert policy == before
+    merged = resolved['snapshot']['model_capabilities']
+    if proof_case == 'absent':
+        assert merged == []
+    else:
+        assert merged[0].get('proof') == owner.get('proof')
+        assert merged[0]['quality'] == ({'review': 0.95} if proof_case == 'registry_quality' else owner['quality'])
+        if proof_case != 'wrong_profile':
+            assert set(merged[0]['capabilities']) == set(['owner-capability'] + record['good_at'] + record['best_fleet_uses'])
+    assert select_model(task)['selected'] == (route if proof_case in {'fresh', 'registry_quality'} else None)
+
+
+@pytest.mark.parametrize('requirements, quality, selected', [
+    ((['tools'], 0.8), None, False),
+    ((['tools'], 0), None, False),
+    (([], 0.8), None, False),
+    (([], 0), None, True),
+    (([], 0.8), 0.9, True),
+])
+def test_registry_outage_never_waives_policy_requirements(registry_policy, requirements, quality, selected):
+    task, policy, script, _ = registry_policy
+    script.unlink()
+    route = policy['advisory']['eligible_routes'][0]
+    owner = {**route, 'node': policy['node'], 'profile': policy['profile'],
+             'capabilities': [], 'uncertain': True,
+             'proof': {'authenticated': True, 'usable': True,
+                       'observed_at': policy['advisory']['observed_at']}}
+    if quality is not None:
+        owner['quality'] = {'review': quality}
+    policy['snapshot']['model_capabilities'] = [owner]
+    policy['required_capabilities'], policy['minimum_quality'] = requirements
+    result = select_model(task)
+    assert result['registry_reason'] == 'registry_reader_missing'
+    assert result['selected'] == (route if selected else None)
+    assert result['reason'] == ('eligible_preference' if selected else 'no_verified_eligible_route')
