@@ -435,6 +435,19 @@ def _check_checkpoint_store(should_fix: bool, f: Finding) -> None:
         check_warn(notice)
 
 
+@doctor_check("Bot Chat turn lock check failed", "({e})")
+def _check_bot_turn_locks(should_fix: bool, f: Finding) -> None:
+    """Warn (never fail) when a Bot Chat turn lock has been held long enough to mean a wedged holder."""
+    from tools.bot_relay_lock_watchdog import DEFAULT_MAX_AGE_MINUTES, _format, default_root, find_stale_locks
+    stale = find_stale_locks(default_root(), DEFAULT_MAX_AGE_MINUTES * 60)
+    if not stale:
+        return
+    _section("Bot Chat Turn Locks")
+    for row in stale:
+        check_warn(_format(row))
+    check_info("A hung holder blocks DMs to that bot; inspect it, then kill that exact pid if it is wedged.")
+
+
 def _gh_authenticated() -> bool:
     """Check if gh CLI is authenticated via token file or device flow.
 

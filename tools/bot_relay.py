@@ -924,6 +924,28 @@ def turn_lock_path(root: Path | str, profile: str) -> Path:
     return relay_root(root) / LOCKS_DIR / f"{safe}.lock"
 
 
+def lock_holder_path(lock_path: Path | str) -> Path:
+    """Sidecar naming who holds ``lock_path`` (flock carries no holder info)."""
+    lock_path = Path(lock_path)
+    return lock_path.with_name(lock_path.name + ".holder.json")
+
+
+def _write_lock_holder(lock_path: Path) -> None:
+    """Best effort: a stale or missing sidecar is validated by the watchdog against the live flock."""
+    try:
+        atomic_json_write(lock_holder_path(lock_path), {
+            "pid": os.getpid(), "since": time.time(),
+            "argv0": os.path.basename(sys.argv[0]) if sys.argv and sys.argv[0] else "",
+        }, mode=0o600)
+    except Exception:
+        logger.debug("bot turn lock holder sidecar write failed", exc_info=True)
+
+
+def _remove_lock_holder(lock_path: Path) -> None:
+    with contextlib.suppress(OSError):
+        lock_holder_path(lock_path).unlink()
+
+
 @contextlib.contextmanager
 def acquire_turn_lock(root: Path | str, profile: str, timeout_seconds: float | None = None) -> Iterator[Path]:
     """Hold ``profile``'s cross-process turn lock for the ``with`` body: non-blocking
@@ -954,9 +976,11 @@ def acquire_turn_lock(root: Path | str, profile: str, timeout_seconds: float | N
                 if now >= deadline:
                     raise TurnBusyError(profile, now - start)
                 time.sleep(min(0.1, max(0.005, deadline - now)))
+        _write_lock_holder(path)
         try:
             yield path
         finally:
+            _remove_lock_holder(path)  # before the unlock: a successor's sidecar must never be ours to delete
             with contextlib.suppress(OSError):  # kernel releases on close anyway
                 fcntl.flock(fd, fcntl.LOCK_UN)
     finally:

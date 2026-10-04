@@ -48,6 +48,7 @@ from hermes_cli.doctor_tools import (
     _check_tool_availability,
 )
 from hermes_cli.doctor_state import (
+    _check_bot_turn_locks,
     _check_checkpoint_store,
     _check_directory_structure,
     _check_memory_provider,
@@ -120,6 +121,7 @@ DOCTOR_CHECKS = (
     (None, _check_npm_audit), ('API Connectivity', _check_api_connectivity),
     ('Tool Availability', _check_tool_availability), ('Skills Hub', _check_skills_hub),
     ('Memory Provider', _check_memory_provider), (None, _check_profiles),
+    (None, _check_bot_turn_locks),
 )
 
 
