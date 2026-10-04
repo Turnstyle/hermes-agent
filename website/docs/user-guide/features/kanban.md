@@ -404,6 +404,14 @@ are complete, or **`todo`** while any parent remains open. A `todo` task keeps
 its source-phase provenance and returns to `review` or `ready` automatically
 when the dependency gate clears. `unblock` never routes directly to `triage`.
 
+For a task already in **`triage`**, `hermes kanban unblock <id> --reason "reviewed hold"`
+clears an unreleased block-loop, sticky block, or `needs_input` hold. The CLI records
+the current profile as the actor; database callers must supply both actor and reason.
+The card stays in `triage`, with an audit comment and an `unblocked` event written
+atomically. Release the reviewed spec separately with `specify --keep-spec --expect-sha256`.
+A `HOLD FOR TURNER` title/body marker must be cleared by Turner/owner. Foreign fleet
+mirrors, cards without a hold, and duplicate clears are refused without writes.
+
 If you unblock a task and it later shows up in **`triage`**, the unblock is not
 what put it there. A subsequent *re-block for the same reason* did: after a task
 is blocked → unblocked → re-blocked for the same cause `BLOCK_RECURRENCE_LIMIT`

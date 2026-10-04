@@ -350,9 +350,9 @@ _SPECS = [
         _bulk_ids("schedule"),
     ], help="Park one or more tasks in Scheduled (waiting on time, not human input)"),
     _cmd("unblock", [
-        _reason("Optional reason/note — recorded as a comment before unblocking. Quote multi-word reasons."),
+        _reason("Reason/note (required for triage holds), recorded atomically with unblocking. Quote multi-word reasons."),
         _TASK_IDS,
-    ], help="Return blocked/scheduled tasks to ready, or todo while parents remain open"),
+    ], help="Resume blocked/scheduled tasks (parent-gated); clear triage holds without promotion"),
     _cmd("request-review", [
         _TASK_ID,
         _arg("--summary", help="What was implemented and how it was verified — shown to the reviewer."),

@@ -3926,16 +3926,25 @@ def _landing_status_after_parents(conn: sqlite3.Connection, task_id: str) -> str
     return "ready" if _parents_satisfied(conn, task_id) else "todo"
 
 
-def unblock_task(conn: sqlite3.Connection, task_id: str) -> bool:
+def unblock_task(
+    conn: sqlite3.Connection, task_id: str, *,
+    actor: Optional[str] = None, reason: Optional[str] = None,
+) -> bool:
     """``blocked``/``scheduled`` -> its resumable phase (parent re-gated; ``review``
     when that is where it left off), closing any leaked run first. A ``todo``
     row holding an unreleased Turner hold is also accepted: the
-    ``unblocked`` event is what releases it for ``recompute_ready``."""
+    ``unblocked`` event is what releases it for ``recompute_ready``.
+    Triage holds require actor/reason and stay in triage for separate spec release."""
     now = int(time.time())
     with write_txn(conn):
         hold_row = conn.execute(
             "SELECT status, block_kind, title, body FROM tasks WHERE id = ?", (task_id,),
         ).fetchone()
+        if hold_row is not None and hold_row["status"] == "triage":
+            from hermes_cli.kanban_db_triage_unblock import clear_triage_hold
+            return clear_triage_hold(
+                conn, task_id, hold_row, actor=actor, reason=reason, now=now,
+            )
         unblockable = ("blocked", "scheduled")
         if (
             hold_row is not None and hold_row["status"] == "todo"
@@ -3973,6 +3982,8 @@ def unblock_task(conn: sqlite3.Connection, task_id: str) -> bool:
         )
         if cur.rowcount != 1:
             return False
+        if reason and actor:
+            add_comment(conn, task_id, actor, f"UNBLOCK: {reason}")
         _append_event(
             conn, task_id, "unblocked",
             (
