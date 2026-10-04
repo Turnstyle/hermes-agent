@@ -483,7 +483,9 @@ def test_api_drain_timeout_requeues_and_releases_profile_lock(monkeypatch, tmp_p
     assert done.wait(2)
     assert store.get("timeout-message").fields["status"] == "queued"
     assert "timed out" in store.get("timeout-message").fields["last_error"]
-    with acquire_turn_lock(tmp_path, ME, timeout_seconds=0):
+    # done.set() fires inside the worker's `with acquire_turn_lock`, a moment before the thread
+    # leaves it and drops the flock; wait briefly for the release instead of probing once.
+    with acquire_turn_lock(tmp_path, ME, timeout_seconds=2):
         pass
 
 
