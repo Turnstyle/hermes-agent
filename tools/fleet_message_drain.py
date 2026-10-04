@@ -93,6 +93,8 @@ WRITABLE_FIELDS = frozenset({"status", "updated_at", "delivered_at", "read_at", 
                              "rejected_at", "expired_at", "attempts", "last_error", "sender_notice",
                              "sender_notice_at"})
 MAX_LIMIT = 50
+SYSTEM_SENDER = "fleet-system"
+EXPIRY_NOTICE_SUFFIX = "-expiry-notice"
 LAST_ERROR_CHARS = 500
 _SCOPE = "https://www.googleapis.com/auth/datastore"
 
@@ -489,6 +491,37 @@ def _queued_timeout_sender_notice(doc_id: str, recipient: Any, seconds: int) -> 
             f"for {duration} without an available Bot Chat turn.")
 
 
+def _notify_sender_of_expiry(store: Any, doc_id: str, fields: dict, now: datetime.datetime,
+                             reason: str) -> None:
+    """Push the expiry to the original sender as one ``notify_wake`` doc from ``fleet-system`` (the
+    schema's system-notification kind). Never raises: the expiry it reports is already committed.
+
+    The doc id is deterministic, so a repeated sweep finds it already created. Our own notices
+    (``fleet-system`` sender / ``-expiry-notice`` id) never get one, so an unread notice that
+    expires cannot start a chain."""
+    sender = fields.get("from")
+    if (not isinstance(sender, str) or not sender.strip() or sender == SYSTEM_SENDER
+            or doc_id.endswith(EXPIRY_NOTICE_SUFFIX)):
+        return
+    created = parse_ts(fields.get("created_at"))
+    minutes = int((now - created).total_seconds() // 60) if created else 0
+    now_s = rfc3339(now)
+    notice = {
+        "from": SYSTEM_SENDER, "to": sender, "kind": "notify_wake", "status": "queued", "attempts": 0,
+        "schema_version": 2, "created_at": now_s, "updated_at": now_s,
+        "expires_at": rfc3339(now + datetime.timedelta(hours=24)),
+        "body": (f"to @{fields.get('to') or 'recipient'}, message {doc_id} was NOT delivered: "
+                 f"{reason}, queued {minutes} minutes"),
+    }
+    try:
+        store.create(doc_id + EXPIRY_NOTICE_SUFFIX, notice)
+    except urllib.error.HTTPError as exc:
+        if exc.code != 409:
+            logger.warning("fleet message drain: expiry notice for %s failed (HTTP %s)", doc_id, exc.code)
+    except Exception:
+        logger.warning("fleet message drain: could not write expiry notice for %s", doc_id, exc_info=True)
+
+
 def claim_next(store: Any, me: str, *, limit: int = 10, now: Optional[datetime.datetime] = None,
                queued_timeout_seconds: int = 1800, allow_claim: bool = True) -> Optional[Claimed]:
     """Run one recipient query and atomically claim the oldest claimable doc (queued -> delivered).
@@ -527,6 +560,9 @@ def claim_next(store: Any, me: str, *, limit: int = 10, now: Optional[datetime.d
                 pass
             except Exception:
                 logger.warning("fleet message drain: could not expire doc %s", row.doc_id, exc_info=True)
+            else:
+                _notify_sender_of_expiry(store, row.doc_id, fields, now,
+                                         "expired" if expired_at <= now else "timed out")
             continue
         if not allow_claim:
             continue
@@ -870,6 +906,8 @@ def reclaim_stale(store: Any, *, older_than_seconds: int = 1800, max_attempts: i
                 except PreconditionFailed:
                     counts["conflicts"] += 1
                     continue
+                if outcome == "expired":
+                    _notify_sender_of_expiry(store, row.doc_id, fields, now, "expired")
             counts[outcome] += 1
     return counts
 

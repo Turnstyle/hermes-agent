@@ -11,6 +11,7 @@ import itertools
 import json
 import os
 import threading
+import urllib.error
 import urllib.request
 import uuid
 from types import SimpleNamespace
@@ -106,6 +107,14 @@ class MemoryStore:
     def get(self, doc_id):
         with self.lock:
             return fmd.Row(doc_id, dict(self.docs[doc_id]), self.ut[doc_id]) if doc_id in self.docs else None
+
+    def create(self, doc_id, fields):
+        with self.lock:
+            self.commits += 1
+            if doc_id in self.docs:
+                raise urllib.error.HTTPError("memory://", 409, "ALREADY_EXISTS", None, None)
+            self.docs[doc_id] = dict(fields)
+            self._stamp(doc_id)
 
     def update(self, doc_id, fields, update_time):
         fmd._check_write(doc_id, fields, update_time)
