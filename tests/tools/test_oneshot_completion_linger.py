@@ -246,11 +246,11 @@ def test_default_timeout_read_from_config(registry, monkeypatch):
 
 # ── CLI exit paths invoke the linger ─────────────────────────────────────────
 
-def test_finalize_single_query_releases_lease_then_lingers_before_teardown(monkeypatch):
-    """cli._finalize_single_query releases the session lease FIRST (a finished turn
-    must not keep refusing deliveries through the exit linger, #118826), then calls
-    the registry wait BEFORE the durable flush / cleanup so deliveries land while
-    the parent is alive."""
+def test_finalize_single_query_flushes_releases_lease_then_lingers_before_teardown(monkeypatch):
+    """cli._finalize_single_query flushes the session while it still owns the lease,
+    releases the lease before the exit linger (a finished turn must not keep refusing
+    deliveries, #118826), then calls the registry wait BEFORE cleanup so deliveries
+    land while the parent is alive."""
     import cli as cli_mod
 
     order = []
@@ -277,7 +277,7 @@ def test_finalize_single_query_releases_lease_then_lingers_before_teardown(monke
             order.append("release")
 
     cli_mod._finalize_single_query(_FakeCli())
-    assert order == ["release", "wait", "flush", "finalize", "cleanup"]
+    assert order == ["flush", "release", "wait", "finalize", "cleanup"]
 
 
 def test_finalize_single_query_survives_wait_failure(monkeypatch):
@@ -307,7 +307,7 @@ def test_finalize_single_query_survives_wait_failure(monkeypatch):
             order.append("release")
 
     cli_mod._finalize_single_query(_FakeCli())
-    assert order == ["release", "flush", "finalize", "cleanup"]
+    assert order == ["flush", "release", "finalize", "cleanup"]
 
 
 

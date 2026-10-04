@@ -302,29 +302,31 @@ def _wait_for_oneshot_background_completions(cli) -> None:
 
 
 def _finalize_single_query(cli) -> None:
-    """Close one-shot CLI resources after releasing the active-session lease.
+    """Close one-shot CLI resources, releasing the active-session lease before the exit linger.
 
-    Release order is the point of this routine: by the time finalize runs, every turn
-    of the run (main turn, kanban goal loop, notify-completion follow-ups) has
-    finished, and none of the remaining steps — the bounded linger for
-    notify_on_complete children, the durable flush, cleanup — runs a turn. The lease
-    means "a turn may run on this session", so it is released FIRST; holding it
-    through the linger let an alive-but-idle one-shot keep refusing new deliveries
-    ("Refused active session") for minutes after its turn had ended (#118826).
+    By the time finalize runs, every turn of the run (main turn, kanban goal loop,
+    notify-completion follow-ups) has finished, so the lease ("a turn may run on this
+    session") is released before the bounded linger for notify_on_complete children:
+    holding it through the linger let an alive-but-idle one-shot keep refusing new
+    deliveries ("Refused active session") for minutes after its turn ended (#118826).
+
+    The durable flush (transcript retry + ``end_session``) runs BEFORE the release. Once the
+    lease is gone a successor may acquire the session and reopen it, and a late
+    ``end_session(..., "cli_close")`` from this process would close the successor's live row.
     """
     from cli import _flush_one_shot_session_store, _notify_single_query_session_finalize, _run_cleanup, _wait_for_oneshot_background_completions
-    cli._release_active_session()
-    # Order matters: linger for spawned background work BEFORE any teardown (the
-    # parent owns those children's stdout pipes); then the durable flush, since
-    # memory-provider shutdown inside _run_cleanup can issue aux-LLM calls and
-    # nothing after it may fail in a way that loses the turn.
-    for step, what in (
-        (_wait_for_oneshot_background_completions, "background completion wait"),
-        (_flush_one_shot_session_store, "session store flush"),
-    ):
-        try:
-            step(cli)
-        except Exception:
-            logger.debug("one-shot %s failed", what, exc_info=True)
+    try:
+        # Flush first (lease still held, nothing after it may lose the turn), release, then linger
+        # for spawned background work BEFORE the remaining teardown (the parent owns those
+        # children's stdout pipes).
+        _flush_one_shot_session_store(cli)
+    except Exception:
+        logger.debug("one-shot session store flush failed", exc_info=True)
+    finally:
+        cli._release_active_session()
+    try:
+        _wait_for_oneshot_background_completions(cli)
+    except Exception:
+        logger.debug("one-shot background completion wait failed", exc_info=True)
     _notify_single_query_session_finalize(cli)
     _run_cleanup(notify_session_finalize=False)
