@@ -1,6 +1,6 @@
 """Metadata-only routine selection on the existing Kanban and fallback paths.
 
-Snapshots are owner exports, not another registry or an authentication probe.
+Snapshots are owner exports; optional registry reads use the existing fleet CLI.
 The export contract is documented in the routine-model-selection source skill.
 """
 from __future__ import annotations
@@ -35,12 +35,24 @@ def validate_policy(policy):
     if not isinstance(policy, dict):
         raise ValueError("model policy must be an object")
     allowed = {"node", "profile", "task_class", "required_capabilities", "minimum_quality",
-               "exact_reason", "snapshot", "advisory", "failed_routes", "checkpoint_ref"}
+               "exact_reason", "snapshot", "advisory", "failed_routes", "checkpoint_ref", "registry"}
     if set(policy) - allowed:
         raise ValueError("unknown model policy fields")
     if policy.get("exact_reason") is not None:
         if not isinstance(policy["exact_reason"], str) or not policy["exact_reason"].strip():
             raise ValueError("an exact-model constraint needs a non-empty reason")
+    if "registry" in policy:
+        registry = policy["registry"]
+        if not isinstance(registry, dict) or set(registry) != {"model_ids"}:
+            raise ValueError("registry requires exact model_ids")
+        ids = registry["model_ids"]
+        if (not isinstance(ids, list) or not 1 <= len(ids) <= 8
+                or any(not isinstance(i, str) or not i or len(i) > 128
+                       or any(c not in "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_.-" for c in i)
+                       for i in ids) or len(set(ids)) != len(ids)):
+            raise ValueError("registry requires 1 to 8 unique exact document IDs")
+        if "snapshot" not in policy:
+            raise ValueError("registry requires owner route proof snapshot")
     if "snapshot" in policy:
         for key in ("node", "profile", "task_class"):
             if not isinstance(policy.get(key), str) or not policy[key].strip():
@@ -102,6 +114,12 @@ def eligible_routes(policy, *, now=None):
     """Require every mandatory fact; advice never grants permission or quality."""
     validate_policy(policy)
     now = datetime.now(timezone.utc).timestamp() if now is None else now
+    from hermes_cli.kanban_model_registry import resolve_registry_policy
+    policy, _ = resolve_registry_policy(policy, now=now)
+    return _eligible_routes(policy, now=now)
+
+
+def _eligible_routes(policy, *, now):
     snapshot = policy.get("snapshot")
     if snapshot is None:
         return []
@@ -124,18 +142,24 @@ def eligible_routes(policy, *, now=None):
                    if (m.get("node"), m.get("profile"), m.get("provider"), m.get("model")) ==
                    (policy["node"], policy["profile"], route["provider"], route["model"])]
         # Ambiguous exports cannot prove which record is authoritative.
-        if len(matches) != 1:
+        advised_registry = "registry" in policy and not policy.get("exact_reason")
+        if len(matches) > 1 or (not matches and not advised_registry):
             continue
-        meta = matches[0]
+        meta = matches[0] if matches else {
+            "proof": {"authenticated": True, "usable": True, "observed_at": config["observed_at"]},
+            "uncertain": True,
+        }
         proof = meta.get("proof", {})
         if proof.get("authenticated") is not True or proof.get("usable") is not True or not _fresh(proof.get("observed_at"), now):
             continue
         caps = meta.get("capabilities", [])
-        if not isinstance(caps, list) or not set(policy["required_capabilities"]).issubset(caps):
+        if not isinstance(caps, list) or (matches and not set(policy["required_capabilities"]).issubset(caps)):
             continue
         quality = meta.get("quality", {})
         score = quality.get(policy["task_class"]) if isinstance(quality, dict) else None
-        if isinstance(score, bool) or not isinstance(score, (int, float)) or not math.isfinite(score) or not policy["minimum_quality"] <= score <= 1:
+        if score is None and advised_registry:
+            pass  # Fresh advisory below must explicitly approve unknown quality.
+        elif isinstance(score, bool) or not isinstance(score, (int, float)) or not math.isfinite(score) or not policy["minimum_quality"] <= score <= 1:
             continue
         failures = [f for f in policy.get("failed_routes", []) if
                     (f["provider"], f["model"]) == (route["provider"], route["model"])]
@@ -170,7 +194,12 @@ def select_model(task, policy=None, *, now=None):
     exact = policy.get("exact_reason")
     if exact and (not task.model_override or not task.provider_override):
         raise ValueError("exact-model constraints require model and provider")
-    routes = eligible_routes(policy, now=now)
+    from hermes_cli.kanban_model_registry import resolve_registry_policy
+    timestamp = datetime.now(timezone.utc).timestamp() if now is None else now
+    resolved, registry_reason = resolve_registry_policy(policy, now=timestamp)
+    if registry_reason:
+        result["registry_reason"] = registry_reason
+    routes = _eligible_routes(resolved, now=timestamp)
     preferred = {"provider": task.provider_override, "model": task.model_override}
     if exact:
         if "snapshot" not in policy or preferred in routes:
