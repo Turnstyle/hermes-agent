@@ -95,12 +95,65 @@ Conductor. Names and provenance are owner attestations, not cryptographic human
 authentication. The API derives and stores operator/owner homes, issuance time,
 nondelegable actions, revocation state and a content digest. Do not provide those
 derived fields as input. Grants are immutable; a reused grant ID cannot extend
-or replace authority. Only a fresh owner-issued grant can admit a later scope.
+or replace authority. A fresh owner-issued grant can admit a later scope through
+the supported CLI without any primary chat/model turn. An optional finite
+standing policy also permits the admitted executor to issue renewal grants
+within preapproved scope, as described below.
 
 ```sh
 hermes -p node-conductor kanban --board fleet board-ops grant grant.json
 hermes -p node-conductor kanban --board fleet board-ops revoke node-example-ops-001
 ```
+
+### Bounded standing renewal and later-task admission
+
+The owner may add this optional `standing_policy` object to the exact grant
+contract above. Choose an actual future Unix timestamp for `renew_until`.
+
+```json
+{
+  "renew_until": 1791482400,
+  "max_tasks": 16,
+  "assignees": ["maker-profile"],
+  "allow_descendants": true
+}
+```
+
+`renew_until` must be at least the initial grant expiry and at most seven days
+after issuance. `max_tasks` includes all seed and later admitted tasks, is at
+least the seed count, and cannot exceed64. Assignees must be explicit locally
+existing profiles. Only the configured executor can receive standing authority.
+The node, board, exact tenant, seed task IDs, permitted operations, reviewers,
+recipient, owner chain and human provenance remain fixed by the owner contract.
+
+With `allow_descendants:true`, a later task must have a durable `created` event
+after standing issuance whose `creator_task_id` is one of those exact seeds.
+Only direct creator-linked children qualify, not arbitrary cards, dependency
+children, grandchildren, or all tasks in a tenant. Their assignee and tenant must
+match the standing scope, and the task must retain local ownership and a verified
+recipient subscription. No new task registry is created; grants and cursors stay
+in the authoritative board's existing Board Ops ledger.
+
+The admitted executor submits this exact renewal envelope through the existing
+public grant command. It cannot choose new rights, provenance or expiry:
+
+```json
+{"renew_from":"node-example-ops-001","task_ids":["t_explicit_later_child"]}
+```
+
+```sh
+hermes -p board-ops kanban --board fleet board-ops grant renewal.json
+hermes -p board-ops kanban --board fleet board-ops tick
+```
+
+If an identical live scoped grant exists, renewal returns it unchanged. Otherwise
+it issues a new immutable grant ID with expiry no later than24h or the standing
+deadline, whichever comes first. The receipt/grant records the root authority's
+digest and provenance. An expired ordinary grant has no renewal authority.
+Revoking any standing-family grant revokes its root and all issued renewals;
+root revocation, control disable or standing expiry wins at action time. The
+operator cannot revive that family, edit the policy, extend an existing ID, or
+grant ordinary authority. Renewal needs a fresh owner policy after seven days.
 
 ## Request contract and operations
 
@@ -162,8 +215,18 @@ records to that runtime profile's grants; owner/executor can inspect all records
 
 The existing dispatcher timer calls Board Ops before normal dispatch. Default-off
 boards have no admission or grants. Healthy unchanged state creates no model/Jev
-calls or request actions. Only typed durable requests execute; comment prose does
-not. No model polling or separate timer/service is introduced.
+calls or request actions. Typed durable requests execute; comment prose does not.
+The timer and public `tick` also consume new real `blocked`, `block_loop_detected`,
+`dependency_wait`, `crashed` and `timed_out` events for admitted scopes. They bind
+the actual event timestamp and current task digest to a durable `inspect_wait`
+request, then execute it and deliver any exception through the existing transport.
+These events never release holds or infer successful maker exit. Eligible later
+direct children can obtain finite renewal grants from the owner's standing policy.
+Only events after grant issuance are consumed, with transactional per-grant
+cursors, event/operation dedup and a32-event total tick budget. A denied future
+task is audited on a scoped seed; its own card is never mutated. No model polling
+or separate timer/service is introduced. An admitted executor gateway/runtime
+must be bound to the executor profile; another gateway's profile is not authority.
 
 At action time, one checked SQLite transaction revalidates grant digest, expiry,
 revocation, control revision, node/board/task/tenant, exact text, the full task/run
@@ -173,9 +236,10 @@ readiness composition is restricted to the requested task. Restart resumes pendi
 rows and does not replay committed actions. The cursor and per-request states are
 durable in the same canonical board.
 
-Routine operators cannot manage grants/control or edit models, config, persona,
+Routine operators cannot manage ordinary grants/control or edit models, config, persona,
 locks, assignees or dependencies; they cannot archive/delete, restart/install/kill,
-complete cards, release holds or dispatch makers. Worker and delegated-child
+complete cards, release holds or dispatch makers. The explicit standing renewal
+envelope is the sole bounded issuance exception. Worker and delegated-child
 contexts are denied. Keep-spec refuses current runs/claims, failure counters and
 block recurrences. Existing keep-spec holds and Fleet write triggers remain in
 force. Genuine dependencies, title/body, checkpoints, model overrides, links,
@@ -183,9 +247,13 @@ leases and ownership fences are not reset to make a card eligible. The live SAME
 Rescue `block_loop_detected` hold still requires its owning Conductor's explicit
 resolution; an ordinary operator cannot clear it.
 
-The action budget is 300 seconds from the original durable event. A request first
-processed at age 300 seconds or later becomes an exception rather than a late
-action. Exceptions are due immediately; the escalation receipt records whether
+The action budget is300 seconds from the original durable event. Event age alone
+does not deny permission. Even a delayed request must pass the same transactional
+grant/expiry/revocation/state/digest/dependency/hold/ownership/ESTOP checks. An
+eligible action can apply late; its receipt records `action_deadline_met:false`
+and the actual `deadline_breach_seconds` without changing the original timestamp.
+Ineligible delayed requests record the actual refusal and deadline breach.
+Exceptions are due immediately; the escalation receipt records whether
 the 600-second original-event budget was met. Each pass handles at most 32 requests
 and 32 exception claims. Sending has a 10-second timeout per notice.
 

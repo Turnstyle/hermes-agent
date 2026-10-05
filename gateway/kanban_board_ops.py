@@ -20,6 +20,7 @@ def _collect(kb) -> list[dict]:
     for board in _board_slugs(kb):
         try:
             with open_board_ops(board) as api:
+                api.intake_events()
                 api.process_pending()
                 deliveries.extend(api.claim_escalations())
         except Refused:

@@ -21,6 +21,11 @@ NONDELEGABLE = (
     "restart", "install", "kill", "archive", "delete", "unlink", "edit_locks",
     "release_hold", "reassign", "complete", "dispatch",
 )
+GRANT_FIELDS = {
+    "grant_id", "node_id", "board", "task_ids", "tenant", "operator_profile",
+    "owner_chain", "human_attribution", "authority_provenance", "allowed_operations",
+    "expires_at", "escalation_recipient", "review_authors",
+}
 
 
 class Refused(ValueError):
@@ -92,12 +97,7 @@ def assert_board_path(conn, board: str) -> None:
 
 
 def validate_grant(contract: dict, control: dict, now: int) -> dict:
-    required = {
-        "grant_id", "node_id", "board", "task_ids", "tenant", "operator_profile",
-        "owner_chain", "human_attribution", "authority_provenance", "allowed_operations",
-        "expires_at", "escalation_recipient", "review_authors",
-    }
-    if set(contract) != required:
+    if set(contract) not in (GRANT_FIELDS, GRANT_FIELDS | {"standing_policy"}):
         raise Refused("grant fields must match the documented contract exactly")
     data = dict(contract)
     for field in ("grant_id", "node_id", "board", "operator_profile", "human_attribution", "authority_provenance"):
@@ -128,6 +128,23 @@ def validate_grant(contract: dict, control: dict, now: int) -> dict:
             continue
         nonblank(recipient[field], "recipient." + field)
     profile_home(recipient["profile"])
+    if "standing_policy" in data:
+        policy = data["standing_policy"]
+        if not isinstance(policy, dict) or set(policy) != {"renew_until", "max_tasks", "assignees", "allow_descendants"}:
+            raise Refused("standing policy fields must match the bounded contract")
+        if type(policy["renew_until"]) is not int or not data["expires_at"] <= policy["renew_until"] <= now + 7 * 86400:
+            raise Refused("standing authority must end within seven days")
+        if type(policy["max_tasks"]) is not int or not len(data["task_ids"]) <= policy["max_tasks"] <= 64:
+            raise Refused("standing authority must name a cumulative task cap of at most 64")
+        if type(policy["allow_descendants"]) is not bool:
+            raise Refused("allow_descendants must be an explicit boolean")
+        assignees = policy["assignees"]
+        if not isinstance(assignees, list) or not assignees or any(not isinstance(a, str) for a in assignees) or len(set(assignees)) != len(assignees):
+            raise Refused("standing assignees must be an explicit nonempty unique list")
+        for assignee in assignees:
+            profile_home(assignee)
+        if data["operator_profile"] != control["executor_profile"]:
+            raise Refused("standing renewal belongs only to the admitted executor")
     data.update(
         operator_home=profile_home(data["operator_profile"]),
         issued_at=now, revoked_at=None, nondelegable_actions=list(NONDELEGABLE),

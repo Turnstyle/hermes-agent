@@ -20,6 +20,7 @@ from hermes_cli.kanban_board_ops_policy import (
     runtime_home, startup_authority, validate_grant,
 )
 from hermes_cli.kanban_board_ops_transactions import compose_task_transition
+from hermes_cli.kanban_board_ops_standing import StandingOps
 
 ACTION_BOUND_SECONDS = 300
 ESCALATION_BOUND_SECONDS = 600
@@ -30,7 +31,7 @@ def _now() -> int:
     return int(time.time())
 
 
-class BoardOps:
+class BoardOps(StandingOps):
     """The connection must point at the explicitly named canonical board.
 
     Public callers use open_board_ops. Gateway passes the same checked board
@@ -87,6 +88,8 @@ class BoardOps:
             return store.control(self.conn, self.board, require_enabled=False)
 
     def grant(self, contract: dict) -> dict:
+        if isinstance(contract, dict) and set(contract) == {"renew_from", "task_ids"}:
+            return self.renew(contract["renew_from"], contract["task_ids"])
         with kbc.write_txn(self.conn):
             control = self._control(owner=True)
             data = validate_grant(contract, control, _now())
@@ -96,11 +99,18 @@ class BoardOps:
                     raise Refused("grant tenant differs from a named task")
                 assert_local_ownership(self.conn, snapshot["task"], control["node_id"], _now())
                 recipient_subscription(self.conn, task_id, data["escalation_recipient"])
+                if "standing_policy" in data and snapshot["task"]["assignee"] not in data["standing_policy"]["assignees"]:
+                    raise Refused("seed task assignee outside standing scope")
             if self.conn.execute("SELECT 1 FROM kanban_board_ops_grants WHERE id=?", (data["grant_id"],)).fetchone():
                 raise Refused("grant id already issued; immutable grants cannot be extended or replaced")
+            store.initialize(self.conn)
+            cursor = self.conn.execute("SELECT COALESCE(MAX(id),0) FROM task_events").fetchone()[0]
+            if "standing_policy" in data:
+                data["standing_after_event_id"] = cursor
             self.conn.execute(
-                "INSERT INTO kanban_board_ops_grants(id,contract,digest) VALUES(?,?,?)",
-                (data["grant_id"], canonical(data), store.digest(data)),
+                "INSERT INTO kanban_board_ops_grants(id,contract,digest,root_id,intake_cursor) VALUES(?,?,?,?,?)",
+                (data["grant_id"], canonical(data), store.digest(data),
+                 data["grant_id"] if "standing_policy" in data else None, cursor),
             )
             for task_id in data["task_ids"]:
                 kb._append_event(self.conn, task_id, "board_ops_granted", {"grant_id": data["grant_id"], "digest": store.digest(data), "owner": control["owner_profile"], "human_attribution": data["human_attribution"], "authority_provenance": data["authority_provenance"]})
@@ -110,7 +120,9 @@ class BoardOps:
         with kbc.write_txn(self.conn):
             self._control(owner=True, enabled=False)
             data = store.grant(self.conn, grant_id)
-            self.conn.execute("UPDATE kanban_board_ops_grants SET revoked_at=COALESCE(revoked_at,?) WHERE id=?", (_now(), grant_id))
+            store.initialize(self.conn)
+            root_id = data.get("standing_root_id", grant_id)
+            self.conn.execute("UPDATE kanban_board_ops_grants SET revoked_at=COALESCE(revoked_at,?) WHERE id=? OR root_id=?", (_now(), root_id, root_id))
             for task_id in data["task_ids"]:
                 kb._append_event(self.conn, task_id, "board_ops_revoked", {"grant_id": grant_id, "revoked_by_home": runtime_home()})
             return store.grant(self.conn, grant_id)
@@ -120,6 +132,14 @@ class BoardOps:
         now = _now()
         if grant["revoked_at"] is not None or not grant["issued_at"] <= now < grant["expires_at"]:
             raise Refused("grant revoked or expired")
+        if "standing_policy" in grant:
+            self._standing_root(grant["grant_id"], control)
+            self._standing_task(grant, data["task_id"], control)
+        if "standing_root_id" in grant:
+            root = self._standing_root(grant["standing_root_id"], control)
+            if root["digest"] != grant["standing_root_digest"]:
+                raise Refused("standing authority digest changed")
+            self._standing_task(root, data["task_id"], control)
         if data["node_id"] != control["node_id"] or data["board"] != self.board or data["node_id"] != grant["node_id"] or data["board"] != grant["board"]:
             raise Refused("request node/board outside grant")
         if data["task_id"] not in grant["task_ids"] or data["tenant"] != grant["tenant"]:
@@ -193,6 +213,10 @@ class BoardOps:
                    "actor_home": request["actor_home"], "grant_id": row["grant_id"], "grant_digest": request["grant_digest"],
                    "original_event_at": row["original_at"], "processed_at": _now(), "facts": facts,
                    "state": state, "execution_attempts": 1, "inference_calls": 0}
+        receipt["action_deadline_met"] = _now() <= row["original_at"] + ACTION_BOUND_SECONDS
+        receipt["deadline_breach_seconds"] = max(0, _now() - row["original_at"] - ACTION_BOUND_SECONDS)
+        if not receipt["action_deadline_met"] and state == "exception":
+            facts["reason"] = "original-event deadline breached; " + facts.get("reason", "owner decision required")
         due = _now() if state == "exception" else None
         self.conn.execute("UPDATE kanban_board_ops_requests SET state=?,receipt=?,due_at=? WHERE id=? AND state='pending'", (state, canonical(receipt), due, row["id"]))
         self.conn.execute("UPDATE kanban_board_ops_control SET cursor=MAX(cursor,?) WHERE singleton=1", (row["id"],))
@@ -226,8 +250,8 @@ class BoardOps:
                     from agent.estop import is_engaged
                     if is_engaged():
                         raise Refused("ESTOP is engaged; no task action admitted")
-                    if _now() - row["original_at"] >= ACTION_BOUND_SECONDS:
-                        raise Refused("deterministic action deadline elapsed from original event")
+                    # Age is a response-budget fact, never execution authority.
+                    # The same transaction still checks every live prerequisite.
                     with compose_task_transition(self.conn, row["task_id"]):
                         # Failed composed work rolls back before a refusal receipt.
                         with kbc.write_txn(self.conn, allow_nested=True):

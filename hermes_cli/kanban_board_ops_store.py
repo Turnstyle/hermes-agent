@@ -32,6 +32,11 @@ def installed(conn) -> bool:
 def initialize(conn) -> None:
     for sql in _DDL:
         conn.execute(sql)
+    # Owner admission/issuance migrates the existing grant ledger, not tasks.
+    columns = {r[1] for r in conn.execute("PRAGMA table_info(kanban_board_ops_grants)")}
+    for name, declaration in (("root_id", "TEXT"), ("intake_cursor", "INTEGER NOT NULL DEFAULT 0")):
+        if name not in columns:
+            conn.execute(f"ALTER TABLE kanban_board_ops_grants ADD COLUMN {name} {declaration}")
 
 
 def digest(data: dict) -> str:

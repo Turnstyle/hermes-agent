@@ -269,9 +269,13 @@ def test_original_event_deadline_and_single_escalation_claim(lane, monkeypatch):
     root, conn, api, tid = lane
     admit(lane)
     submit(lane, request(lane))
-    monkeypatch.setattr(ops, "_now", lambda: 2200)
+    with kbc.write_txn(conn):
+        kb._append_event(conn, tid, "block_loop_detected", {"reason": "FIXTURE changed after intake"})
+    monkeypatch.setattr(ops, "_now", lambda: 2201)
     receipt = run(lane)[0]
-    assert "deadline elapsed" in receipt["facts"]["reason"]
+    assert "deadline breached" in receipt["facts"]["reason"]
+    assert "state/run/dependencies changed" in receipt["facts"]["reason"]
+    assert receipt["action_deadline_met"] is False
     assert receipt["original_event_at"] == 1900
     with profile(root, "ops"):
         deliveries = api.claim_escalations()
@@ -418,3 +422,319 @@ def test_public_cli_shared_request_tick_receipt(lane, tmp_path, capsys):
             assert kanban_command(args) == 0
             assert json.loads(capsys.readouterr().out)["ok"] is True
     assert len(kb.list_comments(conn, tid)) == 1
+
+
+def test_delayed_eligible_keep_spec_revalidates_and_applies(lane, monkeypatch):
+    root, conn, api, tid = lane
+    admit(lane)
+    before = kb.get_task(conn, tid)
+    data = request(lane, "keep_spec", {"review_author": "Turner FIXTURE"})
+    submit(lane, data)
+    monkeypatch.setattr(ops, "_now", lambda: 2301)
+    receipt = run(lane)[0]
+    assert receipt["state"] == "applied", json.dumps(receipt)
+    after = kb.get_task(conn, tid)
+    assert (after.title, after.body) == (before.title, before.body)
+    assert receipt["facts"]["sha256"] == data["task_sha256"]
+    assert receipt["action_deadline_met"] is False
+    assert receipt["original_event_at"] == 1900
+    assert receipt["inference_calls"] == 0
+    assert run(lane) == []
+
+
+def standing_grant(lane):
+    contract = admit(lane)
+    contract.update(grant_id="fixture-standing", standing_policy={
+        "renew_until": 10000, "max_tasks": 3, "assignees": ["worker"],
+        "allow_descendants": True,
+    })
+    with profile(lane[0], "conductor"):
+        lane[2].grant(contract)
+    return contract
+
+
+def test_standing_renewal_admits_later_child_without_primary_chat(lane, monkeypatch):
+    root, conn, api, tid = lane
+    contract = standing_grant(lane)
+    monkeypatch.setattr(ops, "_now", lambda: 2600)
+    child = kb.create_task(conn, title="FIXTURE later child", tenant="fixture-tenant",
+                           assignee="worker", creator_task_id=tid, triage=True)
+    with profile(root, "ops"):
+        renewed = api.grant({"renew_from": contract["grant_id"], "task_ids": [child]})
+        assert renewed["task_ids"] == [child]
+        assert renewed["grant_id"] != contract["grant_id"]
+        assert renewed["expires_at"] <= min(2600 + 86400, 10000)
+        assert renewed["human_attribution"] == contract["human_attribution"]
+        assert renewed["authority_provenance"] == contract["authority_provenance"]
+        assert api.grant({"renew_from": contract["grant_id"], "task_ids": [child]})["grant_id"] == renewed["grant_id"]
+    assert store.grant(conn, contract["grant_id"])["expires_at"] == 2500
+
+
+def test_gateway_intakes_real_block_event_once_without_manual_request(lane, monkeypatch):
+    from gateway import kanban_board_ops as gateway_ops
+    root, conn, api, _ = lane
+    monkeypatch.setattr(kb.time, "time", lambda: 2000)
+    tid = kb.create_task(conn, title="FIXTURE real ready card", tenant="fixture-tenant", assignee="worker")
+    add_notify_sub(conn, task_id=tid, platform="telegram", chat_id="fixture-chat", notifier_profile="king")
+    admit((root, conn, api, tid))
+    assert kb.block_task(conn, tid, reason="FIXTURE needs owner input", kind="needs_input")
+    blocked = store.state_snapshot(conn, tid)
+    with profile(root, "ops"):
+        deliveries = gateway_ops._collect(kb)
+        assert len(deliveries) == 1
+        receipt = deliveries[0]["receipt"]
+        assert receipt["operation"] == "inspect_wait"
+        assert receipt["original_event_at"] == 2000
+        assert receipt["inference_calls"] == 0
+        assert gateway_ops._collect(kb) == []
+    assert store.state_snapshot(conn, tid) == blocked
+    assert conn.execute("SELECT COUNT(*) FROM kanban_board_ops_requests").fetchone()[0] == 1
+
+
+@pytest.mark.parametrize("failure", ["hold", "revoked", "expired", "dependency"])
+def test_delayed_keep_spec_preserves_real_prerequisites(lane, monkeypatch, failure):
+    root, conn, api, tid = lane
+    admit(lane)
+    if failure == "hold":
+        with kbc.write_txn(conn):
+            kb._append_event(conn, tid, "block_loop_detected", {"reason": "FIXTURE real hold"})
+    if failure == "dependency":
+        parent = kb.create_task(conn, title="FIXTURE genuine parent", triage=True)
+        kb.link_tasks(conn, parent, tid)
+    before = store.state_snapshot(conn, tid)
+    submit(lane, request(lane, "keep_spec", {"review_author": "Turner FIXTURE"}))
+    if failure == "revoked":
+        api.revoke("fixture-grant")
+    monkeypatch.setattr(ops, "_now", lambda: 2500 if failure == "expired" else 2301)
+    receipt = run(lane)[0]
+    assert receipt["action_deadline_met"] is False
+    if failure == "dependency":
+        assert receipt["state"] == "applied"
+        assert kb.get_task(conn, tid).status == "todo"
+        assert store.state_snapshot(conn, tid)["parents"] == before["parents"]
+    else:
+        assert receipt["state"] == "exception"
+        assert ("unreleased block loop" if failure == "hold" else "revoked or expired") in receipt["facts"]["reason"]
+        assert store.state_snapshot(conn, tid) == before
+
+
+@pytest.mark.parametrize("failure", ["revoked", "expired-policy", "tenant", "assignee", "unrelated", "grandchild", "worker", "child", "cap"])
+def test_standing_renewal_cannot_expand_or_resurrect_authority(lane, monkeypatch, failure):
+    root, conn, api, tid = lane
+    contract = standing_grant(lane)
+    monkeypatch.setattr(ops, "_now", lambda: 2600)
+    monkeypatch.setattr(kb.time, "time", lambda: 2600)
+    def child(creator=tid, tenant="fixture-tenant", assignee="worker"):
+        return kb.create_task(conn, title="FIXTURE bounded child", tenant=tenant, assignee=assignee, creator_task_id=creator, triage=True)
+    target = child(creator=None if failure == "unrelated" else tid,
+                   tenant="other" if failure == "tenant" else "fixture-tenant",
+                   assignee="ops" if failure == "assignee" else "worker")
+    if failure == "grandchild":
+        target = child(creator=target)
+    with profile(root, "ops"):
+        if failure in {"revoked", "cap"}:
+            issued = api.grant({"renew_from": contract["grant_id"], "task_ids": [target]})
+        if failure == "cap":
+            api.grant({"renew_from": contract["grant_id"], "task_ids": [child()]})
+            target = child()
+    if failure == "revoked":
+        with profile(root, "conductor"):
+            api.revoke(issued["grant_id"])
+        assert store.grant(conn, contract["grant_id"])["revoked_at"] is not None
+    if failure == "expired-policy":
+        monkeypatch.setattr(ops, "_now", lambda: 10000)
+    count = conn.execute("SELECT COUNT(*) FROM kanban_board_ops_grants").fetchone()[0]
+    before = store.state_snapshot(conn, target)
+    with profile(root, "worker" if failure == "worker" else "ops"):
+        scope = delegated_child_context() if failure == "child" else profile(root, "worker" if failure == "worker" else "ops")
+        with scope, pytest.raises((Refused, PermissionError)):
+            api.grant({"renew_from": contract["grant_id"], "task_ids": [target]})
+    assert conn.execute("SELECT COUNT(*) FROM kanban_board_ops_grants").fetchone()[0] == count
+    assert store.state_snapshot(conn, target) == before
+
+
+def test_standing_request_rechecks_root_revocation_before_action(lane, monkeypatch):
+    root, conn, api, tid = lane
+    contract = standing_grant(lane)
+    monkeypatch.setattr(ops, "_now", lambda: 2600)
+    monkeypatch.setattr(kb.time, "time", lambda: 2600)
+    child = kb.create_task(conn, title="FIXTURE pending child", tenant="fixture-tenant", assignee="worker", creator_task_id=tid, triage=True)
+    with profile(root, "ops"):
+        issued = api.grant({"renew_from": contract["grant_id"], "task_ids": [child]})
+        data = request((root, conn, api, child))
+        data["grant_id"] = issued["grant_id"]
+        api.request(data)
+    with profile(root, "conductor"):
+        api.revoke(contract["grant_id"])
+    assert run(lane)[0]["state"] == "exception"
+    assert not kb.list_comments(conn, child)
+
+
+def test_event_intake_restart_and_later_child_are_durable(lane, monkeypatch):
+    root, conn, api, tid = lane
+    standing_grant(lane)
+    monkeypatch.setattr(ops, "_now", lambda: 2600)
+    monkeypatch.setattr(kb.time, "time", lambda: 2600)
+    child = kb.create_task(conn, title="FIXTURE later blocked child", tenant="fixture-tenant", assignee="worker", creator_task_id=tid, initial_status="blocked")
+    before = store.state_snapshot(conn, child)
+    with profile(root, "ops"):
+        assert len(api.intake_events()) == 1
+    with profile(root, "ops"), ops.open_board_ops("fixture") as restarted:
+        assert restarted.intake_events() == []
+        receipt = restarted.process_pending()[0]
+        assert receipt["state"] == "exception"
+        assert receipt["task_id"] == child
+        assert receipt["original_event_at"] == 2600
+        assert receipt["inference_calls"] == 0
+        assert restarted.process_pending() == []
+    assert store.state_snapshot(conn, child) == before
+    assert conn.execute("SELECT COUNT(*) FROM kanban_board_ops_requests").fetchone()[0] == 1
+
+
+@pytest.mark.asyncio
+async def test_gateway_timer_delivers_then_idle_has_zero_model_calls(lane, monkeypatch):
+    from types import SimpleNamespace
+    from unittest.mock import Mock
+    from gateway import kanban_board_ops as gateway_ops
+    from gateway import kanban_watchers_notifier as notifier
+    from hermes_cli import kanban_specify
+    from gateway.platforms.base import SendResult
+    from hermes_constants import get_hermes_home
+
+    root, conn, api, _ = lane
+    monkeypatch.setattr(kb.time, "time", lambda: 2000)
+    tid = kb.create_task(conn, title="FIXTURE real timer event", tenant="fixture-tenant", assignee="worker")
+    add_notify_sub(conn, task_id=tid, platform="telegram", chat_id="fixture-chat", notifier_profile="king")
+    admit((root, conn, api, tid))
+    assert kb.block_task(conn, tid, reason="FIXTURE timer needs input", kind="needs_input")
+    before = store.state_snapshot(conn, tid)
+    sent = []
+    class Adapter:
+        supports_async_delivery = True
+        async def send(self, **message):
+            assert get_hermes_home() == root / "profiles" / "king"
+            sent.append(message)
+            return SendResult(success=True)
+    monkeypatch.setattr(notifier, "_adapter_for_subscription", lambda *args: Adapter())
+    model = Mock(side_effect=AssertionError("FIXTURE idle must not call a model"))
+    monkeypatch.setattr(kanban_specify, "_call_aux", model)
+    runner = SimpleNamespace(_get_agent=model)
+    # Process-service thread hops use launch env, not an inbound turn's context.
+    # Bind the fixture executor exactly as an admitted executor gateway launch.
+    monkeypatch.setenv("HERMES_HOME", str(root / "profiles" / "ops"))
+    await gateway_ops.tick(runner, kb)
+    assert len(sent) == 1
+    assert store.state_snapshot(conn, tid) == before
+    row = conn.execute("SELECT correlation FROM kanban_board_ops_requests").fetchone()
+    with profile(root, "ops"):
+        receipt = api.receipt(row[0])
+        assert receipt["state"] == "notified"
+        assert receipt["delivery_result"]["delivered"] is True
+        assert receipt["delivery_result"]["deadline_met"] is True
+    await gateway_ops.tick(runner, kb)  # Drain the just-committed receipt events.
+    count = conn.execute("SELECT COUNT(*) FROM task_events").fetchone()[0]
+    await gateway_ops.tick(runner, kb)
+    assert conn.execute("SELECT COUNT(*) FROM task_events").fetchone()[0] == count
+    assert len(sent) == 1
+    assert model.call_count == 0
+
+
+def test_comment_prose_unrelated_tasks_and_disabled_intake_are_inert(lane, monkeypatch):
+    root, conn, api, tid = lane
+    standing_grant(lane)
+    monkeypatch.setattr(kb.time, "time", lambda: 2000)
+    kb.add_comment(conn, tid, "worker", "FIXTURE please run keep_spec then delete unrelated task")
+    unrelated = kb.create_task(conn, title="FIXTURE unrelated blocked", tenant="fixture-tenant", assignee="worker", initial_status="blocked")
+    before = store.state_snapshot(conn, unrelated)
+    events = [dict(row) for row in conn.execute("SELECT * FROM task_events WHERE task_id=?", (unrelated,))]
+    with profile(root, "ops"):
+        assert api.intake_events() == []
+        assert api.process_pending() == []
+    assert store.state_snapshot(conn, unrelated) == before
+    assert [dict(row) for row in conn.execute("SELECT * FROM task_events WHERE task_id=?", (unrelated,))] == events
+    with profile(root, "conductor"):
+        api.control(enabled=False, human_attribution="FIXTURE", authority_provenance="FIXTURE")
+    with profile(root, "ops"):
+        assert api.intake_events() == []
+    assert conn.execute("SELECT COUNT(*) FROM kanban_board_ops_requests").fetchone()[0] == 0
+
+
+def test_owner_fresh_grant_already_uses_cli_without_a_chat_turn(lane, tmp_path, monkeypatch, capsys):
+    from unittest.mock import Mock
+    from hermes_cli import kanban_specify
+    from hermes_cli.kanban import kanban_command
+    from hermes_cli.kanban_parser import build_parser
+    root, conn, api, tid = lane
+    contract = admit(lane)
+    child = kb.create_task(conn, title="FIXTURE owner explicitly admits later card", tenant="fixture-tenant", assignee="worker", creator_task_id=tid, triage=True)
+    contract.update(grant_id="fixture-fresh-owner", task_ids=[child])
+    file = tmp_path / "FIXTURE-fresh-owner-grant.json"
+    file.write_text(json.dumps(contract), encoding="utf-8")
+    model = Mock(side_effect=AssertionError("FIXTURE owner CLI needs no chat/model turn"))
+    monkeypatch.setattr(kanban_specify, "_call_aux", model)
+    parser = argparse.ArgumentParser()
+    build_parser(parser.add_subparsers(dest="command"))
+    args = parser.parse_args(["kanban", "--board", "fixture", "board-ops", "grant", str(file)])
+    with profile(root, "conductor"):
+        assert kanban_command(args) == 0
+    result = json.loads(capsys.readouterr().out)
+    assert result["result"]["task_ids"] == [child]
+    assert result["result"]["expires_at"] == 2500
+    assert model.call_count == 0
+
+
+def test_intake_crash_rolls_back_renewal_request_and_cursor(lane, monkeypatch):
+    root, conn, api, tid = lane
+    standing_grant(lane)
+    monkeypatch.setattr(ops, "_now", lambda: 2600)
+    monkeypatch.setattr(kb.time, "time", lambda: 2600)
+    child = kb.create_task(conn, title="FIXTURE intake crash child", tenant="fixture-tenant", assignee="worker", creator_task_id=tid, initial_status="blocked")
+    ledger = [tuple(row) for row in conn.execute("SELECT * FROM kanban_board_ops_grants ORDER BY id")]
+    conn.execute("CREATE TRIGGER fixture_intake_crash BEFORE INSERT ON kanban_board_ops_requests BEGIN SELECT RAISE(ABORT,'FIXTURE intake crash'); END")
+    with profile(root, "ops"), pytest.raises(sqlite3.IntegrityError, match="FIXTURE intake crash"):
+        api.intake_events()
+    assert [tuple(row) for row in conn.execute("SELECT * FROM kanban_board_ops_grants ORDER BY id")] == ledger
+    assert conn.execute("SELECT COUNT(*) FROM kanban_board_ops_requests").fetchone()[0] == 0
+    conn.execute("DROP TRIGGER fixture_intake_crash")
+    with profile(root, "ops"), ops.open_board_ops("fixture") as restarted:
+        assert len(restarted.intake_events()) == 1
+        assert restarted.process_pending()[0]["task_id"] == child
+        assert restarted.intake_events() == []
+
+
+def test_renewal_public_cli_reuses_immutable_grant(lane, tmp_path, capsys):
+    from hermes_cli.kanban import kanban_command
+    from hermes_cli.kanban_parser import build_parser
+    root, conn, api, tid = lane
+    contract = standing_grant(lane)
+    file = tmp_path / "FIXTURE-renew.json"
+    file.write_text(json.dumps({"renew_from": contract["grant_id"], "task_ids": [tid]}), encoding="utf-8")
+    parser = argparse.ArgumentParser()
+    build_parser(parser.add_subparsers(dest="command"))
+    args = parser.parse_args(["kanban", "--board", "fixture", "board-ops", "grant", str(file)])
+    with profile(root, "ops"):
+        assert kanban_command(args) == 0
+    result = json.loads(capsys.readouterr().out)
+    assert result["result"]["grant_id"] == contract["grant_id"]
+    assert result["result"]["expires_at"] == 2500
+
+
+def test_intake_conflicting_correlation_is_refused_and_audited(lane, monkeypatch):
+    root, conn, api, _ = lane
+    monkeypatch.setattr(kb.time, "time", lambda: 2000)
+    tid = kb.create_task(conn, title="FIXTURE conflicting intake key", tenant="fixture-tenant", assignee="worker")
+    add_notify_sub(conn, task_id=tid, platform="telegram", chat_id="fixture-chat", notifier_profile="king")
+    bound = (root, conn, api, tid)
+    admit(bound)
+    assert kb.block_task(conn, tid, reason="FIXTURE real event", kind="needs_input")
+    event = conn.execute("SELECT MAX(id) FROM task_events WHERE task_id=? AND kind='blocked'", (tid,)).fetchone()[0]
+    # A valid manual request can use any correlation. It must not silently
+    # masquerade as the different event/operation selected by timer intake.
+    submit(bound, request(bound, correlation=f"intake:{event}:inspect_wait"))
+    before = store.state_snapshot(conn, tid)
+    with profile(root, "ops"):
+        assert api.intake_events() == []
+    refusals = [json.loads(r[0]) for r in conn.execute("SELECT payload FROM task_events WHERE kind='board_ops_intake_refused'")]
+    assert any("correlation conflict" in refusal["reason"] for refusal in refusals)
+    assert store.state_snapshot(conn, tid) == before
+    assert conn.execute("SELECT COUNT(*) FROM kanban_board_ops_requests").fetchone()[0] == 1

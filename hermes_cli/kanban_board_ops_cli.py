@@ -31,7 +31,7 @@ _HANDLERS = {
     "request": lambda api, args: api.request(_read(args.request_file)),
     "list": lambda api, args: api.list(),
     "receipt": lambda api, args: api.receipt(args.correlation),
-    "tick": lambda api, args: {"receipts": api.process_pending(), "delivery": "gateway handles exception notifications"},
+    "tick": lambda api, args: {"intake": api.intake_events(), "receipts": api.process_pending(), "delivery": "gateway handles exception notifications"},
 }
 
 
