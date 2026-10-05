@@ -2230,15 +2230,24 @@ def _dispatch_lane_task(
                 "kanban: re-routing execution card %s from decompose-only profile %r to node builder %r",
                 task_id, assignee, target_builder,
             )
-            result.auto_rerouted_builder.append((task_id, assignee, target_builder))
-            if not dry_run:
+            if dry_run:
+                result.auto_rerouted_builder.append((task_id, assignee, target_builder))
+            else:
                 reassign_comment = (
                     f"[auto-reroute] Re-routed execution card from decompose-only profile "
                     f"'{assignee}' to node builder '{target_builder}'."
                 )
                 try:
-                    _kb.reassign_task(conn, task_id, target_builder, reclaim_first=True)
-                    _kb.add_comment(conn, task_id, "kanban-dispatcher", reassign_comment)
+                    rerouted = _kb.reassign_task(conn, task_id, target_builder, reclaim_first=True)
+                    if rerouted:
+                        result.auto_rerouted_builder.append((task_id, assignee, target_builder))
+                        _kb.add_comment(conn, task_id, "kanban-dispatcher", reassign_comment)
+                    else:
+                        _kb._log.info(
+                            "kanban: re-route of execution card %s to builder %r skipped; "
+                            "reassign_task returned False",
+                            task_id, target_builder,
+                        )
                 except Exception as exc:
                     _kb._log.error(
                         "kanban: failed to re-route execution card %s to builder %r: %s",

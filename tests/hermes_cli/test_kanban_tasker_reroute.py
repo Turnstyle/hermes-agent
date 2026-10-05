@@ -781,3 +781,140 @@ def test_reassign_reclaim_first_race_complete_keeps_done(kanban_home, monkeypatc
         assert updated.status == "done"
         assert updated.assignee == assignee_before
         assert kb.claim_task(conn, task_id) is None
+
+
+def test_reassign_reclaim_first_aborts_when_rival_claims_after_preread(kanban_home, monkeypatch):
+    """Unclaimed ready at pre-read, then a rival claim before the txn, must abort."""
+    with kbc.connect_closing() as conn:
+        task_id = kb.create_task(conn, title="unclaimed ready reclaim race", assignee="worker-profile")
+        with kb.write_txn(conn):
+            conn.execute("UPDATE tasks SET status = 'ready' WHERE id = ?", (task_id,))
+        assignee_before = kb.get_task(conn, task_id).assignee
+        real_write_txn = kb.write_txn
+        rival: dict = {}
+
+        @contextlib.contextmanager
+        def _claim_then_txn(c, **kwargs):
+            monkeypatch.setattr(kb, "write_txn", real_write_txn)
+            with kbc.connect_closing() as other:
+                claimed = kb.claim_task(other, task_id)
+                assert claimed is not None
+                dispatch_mod._set_worker_pid(other, task_id, os.getpid())
+                rival["lock"] = claimed.claim_lock
+                rival["run_id"] = claimed.current_run_id
+            with real_write_txn(c, **kwargs) as inner:
+                yield inner
+
+        monkeypatch.setattr(kb, "write_txn", _claim_then_txn)
+        ok = kb.reassign_task(conn, task_id, "builder-profile", reclaim_first=True)
+
+        updated = kb.get_task(conn, task_id)
+        assert ok is False
+        assert updated.status == "running"
+        assert updated.claim_lock == rival["lock"]
+        assert int(updated.worker_pid) == os.getpid()
+        assert updated.assignee == assignee_before
+        open_run = conn.execute(
+            "SELECT ended_at FROM task_runs WHERE id = ?",
+            (rival["run_id"],),
+        ).fetchone()
+        assert open_run["ended_at"] is None
+        assert kb.claim_task(conn, task_id) is None
+
+
+def test_reassign_reclaim_first_aborts_when_claim_swaps_before_txn(kanban_home, monkeypatch):
+    """Pre-read claim A replaced by claim B before the txn must leave B intact."""
+    with kbc.connect_closing() as conn:
+        task_id = kb.create_task(conn, title="claim A to B reclaim race", assignee="worker-profile")
+        with kb.write_txn(conn):
+            conn.execute("UPDATE tasks SET status = 'ready' WHERE id = ?", (task_id,))
+        claimed_a = kb.claim_task(conn, task_id)
+        assert claimed_a is not None
+        dispatch_mod._set_worker_pid(conn, task_id, 999_999_999)
+        assignee_before = kb.get_task(conn, task_id).assignee
+        lock_a = claimed_a.claim_lock
+        rival: dict = {}
+        terminate_calls = {"n": 0}
+
+        def _terminate_then_swap(*_args, **_kwargs):
+            terminate_calls["n"] += 1
+            if terminate_calls["n"] > 1:
+                return {
+                    "prev_pid": 999_999_999,
+                    "host_local": True,
+                    "termination_attempted": False,
+                    "terminated": True,
+                    "sigkill": False,
+                }
+            with kbc.connect_closing() as other:
+                assert kb.reclaim_task(other, task_id) is True
+                claimed_b = kb.claim_task(other, task_id, claimer="rival-b")
+                assert claimed_b is not None
+                dispatch_mod._set_worker_pid(other, task_id, os.getpid())
+                rival["lock"] = claimed_b.claim_lock
+                rival["run_id"] = claimed_b.current_run_id
+            return {
+                "prev_pid": 999_999_999,
+                "host_local": True,
+                "termination_attempted": False,
+                "terminated": True,
+                "sigkill": False,
+            }
+
+        monkeypatch.setattr(kb, "_terminate_reclaimed_worker", _terminate_then_swap)
+        ok = kb.reassign_task(conn, task_id, "builder-profile", reclaim_first=True)
+
+        updated = kb.get_task(conn, task_id)
+        assert ok is False
+        assert rival["lock"] != lock_a
+        assert updated.status == "running"
+        assert updated.claim_lock == rival["lock"]
+        assert int(updated.worker_pid) == os.getpid()
+        assert updated.assignee == assignee_before
+        open_run = conn.execute(
+            "SELECT ended_at FROM task_runs WHERE id = ?",
+            (rival["run_id"],),
+        ).fetchone()
+        assert open_run["ended_at"] is None
+        assert kb.claim_task(conn, task_id) is None
+
+
+def test_dispatcher_reroute_skips_comment_when_reassign_fails(kanban_home, monkeypatch):
+    """A failed reclaim_first reassign must not write the auto-reroute audit comment."""
+    with kbc.connect_closing() as conn:
+        task_id = kb.create_task(
+            conn,
+            title="Build Sheldon custom system-prompt override profile shld-cndr-prompt-base",
+            assignee="shld-tasker",
+            tenant="sheldon",
+        )
+        with kb.write_txn(conn):
+            conn.execute("UPDATE tasks SET status = 'ready' WHERE id = ?", (task_id,))
+
+    spawned_tasks = []
+
+    def mock_spawn(task, ws):
+        spawned_tasks.append(task.id)
+        return 12345
+
+    monkeypatch.setattr(kb, "reassign_task", lambda *_a, **_k: False)
+
+    with patch("hermes_cli.profiles.is_decompose_only_profile", side_effect=lambda p: p == "shld-tasker"):
+        with patch("hermes_cli.profiles.resolve_node_builder", return_value="shld-bot-maker"):
+            with patch("hermes_cli.kanban_db_dispatch._profile_exists_fn", return_value=lambda p: True):
+                with kbc.connect_closing() as conn:
+                    res = dispatch_mod._dispatch_once_locked(
+                        conn,
+                        spawn_fn=mock_spawn,
+                        default_assignee="shld-bot-maker",
+                    )
+
+    assert task_id not in spawned_tasks
+    assert (task_id, "shld-tasker", "shld-bot-maker") not in res.auto_rerouted_builder
+
+    with kbc.connect_closing() as conn:
+        updated = kb.get_task(conn, task_id)
+        assert updated.assignee == "shld-tasker"
+        assert updated.status == "ready"
+        comments = kb.list_comments(conn, task_id)
+        assert not any("[auto-reroute]" in c.body for c in comments)
