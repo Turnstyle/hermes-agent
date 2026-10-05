@@ -202,6 +202,9 @@ def _select_model(task, policy=None, *, now=None, resolved_registry=None):
         result["registry_reason"] = registry_reason
     routes = _eligible_routes(resolved, now=timestamp)
     preferred = {"provider": task.provider_override, "model": task.model_override}
+    if not routes or (exact and preferred not in routes and "snapshot" in policy):
+        from hermes_cli.kanban_model_execution import evidence_unavailable
+        result["evidence_unavailable"] = evidence_unavailable(resolved, preferred, now=timestamp)
     if exact:
         if "snapshot" not in policy or preferred in routes:
             return {**result, "selected": preferred, "reason": "exact_model_required", "exact_reason": exact}
@@ -214,12 +217,22 @@ def _select_model(task, policy=None, *, now=None, resolved_registry=None):
 
 def set_policy(conn, task_id, policy):
     from hermes_cli import kanban_db as kb
+    from hermes_cli.kanban_model_authority import selection_runtime_home
+    selection_runtime_home()
     validate_policy(policy)
     with kb.write_txn(conn):
         task = kb.get_task(conn, task_id)
         if task is None:
             raise ValueError("unknown task")
-        decision = select_model(task, policy)
+        exact = (task.model_policy or {}).get("exact_reason")
+        if exact and policy.get("exact_reason") != exact:
+            raise ValueError("existing exact-model lock cannot be removed or changed")
+        from hermes_cli.kanban_model_authority import authorize_policy_update
+        attribution = authorize_policy_update(conn, task, policy)
+        decision = {**select_model(task, policy), **attribution}
+        if exact and decision["selected"] is not None and decision["selected"] != {
+                "provider": task.provider_override, "model": task.model_override}:
+            raise ValueError("existing exact-model lock cannot change route")
         if decision["selected"] is None:
             raise ValueError(decision["reason"])
         conn.execute("UPDATE tasks SET model_policy = ? WHERE id = ?", (json.dumps(policy), task_id))
@@ -241,6 +254,11 @@ def selection_command(args):
         print(json.dumps(result, indent=2))
         return 0 if result["selected"] else 2
     except (OSError, ValueError, TypeError, KeyError) as exc:
+        from hermes_cli.kanban_model_authority import SelectionPolicyRefused
+        if isinstance(exc, SelectionPolicyRefused):
+            print(json.dumps({"selected": None, "reason": str(exc),
+                              "remedy": "Use the admitted owner runtime; authenticated snapshot application requires a protected route-evidence source."}))
+            return 2
         # Do not echo input text or opaque metadata into logs.
         print(json.dumps({"selected": None, "reason": "invalid_or_unavailable_selection_metadata",
                           "error_type": type(exc).__name__}))
@@ -269,6 +287,9 @@ def bind_worker_selection(agent):
     timestamp = datetime.now(timezone.utc).timestamp()
     resolved_registry = resolve_registry_policy(task.model_policy, now=timestamp)
     decision = _select_model(task, now=timestamp, resolved_registry=resolved_registry)
+    from hermes_cli.kanban_model_execution import require_selection
+    if decision.get("evidence_unavailable"):
+        require_selection(decision)
     if decision["selected"] != {"provider": agent.provider, "model": agent.model}:
         raise ValueError("worker route does not match verified card selection")
     agent._routine_model_policy = task.model_policy

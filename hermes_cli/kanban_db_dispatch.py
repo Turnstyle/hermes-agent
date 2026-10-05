@@ -2649,7 +2649,8 @@ def _dispatch_lane_task(
 
         # The host refused the spawn (no restart-safe scope): nothing about the
         # card ran, so it must not spend the card's retry budget (#114720).
-        infrastructure = isinstance(exc, RestartSafeScopeUnavailable)
+        from hermes_cli.kanban_model_execution import SelectionEvidenceUnavailable
+        infrastructure = isinstance(exc, (RestartSafeScopeUnavailable, SelectionEvidenceUnavailable))
         if infrastructure:
             _kb._log.warning("kanban dispatcher: spawn of %s deferred, host cannot place the worker: %s", claimed.id, exc)
         if _record_task_failure(
@@ -3281,8 +3282,8 @@ def _worker_argv(task: Task, profile_arg: str, hermes_home: Optional[str]) -> li
             cmd.extend(["--skills", sk])
     from hermes_cli.kanban_model_selection import select_model
     selection = select_model(task)
-    if selection["selected"] is None:
-        raise ValueError(f"model selection unavailable: {selection['reason']}")
+    from hermes_cli.kanban_model_execution import require_selection
+    require_selection(selection)
     selected = selection["selected"]
     task._model_selection = selection
     if selected["model"]:

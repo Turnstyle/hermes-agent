@@ -227,6 +227,9 @@ _DELEGATED_CHILD_DENIED_BOARD_ACTIONS: frozenset[str] = frozenset({
 
 def _is_delegated_child_cli_mutation(args: argparse.Namespace) -> bool:
     action = getattr(args, "kanban_action", None)
+    if action == "select-model":
+        from agent.delegation_context import is_delegated_child_process_context
+        return bool(getattr(args, "apply", False)) and is_delegated_child_process_context()
     if action == "boards":
         if (getattr(args, "boards_action", None) or "list") not in _DELEGATED_CHILD_DENIED_BOARD_ACTIONS:
             return False

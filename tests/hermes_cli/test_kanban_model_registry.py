@@ -127,6 +127,7 @@ def test_registry_public_command_and_worker_scope_a_b_a(registry_policy, tmp_pat
 
     _, template, script, _ = registry_policy
     for profile in ('worker-a', 'worker-b', 'worker-a'):
+        monkeypatch.delenv('HERMES_KANBAN_TASK', raising=False)
         home = tmp_path / profile
         home.mkdir(exist_ok=True)
         monkeypatch.setenv('HERMES_HOME', str(home))
@@ -143,10 +144,18 @@ def test_registry_public_command_and_worker_scope_a_b_a(registry_policy, tmp_pat
         file = home / 'policy.json'
         file.write_text(json.dumps(policy))
         args = SimpleNamespace(policy_file=str(file), task_id=tid, apply=True)
+        assert selection_command(args) == 2
+        refusal = json.loads(capsys.readouterr().out)
+        assert refusal['reason'] == 'owner_selection_authority_unavailable'
+        args.apply = False
         assert selection_command(args) == 0
         result = json.loads(capsys.readouterr().out)
         assert result['registry_reason'] == 'registry_lookup_ok'
         with kbc.connect_closing() as conn:
+            assert kb.get_task(conn, tid).model_policy is None
+            # Historical snapshot FIXTURE for the worker-boundary test; the
+            # caller cannot install this as authenticated evidence via --apply.
+            conn.execute('UPDATE tasks SET model_policy=? WHERE id=?', (json.dumps(policy), tid))
             task = kb.get_task(conn, tid)
             assert task.model_policy == policy
             assert task.status == 'ready'
