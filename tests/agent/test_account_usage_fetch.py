@@ -339,3 +339,72 @@ def test_fetch_portal_account_returns_value_and_keeps_caller_context(monkeypatch
     finally:
         marker.reset(token)
     assert seen == {"force_fresh": True, "marker": "profile-scope"}
+
+
+# --- Anthropic "utilization": percent versus fraction is decided once per payload, never per value ---------------
+
+def _anthropic_windows(monkeypatch, payload):
+    monkeypatch.setattr("agent.account_usage.resolve_anthropic_token", lambda: "sk-ant-oat01-test")
+    monkeypatch.setattr("agent.account_usage._is_oauth_token", lambda token: True)
+    monkeypatch.setattr("agent.account_usage.httpx.Client", lambda timeout=15.0: _Client(payload))
+    snapshot = fetch_account_usage("anthropic")
+    assert snapshot is not None
+    return {w.label: w for w in snapshot.windows}
+
+
+def _util(five_hour, seven_day=None):
+    payload = {"five_hour": {"utilization": five_hour, "resets_at": "2026-10-05T10:00:00+00:00"}}
+    if seven_day is not None:
+        payload["seven_day"] = {"utilization": seven_day, "resets_at": "2026-10-09T10:00:00+00:00"}
+    return payload
+
+
+def test_anthropic_percent_payload_a_lone_one_is_one_percent_not_a_hundred(monkeypatch):
+    # Seen live: the five-hour window reads 0, then 1, then 2 percent. A raw 1 must stay 1.
+    windows = _anthropic_windows(monkeypatch, _util(1, 44))
+    assert windows["Current session"].used_percent == 1.0
+    assert windows["Current session"].raw_used == 1.0
+    assert windows["Current week"].used_percent == 44.0
+
+
+def test_anthropic_percent_payload_one_beside_zero_is_one_percent(monkeypatch):
+    windows = _anthropic_windows(monkeypatch, _util(1, 0))
+    assert windows["Current session"].used_percent == 1.0
+    assert windows["Current week"].used_percent == 0.0
+
+
+def test_anthropic_single_window_one_is_one_percent(monkeypatch):
+    windows = _anthropic_windows(monkeypatch, _util(1))
+    assert windows["Current session"].used_percent == 1.0
+
+
+def test_anthropic_fraction_payload_is_scaled_as_a_whole(monkeypatch):
+    windows = _anthropic_windows(monkeypatch, _util(0.37, 0.12))
+    assert windows["Current session"].used_percent == pytest.approx(37.0)
+    assert windows["Current week"].used_percent == pytest.approx(12.0)
+    assert windows["Current session"].raw_used == 0.37
+
+
+def test_anthropic_fraction_payload_with_a_full_window_keeps_the_full_window_at_100(monkeypatch):
+    windows = _anthropic_windows(monkeypatch, _util(1.0, 0.44))
+    assert windows["Current session"].used_percent == pytest.approx(100.0)
+    assert windows["Current week"].used_percent == pytest.approx(44.0)
+
+
+def test_anthropic_whole_percent_over_one_is_never_scaled(monkeypatch):
+    windows = _anthropic_windows(monkeypatch, _util(2, 44))
+    assert windows["Current session"].used_percent == 2.0
+    windows = _anthropic_windows(monkeypatch, _util(100, 44))
+    assert windows["Current session"].used_percent == 100.0
+
+
+def test_anthropic_zero_everywhere_stays_zero(monkeypatch):
+    windows = _anthropic_windows(monkeypatch, _util(0, 0))
+    assert windows["Current session"].used_percent == 0.0
+
+
+def test_codex_percent_windows_are_never_fraction_scaled():
+    from agent.account_usage import _usage_windows
+
+    windows = _usage_windows({"a": {"used_percent": 1, "reset_at": None}}, (("a", "Session"),), "used_percent", "reset_at")
+    assert windows[0].used_percent == 1.0 and windows[0].raw_used == 1.0

@@ -728,15 +728,15 @@ has no usage endpoint, or the fetch fails (stdout stays empty).
   "plan": "Plus",
   "fetched_at": "2026-09-19T07:58:55+00:00",
   "windows": [
-    {"label": "Session", "used_percent": 37.0, "resets_at": "2026-09-19T21:00:00+00:00", "detail": null},
-    {"label": "Weekly", "used_percent": 12.5, "resets_at": "2026-09-25T09:00:00+00:00", "detail": null}
+    {"label": "Session", "used_percent": 37.0, "raw_used": 37.0, "resets_at": "2026-09-19T21:00:00+00:00", "detail": null},
+    {"label": "Weekly", "used_percent": 12.5, "raw_used": 12.5, "resets_at": "2026-09-25T09:00:00+00:00", "detail": null}
   ],
   "details": ["You have 1 reset banked - use /usage reset to activate"],
   "unavailable_reason": null
 }
 ```
 
-`used_percent` is `null` when the provider did not report the window; `resets_at` is ISO-8601 UTC or `null`
+`used_percent` is `null` when the provider did not report the window; `raw_used` is the provider's number before any scaling (`null` when the window is not built from one provider number); `resets_at` is ISO-8601 UTC or `null`
 (some windows carry a free-text `detail` instead); `plan` is `null` when unknown.
 
 ## `hermes status`

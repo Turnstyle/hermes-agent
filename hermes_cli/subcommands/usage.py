@@ -25,6 +25,7 @@ def usage_snapshot_document(snapshot) -> dict:
             {
                 "label": window.label,
                 "used_percent": window.used_percent,
+                "raw_used": window.raw_used,
                 "resets_at": window.reset_at.isoformat() if window.reset_at else None,
                 "detail": window.detail,
             }
