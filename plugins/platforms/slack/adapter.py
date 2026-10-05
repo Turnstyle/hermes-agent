@@ -3859,13 +3859,9 @@ class SlackAdapter(BasePlatformAdapter):
                 return None
         return thread_ts
 
-    def _slack_reaction_triggers(self) -> Optional[set]:
-        """Reaction-routing opt-in: None = disabled (default, events acked+dropped);
-        empty set = all emoji, bot's own messages only; non-empty = these emoji on
-        any message. From ``slack.reaction_triggers`` or ``SLACK_REACTION_TRIGGERS``."""
-        raw = self.config.extra.get("reaction_triggers")
-        if raw is None:
-            raw = _get_scoped_secret("SLACK_REACTION_TRIGGERS") or None
+    @staticmethod
+    def _parse_reaction_triggers(raw) -> Optional[set]:
+        """Normalize reaction_triggers config/env forms to Optional[set]."""
         if raw is None:
             return None
         if isinstance(raw, bool):
@@ -3878,6 +3874,24 @@ class SlackAdapter(BasePlatformAdapter):
         if text.lower() in {"true", "1", "yes", "on", "all", "*"}:
             return set()
         return {p.strip().strip(":") for p in re.split(r"[,\s]+", text) if p.strip().strip(":")}
+
+    def _slack_reaction_triggers(self) -> Optional[set]:
+        """Reaction-routing opt-in: None = disabled (default, events acked+dropped);
+        empty set = all emoji, bot's own messages only; non-empty = these emoji on
+        any message. From ``slack.reaction_triggers`` or ``SLACK_REACTION_TRIGGERS``."""
+        raw = self.config.extra.get("reaction_triggers")
+        if raw is None:
+            raw = _get_scoped_secret("SLACK_REACTION_TRIGGERS") or None
+        return self._parse_reaction_triggers(raw)
+
+    def _slack_reaction_triggers_own_config(self) -> Optional[set]:
+        """!help-only view: this adapter's ``config.extra`` only — never scoped-secret/env.
+
+        Under shared-bot routing the active secret scope can belong to a routed profile
+        while this adapter still belongs to the receiving bot. Live reaction events keep
+        using ``_slack_reaction_triggers()``; help status must not leak foreign scope.
+        """
+        return self._parse_reaction_triggers(self.config.extra.get("reaction_triggers"))
 
     def _slack_reaction_trigger_target(self) -> Tuple[str, str]:
         """Optional (channel, thread) reaction handoff target: ``C123`` or ``C123:<ts>``.

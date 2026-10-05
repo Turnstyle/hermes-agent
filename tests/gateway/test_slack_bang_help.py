@@ -148,6 +148,62 @@ async def test_slack_help_configured_fixture_from_adapter():
 
 
 @pytest.mark.asyncio
+async def test_slack_help_ignores_foreign_secret_scope_reaction_triggers():
+    """!help must not treat another profile's SLACK_REACTION_TRIGGERS as this adapter's config.
+
+    Under shared-bot routing the active secret scope can belong to the routed profile while
+    the intake adapter still belongs to the receiving bot. Live reaction routing may still
+    read the scoped secret; !help must not.
+    """
+    from agent import secret_scope
+
+    adapter = _slack_adapter(extra={})
+    runner = _runner(intake_adapter=adapter)
+    event = _event("!help", Platform.SLACK, profile="receiving")
+    previous = secret_scope.is_multiplex_active()
+    secret_scope.set_multiplex_active(True)
+    try:
+        tok_a = secret_scope.set_secret_scope({"SOMETHING_ELSE": "x"}, profile_home="/tmp/scope-a")
+        try:
+            help_a = await runner._handle_help_command(event)
+            live_a = adapter._slack_reaction_triggers()
+        finally:
+            secret_scope.reset_secret_scope(tok_a)
+
+        tok_b = secret_scope.set_secret_scope(
+            {"SLACK_REACTION_TRIGGERS": "thumbsup,task"},
+            profile_home="/tmp/scope-b",
+        )
+        try:
+            help_b = await runner._handle_help_command(event)
+            live_b = adapter._slack_reaction_triggers()
+        finally:
+            secret_scope.reset_secret_scope(tok_b)
+    finally:
+        secret_scope.set_multiplex_active(previous)
+
+    # Live reaction routing still sees the scoped secret (unchanged behaviour).
+    assert live_a is None
+    assert live_b == {"thumbsup", "task"}
+
+    # !help must stay stable across scopes and must not claim reactions are enabled.
+    assert help_a == help_b
+    assert ":thumbsup:" not in help_a and ":task:" not in help_a
+    assert "enabled for" not in help_a
+    assert "unknown" in help_a or "not enabled" in help_a
+    assert "Proposed, not active" in help_a
+
+    # Own adapter config.extra still reports configured triggers.
+    own = _slack_adapter(extra={"reaction_triggers": ["white_check_mark"]})
+    own_runner = _runner(intake_adapter=own)
+    own_help = await own_runner._handle_help_command(
+        _event("!help", Platform.SLACK, profile="own-cfg")
+    )
+    assert ":white_check_mark:" in own_help
+    assert "Proposed, not active" in own_help
+
+
+@pytest.mark.asyncio
 async def test_non_slack_help_unchanged_shared_catalog(monkeypatch):
     """Telegram /help still uses the shared catalog executor path."""
     called = {}

@@ -623,13 +623,21 @@ class GatewaySlashCommandsMixin(
             aliases = None
             intake = getattr(self, "_intake_adapter_for", None)
             adapter = intake(event.source) if callable(intake) else None
-            if adapter is not None and hasattr(adapter, "_slack_reaction_triggers"):
+            # Own-config evidence only: never _slack_reaction_triggers() here — that
+            # falls back to scoped SLACK_REACTION_TRIGGERS and can report another
+            # profile's env under shared-bot routing.
+            if adapter is not None and hasattr(adapter, "_slack_reaction_triggers_own_config"):
                 reaction_known = True
                 try:
-                    reaction_triggers = adapter._slack_reaction_triggers()
+                    reaction_triggers = adapter._slack_reaction_triggers_own_config()
                 except Exception:
                     reaction_known = False
                     reaction_triggers = None
+                aliases = getattr(adapter, "_slash_aliases", None) or {}
+            elif adapter is not None and hasattr(adapter, "_slack_reaction_triggers"):
+                # Adapter present but no own-config helper: do not consult scoped env.
+                reaction_known = False
+                reaction_triggers = None
                 aliases = getattr(adapter, "_slash_aliases", None) or {}
             text = build_slack_help_text(
                 allowed_commands=options.get("allowed_commands"),
