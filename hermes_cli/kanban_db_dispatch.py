@@ -2238,7 +2238,11 @@ def _dispatch_lane_task(
                     f"'{assignee}' to node builder '{target_builder}'."
                 )
                 try:
-                    rerouted = _kb.reassign_task(conn, task_id, target_builder, reclaim_first=True)
+                    rerouted = _kb.reassign_task(
+                        conn, task_id, target_builder, reclaim_first=True,
+                        expect_assignee=assignee, expect_status="ready",
+                        expect_unclaimed=True,
+                    )
                     if rerouted:
                         result.auto_rerouted_builder.append((task_id, assignee, target_builder))
                         _kb.add_comment(conn, task_id, "kanban-dispatcher", reassign_comment)

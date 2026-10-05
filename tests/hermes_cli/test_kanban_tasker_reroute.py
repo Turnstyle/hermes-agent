@@ -918,3 +918,188 @@ def test_dispatcher_reroute_skips_comment_when_reassign_fails(kanban_home, monke
         assert updated.status == "ready"
         comments = kb.list_comments(conn, task_id)
         assert not any("[auto-reroute]" in c.body for c in comments)
+
+
+def _ready_execution_card(conn, *, assignee: str = "shld-tasker", tenant: str = "sheldon") -> str:
+    task_id = kb.create_task(
+        conn,
+        title="Build Sheldon custom system-prompt override profile shld-cndr-prompt-base",
+        assignee=assignee,
+        tenant=tenant,
+    )
+    with kb.write_txn(conn):
+        conn.execute("UPDATE tasks SET status = 'ready' WHERE id = ?", (task_id,))
+    return task_id
+
+
+def _dispatch_execution_reroute(conn, spawn_fn):
+    with patch("hermes_cli.profiles.is_decompose_only_profile", side_effect=lambda p: p == "shld-tasker"):
+        with patch("hermes_cli.profiles.resolve_node_builder", return_value="shld-bot-maker"):
+            with patch("hermes_cli.kanban_db_dispatch._profile_exists_fn", return_value=lambda p: True):
+                return dispatch_mod._dispatch_once_locked(
+                    conn,
+                    spawn_fn=spawn_fn,
+                    default_assignee="shld-bot-maker",
+                )
+
+
+def _fail_if_terminate(monkeypatch):
+    """Record terminate calls; do not raise (dispatcher reroute swallows Exception)."""
+    calls: list[tuple] = []
+
+    def _record(*args, **kwargs):
+        calls.append((args, kwargs))
+        return {
+            "prev_pid": args[0] if args else None,
+            "host_local": True,
+            "termination_attempted": True,
+            "terminated": False,
+            "sigkill": False,
+        }
+
+    monkeypatch.setattr(kb, "_terminate_reclaimed_worker", _record)
+    monkeypatch.setattr(dispatch_mod, "_terminate_reclaimed_worker", _record)
+    return calls
+
+
+def test_dispatcher_reroute_aborts_when_rival_claims_after_selection(kanban_home, monkeypatch):
+    """Stale dispatcher selection must not reclaim a rival who claimed after the ready-row read."""
+    with kbc.connect_closing() as conn:
+        task_id = _ready_execution_card(conn)
+
+    spawned_tasks = []
+    rival: dict = {}
+    real_claimed = kb.is_task_claimed_by_caller
+    terminate_calls = _fail_if_terminate(monkeypatch)
+
+    def _claim_then_check(conn, tid, *args, **kwargs):
+        if tid == task_id and "lock" not in rival:
+            claimed = kb.claim_task(conn, tid)
+            assert claimed is not None
+            dispatch_mod._set_worker_pid(conn, tid, os.getpid())
+            rival["lock"] = claimed.claim_lock
+            rival["run_id"] = claimed.current_run_id
+        return real_claimed(conn, tid, *args, **kwargs)
+
+    monkeypatch.setattr(kb, "is_task_claimed_by_caller", _claim_then_check)
+
+    def mock_spawn(task, ws):
+        spawned_tasks.append(task.id)
+        return 12345
+
+    with kbc.connect_closing() as conn:
+        res = _dispatch_execution_reroute(conn, mock_spawn)
+        updated = kb.get_task(conn, task_id)
+        open_run = conn.execute(
+            "SELECT ended_at, outcome, worker_pid FROM task_runs WHERE id = ?",
+            (rival["run_id"],),
+        ).fetchone()
+        comments = kb.list_comments(conn, task_id)
+        second_claim = kb.claim_task(conn, task_id)
+
+    assert not terminate_calls
+    assert task_id not in spawned_tasks
+    assert (task_id, "shld-tasker", "shld-bot-maker") not in res.auto_rerouted_builder
+    assert updated.assignee == "shld-tasker"
+    assert updated.status == "running"
+    assert updated.claim_lock == rival["lock"]
+    assert int(updated.worker_pid) == os.getpid()
+    assert open_run["ended_at"] is None
+    assert open_run["outcome"] is None
+    assert int(open_run["worker_pid"]) == os.getpid()
+    assert not any("[auto-reroute]" in c.body for c in comments)
+    assert second_claim is None
+
+
+def test_dispatcher_reroute_aborts_when_operator_reassigns_after_selection(kanban_home, monkeypatch):
+    """Stale dispatcher selection must not overwrite an operator reassignment to specialist."""
+    with kbc.connect_closing() as conn:
+        task_id = _ready_execution_card(conn)
+
+    spawned_tasks = []
+    real_claimed = kb.is_task_claimed_by_caller
+    terminate_calls = _fail_if_terminate(monkeypatch)
+
+    injected = {"done": False}
+
+    def _operator_then_check(conn, tid, *args, **kwargs):
+        if tid == task_id and not injected["done"]:
+            injected["done"] = True
+            assert kb.assign_task(conn, tid, "specialist") is True
+        return real_claimed(conn, tid, *args, **kwargs)
+
+    monkeypatch.setattr(kb, "is_task_claimed_by_caller", _operator_then_check)
+
+    def mock_spawn(task, ws):
+        spawned_tasks.append(task.id)
+        return 12345
+
+    with kbc.connect_closing() as conn:
+        res = _dispatch_execution_reroute(conn, mock_spawn)
+        updated = kb.get_task(conn, task_id)
+        comments = kb.list_comments(conn, task_id)
+
+    assert not terminate_calls
+    assert task_id not in spawned_tasks
+    assert (task_id, "shld-tasker", "shld-bot-maker") not in res.auto_rerouted_builder
+    assert updated.assignee == "specialist"
+    assert updated.status == "ready"
+    assert updated.claim_lock is None
+    assert not any("[auto-reroute]" in c.body for c in comments)
+
+
+def test_reassign_task_expect_unclaimed_cas(kanban_home, monkeypatch):
+    """expect_* CAS aborts a live claim and succeeds only on truly unclaimed ready."""
+    terminate_calls = _fail_if_terminate(monkeypatch)
+
+    with kbc.connect_closing() as conn:
+        claimed_id = kb.create_task(conn, title="claimed expect cas", assignee="old")
+        with kb.write_txn(conn):
+            conn.execute("UPDATE tasks SET status = 'ready' WHERE id = ?", (claimed_id,))
+        claimed = kb.claim_task(conn, claimed_id)
+        assert claimed is not None
+        dispatch_mod._set_worker_pid(conn, claimed_id, os.getpid())
+        lock_before = claimed.claim_lock
+        run_before = claimed.current_run_id
+
+        ok = kb.reassign_task(
+            conn,
+            claimed_id,
+            "new",
+            reclaim_first=True,
+            expect_assignee="old",
+            expect_status="ready",
+            expect_unclaimed=True,
+        )
+        updated = kb.get_task(conn, claimed_id)
+        open_run = conn.execute(
+            "SELECT ended_at, outcome FROM task_runs WHERE id = ?",
+            (run_before,),
+        ).fetchone()
+        assert ok is False
+        assert updated.assignee == "old"
+        assert updated.status == "running"
+        assert updated.claim_lock == lock_before
+        assert int(updated.worker_pid) == os.getpid()
+        assert open_run["ended_at"] is None
+        assert open_run["outcome"] is None
+        assert kb.claim_task(conn, claimed_id) is None
+
+        ready_id = kb.create_task(conn, title="unclaimed expect cas", assignee="old")
+        with kb.write_txn(conn):
+            conn.execute("UPDATE tasks SET status = 'ready' WHERE id = ?", (ready_id,))
+        ok_ready = kb.reassign_task(
+            conn,
+            ready_id,
+            "new",
+            reclaim_first=True,
+            expect_assignee="old",
+            expect_status="ready",
+            expect_unclaimed=True,
+        )
+        ready = kb.get_task(conn, ready_id)
+        assert ok_ready is True
+        assert ready.assignee == "new"
+        assert ready.status == "ready"
+        assert ready.claim_lock is None
+        assert not terminate_calls

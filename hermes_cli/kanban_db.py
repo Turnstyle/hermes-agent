@@ -30,6 +30,9 @@ from toolsets import get_toolset_names
 
 _log = logging.getLogger(__name__)
 
+# Distinguishes "caller omitted this kwarg" from an explicit None.
+_UNSET: Any = object()
+
 
 # --- Shared micro-helpers (row access, JSON, env, git) ---
 
@@ -1628,7 +1631,10 @@ def list_tasks(
     return [Task.from_row(r) for r in rows]
 
 
-def _assign_task_in_txn(conn: sqlite3.Connection, task_id: str, profile: Optional[str]) -> bool:
+def _assign_task_in_txn(
+    conn: sqlite3.Connection, task_id: str, profile: Optional[str], *,
+    expect_assignee: Any = _UNSET,
+) -> bool:
     """Body of :func:`assign_task`; caller holds the write txn."""
     profile = _canonical_assignee(profile)
     row = conn.execute(
@@ -1636,12 +1642,31 @@ def _assign_task_in_txn(conn: sqlite3.Connection, task_id: str, profile: Optiona
     ).fetchone()
     if not row:
         return False
+    if expect_assignee is not _UNSET:
+        expected = _canonical_assignee(expect_assignee)
+        if row["assignee"] != expected:
+            return False
     if row["claim_lock"] is not None and row["status"] == "running":
         raise RuntimeError(
             f"cannot reassign {task_id}: currently running (claimed). "
             "Wait for completion or reclaim the stale lock first."
         )
-    if row["assignee"] != profile:
+    if expect_assignee is not _UNSET:
+        expected = _canonical_assignee(expect_assignee)
+        if row["assignee"] != profile:
+            cur = conn.execute(
+                "UPDATE tasks SET assignee = ?, consecutive_failures = 0, "
+                "last_failure_error = NULL WHERE id = ? AND assignee IS ?",
+                (profile, task_id, expected),
+            )
+        else:
+            cur = conn.execute(
+                "UPDATE tasks SET assignee = ? WHERE id = ? AND assignee IS ?",
+                (profile, task_id, expected),
+            )
+        if cur.rowcount != 1:
+            return False
+    elif row["assignee"] != profile:
         # The failure streak is per task/profile; a new profile starts fresh.
         conn.execute(
             "UPDATE tasks SET assignee = ?, consecutive_failures = 0, "
@@ -2100,7 +2125,6 @@ def _current_run_id(conn: sqlite3.Connection, task_id: str) -> Optional[int]:
 
 # Distinguishes "caller named the acting profile" (which may legitimately be
 # None for an unassigned card) from "read the card's current assignee".
-_UNSET: Any = object()
 
 
 def _end_or_synthesize_run(
@@ -2701,6 +2725,22 @@ def _row_has_claim(row: sqlite3.Row) -> bool:
     return row["status"] == "running" or row["claim_lock"] is not None
 
 
+def _row_mismatches_expect(
+    row: Optional[sqlite3.Row], *,
+    expect_assignee: Any, expect_status: Optional[str], expect_unclaimed: bool,
+) -> bool:
+    """True when a CAS expect_* does not match *row* (missing row is a mismatch)."""
+    if row is None:
+        return True
+    if expect_unclaimed and _row_has_claim(row):
+        return True
+    if expect_assignee is not _UNSET and row["assignee"] != _canonical_assignee(expect_assignee):
+        return True
+    if expect_status is not None and row["status"] != expect_status:
+        return True
+    return False
+
+
 def _release_claim_cas(
     conn: sqlite3.Connection, task_id: str, row: sqlite3.Row, *, require_worker_pid: bool,
 ) -> tuple[bool, str]:
@@ -2727,7 +2767,8 @@ def _release_claim_cas(
 
 def reassign_task(
     conn: sqlite3.Connection, task_id: str, profile: Optional[str], *, reclaim_first: bool = False,
-    reason: Optional[str] = None,
+    reason: Optional[str] = None, expect_assignee: Any = _UNSET,
+    expect_status: Optional[str] = None, expect_unclaimed: bool = False,
 ) -> bool:
     """Reassign (None unassigns); a running task is refused unless
     ``reclaim_first`` releases its claim — the "this profile's model is broken" path.
@@ -2735,6 +2776,12 @@ def reassign_task(
     An own-card handback may close a run only after the recorded worker PID is
     positively proven not running. If the PID is still alive, the claim stays
     so the card cannot become ready for a second worker.
+
+    ``expect_assignee`` / ``expect_status`` / ``expect_unclaimed`` are a
+    compare-and-swap: when provided they are checked on the pre-read (before
+    any worker termination) and again on the in-txn re-read. A mismatch
+    returns False and changes nothing. ``expect_unclaimed`` also forbids
+    terminating or releasing any live claim.
     """
     from agent.delegation_context import is_delegated_child_process_context, kanban_path_is_fenced
 
@@ -2750,7 +2797,7 @@ def reassign_task(
         reclaim_pre = None
         reclaim_termination: dict = {}
         _identity_cols = (
-            "status, claim_lock, worker_pid, worker_started_at, current_run_id"
+            "status, claim_lock, worker_pid, worker_started_at, current_run_id, assignee"
         )
         if is_own_card and not reclaim_first:
             row = conn.execute(
@@ -2777,7 +2824,18 @@ def reassign_task(
                 f"SELECT {_identity_cols} FROM tasks WHERE id = ?",
                 (task_id,),
             ).fetchone()
-            if reclaim_pre and _row_has_claim(reclaim_pre):
+            if _row_mismatches_expect(
+                reclaim_pre,
+                expect_assignee=expect_assignee,
+                expect_status=expect_status,
+                expect_unclaimed=expect_unclaimed,
+            ):
+                return False
+            if (
+                not expect_unclaimed
+                and reclaim_pre is not None
+                and _row_has_claim(reclaim_pre)
+            ):
                 reclaim_termination = _terminate_reclaimed_worker(
                     reclaim_pre["worker_pid"], reclaim_pre["claim_lock"],
                     started_at=reclaim_pre["worker_started_at"],
@@ -2792,6 +2850,13 @@ def reassign_task(
                         (task_id,),
                     ).fetchone()
                     if not row:
+                        raise _ReassignAborted()
+                    if _row_mismatches_expect(
+                        row,
+                        expect_assignee=expect_assignee,
+                        expect_status=expect_status,
+                        expect_unclaimed=expect_unclaimed,
+                    ):
                         raise _ReassignAborted()
                     if own_handback:
                         if (
@@ -2828,6 +2893,9 @@ def reassign_task(
                         )
                     elif reclaim_pre is None or _claim_identity(row) != _claim_identity(reclaim_pre):
                         raise _ReassignAborted()
+                    elif expect_unclaimed:
+                        if _row_has_claim(row):
+                            raise _ReassignAborted()
                     elif _row_has_claim(reclaim_pre):
                         if row["status"] not in ("running", "ready", "blocked"):
                             raise _ReassignAborted()
@@ -2849,7 +2917,9 @@ def reassign_task(
                         )
                         released = True
                     try:
-                        if not _assign_task_in_txn(conn, task_id, profile):
+                        if not _assign_task_in_txn(
+                            conn, task_id, profile, expect_assignee=expect_assignee,
+                        ):
                             raise _ReassignAborted()
                     except RuntimeError as exc:
                         raise _ReassignAborted() from exc
