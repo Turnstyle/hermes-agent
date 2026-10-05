@@ -2682,8 +2682,8 @@ def reassign_task(
     """Reassign (None unassigns); a running task is refused unless
     ``reclaim_first`` releases its claim — the "this profile's model is broken" path.
 
-    An own-card handback may close a run only after the recorded worker is
-    proven gone. While that PID is still the spawned worker, the claim stays
+    An own-card handback may close a run only after the recorded worker PID is
+    positively proven not running. If the PID is still alive, the claim stays
     so the card cannot become ready for a second worker.
     """
     from agent.delegation_context import is_delegated_child_process_context, kanban_path_is_fenced
@@ -2705,9 +2705,10 @@ def reassign_task(
                 # ready while the original PID keeps executing. The terminal
                 # reaper will not consider that PID until its grace window
                 # elapses, so a dispatcher can claim the same card for a
-                # second worker. Leave the live claim in place until the
-                # recorded worker is proven gone.
-                if _worker_alive(row["worker_pid"], row["worker_started_at"]):
+                # second worker. Leave the live claim in place unless the
+                # recorded PID is positively proven not running (_pid_alive is False).
+                # A negative fingerprint lookup is not proof the worker is gone.
+                if _pid_alive(row["worker_pid"]):
                     return False
                 termination = {
                     "prev_pid": int(row["worker_pid"]) if row["worker_pid"] else None,

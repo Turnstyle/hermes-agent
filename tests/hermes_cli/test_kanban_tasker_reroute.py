@@ -605,6 +605,50 @@ def test_live_own_card_handback_stays_unclaimable(kanban_home):
         assert int(still.worker_pid) == os.getpid()
 
 
+def test_live_own_card_handback_unreadable_fingerprint_stays_unclaimable(kanban_home, monkeypatch):
+    """An own-card handback where the worker PID is alive but its fingerprint
+    read fails (None/mismatch) must still fail closed and not ready the card.
+    """
+    with kbc.connect_closing() as conn:
+        task_id = kb.create_task(conn, title="unreadable fingerprint card", assignee="worker-profile")
+        with kb.write_txn(conn):
+            conn.execute("UPDATE tasks SET status = 'ready' WHERE id = ?", (task_id,))
+        claimed = kb.claim_task(conn, task_id)
+        assert claimed is not None
+        dispatch_mod._set_worker_pid(conn, task_id, os.getpid())
+        assert kb.is_task_claimed_by_caller(conn, task_id) is True
+        lock_before = claimed.claim_lock
+        run_before = claimed.current_run_id
+
+        # Monkeypatch fingerprint read so it returns None / mismatches,
+        # making _worker_alive False while the PID is still alive.
+        monkeypatch.setattr(dispatch_mod, "_process_fingerprint", lambda pid: None)
+        task_row = conn.execute("SELECT worker_started_at FROM tasks WHERE id = ?", (task_id,)).fetchone()
+        assert dispatch_mod._worker_alive(os.getpid(), task_row["worker_started_at"]) is False
+
+        ok = kb.reassign_task(conn, task_id, "builder-profile")
+
+        assert ok is False
+        updated = kb.get_task(conn, task_id)
+        assert updated.status == "running"
+        assert updated.assignee == "worker-profile"
+        assert updated.claim_lock == lock_before
+        assert int(updated.worker_pid) == os.getpid()
+        assert updated.current_run_id == run_before
+        open_run = conn.execute(
+            "SELECT ended_at, outcome, worker_pid FROM task_runs WHERE id = ?",
+            (run_before,),
+        ).fetchone()
+        assert open_run["ended_at"] is None
+        assert open_run["outcome"] is None
+        assert int(open_run["worker_pid"]) == os.getpid()
+        assert kb.claim_task(conn, task_id) is None
+        still = kb.get_task(conn, task_id)
+        assert still.status == "running"
+        assert still.claim_lock == lock_before
+        assert int(still.worker_pid) == os.getpid()
+
+
 def test_dispatcher_claimed_card_reassign_by_worker(tmp_path):
     """CLI handback of a live ancestor claim does not release it for a second worker.
     """
