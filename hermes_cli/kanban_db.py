@@ -1628,33 +1628,40 @@ def list_tasks(
     return [Task.from_row(r) for r in rows]
 
 
+def _assign_task_in_txn(conn: sqlite3.Connection, task_id: str, profile: Optional[str]) -> bool:
+    """Body of :func:`assign_task`; caller holds the write txn."""
+    profile = _canonical_assignee(profile)
+    row = conn.execute(
+        "SELECT status, claim_lock, assignee FROM tasks WHERE id = ?", (task_id,)
+    ).fetchone()
+    if not row:
+        return False
+    if row["claim_lock"] is not None and row["status"] == "running":
+        raise RuntimeError(
+            f"cannot reassign {task_id}: currently running (claimed). "
+            "Wait for completion or reclaim the stale lock first."
+        )
+    if row["assignee"] != profile:
+        # The failure streak is per task/profile; a new profile starts fresh.
+        conn.execute(
+            "UPDATE tasks SET assignee = ?, consecutive_failures = 0, "
+            "last_failure_error = NULL WHERE id = ?", (profile, task_id),
+        )
+    else:
+        conn.execute("UPDATE tasks SET assignee = ? WHERE id = ?", (profile, task_id))
+    # ``from`` lets the respawn guard tell a real handoff (dev→closer) from
+    # a no-op re-assign or an unassign, which must not lift ``active_pr``.
+    _append_event(
+        conn, task_id, "assigned", {"assignee": profile, "from": row["assignee"]},
+    )
+    return True
+
+
 def assign_task(conn: sqlite3.Connection, task_id: str, profile: Optional[str]) -> bool:
     """Assign/reassign; raises RuntimeError while the task is running under a claim."""
-    profile = _canonical_assignee(profile)
     with write_txn(conn):
-        row = conn.execute(
-            "SELECT status, claim_lock, assignee FROM tasks WHERE id = ?", (task_id,)
-        ).fetchone()
-        if not row:
+        if not _assign_task_in_txn(conn, task_id, profile):
             return False
-        if row["claim_lock"] is not None and row["status"] == "running":
-            raise RuntimeError(
-                f"cannot reassign {task_id}: currently running (claimed). "
-                "Wait for completion or reclaim the stale lock first."
-            )
-        if row["assignee"] != profile:
-            # The failure streak is per task/profile; a new profile starts fresh.
-            conn.execute(
-                "UPDATE tasks SET assignee = ?, consecutive_failures = 0, "
-                "last_failure_error = NULL WHERE id = ?", (profile, task_id),
-            )
-        else:
-            conn.execute("UPDATE tasks SET assignee = ? WHERE id = ?", (profile, task_id))
-        # ``from`` lets the respawn guard tell a real handoff (dev→closer) from
-        # a no-op re-assign or an unassign, which must not lift ``active_pr``.
-        _append_event(
-            conn, task_id, "assigned", {"assignee": profile, "from": row["assignee"]},
-        )
     # Observer fires AFTER commit so subscribers see durable state.
     notify_task_updated(conn, task_id, ("assignee",))
     return True
@@ -2675,6 +2682,33 @@ def reclaim_task(
     return True
 
 
+class _ReassignAborted(Exception):
+    """Sentinel: abort the reassign write txn without committing a partial release."""
+
+
+def _release_claim_cas(
+    conn: sqlite3.Connection, task_id: str, row: sqlite3.Row, *, require_worker_pid: bool,
+) -> tuple[bool, str]:
+    """CAS-clear a claim using the values just read. Caller holds the write txn."""
+    if require_worker_pid:
+        retry_status = "ready"
+        cur = conn.execute(
+            "UPDATE tasks SET status = ?, claim_lock = NULL, "
+            "claim_expires = NULL, worker_pid = NULL, worker_started_at = NULL "
+            "WHERE id = ? AND status = 'running' AND claim_lock IS ? AND worker_pid IS ?",
+            (retry_status, task_id, row["claim_lock"], row["worker_pid"]),
+        )
+    else:
+        retry_status = _retry_status_for_run(conn, task_id)
+        cur = conn.execute(
+            "UPDATE tasks SET status = ?, claim_lock = NULL, "
+            "claim_expires = NULL, worker_pid = NULL, worker_started_at = NULL "
+            "WHERE id = ? AND status = ? AND claim_lock IS ?",
+            (retry_status, task_id, row["status"], row["claim_lock"]),
+        )
+    return cur.rowcount == 1, retry_status
+
+
 def reassign_task(
     conn: sqlite3.Connection, task_id: str, profile: Optional[str], *, reclaim_first: bool = False,
     reason: Optional[str] = None,
@@ -2695,6 +2729,9 @@ def reassign_task(
     is_own_card = is_task_claimed_by_caller(conn, task_id)
     token = _OWN_TASK_REASSIGN_ACTIVE.set(True) if (is_own_card and not _OWN_TASK_REASSIGN_ACTIVE.get()) else None
     try:
+        own_handback = False
+        saw_reclaimable = False
+        reclaim_termination: dict = {}
         if is_own_card and not reclaim_first:
             row = conn.execute(
                 "SELECT status, claim_lock, worker_pid, worker_started_at FROM tasks WHERE id = ?",
@@ -2710,36 +2747,91 @@ def reassign_task(
                 # A negative fingerprint lookup is not proof the worker is gone.
                 if _pid_alive(row["worker_pid"]):
                     return False
-                termination = {
-                    "prev_pid": int(row["worker_pid"]) if row["worker_pid"] else None,
-                    "host_local": True,
-                    "termination_attempted": False,
-                    "terminated": False,
-                    "sigkill": False,
-                    "caller_not_signalled": True,
-                    "own_card_handback": True,
-                }
-                with write_txn(conn):
-                    _record_reclaim(
-                        conn,
-                        task_id,
-                        termination,
-                        error="own_card_handback: caller not signalled",
-                        payload={
-                            "reason": "own_card_handback",
-                            "prev_lock": row["claim_lock"],
-                            "caller_not_signalled": True,
-                        },
-                    )
-                    conn.execute(
-                        "UPDATE tasks SET status = 'ready', claim_lock = NULL, claim_expires = NULL, "
-                        "worker_pid = NULL, worker_started_at = NULL WHERE id = ?",
-                        (task_id,),
-                    )
+                own_handback = True
         if reclaim_first:
-            # Safe to call even if nothing to reclaim.
-            reclaim_task(conn, task_id, reason=reason or "reassign")
-        # assign_task handles its own txn + the still-running guard.
+            # Process termination cannot sit inside the DB txn; DB release+assign
+            # still commit together below. reclaim_task itself is unchanged
+            # for its other callers.
+            pre = conn.execute(
+                "SELECT status, claim_lock, worker_pid, worker_started_at FROM tasks WHERE id = ?",
+                (task_id,),
+            ).fetchone()
+            if pre and not (pre["status"] != "running" and pre["claim_lock"] is None):
+                saw_reclaimable = True
+                reclaim_termination = _terminate_reclaimed_worker(
+                    pre["worker_pid"], pre["claim_lock"], started_at=pre["worker_started_at"],
+                )
+
+        if own_handback or reclaim_first:
+            released = False
+            try:
+                with write_txn(conn):
+                    row = conn.execute(
+                        "SELECT status, claim_lock, worker_pid, worker_started_at FROM tasks WHERE id = ?",
+                        (task_id,),
+                    ).fetchone()
+                    if not row:
+                        raise _ReassignAborted()
+                    if own_handback:
+                        if row["status"] != "running" or row["claim_lock"] is None:
+                            raise _ReassignAborted()
+                        ok_cas, _retry_status = _release_claim_cas(
+                            conn, task_id, row, require_worker_pid=True,
+                        )
+                        if not ok_cas:
+                            raise _ReassignAborted()
+                        termination = {
+                            "prev_pid": int(row["worker_pid"]) if row["worker_pid"] else None,
+                            "host_local": True,
+                            "termination_attempted": False,
+                            "terminated": False,
+                            "sigkill": False,
+                            "caller_not_signalled": True,
+                            "own_card_handback": True,
+                        }
+                        _record_reclaim(
+                            conn,
+                            task_id,
+                            termination,
+                            error="own_card_handback: caller not signalled",
+                            payload={
+                                "reason": "own_card_handback",
+                                "prev_lock": row["claim_lock"],
+                                "caller_not_signalled": True,
+                            },
+                        )
+                    elif saw_reclaimable or row["status"] == "running" or row["claim_lock"] is not None:
+                        if row["status"] not in ("running", "ready", "blocked"):
+                            raise _ReassignAborted()
+                        ok_cas, retry_status = _release_claim_cas(
+                            conn, task_id, row, require_worker_pid=False,
+                        )
+                        if not ok_cas:
+                            raise _ReassignAborted()
+                        prev_lock = row["claim_lock"]
+                        _record_reclaim(
+                            conn, task_id, reclaim_termination,
+                            error=f"manual_reclaim: {reason or 'reassign'}",
+                            payload={
+                                "manual": True,
+                                "reason": reason or "reassign",
+                                "prev_lock": prev_lock,
+                                "retry_status": retry_status,
+                            },
+                        )
+                        released = True
+                    try:
+                        if not _assign_task_in_txn(conn, task_id, profile):
+                            raise _ReassignAborted()
+                    except RuntimeError as exc:
+                        raise _ReassignAborted() from exc
+            except _ReassignAborted:
+                return False
+            notify_task_updated(conn, task_id, ("assignee",))
+            if released:
+                _clear_failure_counter(conn, task_id)
+            return True
+
         try:
             return assign_task(conn, task_id, profile)
         except RuntimeError:

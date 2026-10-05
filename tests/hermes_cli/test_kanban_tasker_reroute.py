@@ -15,6 +15,7 @@ Verifies:
 
 from __future__ import annotations
 
+import contextlib
 import json
 import os
 import subprocess
@@ -690,3 +691,93 @@ def test_dispatcher_claimed_card_reassign_by_worker(tmp_path):
     assert len(open_runs) == 1
     assert kb.claim_task(conn, task_id) is None
     conn.close()
+
+
+def _claim_own_running_card(conn, *, title: str, assignee: str = "worker-profile"):
+    task_id = kb.create_task(conn, title=title, assignee=assignee)
+    with kb.write_txn(conn):
+        conn.execute("UPDATE tasks SET status = 'ready' WHERE id = ?", (task_id,))
+    claimed = kb.claim_task(conn, task_id)
+    assert claimed is not None
+    dispatch_mod._set_worker_pid(conn, task_id, os.getpid())
+    assert kb.is_task_claimed_by_caller(conn, task_id) is True
+    return task_id
+
+
+def test_reassign_race_complete_between_read_and_write_keeps_done(kanban_home, monkeypatch):
+    """Completion between reassign's pre-read and write must not revive a done card."""
+    with kbc.connect_closing() as conn:
+        task_id = _claim_own_running_card(conn, title="race complete during handback")
+        assignee_before = kb.get_task(conn, task_id).assignee
+
+        def _complete_then_report_dead(_pid):
+            with kbc.connect_closing() as other:
+                assert kb.complete_task(other, task_id, result="finished", force=True) is True
+            return False
+
+        monkeypatch.setattr(kb, "_pid_alive", _complete_then_report_dead)
+        ok = kb.reassign_task(conn, task_id, "builder-profile")
+
+        updated = kb.get_task(conn, task_id)
+        assert ok is False
+        assert updated.status == "done"
+        assert updated.assignee == assignee_before
+        assert kb.claim_task(conn, task_id) is None
+
+
+def test_reassign_handback_and_assign_commit_together(kanban_home, monkeypatch):
+    """A successful own-card handback must never commit ready under the old assignee."""
+    with kbc.connect_closing() as conn:
+        old_assignee = "worker-profile"
+        new_assignee = "builder-profile"
+        task_id = _claim_own_running_card(conn, title="atomic handback assign", assignee=old_assignee)
+        committed = []
+        real_write_txn = kb.write_txn
+
+        @contextlib.contextmanager
+        def _spy_write_txn(c, **kwargs):
+            with real_write_txn(c, **kwargs) as inner:
+                yield inner
+            with kbc.connect_closing() as other:
+                row = other.execute(
+                    "SELECT status, assignee FROM tasks WHERE id = ?", (task_id,),
+                ).fetchone()
+                committed.append((row["status"], row["assignee"]))
+
+        monkeypatch.setattr(kb, "write_txn", _spy_write_txn)
+        monkeypatch.setattr(kb, "_pid_alive", lambda _pid: False)
+        ok = kb.reassign_task(conn, task_id, new_assignee)
+
+        assert ok is True
+        assert not any(status == "ready" and assignee == old_assignee for status, assignee in committed)
+        updated = kb.get_task(conn, task_id)
+        assert updated.status == "ready"
+        assert updated.assignee == new_assignee
+        assert updated.claim_lock is None
+
+
+def test_reassign_reclaim_first_race_complete_keeps_done(kanban_home, monkeypatch):
+    """Completion between reclaim_first's terminate and DB write must leave done done."""
+    with kbc.connect_closing() as conn:
+        task_id = _claim_own_running_card(conn, title="race complete during reclaim_first")
+        assignee_before = kb.get_task(conn, task_id).assignee
+
+        def _terminate_then_complete(*_args, **_kwargs):
+            with kbc.connect_closing() as other:
+                assert kb.complete_task(other, task_id, result="finished", force=True) is True
+            return {
+                "prev_pid": os.getpid(),
+                "host_local": True,
+                "termination_attempted": False,
+                "terminated": True,
+                "sigkill": False,
+            }
+
+        monkeypatch.setattr(kb, "_terminate_reclaimed_worker", _terminate_then_complete)
+        ok = kb.reassign_task(conn, task_id, "builder-profile", reclaim_first=True)
+
+        updated = kb.get_task(conn, task_id)
+        assert ok is False
+        assert updated.status == "done"
+        assert updated.assignee == assignee_before
+        assert kb.claim_task(conn, task_id) is None
