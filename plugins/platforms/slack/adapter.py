@@ -386,15 +386,23 @@ def _slack_mention_detection_text(event: dict) -> str:
 
 
 def _rewrite_known_bang_command(text: str) -> str:
-    """Rewrite a known leading ``!cmd`` to the gateway ``/cmd`` form."""
+    """Rewrite a known leading ``!cmd`` to the gateway ``/cmd`` form.
+
+    Normalizes only the command token (drops whitespace between ``!`` and the name so
+    ``! Help`` becomes ``/Help``, which ``MessageEvent.get_command`` can parse). Arguments
+    after the token are preserved byte-for-byte. Unknown bang text is unchanged.
+    """
     if not text.startswith("!"):
         return text
     try:
         from hermes_cli.commands import is_gateway_known_command
-        first_token = text[1:].split(maxsplit=1)[0]
-        cmd_name = first_token.split("@", 1)[0].lower()
-        if cmd_name and "/" not in cmd_name and is_gateway_known_command(cmd_name):
-            return "/" + text[1:]
+        match = re.match(r"!([ \t]*)([^@\s/]+)(@\S+)?(.*)$", text, flags=re.DOTALL)
+        if not match:
+            return text
+        _spaces, cmd, bot_mention, rest = match.groups()
+        cmd_name = cmd.lower()
+        if cmd_name and is_gateway_known_command(cmd_name):
+            return "/" + cmd + (bot_mention or "") + (rest or "")
     except Exception:  # pragma: no cover - defensive
         pass
     return text

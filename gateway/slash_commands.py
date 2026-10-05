@@ -609,7 +609,36 @@ class GatewaySlashCommandsMixin(
         return {}
 
     async def _handle_help_command(self, event: MessageEvent) -> str:
-        """Handle /help command - list available commands."""
+        """Handle /help command - list available commands.
+
+        Slack gets a concise mobile-oriented control subset (bang-friendly) plus
+        receiving-profile reaction evidence; other platforms keep the shared catalog.
+        ``/commands`` / ``!commands`` still return the full catalog on every platform.
+        """
+        if getattr(getattr(event, "source", None), "platform", None) == Platform.SLACK:
+            from gateway.slash_commands_slack_help import build_slack_help_text
+            options = self._catalog_options(event)
+            reaction_triggers = None
+            reaction_known = False
+            aliases = None
+            intake = getattr(self, "_intake_adapter_for", None)
+            adapter = intake(event.source) if callable(intake) else None
+            if adapter is not None and hasattr(adapter, "_slack_reaction_triggers"):
+                reaction_known = True
+                try:
+                    reaction_triggers = adapter._slack_reaction_triggers()
+                except Exception:
+                    reaction_known = False
+                    reaction_triggers = None
+                aliases = getattr(adapter, "_slash_aliases", None) or {}
+            text = build_slack_help_text(
+                allowed_commands=options.get("allowed_commands"),
+                reaction_triggers=reaction_triggers,
+                reaction_status_known=reaction_known,
+                configured_slash_aliases=aliases,
+                receiving_profile=getattr(event.source, "profile", None),
+            )
+            return self._telegramized_command_reply(event, text)
         return self._telegramized_command_reply(
             event, _execute("help", options=self._catalog_options(event)).text)
 
