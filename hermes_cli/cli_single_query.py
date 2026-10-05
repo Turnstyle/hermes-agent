@@ -269,6 +269,9 @@ def _single_query_exit_code(result, *, credentials_rate_limited: bool = False) -
         return 0
     if os.environ.get("HERMES_KANBAN_TASK"):
         reason = result.get("failure_reason")
+        if reason == "model_selection_evidence_unavailable":
+            from hermes_cli.kanban_db import KANBAN_RATE_LIMIT_EXIT_CODE
+            return KANBAN_RATE_LIMIT_EXIT_CODE
         if reason in _TRANSIENT_PROVIDER_REASONS:
             from hermes_cli.kanban_db import KANBAN_RATE_LIMIT_EXIT_CODE
             return KANBAN_RATE_LIMIT_EXIT_CODE
@@ -708,8 +711,11 @@ def _run_single_query_mode(cli, query, image, quiet, oneshot, stream_json: bool 
                             emitter.attach(cli.agent)
                         _run_quiet_single_query(cli, effective_query, emitter=emitter)
 
+                init_result = getattr(cli, "_last_turn_result", None)
+                selection_wait = (init_result if isinstance(init_result, dict)
+                                  and init_result.get("failure_reason") == "model_selection_evidence_unavailable" else None)
                 fail_code = _single_query_exit_code(
-                    None, credentials_rate_limited=getattr(cli, "_credentials_rate_limited", False))
+                    selection_wait, credentials_rate_limited=getattr(cli, "_credentials_rate_limited", False))
                 if emitter is not None:
                     emitter.emit_result({"failed": True, "error": "credentials or agent init failed"},
                                         session_id=cli.session_id or "", exit_code=fail_code)

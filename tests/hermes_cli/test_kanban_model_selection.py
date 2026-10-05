@@ -116,13 +116,16 @@ def test_public_selection_preserves_contract_and_never_releases_work(tmp_path, m
     assert result["checkpoint_ref"] == "fixture-checkpoint-7"
     assert result["model_output"] == result["accepted"] == "unobserved"
     applied = cli(home, "select-model", tid, "--policy-file", str(f), "--apply")
-    assert applied.returncode == (0 if expected else 2), applied.stdout + applied.stderr
+    # Caller-authored proof remains a read-only preview. No admitted owner or
+    # protected route-authentication evidence exists in this fixture CLI home.
+    assert applied.returncode == 2, applied.stdout + applied.stderr
+    assert json.loads(applied.stdout)["reason"] == "owner_selection_authority_unavailable"
     with kbc.connect_closing() as conn:
         after = kb.get_task(conn, tid)
     for field in ("id", "assignee", "body", "status", "claim_lock", "current_run_id",
                   "workspace_path", "completion_contract", "result", "model_override", "provider_override"):
         assert getattr(after, field) == getattr(before, field)
-    assert after.model_policy == (p if expected else None)
+    assert after.model_policy is None
 
 
 def test_dispatch_runtime_scope_and_bounded_fallback(tmp_path, monkeypatch):
@@ -140,7 +143,9 @@ def test_dispatch_runtime_scope_and_bounded_fallback(tmp_path, monkeypatch):
             tid = kb.create_task(conn, title="fixture routine preference", assignee=profile,
                 model_override="routine-old", provider_override="fixture-a")
             p = policy(profile)
-            set_policy(conn, tid, p)
+            # Historical owner export FIXTURE: bypassing the mutation API here
+            # supplies data for routing/fallback tests, not authentication.
+            conn.execute("UPDATE tasks SET model_policy=? WHERE id=?", (json.dumps(p), tid))
             task = kb.get_task(conn, tid)
         monkeypatch.setenv("HERMES_KANBAN_TASK", tid)
         command = dispatch._worker_argv(task, profile, None)

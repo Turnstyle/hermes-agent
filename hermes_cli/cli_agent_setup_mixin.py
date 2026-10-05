@@ -734,6 +734,10 @@ class CLIAgentSetupMixin:
                     # Keep _pending_title so it can be retried after row creation succeeds
             return True
         except Exception as e:
+            from hermes_cli.kanban_model_execution import SelectionEvidenceUnavailable
+            if isinstance(e, SelectionEvidenceUnavailable):
+                self._last_turn_result = {"failed": True,
+                                          "failure_reason": "model_selection_evidence_unavailable"}
             console = ChatConsole()
             from hermes_cli.cli_chat_error_copy import agent_init_failure_message
             console.print(f"[bold red]{_escape(agent_init_failure_message(e))}[/]")
