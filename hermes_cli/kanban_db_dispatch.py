@@ -188,6 +188,31 @@ def _is_known_lifecycle_fence(exc: BaseException) -> bool:
     )
 
 
+def _is_canonical_blocked_sync_pending(conn: sqlite3.Connection, task_id: str) -> bool:
+    """True iff the Fleet mirror row says canonical ``blocked`` with sync ``pending``.
+
+    The local row is ready only because an unblock has not synced yet; the
+    lease fence refusing the claim is the fence working, so the dispatcher
+    counts it as a hold rather than a stall. Plain boards (no adapter table)
+    and any read error return False, preserving the stall signal.
+    """
+    try:
+        row = conn.execute(
+            "SELECT canonical_status, sync_state FROM fleet_kanban_issue_map "
+            "WHERE local_task_id = ?",
+            (task_id,),
+        ).fetchone()
+    except sqlite3.Error:
+        return False
+    if row is None:
+        return False
+    status, sync_state = row[0], row[1]
+    return (
+        isinstance(status, str) and status.strip().lower() == "blocked"
+        and sync_state == "pending"
+    )
+
+
 def _isolate_fenced_row(
     errors_out: Optional[list],
     step: str,
@@ -279,6 +304,12 @@ class DispatchResult:
     foreign_claim_errors: list[tuple[str, str]] = field(default_factory=list)
     """``(task_id, "claim: <fence message>")`` subset of ``claim_errors`` where
     the task is a foreign Fleet mirror."""
+    held_claim_errors: list[tuple[str, str]] = field(default_factory=list)
+    """``(task_id, "claim: <fence message>")`` subset of ``claim_errors`` for a
+    node-owned card whose canonical Fleet status is ``blocked`` with sync still
+    ``pending``: the lease fence refusing it is the fence working as designed
+    (the owner-side unblock has not synced yet), so it is a hold, not a
+    dispatcher failure. Never counted in ``eligible_claim_errors``."""
     eligible_claim_errors: list[tuple[str, str]] = field(default_factory=list)
     """``(task_id, "claim: <fence message>")`` subset of ``claim_errors`` where
     the task is node-owned and dispatch-enabled on this node."""
@@ -383,6 +414,8 @@ def describe_suppression(results: Iterable[Optional["DispatchResult"]]) -> str:
             pressure = res.memory_pressure
         if getattr(res, "capacity_held", None):
             capacity = res.capacity_held
+        if getattr(res, "held_claim_errors", None):
+            counts["lease_held"] = counts.get("lease_held", 0) + len(res.held_claim_errors)
     parts = [f"{k}={v}" for k, v in sorted(counts.items())]
     if pressure:
         parts.append(f"memory_pressure={pressure}")
@@ -435,9 +468,12 @@ def eligible_work_stalled(
     def _has_eligible_claim_errors(r: Any) -> bool:
         if getattr(r, "eligible_claim_errors", None):
             return True
-        if getattr(r, "foreign_claim_errors", None):
-            foreign_ids = {tid for tid, _ in r.foreign_claim_errors}
-            return any(tid not in foreign_ids for tid, _ in (getattr(r, "claim_errors", None) or []))
+        # Foreign mirrors and lease-held cards (canonical blocked, sync
+        # pending) are expected fence refusals, never dispatcher failures.
+        excluded_ids = {tid for tid, _ in (getattr(r, "foreign_claim_errors", None) or [])}
+        excluded_ids |= {tid for tid, _ in (getattr(r, "held_claim_errors", None) or [])}
+        if excluded_ids:
+            return any(tid not in excluded_ids for tid, _ in (getattr(r, "claim_errors", None) or []))
         return bool(getattr(r, "claim_errors", None))
 
     if any(_has_eligible_claim_errors(r) for r in res_list):
@@ -475,6 +511,9 @@ def eligible_work_stalled(
         held_spawnable_count += len(getattr(r, "skipped_per_profile_capped", []) or [])
         held_spawnable_count += len(getattr(r, "profile_busy", []) or [])
         held_spawnable_count += len(getattr(r, "rate_limited", []) or [])
+        # Lease-held cards (canonical blocked, sync pending) are still counted
+        # by _count_spawnable; the fence refusing them is a hold.
+        held_spawnable_count += len(getattr(r, "held_claim_errors", []) or [])
 
     return ready_spawnable > held_spawnable_count
 
@@ -3367,6 +3406,8 @@ def _dispatch_lane_task(
         installed_node = _kb._fleet_adapter_installed_node_id(conn)
         if _kb._is_foreign_fleet_mirror(conn, task_id, installed_node):
             result.foreign_claim_errors.append((task_id, f"claim: {exc}"))
+        elif _is_canonical_blocked_sync_pending(conn, task_id):
+            result.held_claim_errors.append((task_id, f"claim: {exc}"))
         else:
             result.eligible_claim_errors.append((task_id, f"claim: {exc}"))
         return False

@@ -451,6 +451,56 @@ def test_eligible_work_stalled_matrix():
     )
     assert eligible_work_stalled([eligible_claim_spawn_res], 1) is True
 
+    # 20. Lease-held card (canonical blocked, sync pending) + spawn on another
+    # card -> False (hold, not stall); the count must reset.
+    held_spawn_res = DispatchResult(
+        spawned=[("t_ok", "sage", "/tmp")],
+        claim_errors=[("t_held", "claim: verified execution lease required")],
+        held_claim_errors=[("t_held", "claim: verified execution lease required")],
+    )
+    assert eligible_work_stalled([held_spawn_res], 2) is False
+
+    # 21. Lease-held cards only, no spawn, all spawnable accounted for -> False
+    held_only_res = DispatchResult(
+        claim_errors=[("t_h1", "claim: x"), ("t_h2", "claim: x")],
+        held_claim_errors=[("t_h1", "claim: x"), ("t_h2", "claim: x")],
+    )
+    assert eligible_work_stalled([held_only_res], 2) is False
+
+    # 22. Held card does not mask an eligible lease refusal on another card -> True
+    held_plus_eligible = DispatchResult(
+        spawned=[("t_ok", "sage", "/tmp")],
+        claim_errors=[("t_held", "claim: x"), ("t_bad", "claim: x")],
+        held_claim_errors=[("t_held", "claim: x")],
+        eligible_claim_errors=[("t_bad", "claim: x")],
+    )
+    assert eligible_work_stalled([held_plus_eligible], 2) is True
+
+    # 23. Held card plus an extra spawnable card that never started -> True
+    assert eligible_work_stalled([held_only_res], 3) is True
+
+
+def test_claim_fence_on_blocked_sync_pending_card_is_hold(kanban_home_with_profiles):
+    """Real fence refusal on a canonical-blocked, sync-pending mirror lands in held_claim_errors."""
+    import sqlite3
+    from hermes_cli.kanban_db_dispatch import _is_canonical_blocked_sync_pending
+
+    with kbc.connect() as conn:
+        conn.execute(
+            "CREATE TABLE IF NOT EXISTS fleet_kanban_issue_map ("
+            "local_task_id TEXT PRIMARY KEY, canonical_status TEXT, sync_state TEXT)"
+        )
+        conn.executemany(
+            "INSERT INTO fleet_kanban_issue_map VALUES (?,?,?)",
+            [("t_a", "blocked", "pending"), ("t_b", "blocked", "synced"),
+             ("t_c", "ready", "pending"), ("t_d", None, "pending")],
+        )
+        assert _is_canonical_blocked_sync_pending(conn, "t_a") is True
+        assert _is_canonical_blocked_sync_pending(conn, "t_b") is False
+        assert _is_canonical_blocked_sync_pending(conn, "t_c") is False
+        assert _is_canonical_blocked_sync_pending(conn, "t_d") is False
+        assert _is_canonical_blocked_sync_pending(conn, "t_missing") is False
+
 
 @pytest.mark.asyncio
 async def test_gateway_watcher_mixed_held_and_failing_card_pages(kanban_home_with_profiles, monkeypatch, caplog):
