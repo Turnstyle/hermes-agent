@@ -723,14 +723,60 @@ _BOT_CHAT_STDOUT_TAIL = 200
 _BOT_CHAT_BANNER_PREFIXES = ("Resumed session", "session_id:")
 
 
+def _get_bot_chat_progress_limits(timeout: int) -> tuple[int, int]:
+    """``(stall_window, max_seconds)`` for the stall-aware delivery cap.
+
+    A turn still writing to its Bot Chat at the ``bot_chat_delivery_timeout_seconds`` cap is
+    working, not stuck: killing it mid-tool-loop lost the alert's summary and booked a timeout
+    (shld-cndr job f120c06f81e5, 2026-10-06 — last write 6 s before the kill). The cap then moves
+    to last write + ``cron.bot_chat_delivery_stall_seconds`` (default 180), never past
+    ``cron.bot_chat_delivery_max_seconds`` (default 3x the cap, at least the cap) from the start.
+    A stall of 0 disables the extension (the old fixed cap)."""
+    stall, ceiling = 180, timeout * 3
+    try:
+        cfg = (_sched.load_config() or {}).get("cron", {}) or {}
+        stall = int(cfg.get("bot_chat_delivery_stall_seconds", stall))
+        ceiling = int(cfg.get("bot_chat_delivery_max_seconds", ceiling))
+    except Exception:
+        pass
+    return max(0, stall), max(timeout, ceiling)
+
+
+def _bot_chat_last_activity(home) -> Optional[float]:
+    """Epoch of the newest message on the target's canonical Bot Chat compression tip, or None.
+
+    Read-only; resolved on every call because the turn may compress into a new tip."""
+    from pathlib import Path
+    from hermes_state import SessionDB
+
+    db_path = Path(home) / "state.db"
+    if not db_path.is_file():
+        return None
+    db = SessionDB(db_path=db_path, read_only=True)
+    try:
+        row = db.get_session_by_title("Bot Chat")
+        tip = db.get_compression_tip(row["id"]) if row else None
+        if not tip:
+            return None
+        hit = db._read_one("SELECT MAX(timestamp) FROM messages WHERE session_id = ?", (tip,))
+        return float(hit[0]) if hit and hit[0] is not None else None
+    finally:
+        db.close()
+
+
 def _run_bot_chat_turn(argv: list, env: dict, report_path: str, timeout: float) -> subprocess.CompletedProcess:
     """Run one ``hermes chat -Q`` delivery child; the cap bounds the TURN, not the process (#113608).
 
     The booking policy lives with the report contract (``quiet_single_query.run_reported_turn``):
     this lane needs only the outcome, so a child that reported its turn gets the exit grace and is
-    then left to its linger; only a turn that never ends is killed.
+    then left to its linger; only a turn that never ends is killed. The cap is stall-aware: a turn
+    still writing to the target Bot Chat is given until it goes quiet (``_get_bot_chat_progress_limits``).
     """
     from hermes_cli.quiet_single_query import run_reported_turn
+
+    home = env.get("HERMES_HOME")
+    stall_window, max_timeout = _get_bot_chat_progress_limits(int(timeout))
+    progress = (lambda: _bot_chat_last_activity(home)) if home and stall_window else None
 
     # The scheduler may sit in a directory that no longer exists (a kanban worker whose
     # scratch workspace was reaped): a child inheriting that cwd dies at CLI startup
@@ -738,7 +784,8 @@ def _run_bot_chat_turn(argv: list, env: dict, report_path: str, timeout: float) 
     # Decoding is the runner's platform policy: lossy everywhere (#105582), UTF-8 only on
     # win32 (#115894), the locale codec on POSIX (#66566).
     return run_reported_turn(argv, env=env, report_path=report_path, timeout=timeout,
-                             cwd=env.get("HERMES_HOME") or None)
+                             cwd=home or None, progress=progress, stall_window=float(stall_window),
+                             max_timeout=float(max_timeout))
 
 
 def _format_failure_streams(result) -> str:
