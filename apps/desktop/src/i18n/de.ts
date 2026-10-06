@@ -5901,6 +5901,7 @@ export const deOverrides = {
     staleSessionTitle: 'Chat veraltet',
     staleSessionBody:
       'Dieses Fenster war hinter einer anderen Ansicht desselben Chats. Die neuesten Nachrichten wurden geladen. Senden Sie erneut, wenn Sie noch möchten.',
+    queuedBehindBotMessage: 'Hinter einer Bot-Nachricht eingeordnet.',
     providerCredentialRequired:
       'Fügen Sie Anmeldedaten für einen Anbieter hinzu, bevor Sie Ihre erste Nachricht senden.',
     emptySlashCommand: 'leerer Slash-Befehl',

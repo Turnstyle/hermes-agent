@@ -4995,6 +4995,7 @@ export const zh = defineLocale({
     promptFailed: '提示词发送失败',
     staleSessionTitle: '对话已过期',
     staleSessionBody: '此窗口落后于同一对话的其他窗口。已加载最新消息。若仍要发送请再试一次。',
+    queuedBehindBotMessage: '已排在一条机器人消息之后。',
     providerCredentialRequired: '发送第一条消息前请先添加提供方凭据。',
     emptySlashCommand: '空 slash 命令',
     desktopCommands: '桌面端命令',

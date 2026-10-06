@@ -934,6 +934,28 @@ export function useSubmitPrompt(deps: SubmitPromptDeps) {
             { alsoTimeout: true }
           )
 
+          if (submitted.result?.status === 'queued' && submitted.result?.behind === 'bot') {
+            // The bot CLI keeps its turn. This send sits on the gateway queue and
+            // runs when that lease drops; it is not an error and not a live turn yet.
+            releaseBusy()
+            updateSessionState(
+              submitted.sessionId,
+              state => ({
+                ...state,
+                busy: false,
+                awaitingResponse: false,
+                turnStartedAt: null
+              }),
+              targetStoredSessionId
+            )
+
+            if (targetIsCurrentView()) {
+              notify({ kind: 'info', message: copy.queuedBehindBotMessage })
+            }
+
+            return true
+          }
+
           const rowId = submitted.result?.user_row_id
 
           if (typeof rowId === 'number' && Number.isSafeInteger(rowId) && rowId > 0) {

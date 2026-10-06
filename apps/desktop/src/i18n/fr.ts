@@ -5912,6 +5912,7 @@ export const frOverrides = {
     staleSessionTitle: 'Conversation obsolète',
     staleSessionBody:
       'Cette fenêtre était en retard sur une autre vue du même chat. Les derniers messages ont été chargés. Renvoyez si vous le souhaitez encore.',
+    queuedBehindBotMessage: 'Mis en file derrière un message de bot.',
     providerCredentialRequired: "Ajoutez un identifiant de fournisseur avant d'envoyer votre premier message.",
     emptySlashCommand: 'commande slash vide',
     desktopCommands: 'Commandes Desktop',

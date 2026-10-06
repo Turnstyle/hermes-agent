@@ -5410,6 +5410,7 @@ export const en: Translations = {
     staleSessionTitle: 'Chat out of date',
     staleSessionBody:
       'This window was behind another view of the same chat. Latest messages were loaded. Send again if you still want to.',
+    queuedBehindBotMessage: 'Queued behind a bot message.',
     providerCredentialRequired: 'Add a provider credential before sending your first message.',
     emptySlashCommand: 'empty slash command',
     desktopCommands: 'Desktop commands',

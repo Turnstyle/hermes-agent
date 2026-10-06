@@ -2453,6 +2453,8 @@ export interface PromptSubmitParams {
 /** ``status`` is absent only on the typed-stop-phrase reply (``voice_stopped``). After a truncation the survivor row ids let the client rebind its cached ``rowId``s (``None`` map entries: drop the cached id). ``turn_isolation`` marks a compute-host dispatch. */
 export interface PromptSubmitResult {
   status?: PromptSubmitStatus | null
+  /** Set when a human send waited on a bot CLI lease instead of taking the chat. */
+  behind?: 'bot' | null
   voice_stopped?: boolean | null
   user_row_id?: number | null
   survivor_user_row_ids?: (number | null)[] | null
