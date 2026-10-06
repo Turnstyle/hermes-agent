@@ -172,20 +172,135 @@ def test_pause_just_before_popen_closes_log_without_starting_worker(board, monke
     assert logs and logs[0].closed
 
 
-def test_pid_write_failure_keeps_the_running_claim_visible(board, monkeypatch):
-    _, _, conn = board
+@pytest.mark.parametrize("default_spawn,write_fails", [(False, True), (True, True), (False, False), (True, False), (False, "all_writes"), (False, "no_pid")])
+def test_handoff_survives_claim_expiry_and_dispatcher_restart(board, monkeypatch, default_spawn, write_fails):
+    root, _, conn = board
     tid = kb.create_task(conn, title="uncertain handoff", assignee="worker")
+    calls = []
+    proc = SimpleNamespace(pid=99999999, returncode=None)
+    def spawn(*args, **kwargs):
+        calls.append(tid)
+        if write_fails == "all_writes":
+            conn.execute("PRAGMA query_only=ON")
+        if write_fails == "no_pid":
+            return None
+        return proc if default_spawn else proc.pid
+    if default_spawn:
+        monkeypatch.setattr(dispatch.subprocess, "Popen", spawn)
+    spawn_fn = None if default_spawn else spawn
+    original = dispatch._set_worker_pid
     def failed_write(*args):
         raise OSError("injected persistence failure")
-    monkeypatch.setattr(dispatch, "_set_worker_pid", failed_write)
-    result = dispatch.dispatch_once(conn, spawn_fn=lambda *args: 99999999)
-    assert result.spawned == []
+    if write_fails is True:
+        monkeypatch.setattr(dispatch, "_set_worker_pid", failed_write)
+    try:
+        result = dispatch.dispatch_once(conn, spawn_fn=spawn_fn)
+    finally:
+        conn.execute("PRAGMA query_only=OFF")
+    assert bool(result.spawned) == (not write_fails)
     task = kb.get_task(conn, tid)
     assert task.status == "running"
     assert task.claim_lock
-    assert task.worker_pid is None
+    assert task.worker_pid == (None if write_fails else proc.pid)
     assert task.consecutive_failures == 0
     assert conn.execute("SELECT status FROM task_runs WHERE id=?", (task.current_run_id,)).fetchone()[0] == "running"
+    registered = dispatch._live_worker_procs.get(proc.pid)
+    conn.execute("UPDATE tasks SET claim_expires=1 WHERE id=?", (tid,))
+    monkeypatch.setattr(dispatch, "_set_worker_pid", original)
+    monkeypatch.setattr(dispatch, "_live_worker_procs", {})
+    probes = []
+    monkeypatch.setattr(dispatch, "_worker_alive", lambda *a: probes.append(a) or True)
+    monkeypatch.setattr(kb, "_worker_alive", lambda *a: probes.append(a) or True)
+    with kbc.connect(db_path=kb.kanban_db_path()) as reopened:
+        for _ in range(2):
+            later = dispatch.dispatch_once(reopened, spawn_fn=spawn_fn)
+            assert later.spawned == []
+        after = kb.get_task(reopened, tid)
+        assert after.status == "running"
+        assert after.current_run_id == task.current_run_id
+        assert after.claim_lock == task.claim_lock
+        assert after.consecutive_failures == 0
+        assert reopened.execute("SELECT count(*) FROM task_runs WHERE task_id=?", (tid,)).fetchone()[0] == 1
+    assert calls == [tid]
+    if default_spawn:
+        assert registered is proc
+    if write_fails:
+        assert any("Decider" in reason for _, reason in later.reclaim_errors)
+        assert probes == []
+    else:
+        assert probes
+
+
+@pytest.mark.parametrize("entry", ["stale", "orphan", "claim", "review", "direct", "gc_then_reopen"])
+def test_uncertain_handoff_holds_other_recovery_entries(board, monkeypatch, entry):
+    root, _, conn = board
+    tid = kb.create_task(conn, title="uncertain handoff", assignee="worker")
+    calls = []
+    monkeypatch.setattr(dispatch, "_set_worker_pid", lambda *a: (_ for _ in ()).throw(OSError("write refused")))
+    dispatch.dispatch_once(conn, spawn_fn=lambda *a: calls.append(tid) or 99999999)
+    task = kb.get_task(conn, tid)
+    errors = []
+    if entry == "stale":
+        conn.execute("UPDATE tasks SET started_at=1, last_heartbeat_at=NULL WHERE id=?", (tid,))
+        conn.execute("UPDATE task_runs SET started_at=1 WHERE id=?", (task.current_run_id,))
+        assert dispatch.detect_stale_running(conn, stale_timeout_seconds=1, errors_out=errors) == []
+    elif entry == "orphan":
+        conn.execute("UPDATE tasks SET claim_lock=NULL, claim_expires=NULL WHERE id=?", (tid,))
+        assert dispatch.reconcile_orphaned_running(conn, errors_out=errors) == []
+    elif entry == "gc_then_reopen":
+        conn.execute("UPDATE tasks SET status='done' WHERE id=?", (tid,))
+        conn.execute("UPDATE task_events SET created_at=1 WHERE task_id=?", (tid,))
+        kb.gc_events(conn, older_than_seconds=0)
+        conn.execute("UPDATE tasks SET status='ready', claim_lock=NULL WHERE id=?", (tid,))
+        assert kb.claim_task(conn, tid) is None
+    elif entry in {"claim", "review"}:
+        conn.execute("UPDATE tasks SET status=?, claim_lock=NULL WHERE id=?", ("review" if entry == "review" else "ready", tid))
+        claim = kb.claim_review_task if entry == "review" else kb.claim_task
+        assert claim(conn, tid) is None
+    else:
+        monkeypatch.setattr(dispatch.subprocess, "Popen", lambda *a, **k: calls.append(tid) or SimpleNamespace(pid=99999998, returncode=None))
+        with pytest.raises(RuntimeError, match="handoff"):
+            dispatch._default_spawn(task, str(root))
+    if entry in {"stale", "orphan"}:
+        assert any("Decider" in reason for _, reason in errors)
+    assert calls == [tid]
+    assert kb.get_task(conn, tid).current_run_id == task.current_run_id
+
+
+@pytest.mark.parametrize("failure", ["intent_write", "popen", "interrupt"])
+def test_default_spawn_retains_only_uncertain_attempts(board, monkeypatch, failure):
+    root, _, conn = board
+    tid = kb.create_task(conn, title="refused before spawn", assignee="worker")
+    calls = []
+    original = kb._append_event
+    def append(conn, task_id, kind, *args, **kwargs):
+        if failure == "intent_write" and kind == "worker_handoff_pending":
+            raise OSError("intent write refused")
+        return original(conn, task_id, kind, *args, **kwargs)
+    def popen(*args, **kwargs):
+        calls.append(tid)
+        if failure == "interrupt":
+            raise KeyboardInterrupt("interrupted during spawn")
+        raise OSError("spawn refused")
+    monkeypatch.setattr(kb, "_append_event", append)
+    monkeypatch.setattr(dispatch.subprocess, "Popen", popen)
+    if failure == "interrupt":
+        with pytest.raises(KeyboardInterrupt):
+            dispatch.dispatch_once(conn)
+        conn.execute("UPDATE tasks SET claim_expires=1 WHERE id=?", (tid,))
+        later = dispatch.dispatch_once(conn, spawn_fn=lambda *a: calls.append(tid) or 99999999)
+        assert later.spawned == []
+        assert calls == [tid]
+        assert kb.get_task(conn, tid).status == "running"
+        return
+    result = dispatch.dispatch_once(conn)
+    assert result.spawned == []
+    assert result.spawn_errors
+    assert calls == ([] if failure == "intent_write" else [tid])
+    assert kb.get_task(conn, tid).status == "ready"
+    monkeypatch.setattr(kb, "_append_event", original)
+    retry = dispatch.dispatch_once(conn, spawn_fn=lambda *a: 99999999)
+    assert [row[0] for row in retry.spawned] == [tid]
 
 
 @pytest.mark.parametrize("state", ["paused", "unclaimed", "claimed", "fenced", "dispatch"])

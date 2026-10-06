@@ -4,9 +4,14 @@ from __future__ import annotations
 import contextlib
 import logging
 import os
+import sqlite3
 import threading
 import time
 from pathlib import Path
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from hermes_cli.kanban_db import Task
 
 from hermes_constants import get_default_hermes_root, get_hermes_home
 
@@ -20,6 +25,59 @@ class LaunchDeferred(RuntimeError):
 
 class WorkerHandoffUncertain(RuntimeError):
     """A spawned worker must retain its claim when PID persistence fails."""
+
+
+HANDOFF_HOLD_REASON = (
+    "Worker handoff unresolved; automatic recovery blocked because a worker may "
+    "have started without a recorded PID. Decider must verify the worker's identity "
+    "or exit before retry; escalate to Coordinator or Tasker, then King, then Conductor."
+)
+
+
+def handoff_pending(
+    conn: sqlite3.Connection, task_id: str, *, errors_out: list | None = None, stage: str = "launch",
+) -> bool:
+    """An intent survives expiry and lost claim/run metadata until explicitly resolved."""
+    row = conn.execute(
+        "SELECT kind FROM task_events WHERE task_id = ? "
+        "AND kind IN ('worker_handoff_pending', 'worker_handoff_cancelled', 'worker_handoff_resolved') "
+        "ORDER BY id DESC LIMIT 1", (task_id,),
+    ).fetchone()
+    if row is None or row["kind"] != "worker_handoff_pending":
+        return False
+    _log.warning("kanban %s: %s: %s", stage, task_id, HANDOFF_HOLD_REASON)
+    if errors_out is not None:
+        errors_out.append((task_id, f"{stage}: {HANDOFF_HOLD_REASON}"))
+    return True
+
+
+def begin_worker_handoff(conn: sqlite3.Connection, task: Task) -> None:
+    """Commit before spawn, so a failed PID write needs no further successful write."""
+    from hermes_cli import kanban_db as kb
+
+    if conn.in_transaction:
+        raise LaunchDeferred("Worker handoff requires a committed intent outside an existing transaction")
+    with kb.write_txn(conn):
+        if handoff_pending(conn, task.id):
+            raise WorkerHandoffUncertain(HANDOFF_HOLD_REASON)
+        current = kb.get_task(conn, task.id)
+        if (current is None or current.status != "running" or not current.claim_lock
+                or current.current_run_id != task.current_run_id
+                or current.claim_lock != task.claim_lock or current.worker_pid):
+            raise RuntimeError("Worker launch requires an unstarted, current Kanban claim")
+        kb._append_event(conn, task.id, "worker_handoff_pending", {
+            "reason": HANDOFF_HOLD_REASON, "claim_lock": task.claim_lock,
+        }, run_id=task.current_run_id)
+
+
+def cancel_worker_handoff(conn: sqlite3.Connection, task: Task) -> None:
+    """Only for a spawn call known to have failed before returning a process."""
+    from hermes_cli import kanban_db as kb
+
+    with kb.write_txn(conn):
+        kb._append_event(conn, task.id, "worker_handoff_cancelled", {
+            "reason": "Spawn failed before returning a worker",
+        }, run_id=task.current_run_id)
 
 
 def pause_reason() -> str | None:

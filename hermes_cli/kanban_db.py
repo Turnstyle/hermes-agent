@@ -2571,10 +2571,10 @@ def claim_task(
     Returns the claimed ``Task`` on success, ``None`` if the task was
     already claimed (or is not in ``ready`` status).
     """
-    from hermes_cli.kanban_launch import launch_guard
+    from hermes_cli.kanban_launch import handoff_pending, launch_guard
 
     with launch_guard(conn) as admitted:
-        if not admitted:
+        if not admitted or handoff_pending(conn, task_id):
             return None
         now = int(time.time())
         lock = claimer or _claimer_id()
@@ -2614,10 +2614,10 @@ def claim_review_task(
     """Atomic ``review -> running`` (None when lost). Parents are re-checked
     (one may have reopened meanwhile) and a NEW run tracks the reviewer
     separately from the implementer."""
-    from hermes_cli.kanban_launch import launch_guard
+    from hermes_cli.kanban_launch import handoff_pending, launch_guard
 
     with launch_guard(conn) as admitted:
-        if not admitted:
+        if not admitted or handoff_pending(conn, task_id):
             return None
         now = int(time.time())
         lock = claimer or _claimer_id()
@@ -2761,6 +2761,8 @@ def release_stale_claims(
     release UPDATE: a refused row is never killed and is recorded in ``errors_out`` (see
     ``_isolate_fenced_row``). A worker that survives termination rolls the release back and keeps its claim.
     """
+    from hermes_cli.kanban_launch import handoff_pending
+
     now = int(time.time())
     reclaimed = 0
     host_prefix = _host_prefix()
@@ -2785,6 +2787,8 @@ def release_stale_claims(
                 conn, errors_out, "release_stale_claims", row["id"], fleet_node_id,
             ):
                 continue
+        if handoff_pending(conn, row["id"], errors_out=errors_out, stage="release_stale_claims"):
+            continue
         hb = row["last_heartbeat_at"]
         # Backstop: a heartbeat older than the max-stale threshold means no
         # observable progress — reclaim even if the PID is alive (logic loop).
@@ -2798,6 +2802,8 @@ def release_stale_claims(
         termination: dict = {}
         try:
             with write_txn(conn):
+                if handoff_pending(conn, row["id"], errors_out=errors_out, stage="release_stale_claims"):
+                    continue
                 retry_status = _retry_status_for_run(conn, row["id"])
                 cur = conn.execute(
                     "UPDATE tasks SET status = ?, claim_lock = NULL, "
@@ -4797,7 +4803,7 @@ def _retention_seconds(older_than_seconds: int) -> int:
 
 
 def gc_events(conn: sqlite3.Connection, *, older_than_seconds: int = 30 * 24 * 3600) -> int:
-    """Prune old done/archived events, retaining decomposition identity until task deletion.
+    """Prune old done/archived events, retaining decomposition and handoff safety state.
 
     ``older_than_seconds=0`` means everything older than now; the CLI maps
     ``--event-retention-days 0`` to "disabled" before calling this.
@@ -4805,7 +4811,9 @@ def gc_events(conn: sqlite3.Connection, *, older_than_seconds: int = 30 * 24 * 3
     cutoff = int(time.time()) - _retention_seconds(older_than_seconds)
     with write_txn(conn):
         cur = conn.execute(
-            "DELETE FROM task_events WHERE created_at < ? AND kind != 'decomposed' AND task_id IN "
+            "DELETE FROM task_events WHERE created_at < ? "
+            "AND kind NOT IN ('decomposed', 'worker_handoff_pending', "
+            "'worker_handoff_cancelled', 'worker_handoff_resolved') AND task_id IN "
             "(SELECT id FROM tasks WHERE status IN ('done', 'archived'))", (cutoff,),
         )
     return int(cur.rowcount or 0)
