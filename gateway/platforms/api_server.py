@@ -1532,20 +1532,6 @@ class APIServerAdapter(OpenAICompatRoutesMixin, BasePlatformAdapter):
         listener only; named profiles fail closed rather than inherit the owner's key."""
         profile = _api_request_profile.get()
         expected_key = self._expected_api_key()
-        auth_header = request.headers.get("Authorization", "")
-        token = auth_header[7:].strip() if auth_header.startswith("Bearer ") else ""
-        # Fleet fail-open (Turner 2026-09-28): the host (default-listener) key is the
-        # node owner's key and is accepted for every multiplexed profile, loudly logged,
-        # so a missing or unshared profile-scoped key never silently blocks a peer DM.
-        host_key = self._api_key or ""
-        if (token and host_key and profile and profile != "default"
-                and hmac.compare_digest(token.encode(), host_key.encode())):
-            logger.warning(
-                "API server accepted HOST key for profile %r (fleet fail-open; "
-                "profile-scoped key %s); %s", profile,
-                "differs" if expected_key else "missing",
-                self._request_audit_log_suffix(request))
-            return None
         if not expected_key:
             if not (profile and profile != "default"):
                 return None
@@ -1554,7 +1540,9 @@ class APIServerAdapter(OpenAICompatRoutesMixin, BasePlatformAdapter):
                 "API_SERVER_KEY is configured; %s",
                 profile, self._request_audit_log_suffix(request))
             return self._auth_failed_response()
-        if token:
+        auth_header = request.headers.get("Authorization", "")
+        if auth_header.startswith("Bearer "):
+            token = auth_header[7:].strip()
             # Compare as bytes: compare_digest raises TypeError on non-ASCII str, and the
             # token is raw client input — a stray byte must 401, not 500.
             if hmac.compare_digest(token.encode(), expected_key.encode()):
