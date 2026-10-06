@@ -236,7 +236,7 @@ _TICK_ACTIVITY_FIELDS = (
     "spawned", "reclaimed", "promoted", "reconciled_orphans", "reaped_terminal_workers", "crashed", "stale",
     "timed_out", "auto_blocked", "rate_limited", "profile_busy", "auto_assigned_default",
     "respawn_guarded", "skipped_per_profile_capped", "skipped_unassigned",
-    "skipped_nonspawnable", "owner_unavailable",
+    "skipped_placeholder", "skipped_nonspawnable", "owner_unavailable",
 )
 
 
@@ -4950,7 +4950,11 @@ _PLUGIN_COMPAT_LAZY = {
     'connect_closing': ('hermes_cli.kanban_db_connect', 'connect_closing'),
     'count_notify_subs': ('hermes_cli.kanban_db_notify', 'count_notify_subs'),
     'count_running_tasks': ('hermes_cli.kanban_db_dispatch', 'count_running_tasks'),
+    'count_placeholder_ready': ('hermes_cli.kanban_db_dispatch', 'count_placeholder_ready'),
+    'count_placeholder_review': ('hermes_cli.kanban_db_dispatch', 'count_placeholder_review'),
     'count_running_tasks_other_boards': ('hermes_cli.kanban_db_dispatch', 'count_running_tasks_other_boards'),
+    'count_spawnable_ready': ('hermes_cli.kanban_db_dispatch', 'count_spawnable_ready'),
+    'count_spawnable_review': ('hermes_cli.kanban_db_dispatch', 'count_spawnable_review'),
     'derive_default_max_in_progress': ('hermes_cli.kanban_db_dispatch', 'derive_default_max_in_progress'),
     'detect_crashed_workers': ('hermes_cli.kanban_db_dispatch', 'detect_crashed_workers'),
     'detect_stale_running': ('hermes_cli.kanban_db_dispatch', 'detect_stale_running'),
@@ -4959,6 +4963,8 @@ _PLUGIN_COMPAT_LAZY = {
     'has_spawnable_ready': ('hermes_cli.kanban_db_dispatch', 'has_spawnable_ready'),
     'has_spawnable_review': ('hermes_cli.kanban_db_dispatch', 'has_spawnable_review'),
     'heartbeat_worker': ('hermes_cli.kanban_db_dispatch', 'heartbeat_worker'),
+    'is_dispatch_enabled_profile': ('hermes_cli.kanban_db_dispatch', 'is_dispatch_enabled_profile'),
+    'is_placeholder_profile': ('hermes_cli.kanban_db_dispatch', 'is_placeholder_profile'),
     'list_notify_subs': ('hermes_cli.kanban_db_notify', 'list_notify_subs'),
     'purge_stale_done_notify_subs': ('hermes_cli.kanban_db_notify', 'purge_stale_done_notify_subs'),
     'reap_worker_zombies': ('hermes_cli.kanban_db_dispatch', 'reap_worker_zombies'),

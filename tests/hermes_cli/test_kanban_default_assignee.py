@@ -14,9 +14,12 @@ import pytest
 
 @pytest.fixture()
 def isolated_kanban_home(tmp_path, monkeypatch):
-    """Fresh HERMES_HOME with a clean kanban DB."""
+    """Fresh HERMES_HOME with a clean kanban DB and opted-in default dispatch."""
     test_home = tmp_path / ".hermes"
     test_home.mkdir()
+    (test_home / "config.yaml").write_text(
+        "kanban:\n  dispatch_profiles:\n    - default\n", encoding="utf-8",
+    )
     monkeypatch.setenv("HERMES_HOME", str(test_home))
     monkeypatch.setattr(Path, "home", lambda: tmp_path)
     from hermes_cli import kanban_db

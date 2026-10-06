@@ -102,6 +102,9 @@ def _cmd_dispatch(args: argparse.Namespace) -> int:
                 {"task_id": tid, "assignee": who, "workspace": ws} for (tid, who, ws) in res.spawned
             ],
             "skipped_unassigned": res.skipped_unassigned,
+            "skipped_placeholder": [
+                {"task_id": tid, "assignee": who} for (tid, who) in getattr(res, "skipped_placeholder", [])
+            ],
             "skipped_nonspawnable": res.skipped_nonspawnable,
             "owner_unavailable": [
                 {"task_id": tid, "assignee": who} for (tid, who) in res.owner_unavailable
@@ -161,11 +164,18 @@ def _cmd_dispatch(args: argparse.Namespace) -> int:
     for tid, who, current in res.skipped_per_profile_capped:
         print(f"Deferred ({who} at per-profile cap, {current} running): {tid}")
     missing = {tid for tid, _who in res.owner_unavailable}
-    quiet = [tid for tid in res.skipped_nonspawnable if tid not in missing]
+    placeholder_ids = {tid for tid, _who in getattr(res, "skipped_placeholder", [])}
+    quiet = [tid for tid in res.skipped_nonspawnable if tid not in missing and tid not in placeholder_ids]
     if quiet:
         print(
             f"Skipped (non-spawnable assignee — terminal lane, OK): "
             f"{', '.join(quiet)}"
+        )
+    if getattr(res, "skipped_placeholder", None):
+        holders = [f"{tid} ({who})" for tid, who in res.skipped_placeholder]
+        print(
+            f"Skipped (placeholder assignee — non-paging, waiting for assignment): "
+            f"{', '.join(holders)}"
         )
     for tid, who in res.owner_unavailable:
         print(f"Owner unavailable (no profile {who!r} on this home; reassign to recover): {tid}")
@@ -257,7 +267,7 @@ def _cmd_daemon(args: argparse.Namespace) -> int:
             return False
 
     def _on_tick(res):
-        ready_pending = bool(res.skipped_unassigned) or _ready_queue_nonempty()
+        ready_pending = _ready_queue_nonempty()
         if ready_pending and not res.spawned:
             health_state["bad_ticks"] += 1
         else:

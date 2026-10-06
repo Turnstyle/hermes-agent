@@ -294,6 +294,19 @@ class DispatchResult:
     Code terminal like ``orion-cc``), not a Hermes profile. Expected steady-state
     on multi-lane setups, NOT operator-actionable; tracked apart so health
     telemetry can tell "stuck" from "correctly idle"."""
+<<<<<<< HEAD
+=======
+    owner_unavailable: list[tuple[str, str]] = field(default_factory=list)
+    """``(task_id, assignee)`` subset of ``skipped_nonspawnable`` whose assignee
+    is neither a configured ``kanban.control_plane_lanes`` entry nor a profile
+    outside this home's ``kanban.dispatch_profiles`` — i.e. the owning profile
+    is missing/unavailable here. Operator-actionable; the card carries one
+    deduped ``owner_unavailable`` event until it is claimed or reassigned."""
+    skipped_placeholder: list[tuple[str, str]] = field(default_factory=list)
+    """``(task_id, assignee)`` subset of ready tasks assigned to a placeholder profile
+    (default, alpha, beta, orch) without dispatch enabled. Reported as a separate non-paging
+    count so health telemetry does not alarm."""
+>>>>>>> 8d32dac32d (fix(kanban): exclude placeholder profiles from spawnable health telemetry and report separately)
     skipped_per_profile_capped: list[tuple[str, str, int]] = field(default_factory=list)
     """``(task_id, assignee, current_running_count)`` deferred because the
     assignee is at ``kanban.max_in_progress_per_profile``. Picked up on a later
@@ -2503,30 +2516,78 @@ def _is_handoff_event(kind: str, payload: Optional[str]) -> bool:
     return bool(to) and "from" in data and data["from"] != to
 
 
+PLACEHOLDER_PROFILES: frozenset[str] = frozenset({"default", "alpha", "beta", "orch"})
+
+
+def is_placeholder_profile(name: Optional[str]) -> bool:
+    """True when *name* is a synthetic/placeholder pool profile
+    (``default``, ``alpha``, ``beta``, ``orch``) with no gateway worker."""
+    if not name or not isinstance(name, str):
+        return False
+    try:
+        from hermes_cli.profiles import normalize_profile_name
+        canon = normalize_profile_name(name)
+    except Exception:
+        canon = name.strip().lower()
+    return canon in PLACEHOLDER_PROFILES
+
+
+def is_dispatch_enabled_profile(name: str) -> bool:
+    """True when *name* is a real profile with dispatch enabled on this node.
+
+    1. When ``kanban.dispatch_profiles`` is set (#110995), the profile must be
+       in the allowlist AND exist.
+    2. When ``kanban.dispatch_profiles`` is unset:
+       - Placeholder profiles (``default``, ``alpha``, ``beta``, ``orch``) have
+         no gateway worker and are NOT dispatch-enabled.
+       - Other profiles must actually exist as live named profiles on this node.
+    """
+    try:
+        from hermes_cli.profiles import normalize_profile_name, profile_exists
+    except Exception:
+        return True
+    try:
+        canon = normalize_profile_name(name)
+    except ValueError:
+        return False
+    allowlist = _dispatch_profile_allowlist(normalize_profile_name)
+    if allowlist is not None:
+        return canon in allowlist and bool(profile_exists(name))
+    if canon in PLACEHOLDER_PROFILES:
+        return False
+    return bool(profile_exists(name))
+
+
 def _profile_exists_fn() -> Optional[Callable[[str], bool]]:
-    """``hermes_cli.profiles.profile_exists``, or ``None`` when it cannot be
-    imported (local import avoids a cycle; callers fall back to trusting the
-    assignee).
+    """Predicate testing whether an assignee is a real profile with dispatch
+    enabled on this node.
+
+    Returns ``None`` when ``hermes_cli.profiles`` cannot be imported (callers
+    fall back to trusting the assignee).
 
     When ``kanban.dispatch_profiles`` is set (#110995) the returned predicate
     additionally requires the assignee to be listed, fail-closed — so a card
     assigned to ``default`` is only claimable by homes that opted into it.
-    Foreign assignees land in the existing ``skipped_nonspawnable`` bucket.
+    When unset, placeholder profiles (``default``, ``alpha``, ``beta``, ``orch``)
+    with no gateway worker are excluded. Foreign and placeholder assignees land in
+    ``skipped_nonspawnable`` / ``skipped_placeholder``.
     """
     try:
         from hermes_cli.profiles import normalize_profile_name, profile_exists
     except Exception:
         return None
     allowlist = _dispatch_profile_allowlist(normalize_profile_name)
-    if allowlist is None:
-        return profile_exists
 
     def _gated(name: str) -> bool:
         try:
             canon = normalize_profile_name(name)
         except ValueError:
             return False
-        return canon in allowlist and bool(profile_exists(name))
+        if allowlist is not None:
+            return canon in allowlist and bool(profile_exists(name))
+        if canon in PLACEHOLDER_PROFILES:
+            return False
+        return bool(profile_exists(name))
 
     return _gated
 
@@ -2612,9 +2673,10 @@ def _control_plane_lane_patterns() -> tuple[str, ...]:
 
 def _nonspawnable_kind(assignee: str) -> str:
     """Why ``assignee`` failed the spawn gate: ``"lane"`` (configured
-    control-plane lane), ``"foreign"`` (this home's ``dispatch_profiles`` does
-    not list it — another home owns it) or ``"missing"`` (this home should run
-    it but has no such profile)."""
+    control-plane lane), ``"placeholder"`` (placeholder pool profile with no
+    worker), ``"foreign"`` (this home's ``dispatch_profiles`` does not list it —
+    another home owns it) or ``"missing"`` (this home should run it but has no
+    such profile)."""
     import fnmatch
 
     name = (assignee or "").strip().lower()
@@ -2631,7 +2693,16 @@ def _nonspawnable_kind(assignee: str) -> str:
         except ValueError:
             return "missing"
         if canon not in allowlist:
+            if canon in PLACEHOLDER_PROFILES:
+                return "placeholder"
             return "foreign"
+    else:
+        try:
+            canon = normalize_profile_name(assignee)
+        except ValueError:
+            return "missing"
+        if canon in PLACEHOLDER_PROFILES:
+            return "placeholder"
     return "missing"
 
 
@@ -2749,30 +2820,94 @@ def _owned_assignee_rows(conn: sqlite3.Connection, status: str) -> list:
     ).fetchall()
 
 
-def _has_spawnable(conn: sqlite3.Connection, status: str) -> bool:
-    rows = _owned_assignee_rows(conn, status)
+def _owned_task_rows(conn: sqlite3.Connection, status: str) -> list:
+    """All unclaimed ``status`` rows (id, assignee) THIS Fleet node owns."""
+    base = ("SELECT t.id, t.assignee FROM tasks t "
+            "WHERE t.status = ? AND t.assignee IS NOT NULL AND t.claim_lock IS NULL")
+    node_id = _kb._fleet_adapter_installed_node_id(conn)
+    has_map = node_id is not None and conn.execute(
+        "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'fleet_kanban_issue_map'"
+    ).fetchone() is not None
+    if not has_map:
+        return conn.execute(base, (status,)).fetchall()
+    owner = "(CASE WHEN m.current_node IS NULL THEN m.source_node ELSE m.current_node END)"
+    return conn.execute(
+        base + " AND NOT EXISTS ("
+        "SELECT 1 FROM fleet_kanban_issue_map m WHERE m.local_task_id = t.id AND ("
+        f"{owner} IS NULL OR typeof({owner}) <> 'text'"
+        # str.strip() parity: space, \t, \n, \v, \f, \r.
+        f" OR trim({owner}, char(32, 9, 10, 11, 12, 13)) = ''"
+        f" OR {owner} <> ?))",
+        (status, node_id),
+    ).fetchall()
+
+
+def _count_spawnable(conn: sqlite3.Connection, status: str) -> int:
+    """Count unclaimed ``status`` tasks owned by this node whose assignee is
+    a real profile with dispatch enabled on this node."""
+    rows = _owned_task_rows(conn, status)
     if not rows:
-        return False
+        return 0
     profile_exists = _profile_exists_fn()
     if profile_exists is None:
-        # Can't introspect — assume spawnable, preserve legacy behavior.
-        return True
-    return any(profile_exists(row["assignee"]) for row in rows)
+        return len(rows)
+    return sum(1 for row in rows if profile_exists(row["assignee"]))
+
+
+def _count_placeholder(conn: sqlite3.Connection, status: str) -> int:
+    """Count unclaimed ``status`` tasks owned by this node whose assignee is
+    a placeholder profile without dispatch enabled on this node."""
+    rows = _owned_task_rows(conn, status)
+    if not rows:
+        return 0
+    profile_exists = _profile_exists_fn()
+    return sum(
+        1 for row in rows
+        if is_placeholder_profile(row["assignee"]) and (profile_exists is None or not profile_exists(row["assignee"]))
+    )
+
+
+def count_spawnable_ready(conn: sqlite3.Connection) -> int:
+    """Count ready tasks owned by this node whose assignee is a real profile
+    with dispatch enabled on this node."""
+    return _count_spawnable(conn, "ready")
+
+
+def count_placeholder_ready(conn: sqlite3.Connection) -> int:
+    """Count ready tasks owned by this node whose assignee is a placeholder profile
+    (default, alpha, beta, orch) without dispatch enabled."""
+    return _count_placeholder(conn, "ready")
+
+
+def count_spawnable_review(conn: sqlite3.Connection) -> int:
+    """:func:`count_spawnable_ready` for the review column."""
+    return _count_spawnable(conn, "review")
+
+
+def count_placeholder_review(conn: sqlite3.Connection) -> int:
+    """:func:`count_placeholder_ready` for the review column."""
+    return _count_placeholder(conn, "review")
+
+
+def _has_spawnable(conn: sqlite3.Connection, status: str) -> bool:
+    return _count_spawnable(conn, status) > 0
 
 
 def has_spawnable_ready(conn: sqlite3.Connection) -> bool:
-    """True iff a ready+assigned+unclaimed task maps to a real Hermes profile.
+    """True iff a ready+assigned+unclaimed task maps to a real Hermes profile
+    with dispatch enabled on this node.
 
     Lets health telemetry tell "stuck" (``0 spawned`` with spawnable work) from
-    "correctly idle" (only control-plane lanes waiting on ``claim_task``). Falls
-    back to "any assigned" when ``profile_exists`` is unimportable.
+    "correctly idle" (only control-plane lanes waiting on ``claim_task`` or
+    placeholder-assigned cards). Falls back to "any assigned" when
+    ``profile_exists`` is unimportable.
     """
-    return _has_spawnable(conn, "ready")
+    return _count_spawnable(conn, "ready") > 0
 
 
 def has_spawnable_review(conn: sqlite3.Connection) -> bool:
     """:func:`has_spawnable_ready` for the review column."""
-    return _has_spawnable(conn, "review")
+    return _count_spawnable(conn, "review") > 0
 
 
 def review_dispatch_enabled() -> bool:
@@ -3057,7 +3192,18 @@ def _dispatch_lane_task(
     profile_exists = _profile_exists_fn()
     if profile_exists is not None and not profile_exists(assignee):
         result.skipped_nonspawnable.append(task_id)
+<<<<<<< HEAD
         if _nonspawnable_kind(assignee) == "missing":
+=======
+        # A control-plane lane (or a profile another home owns) is expected to
+        # sit here quietly. A missing/unavailable local profile is not: leave
+        # ONE durable, deduped event so the card reads as an exception an
+        # operator can recover (explicit ``reassign_task``), not as idle.
+        kind = _nonspawnable_kind(assignee)
+        if kind == "placeholder":
+            result.skipped_placeholder.append((task_id, assignee))
+        elif kind == "missing":
+>>>>>>> 8d32dac32d (fix(kanban): exclude placeholder profiles from spawnable health telemetry and report separately)
             result.owner_unavailable.append((task_id, assignee))
             if not dry_run:
                 _record_owner_unavailable(conn, task_id, assignee)

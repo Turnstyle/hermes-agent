@@ -238,6 +238,32 @@ class _KanbanDispatcher:
                         conn.close()
         return False
 
+    def ready_counts(self) -> dict[str, int]:
+        """Aggregate spawnable and placeholder ready counts across all boards.
+
+        Returns ``{"spawnable": ..., "placeholder": ...}``. Placeholder counts
+        are non-paging diagnostics.
+        """
+        kbd = _kbd()
+        _review_probe = kbd.review_dispatch_enabled()
+        counts = {"spawnable": 0, "placeholder": 0}
+        for slug in self._board_slugs():
+            conn = None
+            try:
+                conn = _kbc().connect(board=slug)
+                counts["spawnable"] += kbd.count_spawnable_ready(conn)
+                counts["placeholder"] += kbd.count_placeholder_ready(conn)
+                if _review_probe:
+                    counts["spawnable"] += kbd.count_spawnable_review(conn)
+                    counts["placeholder"] += kbd.count_placeholder_review(conn)
+            except Exception:
+                continue
+            finally:
+                if conn is not None:
+                    with contextlib.suppress(Exception):
+                        conn.close()
+        return counts
+
     def auto_decompose_tick(self, auto_decompose_per_tick: int) -> int:
         """Auto-decompose up to N triage tasks across all boards into ready workgraphs.
 

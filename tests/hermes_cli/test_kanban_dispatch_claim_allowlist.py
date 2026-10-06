@@ -68,14 +68,45 @@ def test_default_assignee_outside_allowlist_leaves_card_unassigned(
     assert "assigned" not in kinds
 
 
-def test_unset_allowlist_keeps_default_claimable(kanban_home, all_assignees_spawnable):
-    """No key = upstream behaviour: any existing profile, ``default`` included."""
+def test_unset_allowlist_treats_default_as_placeholder(kanban_home, all_assignees_spawnable):
+    """No key = default is a placeholder profile with no gateway worker.
+    It is excluded from spawnable telemetry and routed to skipped_placeholder."""
     with kbc.connect() as conn:
-        tid = kb.create_task(conn, title="local card", assignee="default")
+        tid = kb.create_task(conn, title="placeholder card", assignee="default")
+        assert kbd.has_spawnable_ready(conn) is False
+        assert kbd.count_spawnable_ready(conn) == 0
+        assert kbd.count_placeholder_ready(conn) == 1
+        res = kbd.dispatch_once(conn, dry_run=True)
+    assert res.spawned == []
+    assert res.skipped_placeholder == [(tid, "default")]
+    assert res.owner_unavailable == []
+
+
+def test_unset_allowlist_keeps_real_profile_claimable(kanban_home, all_assignees_spawnable):
+    """No key = real named profiles with dispatch enabled remain claimable and spawnable."""
+    with kbc.connect() as conn:
+        tid = kb.create_task(conn, title="local card", assignee="sage")
         assert kbd.has_spawnable_ready(conn) is True
+        assert kbd.count_spawnable_ready(conn) == 1
+        assert kbd.count_placeholder_ready(conn) == 0
         res = kbd.dispatch_once(conn, dry_run=True)
     assert [t for t, _a, _w in res.spawned] == [tid]
-    assert res.skipped_nonspawnable == []
+    assert res.skipped_placeholder == []
+
+
+def test_explicit_allowlist_with_default_claims_default(kanban_home, all_assignees_spawnable):
+    """Explicit opt-in: when dispatch_profiles lists 'default', it becomes claimable."""
+    (kanban_home / "config.yaml").write_text(
+        "kanban:\n  dispatch_profiles:\n    - default\n", encoding="utf-8",
+    )
+    with kbc.connect() as conn:
+        tid = kb.create_task(conn, title="explicit default card", assignee="default")
+        assert kbd.has_spawnable_ready(conn) is True
+        assert kbd.count_spawnable_ready(conn) == 1
+        assert kbd.count_placeholder_ready(conn) == 0
+        res = kbd.dispatch_once(conn, dry_run=True)
+    assert [t for t, _a, _w in res.spawned] == [tid]
+    assert res.skipped_placeholder == []
 
 
 @pytest.mark.parametrize("value", ["", None], ids=["empty_string", "bare_key"])
