@@ -32,6 +32,9 @@ class AccountUsageWindow:
     used_percent: Optional[float] = None
     reset_at: Optional[datetime] = None
     detail: Optional[str] = None
+    # The provider's number exactly as returned, before any scaling. ``None`` when the window was not built
+    # from a provider number (credits, quota math, free-text windows).
+    raw_used: Optional[float] = None
 
 
 @dataclass(frozen=True)
@@ -389,18 +392,31 @@ def _get_json(url: str, headers: dict[str, str], *, timeout: float) -> dict:
 def _usage_windows(
     source: dict, mapping: tuple[tuple[str, str], ...], used_key: str, reset_key: str, *, fraction: bool = False
 ) -> list[AccountUsageWindow]:
-    """Build windows from ``source[key][used_key]``; ``fraction`` scales values <= 1 to percent."""
-    windows: list[AccountUsageWindow] = []
+    """Build windows from ``source[key][used_key]``.
+
+    ``fraction`` allows a payload to be read as 0..1 fractions. That is decided once for the whole payload, never
+    per value: a payload is fractional only when every reported value is <= 1 and at least one is strictly between
+    0 and 1 (for example 0.37). A lone 1 (meaning 1 percent) beside 0 or beside larger values is a percent, so it is
+    never shown as 100. Every window keeps the provider's number in ``raw_used``.
+    """
+    found: list[tuple[str, dict, float]] = []
     for key, label in mapping:
         window = source.get(key) or {}
         used = window.get(used_key)
         if used is None:
             continue
-        used = float(used)
-        if fraction and used <= 1:
-            used *= 100
-        windows.append(AccountUsageWindow(label=label, used_percent=used, reset_at=_parse_dt(window.get(reset_key))))
-    return windows
+        found.append((label, window, float(used)))
+    scale = 1.0
+    if fraction and found:
+        values = [used for _label, _window, used in found]
+        if all(v <= 1 for v in values) and any(0 < v < 1 for v in values):
+            scale = 100.0
+    return [
+        AccountUsageWindow(
+            label=label, used_percent=used * scale, reset_at=_parse_dt(window.get(reset_key)), raw_used=used,
+        )
+        for label, window, used in found
+    ]
 
 
 # Published Codex quota windows by ``limit_window_seconds``: 5h session and 7-day weekly.
