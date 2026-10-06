@@ -93,8 +93,10 @@ def message_agent_tool_schema() -> dict:
                 "delivery process, not a delivery receipt). It does NOT return their reply and you must "
                 "not wait or poll for one — send it, finish your turn, and that process's "
                 "completion notification wakes you with the outcome: their reply, or the "
-                "delivery failure — unless the ack returns reply_delivery=\"poll\", in which case "
-                "follow its process(action=\"wait\") instruction before ending the turn. COMPOSE the message yourself: write what YOU want to say to "
+                "delivery failure — unless the ack returns reply_delivery=\"transcript\", "
+                "in which case the reply is saved in this session's transcript and you should finish "
+                "your turn, or reply_delivery=\"poll\", in which case follow its "
+                "process(action=\"wait\") instruction before ending the turn. COMPOSE the message yourself: write what YOU want to say to "
                 "that agent (lead with the point; include the concrete ask or result). "
                 "Never paste the user's words verbatim — paraphrase the actionable "
                 "substance, and keep private 1:1 chat content private. Message one "
@@ -1117,9 +1119,8 @@ def _start_delivery(argv: list[str], content: str, label: str, *, stdin_file: bo
             elif notification.get("process_id"):
                 result["process_id"] = notification["process_id"]
                 result["reply_delivery"] = notification.get("reply_delivery", "notification")
-                if result["reply_delivery"] == "poll":
-                    # Same runner, same stdout-borne reply (#101142): a non-push sender must get
-                    # the poll instruction here too, not 'finish your turn'.
+                if result["reply_delivery"] in ("poll", "transcript"):
+                    # The same runner carries the reply for both non-push return paths.
                     result["detail"] = f"Durably queued for the live Bot Chat owner. Do NOT resend. {notification['detail']}"
             return json.dumps(result)
     try:
@@ -1162,19 +1163,27 @@ def _spawn_delivery(command: str, label: str, *, dm_file: Optional[str] = None, 
         # From here the background runner owns the file (removed after the consumer finishes).
         transferred = True
         if parsed.get("notify_on_complete") is False:
-            # terminal_tool refused the completion promise: this session (api_server, one-shot
-            # runner) cannot receive an async completion, so the recipient's reply would never
-            # be injected here (#101142). Say so and name the return path the surface supports.
-            detail = (f"Message handed to a background delivery process for {label}, but THIS session "
-                      "cannot receive completion notifications, so the reply will NOT arrive on its own. "
-                      f"Before ending your turn, retrieve the outcome with process(action='wait', "
-                      f"session_id='{proc_id}') — its output is the reply (relay it, attributed to that "
-                      "agent) or the delivery failure (report it; the message was NOT delivered); "
-                      "if wait returns status=timeout, call wait again until the process exits.")
-            if _persist_reply_when_done(proc_id, agent):
+            # This flag also covers one-shot and Kanban workers. Only API turns with an armed
+            # transcript row can finish without waiting for the runner's outcome.
+            persisted = _persist_reply_when_done(proc_id, agent)
+            if getattr(agent, "platform", None) == "api_server" and persisted:
+                reply_delivery = "transcript"
+                detail = (f"Message handed to a background delivery process for {label}. This session "
+                          "cannot receive completion notifications. Do NOT wait or poll: the reply "
+                          "is saved into this transcript as a delivery row when it arrives. Finish your turn.")
+            else:
+                reply_delivery = "poll"
+                detail = (f"Message handed to a background delivery process for {label}, but THIS session "
+                          "cannot receive completion notifications, so the reply will NOT arrive on its own. "
+                          f"Before ending your turn, retrieve the outcome with process(action='wait', "
+                          f"session_id='{proc_id}') — its output is the reply (relay it, attributed to that "
+                          "agent) or the delivery failure (report it; the message was NOT delivered); "
+                          "if wait returns status=timeout, call wait again until the process exits.")
+            if persisted and reply_delivery == "poll":
                 detail += (" Its outcome is also saved into this session's transcript as a delivery row "
                            "when the process exits, so it survives even if the turn ends first.")
         else:
+            reply_delivery = "notification"
             detail = (f"Message queued for {label}: this acknowledges the hand-off to a "
                       "background delivery process, not a delivery receipt — do NOT wait or poll. "
                       "Finish your turn now; that process's completion notification carries the "
@@ -1184,7 +1193,7 @@ def _spawn_delivery(command: str, label: str, *, dm_file: Optional[str] = None, 
             "status": "queued",
             "delivery_id": delivery_id or (_dm_delivery_id(dm_file) if dm_file else ""),
             "to": label,
-            "reply_delivery": "poll" if parsed.get("notify_on_complete") is False else "notification",
+            "reply_delivery": reply_delivery,
             "detail": detail,
             "process_id": proc_id,
             "queued_at": int(time.time()),

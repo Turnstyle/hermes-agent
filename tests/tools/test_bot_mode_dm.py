@@ -1148,19 +1148,19 @@ def test_live_owner_ack_carries_the_poll_return_path_when_session_cannot_receive
     assert "proc_np2" in result["detail"]
 
 
-def test_poll_reply_is_persisted_as_a_delivery_row_when_the_runner_exits(tmp_path, monkeypatch):
-    """#101142 durable leg: with no completion notification the sender may end its turn without
-    polling; the tracked runner's exit must still land the reply in the sender's session transcript
-    as a DELIVERY row (``display_kind=process_complete``), so nothing is silently lost."""
+def test_api_server_reply_uses_transcript_without_wait_and_persists_on_exit(tmp_path, monkeypatch):
+    """An API turn finishes without waiting; the runner's reply lands in its transcript."""
     import tools.terminal_tool as terminal_tool_module
     from tools.process_registry import process_registry
 
     reply = json.dumps({"status": "settled", "reply": "PAYLOAD_SENTINEL_42", "delivery_id": "d1"})
     procs = []
+    runners = []
 
     def fake_terminal_tool(command, **kw):
-        popen = subprocess.Popen([sys.executable, "-c", f"import json; print({reply!r})"],
+        popen = subprocess.Popen([sys.executable, "-c", f"import time; time.sleep(1); print({reply!r})"],
                                  stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+        runners.append(popen)
         procs.append(process_registry.adopt_local(popen, command=command, cwd=str(tmp_path), notify_on_complete=False))
         return json.dumps({"output": "Background process started", "session_id": procs[-1].id,
                            "notify_on_complete": False})
@@ -1168,11 +1168,15 @@ def test_poll_reply_is_persisted_as_a_delivery_row_when_the_runner_exits(tmp_pat
     monkeypatch.setattr(terminal_tool_module, "terminal_tool", fake_terminal_tool)
     home = _managed_home(tmp_path, teammates=("researcher",))
     agent = _FakeAgent(home, title="Bot Chat")
+    agent.platform = "api_server"
     rows = []
     agent._session_db.append_message = lambda session_id, role, **kw: rows.append((session_id, role, kw)) or 1
 
     result = json.loads(bot_mode_dm.message_agent_tool(target="researcher", message="hi", agent=agent))
-    assert result["reply_delivery"] == "poll"
+    assert runners[0].poll() is None, "message_agent waited for the delivery runner"
+    assert result["reply_delivery"] == "transcript"
+    assert "Do NOT wait or poll" in result["detail"]
+    assert "process(action='wait'" not in result["detail"]
     deadline = time.monotonic() + 10
     while not rows and time.monotonic() < deadline:
         time.sleep(0.05)
@@ -1182,6 +1186,75 @@ def test_poll_reply_is_persisted_as_a_delivery_row_when_the_runner_exits(tmp_pat
     assert kw["display_kind"] == "process_complete"
     assert "PAYLOAD_SENTINEL_42" in kw["content"]
     assert procs[0].id in kw["content"]
+
+
+@pytest.mark.parametrize("platform", ["cli", "desktop"])
+def test_push_sender_ack_is_byte_identical(tmp_path, monkeypatch, platform):
+    _capture_spawn(monkeypatch)
+    agent = _FakeAgent(_managed_home(tmp_path))
+    agent.platform = platform
+
+    raw = bot_mode_dm.message_agent_tool("researcher", "hello", agent=agent)
+    actual = json.loads(raw)
+    assert raw == json.dumps({
+        "status": "queued", "delivery_id": actual["delivery_id"],
+        "to": "@researcher", "reply_delivery": "notification",
+        "detail": ("Message queued for @researcher: this acknowledges the hand-off to a "
+                   "background delivery process, not a delivery receipt — do NOT wait or poll. "
+                   "Finish your turn now; that process's completion notification carries the "
+                   "delivery outcome — the reply (relay it then, attributed to that agent) or "
+                   "the delivery failure (report it; the message was NOT delivered)."),
+        "process_id": "proc_test1234", "queued_at": actual["queued_at"],
+    })
+
+
+def test_api_server_live_owner_ack_uses_transcript_without_wait(tmp_path, monkeypatch):
+    from tools import bot_live_delivery as live
+    import tools.terminal_tool as terminal_tool_module
+
+    home = _managed_home(tmp_path)
+    target = home / "profiles" / "researcher"
+    owner = dict(profile_home=str(target), session_id="bot", lease_id="lease", live_session_id="live")
+    monkeypatch.setattr(live, "find_canonical_live_owner", lambda h: owner if Path(h) == target else None)
+    monkeypatch.setattr(bot_mode_dm, "_dm_dir", lambda: tmp_path)
+    monkeypatch.setattr(terminal_tool_module, "terminal_tool", lambda command, **kw: json.dumps({
+        "output": "Background process started", "session_id": "proc_api_live", "notify_on_complete": False}))
+    monkeypatch.setattr(bot_mode_dm, "_persist_reply_when_done", lambda proc_id, agent: True)
+    agent = _FakeAgent(home)
+    agent.platform = "api_server"
+
+    result = json.loads(bot_mode_dm.message_agent_tool("researcher", "hello", agent=agent))
+    assert result["status"] == "queued"
+    assert result["reply_delivery"] == "transcript"
+    assert "Do NOT wait or poll" in result["detail"]
+    assert "process(action='wait'" not in result["detail"]
+
+
+def test_api_server_without_transcript_keeps_poll_instruction(tmp_path, monkeypatch):
+    import tools.terminal_tool as terminal_tool_module
+
+    monkeypatch.setattr(terminal_tool_module, "terminal_tool", lambda command, **kw: json.dumps({
+        "output": "Background process started", "session_id": "proc_api_no_db", "notify_on_complete": False}))
+    agent = _FakeAgent(_managed_home(tmp_path))
+    agent.platform = "api_server"
+
+    result = json.loads(bot_mode_dm.message_agent_tool("researcher", "hello", agent=agent))
+    assert result["reply_delivery"] == "poll"
+    assert "process(action='wait'" in result["detail"]
+
+
+def test_non_api_sender_without_notification_keeps_poll_even_with_transcript(tmp_path, monkeypatch):
+    import tools.terminal_tool as terminal_tool_module
+
+    monkeypatch.setattr(terminal_tool_module, "terminal_tool", lambda command, **kw: json.dumps({
+        "output": "Background process started", "session_id": "proc_oneshot", "notify_on_complete": False}))
+    monkeypatch.setattr(bot_mode_dm, "_persist_reply_when_done", lambda proc_id, agent: True)
+    agent = _FakeAgent(_managed_home(tmp_path))
+    agent.platform = "cli"
+
+    result = json.loads(bot_mode_dm.message_agent_tool("researcher", "hello", agent=agent))
+    assert result["reply_delivery"] == "poll"
+    assert "process(action='wait'" in result["detail"]
 
 
 def test_local_turn_survives_undecodable_transport_output(tmp_path, capsys):
