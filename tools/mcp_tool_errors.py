@@ -136,8 +136,9 @@ _KEEPALIVE_PHASES = ("ping", "list_tools")
 
 
 def _plain_int(value: Any) -> Optional[int]:
-    """*value* when it is a real ``int`` (not ``bool``), else None — only numbers may reach a log line."""
-    return value if isinstance(value, int) and not isinstance(value, bool) else None
+    """*value* when it is exactly an ``int`` (no ``bool``, no subclass with custom formatting), else None —
+    only plain numbers may reach a log line."""
+    return value if type(value) is int else None
 
 
 def _keepalive_failure_fields(root: BaseException, phase: Optional[str], rejection: Optional[dict] = None) -> str:

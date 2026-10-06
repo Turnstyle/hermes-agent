@@ -168,6 +168,31 @@ async def test_ping_timeout_then_list_tools_failure_reports_the_ping_failure():
 
 
 @pytest.mark.asyncio
+async def test_list_tools_retry_status_is_not_attributed_to_the_ping_failure():
+    task = _task_with(AsyncMock(side_effect=asyncio.TimeoutError()))
+
+    async def failing_list_tools():
+        task._http_rejection.update(_poisoned_rejection(503))  # seen during the retry
+        raise asyncio.TimeoutError()
+
+    task.session.list_tools = failing_list_tools
+
+    with pytest.raises(asyncio.TimeoutError) as info:
+        await task._keepalive_probe()
+
+    assert _keepalive_failure_fields(info.value, task._keepalive_phase, task._http_rejection) == " [phase=ping]"
+
+
+def test_int_subclass_with_custom_text_is_not_logged():
+    class _Evil(int):
+        def __format__(self, spec):
+            return SECRET_BODY
+
+    exc = SimpleNamespace(error=SimpleNamespace(code=_Evil(-32603)), response=SimpleNamespace(status_code=_Evil(401)))
+    assert _keepalive_failure_fields(exc, "ping") == " [phase=ping]"
+
+
+@pytest.mark.asyncio
 async def test_each_probe_clears_the_previous_http_status():
     task = _task_with(AsyncMock())
     task._http_rejection.update(_poisoned_rejection(401))  # left over from an older request

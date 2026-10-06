@@ -198,6 +198,7 @@ class MCPServerHealthMixin:
                         await list_tools()
                     except Exception:
                         self._keepalive_phase = "ping"  # the original (ping) failure is what propagates
+                        self._http_rejection.clear()  # a status seen during the list_tools retry is not the ping's
                         raise exc from None
                     self._ping_unsupported = True  # latch so later keepalives skip the 30s wait
                     logger.info("MCP server '%s': ping timed out but list_tools succeeded — server "
