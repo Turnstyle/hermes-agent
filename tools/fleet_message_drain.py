@@ -399,6 +399,21 @@ class NoGoogleCredentials(RuntimeError):
     """Neither host ADC nor the operator's gcloud login can authorize Firestore."""
 
 
+def _named_key_credentials() -> Any:
+    """Sign in with the named service-account key file. Never Application Default Credentials.
+
+    Owner's firm rule (5 Oct 2026, card A-L3): no ADC. The path comes from FLEET_MESSAGES_SA_KEY_FILE,
+    else this machine's conductive-admin key. A missing or unreadable file raises, and _live_token
+    then uses gcloud's active named account (see `gcloud auth list`). Try next: ask the Keys Router
+    to place the key, or set FLEET_MESSAGES_SA_KEY_FILE to a key with datastore access.
+    """
+    import pwd
+    from google.oauth2 import service_account
+    path = os.environ.get("FLEET_MESSAGES_SA_KEY_FILE") or os.path.join(
+        pwd.getpwuid(os.getuid()).pw_dir, ".config", "conductive-admin", "conductive-admin-sa-key.json")
+    return service_account.Credentials.from_service_account_file(path, scopes=[_SCOPE])
+
+
 def _live_token() -> str:
     """Prefer host ADC; use a short, cached gcloud token when ADC is unavailable."""
     global _live_credentials, _gcloud_token_cached, _gcloud_token_until, _credentials_warned
@@ -407,7 +422,7 @@ def _live_token() -> str:
             import google.auth
             import google.auth.transport.requests
             if _live_credentials is None:
-                _live_credentials, _project = google.auth.default(scopes=[_SCOPE])
+                _live_credentials = _named_key_credentials()  # A-L3: named key file, never ADC
             if not _live_credentials.valid:
                 _live_credentials.refresh(google.auth.transport.requests.Request())
             if not _live_credentials.token:

@@ -39,7 +39,7 @@ def test_live_token_falls_back_to_gcloud_and_warns_once_per_failed_streak(monkey
         def refresh(self, request):
             raise RefreshError("expired")
 
-    monkeypatch.setattr(google.auth, "default", lambda **kwargs: (Expired(), None))
+    monkeypatch.setattr(fmd, "_named_key_credentials", lambda: Expired())
     monkeypatch.setattr(fmd, "_live_credentials", None)
     monkeypatch.setattr(fmd, "_gcloud_token_cached", "")
     monkeypatch.setattr(fmd, "_gcloud_token_until", 0)
