@@ -289,13 +289,10 @@ class DispatchResult:
     tick before spawning, so telemetry/CLI/dashboard can show the dispatcher
     acting on the fallback rule rather than explicit assignments."""
     skipped_nonspawnable: list[str] = field(default_factory=list)
-    owner_unavailable: list[tuple[str, str]] = field(default_factory=list)
     """Ready task ids whose assignee names a control-plane lane (e.g. a Claude
     Code terminal like ``orion-cc``), not a Hermes profile. Expected steady-state
     on multi-lane setups, NOT operator-actionable; tracked apart so health
     telemetry can tell "stuck" from "correctly idle"."""
-<<<<<<< HEAD
-=======
     owner_unavailable: list[tuple[str, str]] = field(default_factory=list)
     """``(task_id, assignee)`` subset of ``skipped_nonspawnable`` whose assignee
     is neither a configured ``kanban.control_plane_lanes`` entry nor a profile
@@ -306,7 +303,6 @@ class DispatchResult:
     """``(task_id, assignee)`` subset of ready tasks assigned to a placeholder profile
     (default, alpha, beta, orch) without dispatch enabled. Reported as a separate non-paging
     count so health telemetry does not alarm."""
->>>>>>> 8d32dac32d (fix(kanban): exclude placeholder profiles from spawnable health telemetry and report separately)
     skipped_per_profile_capped: list[tuple[str, str, int]] = field(default_factory=list)
     """``(task_id, assignee, current_running_count)`` deferred because the
     assignee is at ``kanban.max_in_progress_per_profile``. Picked up on a later
@@ -3200,9 +3196,6 @@ def _dispatch_lane_task(
     profile_exists = _profile_exists_fn()
     if profile_exists is not None and not profile_exists(assignee):
         result.skipped_nonspawnable.append(task_id)
-<<<<<<< HEAD
-        if _nonspawnable_kind(assignee) == "missing":
-=======
         # A control-plane lane (or a profile another home owns) is expected to
         # sit here quietly. A missing/unavailable local profile is not: leave
         # ONE durable, deduped event so the card reads as an exception an
@@ -3211,7 +3204,6 @@ def _dispatch_lane_task(
         if kind == "placeholder":
             result.skipped_placeholder.append((task_id, assignee))
         elif kind == "missing":
->>>>>>> 8d32dac32d (fix(kanban): exclude placeholder profiles from spawnable health telemetry and report separately)
             result.owner_unavailable.append((task_id, assignee))
             if not dry_run:
                 _record_owner_unavailable(conn, task_id, assignee)
