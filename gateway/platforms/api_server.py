@@ -1013,6 +1013,31 @@ def _admit_api_agent_request(handler):
     return _wrapped
 
 
+def _admit_session_chat_or_queue(handler):
+    """Auth like ``_admit_api_agent_request``, but a draining gateway accepts a text
+    bot DM into the restart spool instead of answering 503. Other bodies still 503.
+    Accepted messages do not reserve a turn slot: drain must not wait on them."""
+    @wraps(handler)
+    async def _wrapped(self, request, *args, **kwargs):
+        auth_err = (
+            self._check_run_auth(request, permission="dispatch")
+            if _api_runs._uses_room_run_auth(self, request)
+            else self._check_auth(request))
+        if auth_err:
+            return auth_err
+        if self._gateway_is_draining():
+            return await self._queue_draining_session_chat(request)
+        reservation = {"active": True}
+        token = _api_agent_request_reservation.set(reservation)
+        self._pending_agent_requests += 1
+        try:
+            return await handler(self, request, *args, **kwargs)
+        finally:
+            _release_pending_api_work(self, reservation)
+            _api_agent_request_reservation.reset(token)
+    return _wrapped
+
+
 def _release_pending_api_work(adapter, reservation: dict[str, bool]) -> None:
     """Release a pending-work reservation exactly once."""
     if reservation["active"]:
@@ -3618,7 +3643,7 @@ class APIServerAdapter(OpenAICompatRoutesMixin, BasePlatformAdapter):
             logger.info("Session SSE client disconnected while a live Bot Chat held the turn")
         return response
 
-    @_admit_api_agent_request
+    @_admit_session_chat_or_queue
     async def _handle_session_chat(self, request: "web.Request") -> "web.Response":
         """POST /api/sessions/{session_id}/chat — one synchronous agent turn (plus the delivery lanes'
         one bounded re-run of a transient failure; ``hermes peer dm`` is the client)."""
@@ -3666,7 +3691,7 @@ class APIServerAdapter(OpenAICompatRoutesMixin, BasePlatformAdapter):
              "runtime": self._effective_turn_runtime(ctx["runtime_request"], result, usage)},
             headers=headers)
 
-    @_admit_api_agent_request
+    @_admit_session_chat_or_queue
     async def _handle_session_chat_stream(self, request: "web.Request") -> "web.StreamResponse":
         """POST /api/sessions/{session_id}/chat/stream — SSE wrapper over _run_agent."""
         limited = self._concurrency_limited_response()
