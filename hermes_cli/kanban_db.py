@@ -2288,6 +2288,81 @@ def _is_foreign_fleet_mirror(
     return owner != installed_node_id
 
 
+# Verdicts of :func:`_fleet_row_ownership`.
+FLEET_OWNER_LOCAL = "local"
+FLEET_OWNER_FOREIGN = "foreign"
+FLEET_OWNER_UNKNOWN = "unknown"
+
+
+def _fleet_row_ownership(
+    conn: sqlite3.Connection,
+    task_id: str,
+    installed_node_id: Optional[str],
+) -> tuple[str, str]:
+    """Verdict ``(owner, detail)`` on whether THIS node may recover ``task_id``.
+
+    Recovery paths (orphan reconciliation, expired-claim release of a claim this
+    host did not take) write ``running -> ready``. On a synced Fleet board the
+    local copy of another node's ``running`` card has no local claim, worker or
+    lease, and the lifecycle fence refuses every such write (t_23c40d89). This
+    decides ownership BEFORE any host-local PID probe or write is attempted.
+
+    ``FLEET_OWNER_LOCAL``: no adapter installed (legacy board), no map row (the
+    card predates the adapter — same rule as :func:`_is_foreign_fleet_mirror`),
+    or the canonical home ``COALESCE(current_node, source_node)`` is this node
+    AND ``tasks.tenant`` (where the assignee-home rule records the card's home)
+    does not disagree. A NULL/blank tenant is no evidence either way.
+
+    ``FLEET_OWNER_FOREIGN``: the canonical home is another node. Expected,
+    silent: the owner node recovers its own card.
+
+    ``FLEET_OWNER_UNKNOWN``: ownership cannot be verified — unreadable adapter
+    node id, unreadable map, blank/non-text canonical home, or a canonical home
+    that contradicts ``tenant``. The caller must leave the row untouched AND
+    surface it; ``detail`` names why. Fails closed on any read error.
+    """
+    if installed_node_id is None:
+        return FLEET_OWNER_LOCAL, ""
+    if installed_node_id == _FLEET_NODE_UNPARSEABLE:
+        return FLEET_OWNER_UNKNOWN, "fleet adapter node id is unreadable"
+    try:
+        row = conn.execute(
+            "SELECT m.current_node, m.source_node, t.tenant "
+            "FROM tasks t LEFT JOIN fleet_kanban_issue_map m ON m.local_task_id = t.id "
+            "WHERE t.id = ?",
+            (task_id,),
+        ).fetchone()
+    except sqlite3.Error as exc:
+        return FLEET_OWNER_UNKNOWN, f"ownership read failed: {exc}"
+    if row is None:
+        return FLEET_OWNER_LOCAL, ""
+    current_node, source_node, tenant = row[0], row[1], row[2]
+    if current_node is None and source_node is None:
+        # LEFT JOIN found no map row (both columns NULL) — or a row with no owner
+        # at all. Tell the two apart: a missing row predates the adapter (local).
+        try:
+            mapped = conn.execute(
+                "SELECT 1 FROM fleet_kanban_issue_map WHERE local_task_id = ?", (task_id,),
+            ).fetchone()
+        except sqlite3.Error as exc:
+            return FLEET_OWNER_UNKNOWN, f"ownership read failed: {exc}"
+        if mapped is None:
+            return FLEET_OWNER_LOCAL, ""
+    owner = source_node if current_node is None else current_node
+    if not isinstance(owner, str) or not owner.strip():
+        return FLEET_OWNER_UNKNOWN, (
+            f"canonical home is not a node id (current_node={current_node!r}, "
+            f"source_node={source_node!r})"
+        )
+    if owner != installed_node_id:
+        return FLEET_OWNER_FOREIGN, f"canonical home is {owner!r}"
+    if isinstance(tenant, str) and tenant.strip() and tenant != owner:
+        return FLEET_OWNER_UNKNOWN, (
+            f"canonical home {owner!r} contradicts card home (tenant) {tenant!r}"
+        )
+    return FLEET_OWNER_LOCAL, ""
+
+
 def recompute_ready(conn: sqlite3.Connection, failure_limit: int = None) -> int:
     """Promote ``todo``/``blocked`` tasks whose parents are all done/archived;
     returns the count. Opens its own IMMEDIATE txn — call OUTSIDE any write txn.
@@ -2686,8 +2761,20 @@ def release_stale_claims(
         "WHERE status = 'running' AND claim_expires IS NOT NULL "
         "  AND claim_expires < ?", (now,),
     ).fetchall()
+    fleet_node_id: Any = _UNSET  # resolved lazily: only a non-host-local claim needs it
     for row in stale:
         host_local = (row["claim_lock"] or "").startswith(host_prefix)
+        # Sibling of reconcile_orphaned_running (t_23c40d89): a claim this host did
+        # not take is a mirrored copy of another node's card on a Fleet board. Its
+        # owner recovers it; the lifecycle fence would refuse our write every tick.
+        # A host-local claim is real local ownership evidence and is not re-judged.
+        if not host_local:
+            if fleet_node_id is _UNSET:
+                fleet_node_id = _fleet_adapter_installed_node_id(conn)
+            if not _recovery_owned_here(
+                conn, errors_out, "release_stale_claims", row["id"], fleet_node_id,
+            ):
+                continue
         hb = row["last_heartbeat_at"]
         # Backstop: a heartbeat older than the max-stale threshold means no
         # observable progress — reclaim even if the PID is alive (logic loop).
@@ -4896,6 +4983,7 @@ from hermes_cli.kanban_db_dispatch import (  # noqa: E402
     _isolate_fenced_row,
     _pid_alive,
     _record_task_failure,
+    _recovery_owned_here,
     _terminate_reclaimed_worker,
     _worker_alive,
     _worker_survived_termination,

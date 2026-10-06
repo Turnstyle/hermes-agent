@@ -252,6 +252,49 @@ def _isolate_fenced_row(
     return False
 
 
+def _recovery_owned_here(
+    conn: sqlite3.Connection,
+    errors_out: Optional[list],
+    step: str,
+    task_id: str,
+    node_id: Optional[str],
+) -> bool:
+    """True iff this node may attempt a recovery write on ``task_id``.
+
+    Runs BEFORE any host-local PID probe and before any write (t_23c40d89). On a
+    synced Fleet board the local copy of another node's ``running`` card has no
+    local claim, worker or lease: a PID check against it is meaningless (a
+    foreign PID number can collide with a live local process) and the write is
+    refused by the lifecycle fence on every tick. Ownership comes from
+    :func:`kanban_db._fleet_row_ownership` (canonical ``current_node`` /
+    ``source_node`` against the installed adapter node id, cross-checked against
+    the card's ``tenant`` home).
+
+    * local   -> True.
+    * foreign -> False, silently (debug log): the owner node recovers it.
+    * unknown / contradictory -> False, but visible: a WARNING plus an
+      ``errors_out`` entry (so it surfaces as a reclaim refusal), the row stays
+      untouched. No trigger is bypassed and no lease is fabricated.
+    """
+    owner, detail = _kb._fleet_row_ownership(conn, task_id, node_id)
+    if owner == _kb.FLEET_OWNER_LOCAL:
+        return True
+    if owner == _kb.FLEET_OWNER_FOREIGN:
+        _kb._log.debug(
+            "kanban %s: task %s skipped — %s, recovery belongs to that node",
+            step, task_id, detail,
+        )
+        return False
+    _kb._log.warning(
+        "kanban %s: task %s left unchanged — fleet ownership cannot be verified (%s); "
+        "protected until the mapping is repaired",
+        step, task_id, detail,
+    )
+    if errors_out is not None:
+        errors_out.append((task_id, f"{step}: ownership unverified, left unchanged ({detail})"))
+    return False
+
+
 class _ReclaimAbortForLiveWorker(Exception):
     """Rolls back a reclaim transaction whose worker survived termination.
 
@@ -1634,6 +1677,13 @@ def reconcile_orphaned_running(
     with a comment, leaked run closed, ``reconciled`` event; a row with a live
     host-local PID is deferred so no duplicate spawns beside it.
 
+    Only cards THIS node verifiably owns are candidates (t_23c40d89). On a Fleet
+    board the mirror carries other nodes' ``running`` rows with no local claim;
+    those are skipped before the PID probe and before any write (see
+    :func:`_recovery_owned_here`). A row whose home is foreign is skipped
+    silently; a row whose home is unknown or contradictory is left unchanged and
+    surfaced in ``errors_out``. Boards without a Fleet adapter are unchanged.
+
     ``errors_out``, when given, is a caller-owned list this appends
     ``(task_id, "reconcile_orphaned_running: <message>")`` to for every row an
     installed lifecycle-guard trigger refused. Such a refusal is rolled back to
@@ -1654,9 +1704,15 @@ def reconcile_orphaned_running(
         "WHERE status = 'running' "
         "  AND (claim_lock IS NULL OR claim_expires IS NULL)"
     ).fetchall()
+    # Resolved once per call (one sqlite_master read), as in recompute_ready.
+    node_id = _kb._fleet_adapter_installed_node_id(conn) if rows else None
     for row in rows:
         tid = row["id"]
         pid = row["worker_pid"]
+        # Ownership BEFORE the PID probe or any write (t_23c40d89): a foreign
+        # node's mirrored running row is not ours to probe or requeue.
+        if not _recovery_owned_here(conn, errors_out, "reconcile_orphaned_running", tid, node_id):
+            continue
         if pid and _worker_alive(pid, _kb._row_get(row, "worker_started_at")):
             # Never requeue beside a live process. Retry next tick.
             _kb._log.debug(
