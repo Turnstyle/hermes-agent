@@ -862,14 +862,15 @@ def _drain_enqueue_command(cli: str, sender: str, home: Path, dm_file: str,
 
 def enqueue_busy_peer_dm(home: Path, sender: str, message: str) -> str:
     """Use the local runner's queue command for a busy peer; return its durable message id."""
-    import shutil
+    from hermes_platform.resolver import locate_command
     from tools.environments.local import served_profile_child_env
 
     fd, body_file = tempfile.mkstemp(prefix="peer-dm-", suffix=".txt", dir=_dm_dir(), text=True)
     try:
         with os.fdopen(fd, "w", encoding="utf-8") as stream:
             stream.write(message)
-        cli = shutil.which("hermes") or sys.executable
+        command_path = locate_command("hermes").command
+        cli = command_path[0] if command_path else sys.executable
         command = _drain_enqueue_command(cli, sender, home, body_file)
         if command[0] == sys.executable:
             command[1:3] = ["-m", "tools.fleet_message_drain"]

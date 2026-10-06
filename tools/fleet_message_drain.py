@@ -74,6 +74,8 @@ import urllib.request
 from pathlib import Path
 from typing import Any, Callable, Optional
 
+from hermes_platform.resolver import known_dirs, locate_command
+
 logger = logging.getLogger(__name__)
 _config_read_warned = False
 _config_read_warning_lock = threading.Lock()
@@ -419,7 +421,10 @@ def _live_token() -> str:
                 # Hermes's crypto packages into it and crash it (pyOpenSSL: no attribute GEN_EMAIL).
                 gcloud_env = {k: v for k, v in os.environ.items()
                               if k not in ("PYTHONPATH", "PYTHONHOME", "VIRTUAL_ENV")}
-                proc = subprocess.run(["gcloud", "auth", "print-access-token"], capture_output=True,
+                gcloud = locate_command("gcloud", known_dirs=known_dirs.snap_bin_dirs()).command
+                if not gcloud:
+                    raise FileNotFoundError("gcloud executable not found")
+                proc = subprocess.run([*gcloud, "auth", "print-access-token"], capture_output=True,
                                       text=True, check=True, timeout=3, env=gcloud_env)
                 token = proc.stdout.strip()
                 if not token:

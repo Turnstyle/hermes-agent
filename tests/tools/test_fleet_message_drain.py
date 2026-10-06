@@ -26,7 +26,7 @@ EMU = os.environ.get("FLEET_MESSAGES_EMULATOR", "")
 PROJECT = "mission-control-444444"
 
 
-def test_live_token_falls_back_to_gcloud_and_warns_once_per_failed_streak(monkeypatch, caplog):
+def test_live_token_falls_back_to_gcloud_and_warns_once_per_failed_streak(monkeypatch, caplog, tmp_path):
     import google.auth
     from google.auth.exceptions import RefreshError
 
@@ -41,10 +41,18 @@ def test_live_token_falls_back_to_gcloud_and_warns_once_per_failed_streak(monkey
     monkeypatch.setattr(fmd, "_gcloud_token_cached", "")
     monkeypatch.setattr(fmd, "_gcloud_token_until", 0)
     monkeypatch.setattr(fmd, "_credentials_warned", False)
+    from hermes_platform.resolver import known_dirs
+    gcloud_exe = tmp_path / "gcloud"
+    gcloud_exe.write_text("#!/bin/sh\nexit 0\n")
+    gcloud_exe.chmod(0o755)
+    monkeypatch.setattr(known_dirs, "snap_bin_dirs", lambda: (str(tmp_path),), raising=False)
+    monkeypatch.setenv("PATH", "")
     calls = []
+    commands = []
 
     def gcloud(*args, **kwargs):
         calls.append(kwargs)
+        commands.append(args[0])
         return SimpleNamespace(stdout="gcloud-token\n")
 
     monkeypatch.setattr(fmd.subprocess, "run", gcloud)
@@ -52,6 +60,7 @@ def test_live_token_falls_back_to_gcloud_and_warns_once_per_failed_streak(monkey
     monkeypatch.setenv("PYTHONHOME", "/hermes/python")
     assert fmd._live_token() == "gcloud-token"
     assert fmd._live_token() == "gcloud-token"
+    assert commands == [[str(gcloud_exe), "auth", "print-access-token"]]
     assert len(calls) == 1 and calls[0]["timeout"] <= 3
     # gcloud runs its own Python: the Hermes bootstrap's PYTHONPATH/PYTHONHOME must not leak into it.
     assert "PYTHONPATH" not in calls[0]["env"] and "PYTHONHOME" not in calls[0]["env"]
@@ -64,6 +73,25 @@ def test_live_token_falls_back_to_gcloud_and_warns_once_per_failed_streak(monkey
     assert [r.message for r in caplog.records if "no Google credentials" in r.message] == [
         "fleet message drain: no Google credentials (ADC expired and gcloud token failed); "
         "drain skipped, turns unaffected"]
+
+
+def test_live_token_fails_closed_when_gcloud_cannot_be_resolved(monkeypatch):
+    import google.auth
+    from hermes_platform.resolver import known_dirs
+
+    def no_adc(**kwargs):
+        raise google.auth.exceptions.DefaultCredentialsError("no ADC")
+
+    monkeypatch.setattr(google.auth, "default", no_adc)
+    monkeypatch.setattr(fmd, "_live_credentials", None)
+    monkeypatch.setattr(fmd, "_gcloud_token_cached", "")
+    monkeypatch.setattr(fmd, "_credentials_warned", False)
+    monkeypatch.setattr(known_dirs, "snap_bin_dirs", lambda: ())
+    monkeypatch.setenv("PATH", "")
+    monkeypatch.setattr(fmd.subprocess, "run", lambda *args, **kwargs: pytest.fail("unexpected token command"))
+
+    with pytest.raises(fmd.NoGoogleCredentials, match="ADC expired and gcloud token failed"):
+        fmd._live_token()
 
 
 class MemoryStore:

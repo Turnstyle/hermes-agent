@@ -3641,7 +3641,14 @@ class _StreamingCall(StreamingWaitMonitor):
                 buffer_connect_exhausted_notice(self.agent, e, attempts=max_retries + 1, base_url=self.agent.base_url)
         else:
             self._maybe_disable_streaming(e)
-            logger.exception("Streaming failed before delivery: %s", e)
+            body = getattr(e, "body", None)
+            error = body.get("error") if isinstance(body, dict) else None
+            if (self.agent.provider == "anthropic" and _extract_status_code(e) == 429
+                    and isinstance(error, dict) and error.get("type") == "rate_limit_error"):
+                logger.warning("Anthropic rate limited streaming before delivery (HTTP 429); "
+                               "outer retry/failover will handle it: %s", e)
+            else:
+                logger.exception("Streaming failed before delivery: %s", e)
             if self._unmask_server_error_with_nonstreaming(e):
                 return False
         # Propagate to the main retry loop (credential rotation, fallback, backoff).

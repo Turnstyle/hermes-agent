@@ -21,6 +21,10 @@ def user_local_bin() -> tuple[str, ...]:
     return ("~/.local/bin",) if _POSIX else ("%USERPROFILE%/.local/bin",)
 
 
+def snap_bin_dirs() -> tuple[str, ...]:
+    return ("/snap/bin",) if sys.platform.startswith("linux") else ()
+
+
 def rust_tool_dirs() -> tuple[str, ...]:
     return ("~/.cargo/bin",) if _POSIX else ("%USERPROFILE%/.cargo/bin",)
 
