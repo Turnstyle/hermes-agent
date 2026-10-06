@@ -16,6 +16,20 @@ def isolated_board(tmp_path, monkeypatch):
     kb.init_db()
 
 
+def _install_fleet_adapter(conn):
+    conn.executescript("""
+        CREATE TABLE fleet_kanban_issue_map (
+            local_task_id TEXT PRIMARY KEY, issue_id TEXT, title TEXT, body TEXT,
+            source_node TEXT, current_node TEXT, deferred_snapshot INTEGER, canonical_status TEXT
+        );
+        CREATE TRIGGER fleet_kanban_task_insert AFTER INSERT ON tasks BEGIN
+            INSERT INTO fleet_kanban_issue_map
+                (local_task_id, issue_id, title, body, source_node)
+            VALUES (NEW.id, 'fixture', NEW.title, NEW.body, 'turnerbook');
+        END;
+    """)
+
+
 @pytest.mark.usefixtures("isolated_board")
 class KanbanBlockCommentOrderTests(unittest.TestCase):
     def test_block_does_not_comment_when_block_task_fails(self):
@@ -67,6 +81,7 @@ class KanbanBlockCommentOrderTests(unittest.TestCase):
 
         with kbc.connect_closing() as conn:
             owned = kb.create_task(conn, title="owned triage", assignee="orch", triage=True)
+            _install_fleet_adapter(conn)
             conn.execute(
                 """INSERT INTO tasks(
                     id,title,body,assignee,status,priority,created_by,created_at,
@@ -88,6 +103,7 @@ class KanbanBlockCommentOrderTests(unittest.TestCase):
                     0,
                 ),
             )
+            conn.execute("UPDATE fleet_kanban_issue_map SET source_node = 'remote' WHERE local_task_id = 't_fk_deadbeef'")
             conn.commit()
             ids = kanban_decompose.list_triage_ids()
             self.assertIn(owned, ids)
@@ -100,6 +116,7 @@ class KanbanBlockCommentOrderTests(unittest.TestCase):
 
         with kbc.connect_closing() as conn:
             owned = kb.create_task(conn, title="reassigned away", assignee="orch", triage=True)
+            _install_fleet_adapter(conn)
             conn.execute(
                 """CREATE TABLE IF NOT EXISTS fleet_kanban_issue_map (
                     local_task_id TEXT PRIMARY KEY,

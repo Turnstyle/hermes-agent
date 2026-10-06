@@ -385,6 +385,43 @@ _recent_worker_exits: "dict[int, tuple[int, float]]" = {}
 # through a live handle, so ``_default_spawn`` parks each worker's ``Popen``
 # here (Windows only) and ``reap_worker_zombies`` polls it. Entry: ``pid -> Popen``.
 _live_worker_procs: "dict[int, subprocess.Popen]" = {}
+# Wall-clock time the dispatcher reaped each worker IT spawned (a pid present in
+# ``_live_worker_procs`` at reap time). Other children of this process (terminal
+# commands, git, ps) never enter it. Upper bound for the crash-path orphan
+# group reap (``_vet_orphaned_worker_group``).
+_worker_reaped_at: "dict[int, float]" = {}
+
+
+def _track_worker_proc(proc: "subprocess.Popen") -> None:
+    """Keep a spawned worker's ``Popen`` until the dispatcher reaps it (see ``_live_worker_procs``).
+    A leftover handle for the same pid (its worker was reaped by another thread before it was
+    tracked) is marked finished first, so its ``__del__`` never polls the new worker's pid."""
+    stale = _live_worker_procs.get(int(proc.pid))
+    if stale is not None and stale is not proc and stale.returncode is None:
+        stale.returncode = -1
+    _worker_reaped_at.pop(int(proc.pid), None)
+    _live_worker_procs[int(proc.pid)] = proc
+
+
+def _note_worker_reaped(pid: int, raw_status: int) -> None:
+    """The dispatcher reaped ``pid``: record its exit status and, when it is a worker this process
+    spawned, the reap time. Marks the parked ``Popen`` finished so its ``__del__`` never waits on a
+    PID that may already belong to another process."""
+    _record_worker_exit(pid, raw_status)
+    proc = _live_worker_procs.pop(int(pid), None)
+    if proc is None:
+        return
+    if proc.returncode is None:
+        try:
+            proc.returncode = os.waitstatus_to_exitcode(int(raw_status))
+        except (AttributeError, ValueError):
+            proc.returncode = -1
+    now = time.time()
+    _worker_reaped_at[int(pid)] = now
+    if len(_worker_reaped_at) > _RECENT_WORKER_EXITS_MAX // 2:
+        cutoff = now - _RECENT_WORKER_EXIT_TTL_SECONDS
+        for _pid in [p for p, t in _worker_reaped_at.items() if t < cutoff]:
+            _worker_reaped_at.pop(_pid, None)
 
 
 def _wait_status_from_returncode(returncode: int) -> int:
@@ -505,8 +542,7 @@ def reap_worker_zombies() -> "list[int]":
             returncode = proc.poll()
             if returncode is None:
                 continue
-            _record_worker_exit(pid, _wait_status_from_returncode(returncode))
-            _live_worker_procs.pop(pid, None)
+            _note_worker_reaped(pid, _wait_status_from_returncode(returncode))
             reaped.append(pid)
         return reaped
     try:
@@ -517,7 +553,7 @@ def reap_worker_zombies() -> "list[int]":
                 break
             if pid == 0:
                 break
-            _record_worker_exit(pid, status)
+            _note_worker_reaped(pid, status)
             reaped.append(pid)
     except Exception:
         pass
@@ -656,6 +692,286 @@ def _sigkill(kill, pid: int) -> bool:
         return False
 
 
+def _worker_leads_own_group(pid: int, started_at, signal_fn) -> bool:
+    """True when the worker ``pid`` is live, fingerprint-verified AND leads its own process group, so
+    ``os.killpg(pid, sig)`` reaches the worker and every child it started in its own group (e.g. an
+    external ``claude`` / ``codex`` CLI started with plain ``subprocess.Popen``) without touching
+    anything else. ``_default_spawn`` starts workers
+    with ``start_new_session=True``, so the group id equals the PID. Only the exact equality counts:
+    the group is NEVER derived as ``killpg(getpgid(pid))`` — a worker sharing the dispatcher's group
+    would make that kill the dispatcher itself. Group signals need a real spawn fingerprint: a legacy
+    row (``None``), the UNVERIFIED marker, a zombie or a recycled PID keep the single-PID path.
+    POSIX only (Windows keeps single-PID termination), and only with real signals: a ``signal_fn``
+    test hook keeps the single-PID behaviour. Children that start their own session leave the group
+    and are out of reach here: daemons, MCP servers, and every Hermes terminal-tool command
+    (foreground and background run with ``start_new_session=True``; a ``hermes`` worker's own SIGTERM
+    handler ends its foreground terminal group)."""
+    if signal_fn is not None or _kb._IS_WINDOWS:
+        return False
+    if not (hasattr(os, "killpg") and hasattr(os, "getpgid")):
+        return False
+    if started_at is None or started_at == UNVERIFIED_WORKER_FINGERPRINT:
+        return False
+    if not _kb._pid_alive(pid) or _pid_recycled(pid, started_at):
+        return False
+    try:
+        return os.getpgid(int(pid)) == int(pid)
+    except OSError:
+        return False
+
+
+def _signal_worker_group(pid: int, sig) -> bool:
+    """``os.killpg(pid, sig)``; True when delivered. ESRCH (group already empty) / EPERM → False."""
+    try:
+        os.killpg(int(pid), sig)
+        return True
+    except (ProcessLookupError, PermissionError, OSError):
+        return False
+
+
+def _live_group_members(pgid: int) -> Optional[list[int]]:
+    """PIDs of NON-zombie processes in group ``pgid`` (``ps -A -o pid=,pgid=,stat=``, same on macOS
+    and Linux). A zombie leader that its real parent has not reaped yet is not a member worth
+    waiting for or killing. ``None`` when ``ps`` cannot be read: callers then assume members remain
+    (fail toward finishing the kill, never toward skipping it)."""
+    try:
+        proc = subprocess.run(
+            ["ps", "-A", "-o", "pid=,pgid=,stat="],
+            capture_output=True, text=True, timeout=5, check=False,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if proc.returncode != 0 or not proc.stdout.strip():
+        return None  # unreadable: never read as "no members"
+    out = proc.stdout
+    members: list[int] = []
+    for line in out.splitlines():
+        parts = line.split()
+        if len(parts) < 3:
+            continue
+        try:
+            member, group = int(parts[0]), int(parts[1])
+        except ValueError:
+            continue
+        if group == int(pgid) and not parts[2].startswith("Z"):
+            members.append(member)
+    return members
+
+
+def _worker_group_has_live_members(pgid: int) -> bool:
+    members = _live_group_members(pgid)
+    return True if members is None else bool(members)
+
+
+def _reap_exited_leader(pid: int) -> None:
+    """Reap the worker leader when it is our own exited child, recording its exit status exactly as
+    ``reap_worker_zombies`` would, so the dispatcher's exit classification is unchanged. Not our
+    child / still running → no-op."""
+    try:
+        reaped, status = os.waitpid(int(pid), os.WNOHANG)
+    except (ChildProcessError, OSError):
+        return
+    if reaped == int(pid):
+        _note_worker_reaped(reaped, status)
+
+
+def _poll_worker_group_exit(pid: int, started_at=None) -> bool:
+    """Same ~5 s grace as ``_poll_worker_exit``, but ends early only when the leader AND every live
+    group member are gone, so children get the full grace to exit on SIGTERM. A zombie leader waiting
+    on a parent that is not us does not hold the poll open. Returns whether the leader exited."""
+    for _ in range(10):
+        if not _worker_alive(pid, started_at):
+            _reap_exited_leader(pid)
+            if not _worker_group_has_live_members(pid):
+                return True
+        time.sleep(0.5)
+    return not _worker_alive(pid, started_at)
+
+
+def _worker_exit_reaped_at(pid: int) -> Optional[float]:
+    """Wall-clock time the dispatcher in THIS process reaped worker ``pid`` that it had itself
+    spawned and tracked (``_worker_reaped_at``), or None: another process spawned it (per-tick CLI
+    dispatcher, gateway restarted since the spawn), a test spawn_fn that bypasses
+    ``_track_worker_proc``, or the entry expired. Until that reap the PID stays pinned by the zombie,
+    so no other process can hold it; it is the last moment the PID (and so the process group id) is
+    known to have been the worker's. A reap of any other child that happens to reuse the number
+    never writes here."""
+    reaped = _worker_reaped_at.get(int(pid))
+    return None if reaped is None else float(reaped)
+
+
+# A reused group id belongs to a process created AFTER the reap; its members start later still. A
+# genuine orphan group keeps at least one helper started while the worker ran, so the oldest member
+# must predate the reap by this margin (absorbs the ~1 s macOS create_time drift, fails toward
+# refusal).
+_ORPHAN_GROUP_REAP_MARGIN_SECONDS = 2.0
+
+
+def _vet_orphaned_worker_group(pid: int, started_at) -> dict[str, Any]:
+    """Decide whether the dead worker ``pid``'s process group may be signalled (t_590dc20c).
+
+    The group id is the dead leader's PID (``_default_spawn`` uses ``start_new_session=True``). POSIX
+    never hands out a PID equal to an existing group id, so while one of the worker's helpers
+    survives, the id still names the worker's group. Once the group fully empties the PID can be
+    reused, and a new process that leads group P and exits leaves a look-alike orphaned group whose
+    members all started after the reap. So every guard refuses rather than signal a stranger:
+      * the row carries a real same-boot spawn fingerprint (legacy ``None``, integer and UNVERIFIED
+        rows are refused; another boot's fingerprint is refused);
+      * the leader PID is dead now (a live holder means the PID was reused);
+      * never the caller's own process group; ``ps`` must be readable;
+      * every member's start time is readable and not before the worker's start;
+      * the dispatcher in THIS process spawned the worker and reaped it (``_worker_exit_reaped_at``)
+        and the oldest member started at least ``_ORPHAN_GROUP_REAP_MARGIN_SECONDS`` before that
+        reap. Without an observed reap there is no upper bound, so the group is left alone
+        (``leader_exit_unobserved``).
+    Returns ``{"pgid", "members", "refused"}``; ``refused`` None with members = safe to signal."""
+    info: dict[str, Any] = {"pgid": None, "members": [], "refused": None}
+    if _kb._IS_WINDOWS or not (hasattr(os, "killpg") and hasattr(os, "getpgrp")):
+        info["refused"] = "platform"
+        return info
+    if not pid or int(pid) <= 1:
+        info["refused"] = "no_pid"
+        return info
+    if not (isinstance(started_at, str) and "|" in started_at):
+        # None = legacy row, UNVERIFIED marker, or an integer pre-epoch fingerprint.
+        info["refused"] = "no_fingerprint"
+        return info
+    from gateway.drain_control import current_instantiation_epoch
+    epoch, _, start_raw = started_at.rpartition("|")
+    if epoch != current_instantiation_epoch():
+        info["refused"] = "other_boot"
+        return info
+    try:
+        worker_start = int(start_raw)
+    except ValueError:
+        info["refused"] = "no_fingerprint"
+        return info
+    pgid = int(pid)
+    info["pgid"] = pgid
+    if _kb._pid_alive(pgid):
+        info["refused"] = "leader_pid_live"
+        return info
+    try:
+        if pgid == os.getpgrp():
+            info["refused"] = "own_group"
+            return info
+    except OSError:
+        info["refused"] = "own_group"
+        return info
+    members = _live_group_members(pgid)
+    if members is None:
+        info["refused"] = "ps_unreadable"
+        return info
+    info["members"] = sorted(members)
+    if not members:
+        return info
+    from gateway.status import get_process_start_time
+    try:
+        import psutil  # type: ignore
+    except ImportError:  # pragma: no cover - core dependency
+        info["refused"] = "no_psutil"
+        return info
+    created: list[float] = []
+    for member in members:
+        member_start = get_process_start_time(int(member))
+        if member_start is None:
+            info["refused"] = "member_start_unreadable"
+            return info
+        if int(member_start) < worker_start:
+            info["refused"] = "member_predates_worker"
+            return info
+        try:
+            created.append(float(psutil.Process(int(member)).create_time()))
+        except Exception:
+            info["refused"] = "member_start_unreadable"
+            return info
+    reaped_at = _worker_exit_reaped_at(pgid)
+    if reaped_at is None:
+        info["refused"] = "leader_exit_unobserved"
+        return info
+    if min(created) > reaped_at - _ORPHAN_GROUP_REAP_MARGIN_SECONDS:
+        info["refused"] = "members_postdate_leader_exit"
+        return info
+    return info
+
+
+# Refusals worth a durable event even though nothing was signalled: something unexpected is
+# holding the dead worker's group id, or the orphans could not be checked.
+_ORPHAN_GROUP_EVENT_REFUSALS = frozenset({
+    "leader_pid_live", "own_group", "ps_unreadable", "member_start_unreadable",
+    "member_predates_worker", "leader_exit_unobserved", "members_postdate_leader_exit",
+})
+
+
+def _reap_orphaned_worker_groups(targets: list[tuple[int, Any]]) -> dict[int, dict[str, Any]]:
+    """End what is left of each dead worker's process group, all groups together: vet every group
+    (``_vet_orphaned_worker_group``), SIGTERM the approved ones, ONE shared ~5 s grace, then SIGKILL
+    any approved group that still has members. ``targets`` = ``[(pid, spawn fingerprint)]``.
+    Returns ``{pid: {"members", "signalled", "sigkill", "survivors", "refused"}}``."""
+    results: dict[int, dict[str, Any]] = {}
+    approved: list[int] = []
+    for pid, started_at in targets:
+        vet = _vet_orphaned_worker_group(pid, started_at)
+        results[int(pid)] = {
+            "members": vet["members"], "signalled": False, "sigkill": False, "survivors": [],
+            "refused": vet["refused"],
+        }
+        if vet["refused"] is None and vet["members"]:
+            if _signal_worker_group(vet["pgid"], signal.SIGTERM):
+                results[int(pid)]["signalled"] = True
+                approved.append(vet["pgid"])
+            else:
+                results[int(pid)]["survivors"] = sorted(_live_group_members(vet["pgid"]) or [])
+    if not approved:
+        return results
+    for _ in range(10):
+        if not any(_worker_group_has_live_members(g) for g in approved):
+            break
+        time.sleep(0.5)
+    killed = False
+    for pgid in approved:
+        # Still dead leader + members left after the grace → the id still names the same group.
+        if _worker_group_has_live_members(pgid) and not _kb._pid_alive(pgid):
+            if _signal_worker_group(pgid, getattr(signal, "SIGKILL", signal.SIGTERM)):
+                results[pgid]["sigkill"] = True
+                killed = True
+    if killed:
+        time.sleep(0.2)
+    for pgid in approved:
+        results[pgid]["survivors"] = sorted(_live_group_members(pgid) or [])
+    return results
+
+
+def _reap_crashed_worker_groups(conn: sqlite3.Connection, dead_groups: list) -> None:
+    """Crash-sweep follow-up, run LAST in ``detect_crashed_workers`` (after crash accounting and the
+    worker-exited hook, outside every txn): end the released workers' orphaned groups and record one
+    ``worker_group_reaped`` event per card whose group had members or hit a notable refusal.
+    Best-effort: a failure here never un-releases a card or breaks the tick."""
+    try:
+        results = _reap_orphaned_worker_groups([(pid, fp) for (_t, pid, fp, _r) in dead_groups])
+    except Exception as exc:  # pragma: no cover - defensive
+        _kb._log.warning("kanban: orphaned worker group reap failed: %s", exc)
+        return
+    for task_id, pid, _fp, run_id in dead_groups:
+        info = results.get(int(pid))
+        if not info:
+            continue
+        if not info["members"] and info["refused"] not in _ORPHAN_GROUP_EVENT_REFUSALS:
+            continue
+        if info["refused"] in _ORPHAN_GROUP_EVENT_REFUSALS:
+            _kb._log.warning(
+                "kanban: left worker group %s of task %s alone (%s); members=%s",
+                pid, task_id, info["refused"], info["members"],
+            )
+        try:
+            with _kb.write_txn(conn):
+                _kb._append_event(
+                    conn, task_id, "worker_group_reaped", {"pid": int(pid), **info}, run_id=run_id,
+                )
+        except sqlite3.Error:
+            pass
+
+
 def _terminate_reclaimed_worker(
     pid: Optional[int],
     claim_lock: Optional[str],
@@ -668,13 +984,23 @@ def _terminate_reclaimed_worker(
     signalled — the worker is gone, which is what the reclaim wanted (``terminated`` = True). An
     UNVERIFIED spawn (fingerprint capture failed) that is still live is never signalled either, but
     it is reported as surviving (``signal_refused``) so the reclaim holds the claim instead of
-    spawning a duplicate beside it."""
+    spawning a duplicate beside it.
+
+    Process group: when the live, fingerprint-verified worker leads its own group
+    (``getpgid(pid) == pid``, the ``_default_spawn`` shape), SIGTERM and SIGKILL go to the whole
+    group, so a CLI the worker launched does not outlive a timeout / archive / reclaim / terminal
+    reap. After the grace poll, live group members are SIGKILLed even when the leader exited DURING
+    the grace (orphaned children keep the group alive). Not covered: children of a leader that had
+    already exited before termination began (no verified group to address), and children that called
+    ``setsid`` themselves (daemons, MCP servers, Hermes terminal-tool commands). ``group_signalled``
+    records whether the group path ran."""
     info: dict[str, Any] = {
         "prev_pid": int(pid) if pid else None,
         "host_local": False,
         "termination_attempted": False,
         "terminated": False,
         "sigkill": False,
+        "group_signalled": False,
     }
     if not pid or pid <= 0 or not claim_lock:
         return info
@@ -695,9 +1021,13 @@ def _terminate_reclaimed_worker(
         info["pid_recycled"] = True
         return info
 
+    group = _worker_leads_own_group(pid, started_at, signal_fn)
     info["termination_attempted"] = True
     try:
-        kill(int(pid), signal.SIGTERM)
+        if group and _signal_worker_group(pid, signal.SIGTERM):
+            info["group_signalled"] = True
+        else:
+            kill(int(pid), signal.SIGTERM)
     except ProcessLookupError:
         # Already gone = successful termination. Leaving terminated=False would
         # make the reclaim guard misread a dead worker as alive and defer forever.
@@ -706,7 +1036,19 @@ def _terminate_reclaimed_worker(
     except OSError:
         return info
 
-    if _poll_worker_exit(pid, started_at):
+    if info["group_signalled"]:
+        exited = _poll_worker_group_exit(pid, started_at)
+        # Grace is over: SIGKILL the group even when the leader exited during the grace, so orphaned
+        # children (an external CLI ignoring SIGTERM) die too. POSIX does not hand out a PID equal
+        # to an existing group id, so while a member survives the id still names our group; a leader
+        # PID that is live again under a different fingerprint was recycled → not signalled.
+        leader_recycled = _kb._pid_alive(pid) and _pid_recycled(pid, started_at)
+        if not leader_recycled and _worker_group_has_live_members(pid):
+            if _signal_worker_group(pid, getattr(signal, "SIGKILL", signal.SIGTERM)):
+                info["sigkill"] = True
+    else:
+        exited = _poll_worker_exit(pid, started_at)
+    if exited:
         info["terminated"] = True
         return info
     if _worker_alive(pid, started_at):
@@ -1517,6 +1859,7 @@ class _CrashSweep:
     # Worker-exit observer payloads, fired only after every reclaim/accounting
     # txn has committed.
     exited_hook_payloads: list[dict] = field(default_factory=list)
+    dead_groups: list[tuple[str, int, Any, Optional[int]]] = field(default_factory=list)
 
 
 def _reclaim_dead_workers(
@@ -1604,6 +1947,9 @@ def _reclaim_dead_workers(
                 if not _isolate_fenced_row(errors_out, "detect_crashed_workers", row["id"], exc):
                     raise
                 continue
+            sweep.dead_groups.append(
+                (row["id"], pid, _kb._row_get(row, "worker_started_at"), run_id),
+            )
             sweep.exited_hook_payloads.append({
                 "task_id": row["id"],
                 "assignee": row["assignee"],
@@ -1773,6 +2119,8 @@ def detect_crashed_workers(
                 board=_board,
                 **hook_fields,
             )
+    if sweep.dead_groups:
+        _reap_crashed_worker_groups(conn, sweep.dead_groups)
     return sweep.crashed
 
 
@@ -3502,8 +3850,7 @@ def _default_spawn(task: Task, workspace: str, *, board: Optional[str] = None) -
         )
     # Intentionally NOT closing log_f: the child keeps writing after return;
     # the OS-level FD stays open in the child until it exits.
-    if _kb._IS_WINDOWS:
-        _live_worker_procs[proc.pid] = proc
+    _track_worker_proc(proc)
     return proc.pid
 
 
