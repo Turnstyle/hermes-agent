@@ -346,9 +346,13 @@ def _default_profile_secret_scope():
         reset_secret_scope(token)
 
 
+_LAST_PLACEHOLDER_LOG: dict[str, tuple[int, float]] = {}
+
+
 def _log_spawn_results(results: Optional[list]) -> bool:
     """Log per-board spawn summaries; returns whether any board spawned."""
     any_spawned = False
+    now = time.time()
     for slug, res in (results or []):
         if res is None:
             continue
@@ -366,16 +370,29 @@ def _log_spawn_results(results: Optional[list]) -> bool:
                 slug, len(reclaim_errors),
                 "; ".join(f"{tid}: {err}" for tid, err in reclaim_errors),
             )
+        skipped_placeholder = getattr(res, "skipped_placeholder", None) or []
         if getattr(res, "spawned", None):
             any_spawned = True
             # Quiet by default: an idle gateway stays silent.
             logger.info(
                 "kanban dispatcher [%s]: spawned=%d reclaimed=%d "
-                "crashed=%d timed_out=%d promoted=%d auto_blocked=%d",
+                "crashed=%d timed_out=%d promoted=%d auto_blocked=%d placeholder=%d",
                 slug, len(res.spawned), res.reclaimed,
                 len(res.crashed) if hasattr(res.crashed, "__len__") else 0,
                 len(res.timed_out) if hasattr(res.timed_out, "__len__") else 0,
                 res.promoted,
                 len(res.auto_blocked) if hasattr(res.auto_blocked, "__len__") else 0,
+                len(skipped_placeholder),
             )
+        elif skipped_placeholder:
+            last = _LAST_PLACEHOLDER_LOG.get(slug)
+            if last is None or last[0] != len(skipped_placeholder) or (now - last[1]) >= 300:
+                logger.info(
+                    "kanban dispatcher [%s]: %d placeholder-assigned task(s) skipped "
+                    "(non-paging, waiting for assignment)",
+                    slug, len(skipped_placeholder),
+                )
+                _LAST_PLACEHOLDER_LOG[slug] = (len(skipped_placeholder), now)
+        elif slug in _LAST_PLACEHOLDER_LOG:
+            _LAST_PLACEHOLDER_LOG.pop(slug, None)
     return any_spawned

@@ -277,6 +277,8 @@ class GatewayKanbanWatchersMixin:
         # broken PATH, missing venv, or credential loss.
         bad_ticks = 0
         last_warn_at = 0
+        last_placeholder_count = -1
+        last_placeholder_log_at = 0
         results: Optional[list] = None
         dispatcher = _KanbanDispatcher(_kb, settings)
 
@@ -311,17 +313,39 @@ class GatewayKanbanWatchersMixin:
                         await _to_thread_process_service(dispatcher.auto_decompose_tick, _ad_per_tick)
                     results = await _to_thread_process_service(dispatcher.tick_once)
                     any_spawned = _log_spawn_results(results)
-                    ready_pending = await _to_thread_process_service(dispatcher.ready_nonempty)
-                    bad_ticks = bad_ticks + 1 if ready_pending and not any_spawned else 0
+                    ready_counts = await _to_thread_process_service(dispatcher.ready_counts)
+                    ready_spawnable = ready_counts.get("spawnable", 0)
+                    placeholder_count = ready_counts.get("placeholder", 0)
+
+                    now = int(time.time())
+                    if placeholder_count > 0:
+                        if placeholder_count != last_placeholder_count or now - last_placeholder_log_at >= 300:
+                            logger.info(
+                                "kanban dispatcher: %d ready task(s) assigned to placeholder profile(s) "
+                                "(non-paging, waiting for assignment)",
+                                placeholder_count,
+                            )
+                            last_placeholder_count = placeholder_count
+                            last_placeholder_log_at = now
+                    elif last_placeholder_count > 0:
+                        last_placeholder_count = 0
+
+                    held = _kbd.describe_suppression(res for _slug, res in (results or []))
+                    if held:
+                        logger.info("kanban dispatcher: dispatch held back: %s (non-paging)", held)
+
+                    # Paging predicate: reflect whether a card can dispatch this tick.
+                    # Work held back by policy guards or capacity limits cannot dispatch this tick.
+                    can_dispatch = ready_spawnable > 0 and not held
+                    bad_ticks = bad_ticks + 1 if can_dispatch and not any_spawned else 0
                 now = int(time.time())
                 if bad_ticks >= _HEALTH_WINDOW and now - last_warn_at >= 300:
-                    held = _kbd.describe_suppression(res for _slug, res in (results or []))
                     logger.warning(
                         "kanban dispatcher stuck: ready queue non-empty for "
-                        "%d consecutive ticks but 0 workers spawned.%s Check "
+                        "%d consecutive ticks but 0 workers spawned. Check "
                         "profile health (venv, PATH, credentials) and "
                         "`hermes kanban list --status ready`.",
-                        bad_ticks, f" Last tick held back: {held}." if held else "",
+                        bad_ticks,
                     )
                     last_warn_at = now
             except asyncio.CancelledError:

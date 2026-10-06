@@ -268,7 +268,9 @@ def _cmd_daemon(args: argparse.Namespace) -> int:
 
     def _on_tick(res):
         ready_pending = _ready_queue_nonempty()
-        if ready_pending and not res.spawned:
+        held = kbd.describe_suppression([res])
+        can_dispatch = ready_pending and not held
+        if can_dispatch and not res.spawned:
             health_state["bad_ticks"] += 1
         else:
             health_state["bad_ticks"] = 0

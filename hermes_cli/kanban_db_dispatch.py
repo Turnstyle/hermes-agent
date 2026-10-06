@@ -370,6 +370,8 @@ def describe_suppression(results: Iterable[Optional["DispatchResult"]]) -> str:
             counts["rate_limited"] = counts.get("rate_limited", 0) + len(res.rate_limited)
         if getattr(res, "profile_busy", None):
             counts["profile_busy"] = counts.get("profile_busy", 0) + len(res.profile_busy)
+        if getattr(res, "skipped_per_profile_capped", None):
+            counts["profile_capped"] = counts.get("profile_capped", 0) + len(res.skipped_per_profile_capped)
         if res.skipped_locked:
             counts["skipped_locked"] = counts.get("skipped_locked", 0) + 1
         if res.memory_pressure:
@@ -2844,14 +2846,20 @@ def _owned_task_rows(conn: sqlite3.Connection, status: str) -> list:
 
 def _count_spawnable(conn: sqlite3.Connection, status: str) -> int:
     """Count unclaimed ``status`` tasks owned by this node whose assignee is
-    a real profile with dispatch enabled on this node."""
+    a real profile with dispatch enabled on this node and not held by a respawn guard."""
     rows = _owned_task_rows(conn, status)
     if not rows:
         return 0
     profile_exists = _profile_exists_fn()
-    if profile_exists is None:
-        return len(rows)
-    return sum(1 for row in rows if profile_exists(row["assignee"]))
+    count = 0
+    for row in rows:
+        assignee = row["assignee"]
+        if profile_exists is not None and not profile_exists(assignee):
+            continue
+        if check_respawn_guard(conn, row["id"], lane=status) is not None:
+            continue
+        count += 1
+    return count
 
 
 def _count_placeholder(conn: sqlite3.Connection, status: str) -> int:
