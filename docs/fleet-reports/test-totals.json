@@ -1,0 +1,159 @@
+{
+  "selected_files": 332,
+  "comparison": {
+    "pending_files": 0,
+    "new_failed_cases": 0,
+    "remaining_old_failed_cases": 42,
+    "new_failures": [],
+    "old_failures": [
+      [
+        "tests/agent/test_same_account_pool_eager_fallback.py",
+        [
+          "tests/agent/test_same_account_pool_eager_fallback.py::test_account_limit_after_one_rotation_skips_second_rotation",
+          "tests/agent/test_same_account_pool_eager_fallback.py::test_distinct_entries_rotation_succeeds_no_fallback",
+          "tests/agent/test_same_account_pool_eager_fallback.py::test_same_account_pool_both_429_falls_back_without_long_sleep"
+        ]
+      ],
+      [
+        "tests/cron/test_cron_live_bot_delivery.py",
+        [
+          "tests/cron/test_cron_live_bot_delivery.py::test_live_delivery_retry_keeps_receipt_across_owner_loss"
+        ]
+      ],
+      [
+        "tests/gateway/test_api_server_active_work_drain.py",
+        [
+          "tests/gateway/test_api_server_active_work_drain.py::TestShutdownSettleWindow::test_settle_window_waits_for_interrupted_api_work"
+        ]
+      ],
+      [
+        "tests/gateway/test_kanban_lifecycle_fence_semantics_20260924.py",
+        [
+          "tests/gateway/test_kanban_lifecycle_fence_semantics_20260924.py::test_fenced_claim_reported_in_claim_errors_and_tick_continues",
+          "tests/gateway/test_kanban_lifecycle_fence_semantics_20260924.py::test_full_tick_matrix_protected_and_local_advance_together",
+          "tests/gateway/test_kanban_lifecycle_fence_semantics_20260924.py::test_manual_reclaim_refused_by_fence_sends_no_signal",
+          "tests/gateway/test_kanban_lifecycle_fence_semantics_20260924.py::test_max_runtime_survivor_keeps_its_claim",
+          "tests/gateway/test_kanban_lifecycle_fence_semantics_20260924.py::test_reclaim_sibling_isolates_fenced_row_without_signal[detect_crashed_workers]",
+          "tests/gateway/test_kanban_lifecycle_fence_semantics_20260924.py::test_reclaim_sibling_isolates_fenced_row_without_signal[detect_stale_running]",
+          "tests/gateway/test_kanban_lifecycle_fence_semantics_20260924.py::test_reclaim_sibling_isolates_fenced_row_without_signal[enforce_max_runtime]",
+          "tests/gateway/test_kanban_lifecycle_fence_semantics_20260924.py::test_reclaim_sibling_isolates_fenced_row_without_signal[release_stale_claims]",
+          "tests/gateway/test_kanban_lifecycle_fence_semantics_20260924.py::test_remote_protected_row_skipped_eligible_local_sibling_advances",
+          "tests/gateway/test_kanban_lifecycle_fence_semantics_20260924.py::test_stale_fence_refusal_reported_in_tick_result",
+          "tests/gateway/test_kanban_lifecycle_fence_semantics_20260924.py::test_stale_reclaim_same_host_revoked_generation_sends_zero_signals",
+          "tests/gateway/test_kanban_lifecycle_fence_semantics_20260924.py::test_stale_reclaim_whole_tick_matrix_with_remote_and_revoked_siblings",
+          "tests/gateway/test_kanban_lifecycle_fence_semantics_20260924.py::test_unrelated_check_constraint_with_fence_text_is_not_swallowed",
+          "tests/gateway/test_kanban_lifecycle_fence_semantics_20260924.py::test_whole_tick_isolates_fenced_rows_in_every_reclaim_sibling"
+        ]
+      ],
+      [
+        "tests/gateway/test_peer_dm_into_open_bot_chat.py",
+        [
+          "tests/gateway/test_peer_dm_into_open_bot_chat.py::test_a_peer_run_into_an_open_bot_chat_is_driven_by_its_owners_receipt[owner-fails-with-reason]",
+          "tests/gateway/test_peer_dm_into_open_bot_chat.py::test_a_peer_run_into_an_open_bot_chat_is_driven_by_its_owners_receipt[owner-settles]",
+          "tests/gateway/test_peer_dm_into_open_bot_chat.py::test_a_peer_run_into_an_open_bot_chat_is_driven_by_its_owners_receipt[stopped-while-queued]",
+          "tests/gateway/test_peer_dm_into_open_bot_chat.py::test_a_peer_turn_into_an_open_bot_chat_is_answered_by_its_live_owner[open-bot-chat-answers]",
+          "tests/gateway/test_peer_dm_into_open_bot_chat.py::test_a_peer_turn_into_an_open_bot_chat_is_answered_by_its_live_owner[open-bot-chat-still-running]",
+          "tests/gateway/test_peer_dm_into_open_bot_chat.py::test_a_streamed_peer_turn_into_an_open_bot_chat_is_answered_by_its_live_owner[open-bot-chat-answers]",
+          "tests/gateway/test_peer_dm_into_open_bot_chat.py::test_a_streamed_peer_turn_into_an_open_bot_chat_is_answered_by_its_live_owner[open-bot-chat-still-running]"
+        ]
+      ],
+      [
+        "tests/gateway/test_slack_bang_help.py",
+        [
+          "tests/gateway/test_slack_bang_help.py::test_import_path_is_worktree"
+        ]
+      ],
+      [
+        "tests/hermes_cli/test_kanban_recompute_ready_ownership_20260924.py",
+        [
+          "tests/hermes_cli/test_kanban_recompute_ready_ownership_20260924.py::test_blank_current_node_is_unknown_owner_not_local[",
+          "tests/hermes_cli/test_kanban_recompute_ready_ownership_20260924.py::test_blank_current_node_is_unknown_owner_not_local[]",
+          "tests/hermes_cli/test_kanban_recompute_ready_ownership_20260924.py::test_foreign_blocked_task_no_parents_not_promoted",
+          "tests/hermes_cli/test_kanban_recompute_ready_ownership_20260924.py::test_foreign_todo_task_satisfied_parents_not_promoted",
+          "tests/hermes_cli/test_kanban_recompute_ready_ownership_20260924.py::test_local_dependency_blocked_all_parents_done_promotes",
+          "tests/hermes_cli/test_kanban_recompute_ready_ownership_20260924.py::test_local_manual_blocked_no_parents_stays_blocked",
+          "tests/hermes_cli/test_kanban_recompute_ready_ownership_20260924.py::test_reformatted_trigger_still_parses_node",
+          "tests/hermes_cli/test_kanban_recompute_ready_ownership_20260924.py::test_unparseable_trigger_fails_closed_and_warns"
+        ]
+      ],
+      [
+        "tests/hermes_cli/test_quiet_turn_author.py",
+        [
+          "tests/hermes_cli/test_quiet_turn_author.py::test_quiet_one_shot_consumes_the_variable_before_the_turn",
+          "tests/hermes_cli/test_quiet_turn_author.py::test_quiet_one_shot_passes_turn_author_from_env",
+          "tests/hermes_cli/test_quiet_turn_author.py::test_quiet_one_shot_resumes_nested_notify_on_this_session_not_parent"
+        ]
+      ],
+      [
+        "tests/hermes_cli/test_stream_json.py",
+        [
+          "tests/hermes_cli/test_stream_json.py::test_chat_stream_json_implies_quiet_and_closes_with_result[_ok_turn-True-0-types0]"
+        ]
+      ],
+      [
+        "tests/tools/test_a2a_reason_roundtrip.py",
+        [
+          "tests/tools/test_a2a_reason_roundtrip.py::test_waiter_healthy_reply_has_no_reason_tag"
+        ]
+      ],
+      [
+        "tests/tools/test_local_env_blocklist.py",
+        [
+          "tests/tools/test_local_env_blocklist.py::TestNativeEnvironmentContracts::test_execute_code_composition_strips_inherited_hermes_entries[False]",
+          "tests/tools/test_local_env_blocklist.py::TestNativeEnvironmentContracts::test_execute_code_composition_strips_inherited_hermes_entries[True]"
+        ]
+      ]
+    ]
+  },
+  "baseline": {
+    "file_statuses": {
+      "PASS": 282,
+      "ABSENT_AT_BASE": 34,
+      "FAIL": 16
+    },
+    "case_totals": {
+      "passed": 3893,
+      "failed": 66,
+      "skipped": 33
+    }
+  },
+  "union": {
+    "file_statuses": {
+      "PASS": 315,
+      "ABSENT_AT_BASE": 6,
+      "FAIL": 11
+    },
+    "case_totals": {
+      "passed": 4268,
+      "failed": 42,
+      "skipped": 62
+    }
+  },
+  "absent_union_files": [
+    "tests/agent/test_cron_token_budget.py",
+    "tests/cron/test_job_budgets.py",
+    "tests/hermes_cli/test_kanban_decompose_block_loop_hold.py",
+    "tests/hermes_cli/test_kanban_fleet_mirror_protection_l1.py",
+    "tests/hermes_cli/test_kanban_worker_hard_exit.py",
+    "tests/hermes_cli/test_redtape_parent_and_promote.py"
+  ],
+  "unexpected_absent_union_files": [],
+  "timeouts_or_no_summary": [],
+  "remaining_old_failure_files": [
+    "tests/agent/test_same_account_pool_eager_fallback.py",
+    "tests/cron/test_cron_live_bot_delivery.py",
+    "tests/gateway/test_api_server_active_work_drain.py",
+    "tests/gateway/test_kanban_lifecycle_fence_semantics_20260924.py",
+    "tests/gateway/test_peer_dm_into_open_bot_chat.py",
+    "tests/gateway/test_slack_bang_help.py",
+    "tests/hermes_cli/test_kanban_recompute_ready_ownership_20260924.py",
+    "tests/hermes_cli/test_quiet_turn_author.py",
+    "tests/hermes_cli/test_stream_json.py",
+    "tests/tools/test_a2a_reason_roundtrip.py",
+    "tests/tools/test_local_env_blocklist.py"
+  ],
+  "changed_old_failure_text": [
+    "tests/tools/test_a2a_reason_roundtrip.py"
+  ],
+  "new_failures_gate": "PASS"
+}

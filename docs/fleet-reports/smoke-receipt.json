@@ -1,0 +1,168 @@
+{
+  "started": "2026-10-06 18:28:39 CDT",
+  "sha": "9cfe45f5623b9f305a923ef4eecd5d195e07375c",
+  "home": "/home/max/Scratchpad/5-Oct-2026_Mass-Review/work/hermes-union/scratch-home",
+  "port": 8799,
+  "provider": "local deterministic HTTP fixture",
+  "steps": [
+    {
+      "step": "home-check",
+      "at": "2026-10-06 18:28:39 CDT",
+      "effective_home": "/home/max/Scratchpad/5-Oct-2026_Mass-Review/work/hermes-union/scratch-home"
+    },
+    {
+      "step": "gateway-start",
+      "at": "2026-10-06 18:28:39 CDT",
+      "command": [
+        "/usr/bin/env",
+        "HERMES_HOME=/home/max/Scratchpad/5-Oct-2026_Mass-Review/work/hermes-union/scratch-home",
+        "/home/max/Scratchpad/5-Oct-2026_Mass-Review/work/hermes-union/u2-test-env/bin/python",
+        "-m",
+        "hermes_cli.main",
+        "gateway",
+        "run",
+        "--no-supervise",
+        "-v"
+      ],
+      "scratch_pid": 9
+    },
+    {
+      "step": "health",
+      "at": "2026-10-06 18:28:46 CDT",
+      "status": "PASS",
+      "http_status": 200,
+      "response": {
+        "status": "ok",
+        "platform": "hermes-agent",
+        "version": "0.21.5"
+      }
+    },
+    {
+      "step": "running",
+      "at": "2026-10-06 18:28:46 CDT",
+      "status": "PASS",
+      "gateway_state": "running",
+      "code_sha": "9cfe45f5623b9f305a923ef4eecd5d195e07375c"
+    },
+    {
+      "step": "cli",
+      "at": "2026-10-06 18:28:52 CDT",
+      "command": [
+        "/usr/bin/env",
+        "HERMES_HOME=/home/max/Scratchpad/5-Oct-2026_Mass-Review/work/hermes-union/scratch-home",
+        "/home/max/Scratchpad/5-Oct-2026_Mass-Review/work/hermes-union/u2-test-env/bin/python",
+        "-m",
+        "hermes_cli.main",
+        "kanban",
+        "create",
+        "U2 scratch smoke card",
+        "--assignee",
+        "default",
+        "--workspace",
+        "scratch"
+      ],
+      "rc": 0,
+      "stdout": "Created t_78208acc  (ready, assignee=default)\n",
+      "stderr": "\n\u26a0  Gateway is running but kanban.dispatch_in_gateway=false in config.yaml \u2014 the task will sit in 'ready' until you flip it back on and restart the gateway, OR run the legacy standalone daemon (`hermes kanban daemon --force`).\n"
+    },
+    {
+      "step": "cli",
+      "at": "2026-10-06 18:29:00 CDT",
+      "command": [
+        "/usr/bin/env",
+        "HERMES_HOME=/home/max/Scratchpad/5-Oct-2026_Mass-Review/work/hermes-union/scratch-home",
+        "/home/max/Scratchpad/5-Oct-2026_Mass-Review/work/hermes-union/u2-test-env/bin/python",
+        "-m",
+        "hermes_cli.main",
+        "kanban",
+        "dispatch",
+        "--dry-run",
+        "--max",
+        "1",
+        "--json"
+      ],
+      "rc": 0,
+      "stdout": "{\n  \"reclaimed\": 0,\n  \"crashed\": [],\n  \"timed_out\": [],\n  \"stale\": [],\n  \"auto_blocked\": [],\n  \"promoted\": 0,\n  \"reaped_terminal_workers\": [],\n  \"reclaim_phase\": \"skipped (dry-run)\",\n  \"spawned\": [\n    {\n      \"task_id\": \"t_78208acc\",\n      \"assignee\": \"default\",\n      \"workspace\": \"\"\n    }\n  ],\n  \"skipped_unassigned\": [],\n  \"skipped_placeholder\": [],\n  \"skipped_nonspawnable\": [],\n  \"owner_unavailable\": [],\n  \"skipped_per_profile_capped\": [],\n  \"auto_assigned_default\": [],\n  \"respawn_guarded\": [],\n  \"respawn_guard_lifted\": [],\n  \"rate_limited\": [],\n  \"profile_busy\": [],\n  \"skipped_locked\": false,\n  \"memory_pressure\": null,\n  \"capacity_held\": null,\n  \"reclaim_errors\": [],\n  \"claim_errors\": []\n}\n",
+      "stderr": ""
+    },
+    {
+      "step": "bot-chat-create",
+      "at": "2026-10-06 18:29:01 CDT",
+      "http_status": 201,
+      "session_id": "u2-scratch-bot-chat"
+    },
+    {
+      "step": "bot-chat-send",
+      "at": "2026-10-06 18:29:02 CDT",
+      "status": "PASS",
+      "http_status": 200,
+      "response": {
+        "object": "hermes.session.chat.completion",
+        "session_id": "u2-scratch-bot-chat",
+        "message": {
+          "role": "assistant",
+          "content": "Fleet union scratch Bot Chat answered."
+        },
+        "usage": {
+          "input_tokens": 0,
+          "output_tokens": 0,
+          "total_tokens": 0,
+          "runtime": {
+            "provider": "custom",
+            "model": "smoke-local",
+            "route_source": "global",
+            "requested": {
+              "provider": "",
+              "model": ""
+            }
+          }
+        },
+        "runtime": {
+          "provider": "custom",
+          "model": "smoke-local",
+          "route_source": "global",
+          "requested": {
+            "provider": "",
+            "model": ""
+          }
+        }
+      }
+    }
+  ],
+  "provider_requests": [
+    {
+      "path": "/api/show",
+      "model": null,
+      "stream": false
+    },
+    {
+      "path": "/api/show",
+      "model": null,
+      "stream": false
+    },
+    {
+      "path": "/api/show",
+      "model": null,
+      "stream": false
+    },
+    {
+      "path": "/api/show",
+      "model": null,
+      "stream": false
+    },
+    {
+      "path": "/v1/chat/completions",
+      "model": "smoke-local",
+      "stream": true
+    },
+    {
+      "path": "/v1/chat/completions",
+      "model": "smoke-local",
+      "stream": false
+    }
+  ],
+  "status": "PASS",
+  "scratch_gateway_exit": 1,
+  "finished": "2026-10-06 18:29:03 CDT",
+  "scratch_gateway_stopped": true
+}

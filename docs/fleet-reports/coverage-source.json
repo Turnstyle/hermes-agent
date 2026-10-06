@@ -1,0 +1,6533 @@
+[
+  {
+    "id": "C2-001",
+    "candidate": "9cfe45f5623b9f305a923ef4eecd5d195e07375c",
+    "inherited_sources": [
+      "bf95eb5d3d3b57caea56f7370f00f50df0ba6541"
+    ],
+    "import_commits": [],
+    "files": [
+      {
+        "path": "tests/tools/test_bot_failure_reasons.py",
+        "blob": "2d626ee14069b8ec876dd8eca9ecb0ee690377c9"
+      },
+      {
+        "path": "tests/tools/test_bot_relay.py",
+        "blob": "56ca9858e7914019cb82291bcdc3b29ec1ac5cab"
+      },
+      {
+        "path": "tests/tui_gateway/test_bot_relay_methods.py",
+        "blob": "5a3db0d69889dad66c4ed95956f18ebc06147791"
+      },
+      {
+        "path": "tools/bot_failure_reasons.py",
+        "blob": "54105f6b9d45ae0429456b6674d4992660229146"
+      },
+      {
+        "path": "tools/bot_live_delivery.py",
+        "blob": "b91edc1d6533fa2512cc3b9d0202026af8ff6e38"
+      },
+      {
+        "path": "tools/bot_mode_dm.py",
+        "blob": "0388464ec15e8a9c8b60705240de54d74310d244"
+      },
+      {
+        "path": "tools/bot_relay.py",
+        "blob": "67112e3c77ccb95ef9b4ffe577fb6c94713dea6c"
+      },
+      {
+        "path": "tui_gateway/methods_bot_relay.py",
+        "blob": "a72f2cd80aba0778bd135408e205bb403e68a182"
+      },
+      {
+        "path": "tui_gateway/prompt_turn.py",
+        "blob": "7d31df73dfbb4341c581b657670fde500cf31cfb"
+      },
+      {
+        "path": "tui_gateway/session_notifications.py",
+        "blob": "ce17fd7e48e8436961c909ed36a0fcc32f5968d3"
+      }
+    ],
+    "present": "yes"
+  },
+  {
+    "id": "C2-002",
+    "candidate": "9cfe45f5623b9f305a923ef4eecd5d195e07375c",
+    "inherited_sources": [],
+    "import_commits": [
+      "428df680e7a6851c7afb04f2b61d7528c5598fb1"
+    ],
+    "files": [
+      {
+        "path": "tests/tools/test_bot_mode_dm_runner_dependencies.py",
+        "blob": "193fb46a9c595e7953465224399ff830c3792077"
+      },
+      {
+        "path": "tools/bot_mode_dm.py",
+        "blob": "0388464ec15e8a9c8b60705240de54d74310d244"
+      }
+    ],
+    "present": "yes"
+  },
+  {
+    "id": "C2-003",
+    "candidate": "9cfe45f5623b9f305a923ef4eecd5d195e07375c",
+    "inherited_sources": [
+      "29c9f9b640d2723989cc72d7b3b590b0d1374c95"
+    ],
+    "import_commits": [],
+    "files": [
+      {
+        "path": "plugins/memory/supermemory/README.md",
+        "blob": "d2672aea316dacd4a833f8ffb283b56e31818e8f"
+      },
+      {
+        "path": "plugins/memory/supermemory/__init__.py",
+        "blob": "7cc6185fbe68e175f17a8ec198518dfc09723230"
+      },
+      {
+        "path": "tests/plugins/memory/test_supermemory_guards.py",
+        "blob": "42d363f79de3b9077ebbbd5fd3a939d5cdd65909"
+      }
+    ],
+    "present": "no"
+  },
+  {
+    "id": "C2-004",
+    "candidate": "9cfe45f5623b9f305a923ef4eecd5d195e07375c",
+    "inherited_sources": [
+      "f0861d0589d6a3b780674b16d10d1d9cffca9799"
+    ],
+    "import_commits": [],
+    "files": [
+      {
+        "path": "tests/tools/test_bot_mode_dm.py",
+        "blob": "daa59aff094abf55fe7e9d4fcc72c760d85a8c0b"
+      }
+    ],
+    "present": "yes"
+  },
+  {
+    "id": "C2-005",
+    "candidate": "9cfe45f5623b9f305a923ef4eecd5d195e07375c",
+    "inherited_sources": [
+      "3193c2d1ba80b05e9f4a8ab15d1b9f9018a76a53"
+    ],
+    "import_commits": [],
+    "files": [
+      {
+        "path": "tests/tools/test_bot_mode_dm_busy_queue.py",
+        "blob": "34155e55af0afaed9086bfbf769da0de97ba7689"
+      },
+      {
+        "path": "tools/bot_mode_dm.py",
+        "blob": "0388464ec15e8a9c8b60705240de54d74310d244"
+      },
+      {
+        "path": "tools/fleet_message_drain.py",
+        "blob": "45e46a565c6a9652337186ac33470828208dfc08"
+      }
+    ],
+    "present": "yes"
+  },
+  {
+    "id": "C2-006",
+    "candidate": "9cfe45f5623b9f305a923ef4eecd5d195e07375c",
+    "inherited_sources": [
+      "93ae5fcd9fc361218133554c752a8df342052fde"
+    ],
+    "import_commits": [],
+    "files": [
+      {
+        "path": "hermes_cli/kanban_db.py",
+        "blob": "efb2faacaba7244452e043d237e3924012b9e702"
+      },
+      {
+        "path": "tests/hermes_cli/test_redtape_parent_and_promote.py",
+        "blob": null
+      }
+    ],
+    "present": "no"
+  },
+  {
+    "id": "C2-007",
+    "candidate": "9cfe45f5623b9f305a923ef4eecd5d195e07375c",
+    "inherited_sources": [],
+    "import_commits": [],
+    "files": [
+      {
+        "path": "cron/scheduler.py",
+        "blob": "bab746e7026a95d872e315ebe2ff58e6754b9340"
+      },
+      {
+        "path": "tests/cron/test_preflight_config.py",
+        "blob": "7b72ba8e30d5d53d74ce2ccfc69473a0945e7084"
+      }
+    ],
+    "present": "no"
+  },
+  {
+    "id": "C2-008",
+    "candidate": "9cfe45f5623b9f305a923ef4eecd5d195e07375c",
+    "inherited_sources": [
+      "9542e2f054ba9f917608ed3f449f584a8614a964"
+    ],
+    "import_commits": [],
+    "files": [
+      {
+        "path": "cron/scheduler.py",
+        "blob": "bab746e7026a95d872e315ebe2ff58e6754b9340"
+      },
+      {
+        "path": "tests/cron/test_preflight_config.py",
+        "blob": "7b72ba8e30d5d53d74ce2ccfc69473a0945e7084"
+      }
+    ],
+    "present": "yes"
+  },
+  {
+    "id": "C2-009",
+    "candidate": "9cfe45f5623b9f305a923ef4eecd5d195e07375c",
+    "inherited_sources": [],
+    "import_commits": [],
+    "files": [
+      {
+        "path": "apps/desktop/src/plugins/hermes-bots/relay.test.ts",
+        "blob": "5d01ef8034a44530e7d0efb185789e3d6e6b21e9"
+      },
+      {
+        "path": "apps/desktop/src/plugins/hermes-bots/relay.ts",
+        "blob": "f1eddf0b2869f626d3e3089256b8ce05e288ebb9"
+      },
+      {
+        "path": "apps/shared/src/gateway-contract.generated.ts",
+        "blob": "dd12c2d203420ad599ae60640ca2b4c0e1b54e22"
+      },
+      {
+        "path": "apps/shared/src/gateway-contract.openrpc.json",
+        "blob": "4f04950f1b153722ed542798c5a366d9446e3ff2"
+      },
+      {
+        "path": "cli.py",
+        "blob": "09c47984ef142fc72a3818e4bd37a1617694c5f4"
+      },
+      {
+        "path": "hermes_cli/cli_single_query.py",
+        "blob": "7e3b353f0417381faea5c6f4098a794d48b708a9"
+      },
+      {
+        "path": "tests/hermes_cli/test_quiet_single_query.py",
+        "blob": "7e839ebfbb02055a85fbdfc135ee73a1866d9c6a"
+      },
+      {
+        "path": "tests/tools/test_a2a_reason_roundtrip.py",
+        "blob": "ad368448d29fc4e08aa9b9e705f102474ece7fba"
+      },
+      {
+        "path": "tests/tools/test_bot_failure_reasons.py",
+        "blob": "2d626ee14069b8ec876dd8eca9ecb0ee690377c9"
+      },
+      {
+        "path": "tests/tools/test_bot_relay.py",
+        "blob": "56ca9858e7914019cb82291bcdc3b29ec1ac5cab"
+      },
+      {
+        "path": "tests/tui_gateway/test_bot_relay_methods.py",
+        "blob": "5a3db0d69889dad66c4ed95956f18ebc06147791"
+      },
+      {
+        "path": "tools/bot_failure_reasons.py",
+        "blob": "54105f6b9d45ae0429456b6674d4992660229146"
+      },
+      {
+        "path": "tools/bot_mode_dm.py",
+        "blob": "0388464ec15e8a9c8b60705240de54d74310d244"
+      },
+      {
+        "path": "tools/bot_relay.py",
+        "blob": "67112e3c77ccb95ef9b4ffe577fb6c94713dea6c"
+      },
+      {
+        "path": "tui_gateway/contracts/groups_bot_relay.py",
+        "blob": "e177727be08654af356ad8f0f04e8f4238180cb2"
+      },
+      {
+        "path": "tui_gateway/methods_bot_relay.py",
+        "blob": "a72f2cd80aba0778bd135408e205bb403e68a182"
+      }
+    ],
+    "present": "no"
+  },
+  {
+    "id": "C2-010",
+    "candidate": "9cfe45f5623b9f305a923ef4eecd5d195e07375c",
+    "inherited_sources": [
+      "d6adabd0fbad28ced3f783a03167a08e6625857a"
+    ],
+    "import_commits": [],
+    "files": [
+      {
+        "path": "tests/tools/test_redtape_busy_wording.py",
+        "blob": "a42ab5770548c2899b212fb9b82edf08f2837d45"
+      },
+      {
+        "path": "tools/bot_mode_dm.py",
+        "blob": "0388464ec15e8a9c8b60705240de54d74310d244"
+      },
+      {
+        "path": "tools/bot_relay.py",
+        "blob": "67112e3c77ccb95ef9b4ffe577fb6c94713dea6c"
+      }
+    ],
+    "present": "yes"
+  },
+  {
+    "id": "C2-011",
+    "candidate": "9cfe45f5623b9f305a923ef4eecd5d195e07375c",
+    "inherited_sources": [
+      "02440103642e6475f4f405cfd3f7d98a60e0ce62"
+    ],
+    "import_commits": [],
+    "files": [
+      {
+        "path": "gateway/platforms/api_server.py",
+        "blob": "ad2590cb468522b2a395583b1e337176b6aecd6b"
+      },
+      {
+        "path": "hermes_cli/subcommands/peer.py",
+        "blob": "c01dcbdb9d90c9f79db86148b88993e9ef9101d6"
+      },
+      {
+        "path": "hermes_state_compression.py",
+        "blob": "f0c80530595456ae2f1ab1c8115d571ea393decb"
+      },
+      {
+        "path": "tests/gateway/test_peer_dm_busy_queue.py",
+        "blob": "7636a27e935f97faa67fa34a022593e7fb2a8eb4"
+      },
+      {
+        "path": "tests/gateway/test_peer_dm_into_open_bot_chat.py",
+        "blob": "1069f88c01225d51fdd1606fcd447bead14636d8"
+      },
+      {
+        "path": "tests/hermes_cli/test_peer_cmd.py",
+        "blob": "f0d53916ab0e48bc4468b232ecbbf371d8360e77"
+      },
+      {
+        "path": "tests/hermes_cli/test_peer_dm_reporting.py",
+        "blob": "f130cac998b00a70563babfff2849f35caf9d24e"
+      },
+      {
+        "path": "tests/tools/test_bot_mode_dm.py",
+        "blob": "daa59aff094abf55fe7e9d4fcc72c760d85a8c0b"
+      },
+      {
+        "path": "tools/bot_mode_dm.py",
+        "blob": "0388464ec15e8a9c8b60705240de54d74310d244"
+      }
+    ],
+    "present": "yes"
+  },
+  {
+    "id": "C2-012",
+    "candidate": "9cfe45f5623b9f305a923ef4eecd5d195e07375c",
+    "inherited_sources": [
+      "e6bd66c00f07e3473d1ecce2292a992b9a3fac17"
+    ],
+    "import_commits": [],
+    "files": [
+      {
+        "path": "tools/bot_live_delivery.py",
+        "blob": "b91edc1d6533fa2512cc3b9d0202026af8ff6e38"
+      },
+      {
+        "path": "tools/bot_relay.py",
+        "blob": "67112e3c77ccb95ef9b4ffe577fb6c94713dea6c"
+      }
+    ],
+    "present": "yes"
+  },
+  {
+    "id": "C2-013",
+    "candidate": "9cfe45f5623b9f305a923ef4eecd5d195e07375c",
+    "inherited_sources": [
+      "9fc81826416389c8a67e537f0c9510d5c540b782"
+    ],
+    "import_commits": [],
+    "files": [
+      {
+        "path": "cli.py",
+        "blob": "09c47984ef142fc72a3818e4bd37a1617694c5f4"
+      },
+      {
+        "path": "hermes_cli/cli_single_query.py",
+        "blob": "7e3b353f0417381faea5c6f4098a794d48b708a9"
+      },
+      {
+        "path": "tests/hermes_cli/test_quiet_single_query.py",
+        "blob": "7e839ebfbb02055a85fbdfc135ee73a1866d9c6a"
+      },
+      {
+        "path": "tests/tools/test_bot_mode_dm_busy_queue.py",
+        "blob": "34155e55af0afaed9086bfbf769da0de97ba7689"
+      },
+      {
+        "path": "tests/tools/test_bot_relay.py",
+        "blob": "56ca9858e7914019cb82291bcdc3b29ec1ac5cab"
+      },
+      {
+        "path": "tests/tools/test_bot_turn_lock.py",
+        "blob": "04a39e68a3ec3f29ff773d971d00757a22cd8491"
+      },
+      {
+        "path": "tests/tools/test_fleet_busy_ack_requires_recipient_drain.py",
+        "blob": "98f10fef286a5df14be4fd50eb93213cc655067e"
+      },
+      {
+        "path": "tests/tui_gateway/test_bot_relay_methods.py",
+        "blob": "5a3db0d69889dad66c4ed95956f18ebc06147791"
+      },
+      {
+        "path": "tools/bot_failure_reasons.py",
+        "blob": "54105f6b9d45ae0429456b6674d4992660229146"
+      },
+      {
+        "path": "tools/bot_mode_dm.py",
+        "blob": "0388464ec15e8a9c8b60705240de54d74310d244"
+      },
+      {
+        "path": "tools/bot_relay.py",
+        "blob": "67112e3c77ccb95ef9b4ffe577fb6c94713dea6c"
+      },
+      {
+        "path": "tools/fleet_message_drain.py",
+        "blob": "45e46a565c6a9652337186ac33470828208dfc08"
+      },
+      {
+        "path": "tui_gateway/contracts/groups_bot_relay.py",
+        "blob": "e177727be08654af356ad8f0f04e8f4238180cb2"
+      },
+      {
+        "path": "tui_gateway/methods_bot_relay.py",
+        "blob": "a72f2cd80aba0778bd135408e205bb403e68a182"
+      }
+    ],
+    "present": "yes"
+  },
+  {
+    "id": "C2-014",
+    "candidate": "9cfe45f5623b9f305a923ef4eecd5d195e07375c",
+    "inherited_sources": [
+      "329d2c7fe0ca1b5a6f9b2f83d6cbfa94a5a27a8d"
+    ],
+    "import_commits": [],
+    "files": [
+      {
+        "path": "tests/tools/test_bot_relay.py",
+        "blob": "56ca9858e7914019cb82291bcdc3b29ec1ac5cab"
+      },
+      {
+        "path": "tests/tui_gateway/test_bot_relay_methods.py",
+        "blob": "5a3db0d69889dad66c4ed95956f18ebc06147791"
+      }
+    ],
+    "present": "yes"
+  },
+  {
+    "id": "C2-015",
+    "candidate": "9cfe45f5623b9f305a923ef4eecd5d195e07375c",
+    "inherited_sources": [
+      "c876ad5003181f604d0e565fb37f967b1ef900e4"
+    ],
+    "import_commits": [],
+    "files": [
+      {
+        "path": "tests/tools/test_bot_mode_dm_busy_queue.py",
+        "blob": "34155e55af0afaed9086bfbf769da0de97ba7689"
+      },
+      {
+        "path": "tools/bot_mode_dm.py",
+        "blob": "0388464ec15e8a9c8b60705240de54d74310d244"
+      }
+    ],
+    "present": "yes"
+  },
+  {
+    "id": "C2-016",
+    "candidate": "9cfe45f5623b9f305a923ef4eecd5d195e07375c",
+    "inherited_sources": [
+      "4f2452fe9b94ff5e7e8da6abc78da182668613e1"
+    ],
+    "import_commits": [],
+    "files": [
+      {
+        "path": "tests/tools/test_fleet_message_drain.py",
+        "blob": "f0bf91f5714fcfe16b7e8e10d73255d1e1cf2134"
+      },
+      {
+        "path": "tests/tui_gateway/test_fleet_message_drain_hook.py",
+        "blob": "036b9f71d0fa52118c822be0f8e187fc7fc350a7"
+      },
+      {
+        "path": "tools/fleet_message_drain.py",
+        "blob": "45e46a565c6a9652337186ac33470828208dfc08"
+      },
+      {
+        "path": "tui_gateway/prompt_turn.py",
+        "blob": "7d31df73dfbb4341c581b657670fde500cf31cfb"
+      },
+      {
+        "path": "tui_gateway/session_notifications.py",
+        "blob": "ce17fd7e48e8436961c909ed36a0fcc32f5968d3"
+      }
+    ],
+    "present": "yes"
+  },
+  {
+    "id": "C2-017",
+    "candidate": "9cfe45f5623b9f305a923ef4eecd5d195e07375c",
+    "inherited_sources": [
+      "1b2c6e3eeb8a7b4ef243359288d6d764ff13630c"
+    ],
+    "import_commits": [],
+    "files": [
+      {
+        "path": "hermes_cli/cli_single_query.py",
+        "blob": "7e3b353f0417381faea5c6f4098a794d48b708a9"
+      },
+      {
+        "path": "tests/hermes_cli/test_quiet_single_query.py",
+        "blob": "7e839ebfbb02055a85fbdfc135ee73a1866d9c6a"
+      },
+      {
+        "path": "tests/tools/test_bot_mode_dm_busy_queue.py",
+        "blob": "34155e55af0afaed9086bfbf769da0de97ba7689"
+      },
+      {
+        "path": "tests/tools/test_fleet_message_drain.py",
+        "blob": "f0bf91f5714fcfe16b7e8e10d73255d1e1cf2134"
+      },
+      {
+        "path": "tests/tui_gateway/test_bot_relay_methods.py",
+        "blob": "5a3db0d69889dad66c4ed95956f18ebc06147791"
+      },
+      {
+        "path": "tools/bot_mode_dm.py",
+        "blob": "0388464ec15e8a9c8b60705240de54d74310d244"
+      },
+      {
+        "path": "tools/fleet_message_drain.py",
+        "blob": "45e46a565c6a9652337186ac33470828208dfc08"
+      },
+      {
+        "path": "tui_gateway/methods_bot_relay.py",
+        "blob": "a72f2cd80aba0778bd135408e205bb403e68a182"
+      },
+      {
+        "path": "tui_gateway/prompt_turn.py",
+        "blob": "7d31df73dfbb4341c581b657670fde500cf31cfb"
+      }
+    ],
+    "present": "yes"
+  },
+  {
+    "id": "C2-018",
+    "candidate": "9cfe45f5623b9f305a923ef4eecd5d195e07375c",
+    "inherited_sources": [],
+    "import_commits": [
+      "83ab392facd47e5b586e560d75bb0c14eeabaf22"
+    ],
+    "files": [
+      {
+        "path": "gateway/platforms/api_server.py",
+        "blob": "ad2590cb468522b2a395583b1e337176b6aecd6b"
+      },
+      {
+        "path": "tests/gateway/test_api_server_active_work_drain.py",
+        "blob": "4714995bde10baca3bba03fb11415623e3af23f9"
+      }
+    ],
+    "present": "yes"
+  },
+  {
+    "id": "C2-019",
+    "candidate": "9cfe45f5623b9f305a923ef4eecd5d195e07375c",
+    "inherited_sources": [
+      "9de3e21f67b7d378d6d19a6220cb283c97a2e4ab"
+    ],
+    "import_commits": [],
+    "files": [
+      {
+        "path": "gateway/platforms/api_server.py",
+        "blob": "ad2590cb468522b2a395583b1e337176b6aecd6b"
+      },
+      {
+        "path": "tests/gateway/test_api_server_profile_alias.py",
+        "blob": "a1493ea3216347ed6ee452d60cb40e159a1bb116"
+      }
+    ],
+    "present": "yes"
+  },
+  {
+    "id": "C2-020",
+    "candidate": "9cfe45f5623b9f305a923ef4eecd5d195e07375c",
+    "inherited_sources": [
+      "f4bbedcca6b649f1db9ef7d0fff0b91b2762b563"
+    ],
+    "import_commits": [],
+    "files": [
+      {
+        "path": "hermes_cli/cli_single_query.py",
+        "blob": "7e3b353f0417381faea5c6f4098a794d48b708a9"
+      },
+      {
+        "path": "tests/hermes_cli/test_quiet_single_query.py",
+        "blob": "7e839ebfbb02055a85fbdfc135ee73a1866d9c6a"
+      }
+    ],
+    "present": "yes"
+  },
+  {
+    "id": "C2-021",
+    "candidate": "9cfe45f5623b9f305a923ef4eecd5d195e07375c",
+    "inherited_sources": [
+      "1bb7a6719ca7291125647e12a89698a2f1bb4e48"
+    ],
+    "import_commits": [],
+    "files": [
+      {
+        "path": "tests/tools/test_bot_mode_dm_busy_queue.py",
+        "blob": "34155e55af0afaed9086bfbf769da0de97ba7689"
+      },
+      {
+        "path": "tools/bot_mode_dm.py",
+        "blob": "0388464ec15e8a9c8b60705240de54d74310d244"
+      }
+    ],
+    "present": "yes"
+  },
+  {
+    "id": "C2-022",
+    "candidate": "9cfe45f5623b9f305a923ef4eecd5d195e07375c",
+    "inherited_sources": [
+      "21d0fb24c49c4e1c901969eef6009c83255e60d4"
+    ],
+    "import_commits": [],
+    "files": [
+      {
+        "path": "tests/tools/test_fleet_message_drain.py",
+        "blob": "f0bf91f5714fcfe16b7e8e10d73255d1e1cf2134"
+      },
+      {
+        "path": "tests/tui_gateway/test_fleet_message_drain_hook.py",
+        "blob": "036b9f71d0fa52118c822be0f8e187fc7fc350a7"
+      },
+      {
+        "path": "tools/fleet_message_drain.py",
+        "blob": "45e46a565c6a9652337186ac33470828208dfc08"
+      },
+      {
+        "path": "tui_gateway/prompt_turn.py",
+        "blob": "7d31df73dfbb4341c581b657670fde500cf31cfb"
+      },
+      {
+        "path": "tui_gateway/session_notifications.py",
+        "blob": "ce17fd7e48e8436961c909ed36a0fcc32f5968d3"
+      }
+    ],
+    "present": "yes"
+  },
+  {
+    "id": "C2-023",
+    "candidate": "9cfe45f5623b9f305a923ef4eecd5d195e07375c",
+    "inherited_sources": [
+      "cd43f06efa420cebc51cdae5b374b703a185a18e"
+    ],
+    "import_commits": [],
+    "files": [
+      {
+        "path": "tests/tools/test_bot_mode_dm_busy_queue.py",
+        "blob": "34155e55af0afaed9086bfbf769da0de97ba7689"
+      },
+      {
+        "path": "tests/tools/test_bot_turn_lock.py",
+        "blob": "04a39e68a3ec3f29ff773d971d00757a22cd8491"
+      },
+      {
+        "path": "tests/tui_gateway/test_bot_relay_methods.py",
+        "blob": "5a3db0d69889dad66c4ed95956f18ebc06147791"
+      },
+      {
+        "path": "tools/bot_mode_dm.py",
+        "blob": "0388464ec15e8a9c8b60705240de54d74310d244"
+      },
+      {
+        "path": "tools/fleet_message_enqueue.py",
+        "blob": "fc41c28e38268b424474a6ecc8dbe72dbe7a6271"
+      },
+      {
+        "path": "tui_gateway/methods_bot_relay.py",
+        "blob": "a72f2cd80aba0778bd135408e205bb403e68a182"
+      }
+    ],
+    "present": "no"
+  },
+  {
+    "id": "C2-024",
+    "candidate": "9cfe45f5623b9f305a923ef4eecd5d195e07375c",
+    "inherited_sources": [],
+    "import_commits": [
+      "e819f6d0259c1c1381eba64b03abc6513b47b7c5"
+    ],
+    "files": [
+      {
+        "path": "tests/tools/test_bot_mode_dm.py",
+        "blob": "daa59aff094abf55fe7e9d4fcc72c760d85a8c0b"
+      },
+      {
+        "path": "tools/bot_mode_dm.py",
+        "blob": "0388464ec15e8a9c8b60705240de54d74310d244"
+      },
+      {
+        "path": "tools/bot_mode_probe.py",
+        "blob": "d8a415515a56513ae109d28eb9e644902fe6a33c"
+      }
+    ],
+    "present": "yes"
+  },
+  {
+    "id": "C2-025",
+    "candidate": "9cfe45f5623b9f305a923ef4eecd5d195e07375c",
+    "inherited_sources": [
+      "a684cd839daa58882e6e2cbacdf82a21224c1be4"
+    ],
+    "import_commits": [],
+    "files": [
+      {
+        "path": "tests/tools/test_bot_mode_dm_busy_queue.py",
+        "blob": "34155e55af0afaed9086bfbf769da0de97ba7689"
+      },
+      {
+        "path": "tools/bot_mode_dm.py",
+        "blob": "0388464ec15e8a9c8b60705240de54d74310d244"
+      }
+    ],
+    "present": "yes"
+  },
+  {
+    "id": "C2-026",
+    "candidate": "9cfe45f5623b9f305a923ef4eecd5d195e07375c",
+    "inherited_sources": [
+      "7e7c452ac43f8f2337ab8586966bd93ee3ede55b"
+    ],
+    "import_commits": [],
+    "files": [
+      {
+        "path": "apps/desktop/src/plugins/hermes-bots/relay.test.ts",
+        "blob": "5d01ef8034a44530e7d0efb185789e3d6e6b21e9"
+      },
+      {
+        "path": "apps/desktop/src/plugins/hermes-bots/relay.ts",
+        "blob": "f1eddf0b2869f626d3e3089256b8ce05e288ebb9"
+      },
+      {
+        "path": "apps/shared/src/gateway-contract.generated.ts",
+        "blob": "dd12c2d203420ad599ae60640ca2b4c0e1b54e22"
+      },
+      {
+        "path": "apps/shared/src/gateway-contract.openrpc.json",
+        "blob": "4f04950f1b153722ed542798c5a366d9446e3ff2"
+      },
+      {
+        "path": "gateway/platforms/api_server.py",
+        "blob": "ad2590cb468522b2a395583b1e337176b6aecd6b"
+      },
+      {
+        "path": "gateway/run.py",
+        "blob": "4d84d8884473d6a061bd647b9af1b5a8163ae9f1"
+      },
+      {
+        "path": "gateway/shutdown_flush.py",
+        "blob": "cf3484404619571cb8074515d0818b04e6132522"
+      },
+      {
+        "path": "hermes_cli/cli_single_query.py",
+        "blob": "7e3b353f0417381faea5c6f4098a794d48b708a9"
+      },
+      {
+        "path": "tests/gateway/test_gateway_draining_session_chat_recovery.py",
+        "blob": "0f91a144131646b982f411735d3b518ff13b4776"
+      },
+      {
+        "path": "tests/hermes_cli/test_single_query_fleet_turn_end_drain.py",
+        "blob": "bcf3f78b630504c5ed287aa95042c4a979741abf"
+      },
+      {
+        "path": "tests/tools/test_bot_mode_dm_busy_queue.py",
+        "blob": "34155e55af0afaed9086bfbf769da0de97ba7689"
+      },
+      {
+        "path": "tests/tools/test_bot_relay.py",
+        "blob": "56ca9858e7914019cb82291bcdc3b29ec1ac5cab"
+      },
+      {
+        "path": "tests/tools/test_fleet_busy_ack_requires_recipient_drain.py",
+        "blob": "98f10fef286a5df14be4fd50eb93213cc655067e"
+      },
+      {
+        "path": "tests/tools/test_fleet_message_enqueue.py",
+        "blob": "ea4cb021ccdb8a523bb74d5e54be5be9d51ef673"
+      },
+      {
+        "path": "tests/tools/test_fleet_message_expiry_sender_notice.py",
+        "blob": "45d952e88b79d480d062e614ea30efb876db5a10"
+      },
+      {
+        "path": "tests/tui_gateway/test_bot_relay_methods.py",
+        "blob": "5a3db0d69889dad66c4ed95956f18ebc06147791"
+      },
+      {
+        "path": "tools/bot_mode_dm.py",
+        "blob": "0388464ec15e8a9c8b60705240de54d74310d244"
+      },
+      {
+        "path": "tools/bot_relay.py",
+        "blob": "67112e3c77ccb95ef9b4ffe577fb6c94713dea6c"
+      },
+      {
+        "path": "tools/fleet_message_drain.py",
+        "blob": "45e46a565c6a9652337186ac33470828208dfc08"
+      },
+      {
+        "path": "tools/fleet_message_enqueue.py",
+        "blob": "fc41c28e38268b424474a6ecc8dbe72dbe7a6271"
+      },
+      {
+        "path": "tui_gateway/contracts/groups_bot_relay.py",
+        "blob": "e177727be08654af356ad8f0f04e8f4238180cb2"
+      },
+      {
+        "path": "tui_gateway/methods_bot_relay.py",
+        "blob": "a72f2cd80aba0778bd135408e205bb403e68a182"
+      },
+      {
+        "path": "tui_gateway/session_notifications.py",
+        "blob": "ce17fd7e48e8436961c909ed36a0fcc32f5968d3"
+      }
+    ],
+    "present": "yes"
+  },
+  {
+    "id": "C2-027",
+    "candidate": "9cfe45f5623b9f305a923ef4eecd5d195e07375c",
+    "inherited_sources": [
+      "ec43ec072152cc399e08d54ff21f760ad6f80f73"
+    ],
+    "import_commits": [],
+    "files": [
+      {
+        "path": "tests/tools/test_bot_relay.py",
+        "blob": "56ca9858e7914019cb82291bcdc3b29ec1ac5cab"
+      },
+      {
+        "path": "tools/bot_mode_dm.py",
+        "blob": "0388464ec15e8a9c8b60705240de54d74310d244"
+      }
+    ],
+    "present": "yes"
+  },
+  {
+    "id": "C2-028",
+    "candidate": "9cfe45f5623b9f305a923ef4eecd5d195e07375c",
+    "inherited_sources": [
+      "afa03fd0d093ed38b9142007629f1d9c47df5da4"
+    ],
+    "import_commits": [],
+    "files": [
+      {
+        "path": "tui_gateway/methods_bot_relay.py",
+        "blob": "a72f2cd80aba0778bd135408e205bb403e68a182"
+      }
+    ],
+    "present": "yes"
+  },
+  {
+    "id": "C2-029",
+    "candidate": "9cfe45f5623b9f305a923ef4eecd5d195e07375c",
+    "inherited_sources": [
+      "dde3f1c0e5fe277745b8d5a5ede9894b1480c24a"
+    ],
+    "import_commits": [],
+    "files": [
+      {
+        "path": "apps/desktop/src/plugins/hermes-bots/relay.ts",
+        "blob": "f1eddf0b2869f626d3e3089256b8ce05e288ebb9"
+      },
+      {
+        "path": "hermes_cli/config_defaults.py",
+        "blob": "1953886618af565a85995739c5fb561e0e83f52d"
+      },
+      {
+        "path": "tools/bot_relay.py",
+        "blob": "67112e3c77ccb95ef9b4ffe577fb6c94713dea6c"
+      }
+    ],
+    "present": "yes"
+  },
+  {
+    "id": "C2-030",
+    "candidate": "9cfe45f5623b9f305a923ef4eecd5d195e07375c",
+    "inherited_sources": [
+      "8c242092604a26446f3975af7a8f46737a77993f"
+    ],
+    "import_commits": [],
+    "files": [
+      {
+        "path": "hermes_cli/cli_single_query.py",
+        "blob": "7e3b353f0417381faea5c6f4098a794d48b708a9"
+      },
+      {
+        "path": "hermes_cli/quiet_single_query.py",
+        "blob": "f2a9f8390046b0decc53ffabc61a0fc233b0d7ca"
+      },
+      {
+        "path": "tests/hermes_cli/test_quiet_notify_delivery.py",
+        "blob": "8d20adc08fcede3b28695f5c957ff74dd5a20ff3"
+      },
+      {
+        "path": "tests/tools/test_bot_relay.py",
+        "blob": "56ca9858e7914019cb82291bcdc3b29ec1ac5cab"
+      },
+      {
+        "path": "tools/async_delegation.py",
+        "blob": "b81cc593864e96c2e7ab14373165aa6469e1c6c8"
+      },
+      {
+        "path": "tools/bot_mode_dm.py",
+        "blob": "0388464ec15e8a9c8b60705240de54d74310d244"
+      },
+      {
+        "path": "tools/bot_relay.py",
+        "blob": "67112e3c77ccb95ef9b4ffe577fb6c94713dea6c"
+      }
+    ],
+    "present": "yes"
+  },
+  {
+    "id": "C2-031",
+    "candidate": "9cfe45f5623b9f305a923ef4eecd5d195e07375c",
+    "inherited_sources": [
+      "3905f25cd924f8453e9c6c952eb498194e7ab986"
+    ],
+    "import_commits": [],
+    "files": [
+      {
+        "path": "tui_gateway/methods_bot_relay.py",
+        "blob": "a72f2cd80aba0778bd135408e205bb403e68a182"
+      }
+    ],
+    "present": "yes"
+  },
+  {
+    "id": "C2-032",
+    "candidate": "9cfe45f5623b9f305a923ef4eecd5d195e07375c",
+    "inherited_sources": [
+      "9cf591f48b4d577e5568e0afa05e517ca4cce06a"
+    ],
+    "import_commits": [],
+    "files": [
+      {
+        "path": "apps/desktop/src/plugins/hermes-bots/relay.ts",
+        "blob": "f1eddf0b2869f626d3e3089256b8ce05e288ebb9"
+      },
+      {
+        "path": "tools/bot_relay.py",
+        "blob": "67112e3c77ccb95ef9b4ffe577fb6c94713dea6c"
+      },
+      {
+        "path": "tui_gateway/methods_bot_relay.py",
+        "blob": "a72f2cd80aba0778bd135408e205bb403e68a182"
+      }
+    ],
+    "present": "yes"
+  },
+  {
+    "id": "C2-033",
+    "candidate": "9cfe45f5623b9f305a923ef4eecd5d195e07375c",
+    "inherited_sources": [
+      "858e80f7722dfd9c6214b59ceafe8d86109c5e58"
+    ],
+    "import_commits": [],
+    "files": [
+      {
+        "path": "tools/bot_mode_dm.py",
+        "blob": "0388464ec15e8a9c8b60705240de54d74310d244"
+      },
+      {
+        "path": "tui_gateway/methods_bot_relay.py",
+        "blob": "a72f2cd80aba0778bd135408e205bb403e68a182"
+      }
+    ],
+    "present": "yes"
+  },
+  {
+    "id": "C2-034",
+    "candidate": "9cfe45f5623b9f305a923ef4eecd5d195e07375c",
+    "inherited_sources": [
+      "8671a939c09234ec01b9bf9eaf701a6a43b829fe"
+    ],
+    "import_commits": [],
+    "files": [
+      {
+        "path": "tests/tools/test_bot_live_owner_delivery.py",
+        "blob": "e403611bdd875fe262da1c477bcea51b08c0c122"
+      },
+      {
+        "path": "tests/tools/test_bot_relay.py",
+        "blob": "56ca9858e7914019cb82291bcdc3b29ec1ac5cab"
+      },
+      {
+        "path": "tools/bot_live_delivery.py",
+        "blob": "b91edc1d6533fa2512cc3b9d0202026af8ff6e38"
+      },
+      {
+        "path": "tools/bot_relay.py",
+        "blob": "67112e3c77ccb95ef9b4ffe577fb6c94713dea6c"
+      }
+    ],
+    "present": "yes"
+  },
+  {
+    "id": "C2-035",
+    "candidate": "9cfe45f5623b9f305a923ef4eecd5d195e07375c",
+    "inherited_sources": [
+      "9286994dbead82040e739c7be4c9e5880589faba"
+    ],
+    "import_commits": [],
+    "files": [
+      {
+        "path": "tools/bot_failure_reasons.py",
+        "blob": "54105f6b9d45ae0429456b6674d4992660229146"
+      },
+      {
+        "path": "tui_gateway/methods_bot_relay.py",
+        "blob": "a72f2cd80aba0778bd135408e205bb403e68a182"
+      }
+    ],
+    "present": "yes"
+  },
+  {
+    "id": "C2-036",
+    "candidate": "9cfe45f5623b9f305a923ef4eecd5d195e07375c",
+    "inherited_sources": [
+      "8525ef5efb28a066a1773879df836402694b90b5"
+    ],
+    "import_commits": [],
+    "files": [
+      {
+        "path": "apps/desktop/src/plugins/hermes-bots/relay.ts",
+        "blob": "f1eddf0b2869f626d3e3089256b8ce05e288ebb9"
+      }
+    ],
+    "present": "yes"
+  },
+  {
+    "id": "C2-037",
+    "candidate": "9cfe45f5623b9f305a923ef4eecd5d195e07375c",
+    "inherited_sources": [
+      "6c3307ceda3d4d519e5fb139553c6714db6907af"
+    ],
+    "import_commits": [],
+    "files": [
+      {
+        "path": "tests/tools/test_fleet_message_enqueue.py",
+        "blob": "ea4cb021ccdb8a523bb74d5e54be5be9d51ef673"
+      },
+      {
+        "path": "tools/fleet_message_enqueue.py",
+        "blob": "fc41c28e38268b424474a6ecc8dbe72dbe7a6271"
+      }
+    ],
+    "present": "yes"
+  },
+  {
+    "id": "C2-038",
+    "candidate": "9cfe45f5623b9f305a923ef4eecd5d195e07375c",
+    "inherited_sources": [],
+    "import_commits": [
+      "7876ca0c14c86734b2d35292f97e20f7607372a8"
+    ],
+    "files": [
+      {
+        "path": "apps/desktop/src/app/session/hooks/use-prompt-actions/index.test.tsx",
+        "blob": "0503c4fb4670697711e1affb396c866b7b7b4155"
+      },
+      {
+        "path": "apps/desktop/src/app/session/hooks/use-prompt-actions/submit.ts",
+        "blob": "5241bba932d9b64b13788a40754e149dec64c65c"
+      },
+      {
+        "path": "apps/desktop/src/i18n/ar.ts",
+        "blob": "767af04d0641d0a9a09a2776abbe51e89b1e5e14"
+      },
+      {
+        "path": "apps/desktop/src/i18n/de.ts",
+        "blob": "257ee1f7a954a0dc6140bb353b099a98f075e4c9"
+      },
+      {
+        "path": "apps/desktop/src/i18n/en.ts",
+        "blob": "a2aa7a9a9a4c579d6b737d0cad5e0e17350fd5d1"
+      },
+      {
+        "path": "apps/desktop/src/i18n/es.ts",
+        "blob": "1f0e08b65f3b5e8b35c52756f2b4efcd709d4928"
+      },
+      {
+        "path": "apps/desktop/src/i18n/fr.ts",
+        "blob": "ad347f346889ddda9a43881acf8779bd1fa9bc9b"
+      },
+      {
+        "path": "apps/desktop/src/i18n/ja.ts",
+        "blob": "f8c4755b14c24a829ef026250a1c4a1dee1ec052"
+      },
+      {
+        "path": "apps/desktop/src/i18n/ru.ts",
+        "blob": "7e5fa1a706fe706df873d2b8f1cbd8c7a34426d1"
+      },
+      {
+        "path": "apps/desktop/src/i18n/types.ts",
+        "blob": "3cf0e5ed48c658f2c9a941ae3c938d5967549563"
+      },
+      {
+        "path": "apps/desktop/src/i18n/zh-hant.ts",
+        "blob": "c1fb48be20079fcc0019dbfd9c909f413e88d40c"
+      },
+      {
+        "path": "apps/desktop/src/i18n/zh.ts",
+        "blob": "7b34b184d3086cb1406b8f2643c4b645264b2a55"
+      },
+      {
+        "path": "apps/desktop/src/plugins/hermes-bots/relay.test.ts",
+        "blob": "5d01ef8034a44530e7d0efb185789e3d6e6b21e9"
+      },
+      {
+        "path": "apps/desktop/src/plugins/hermes-bots/relay.ts",
+        "blob": "f1eddf0b2869f626d3e3089256b8ce05e288ebb9"
+      },
+      {
+        "path": "apps/shared/src/gateway-contract.generated.ts",
+        "blob": "dd12c2d203420ad599ae60640ca2b4c0e1b54e22"
+      },
+      {
+        "path": "apps/shared/src/gateway-contract.openrpc.json",
+        "blob": "4f04950f1b153722ed542798c5a366d9446e3ff2"
+      },
+      {
+        "path": "cli.py",
+        "blob": "09c47984ef142fc72a3818e4bd37a1617694c5f4"
+      },
+      {
+        "path": "gateway/platforms/api_server.py",
+        "blob": "ad2590cb468522b2a395583b1e337176b6aecd6b"
+      },
+      {
+        "path": "gateway/run.py",
+        "blob": "4d84d8884473d6a061bd647b9af1b5a8163ae9f1"
+      },
+      {
+        "path": "gateway/run_busy.py",
+        "blob": "66ae8d9cbe6d05ccd724cb7c30ecf9051540dc71"
+      },
+      {
+        "path": "gateway/shutdown_flush.py",
+        "blob": "cf3484404619571cb8074515d0818b04e6132522"
+      },
+      {
+        "path": "hermes_cli/cli_single_query.py",
+        "blob": "7e3b353f0417381faea5c6f4098a794d48b708a9"
+      },
+      {
+        "path": "hermes_cli/gateway_launchd.py",
+        "blob": "f51ee81de987b4fef8126eeec8a95130db55eecd"
+      },
+      {
+        "path": "hermes_cli/gateway_service_unit.py",
+        "blob": null
+      },
+      {
+        "path": "hermes_cli/quiet_single_query.py",
+        "blob": "f2a9f8390046b0decc53ffabc61a0fc233b0d7ca"
+      },
+      {
+        "path": "tests/gateway/test_api_server_active_work_drain.py",
+        "blob": "4714995bde10baca3bba03fb11415623e3af23f9"
+      },
+      {
+        "path": "tests/gateway/test_gateway_draining_session_chat_recovery.py",
+        "blob": "0f91a144131646b982f411735d3b518ff13b4776"
+      },
+      {
+        "path": "tests/gateway/test_subagent_protection.py",
+        "blob": "f7e2218f46d5317b04cbfc725c556cc1ed2ba5dc"
+      },
+      {
+        "path": "tests/hermes_cli/test_gateway_service.py",
+        "blob": "a299e14f2d5fe2d260a5c3d3385afa57ba853322"
+      },
+      {
+        "path": "tests/hermes_cli/test_gateway_service_paths.py",
+        "blob": "e692a3ad35bce5c87a93acaa237548bc74176ff3"
+      },
+      {
+        "path": "tests/hermes_cli/test_launchd_launcher_preflight.py",
+        "blob": "8b559ddf0ba88cc0d38e8a91247aa7ece207d6c5"
+      },
+      {
+        "path": "tests/hermes_cli/test_launchd_refresh_reporting.py",
+        "blob": "60ce289483c877e23051f0509c4b012ad2f4da77"
+      },
+      {
+        "path": "tests/hermes_cli/test_quiet_notify_delivery.py",
+        "blob": "8d20adc08fcede3b28695f5c957ff74dd5a20ff3"
+      },
+      {
+        "path": "tests/hermes_cli/test_quiet_single_query.py",
+        "blob": "7e839ebfbb02055a85fbdfc135ee73a1866d9c6a"
+      },
+      {
+        "path": "tests/hermes_cli/test_quiet_turn_author.py",
+        "blob": "a1aa7dc36592b5fd6ef82e41663da561fccbc767"
+      },
+      {
+        "path": "tests/hermes_cli/test_single_query_fleet_turn_end_drain.py",
+        "blob": "bcf3f78b630504c5ed287aa95042c4a979741abf"
+      },
+      {
+        "path": "tests/hermes_cli/test_stream_json.py",
+        "blob": "e7c8df5d1114cc8dd7a2907e382085db4e16acd4"
+      },
+      {
+        "path": "tests/tools/test_a2a_reason_roundtrip.py",
+        "blob": "ad368448d29fc4e08aa9b9e705f102474ece7fba"
+      },
+      {
+        "path": "tests/tools/test_bot_failure_reasons.py",
+        "blob": "2d626ee14069b8ec876dd8eca9ecb0ee690377c9"
+      },
+      {
+        "path": "tests/tools/test_bot_mode_dm_busy_queue.py",
+        "blob": "34155e55af0afaed9086bfbf769da0de97ba7689"
+      },
+      {
+        "path": "tests/tools/test_bot_relay.py",
+        "blob": "56ca9858e7914019cb82291bcdc3b29ec1ac5cab"
+      },
+      {
+        "path": "tests/tools/test_bot_turn_lock.py",
+        "blob": "04a39e68a3ec3f29ff773d971d00757a22cd8491"
+      },
+      {
+        "path": "tests/tools/test_fleet_busy_ack_requires_recipient_drain.py",
+        "blob": "98f10fef286a5df14be4fd50eb93213cc655067e"
+      },
+      {
+        "path": "tests/tools/test_fleet_message_drain.py",
+        "blob": "f0bf91f5714fcfe16b7e8e10d73255d1e1cf2134"
+      },
+      {
+        "path": "tests/tools/test_fleet_message_enqueue.py",
+        "blob": "ea4cb021ccdb8a523bb74d5e54be5be9d51ef673"
+      },
+      {
+        "path": "tests/tools/test_fleet_message_expiry_sender_notice.py",
+        "blob": "45d952e88b79d480d062e614ea30efb876db5a10"
+      },
+      {
+        "path": "tests/tui_gateway/test_bot_relay_methods.py",
+        "blob": "5a3db0d69889dad66c4ed95956f18ebc06147791"
+      },
+      {
+        "path": "tests/tui_gateway/test_fleet_message_drain_hook.py",
+        "blob": "036b9f71d0fa52118c822be0f8e187fc7fc350a7"
+      },
+      {
+        "path": "tests/tui_gateway/test_queue_behind_cli_lease.py",
+        "blob": "097dbdc713f7b3d70e86198dce5d5c5c283f6d47"
+      },
+      {
+        "path": "tools/async_delegation.py",
+        "blob": "b81cc593864e96c2e7ab14373165aa6469e1c6c8"
+      },
+      {
+        "path": "tools/bot_failure_reasons.py",
+        "blob": "54105f6b9d45ae0429456b6674d4992660229146"
+      },
+      {
+        "path": "tools/bot_mode_dm.py",
+        "blob": "0388464ec15e8a9c8b60705240de54d74310d244"
+      },
+      {
+        "path": "tools/bot_relay.py",
+        "blob": "67112e3c77ccb95ef9b4ffe577fb6c94713dea6c"
+      },
+      {
+        "path": "tools/fleet_message_drain.py",
+        "blob": "45e46a565c6a9652337186ac33470828208dfc08"
+      },
+      {
+        "path": "tools/fleet_message_enqueue.py",
+        "blob": "fc41c28e38268b424474a6ecc8dbe72dbe7a6271"
+      },
+      {
+        "path": "tui_gateway/contracts/groups_bot_relay.py",
+        "blob": "e177727be08654af356ad8f0f04e8f4238180cb2"
+      },
+      {
+        "path": "tui_gateway/contracts/prompt_voice.py",
+        "blob": "133f651e77873277cff1e40656f423f281929c64"
+      },
+      {
+        "path": "tui_gateway/methods_bot_relay.py",
+        "blob": "a72f2cd80aba0778bd135408e205bb403e68a182"
+      },
+      {
+        "path": "tui_gateway/methods_prompt.py",
+        "blob": "5ff29a6e451b55439f3522bd29bc5886f2b3e86f"
+      },
+      {
+        "path": "tui_gateway/prompt_turn.py",
+        "blob": "7d31df73dfbb4341c581b657670fde500cf31cfb"
+      },
+      {
+        "path": "tui_gateway/session_auto_continue.py",
+        "blob": "1493d3338fc81a7a890e2ccbb910662b7248ca6a"
+      },
+      {
+        "path": "tui_gateway/session_notifications.py",
+        "blob": "ce17fd7e48e8436961c909ed36a0fcc32f5968d3"
+      }
+    ],
+    "present": "yes"
+  },
+  {
+    "id": "C2-039",
+    "candidate": "9cfe45f5623b9f305a923ef4eecd5d195e07375c",
+    "inherited_sources": [
+      "e86ed628bd3b5a4e46c2bcdd769549878c9e507b"
+    ],
+    "import_commits": [],
+    "files": [
+      {
+        "path": "tests/tools/test_bot_mode_dm_busy_queue.py",
+        "blob": "34155e55af0afaed9086bfbf769da0de97ba7689"
+      }
+    ],
+    "present": "yes"
+  },
+  {
+    "id": "C2-040",
+    "candidate": "9cfe45f5623b9f305a923ef4eecd5d195e07375c",
+    "inherited_sources": [
+      "e31b0aa02af9476c38d562a8774615d1be332741"
+    ],
+    "import_commits": [],
+    "files": [
+      {
+        "path": "tests/tools/test_bot_mode_dm_busy_queue.py",
+        "blob": "34155e55af0afaed9086bfbf769da0de97ba7689"
+      }
+    ],
+    "present": "yes"
+  },
+  {
+    "id": "C2-041",
+    "candidate": "9cfe45f5623b9f305a923ef4eecd5d195e07375c",
+    "inherited_sources": [
+      "85868a3bad5214fd39803327e85b9dfebaa65928"
+    ],
+    "import_commits": [],
+    "files": [
+      {
+        "path": "apps/desktop/src/plugins/hermes-bots/relay.test.ts",
+        "blob": "5d01ef8034a44530e7d0efb185789e3d6e6b21e9"
+      },
+      {
+        "path": "tests/tools/test_bot_relay.py",
+        "blob": "56ca9858e7914019cb82291bcdc3b29ec1ac5cab"
+      },
+      {
+        "path": "tests/tui_gateway/test_bot_relay_methods.py",
+        "blob": "5a3db0d69889dad66c4ed95956f18ebc06147791"
+      }
+    ],
+    "present": "yes"
+  },
+  {
+    "id": "C2-042",
+    "candidate": "9cfe45f5623b9f305a923ef4eecd5d195e07375c",
+    "inherited_sources": [
+      "34f8f5441a9025d557b4ce9fbc1f54a61789dbf4"
+    ],
+    "import_commits": [],
+    "files": [
+      {
+        "path": "tests/tui_gateway/test_bot_relay_methods.py",
+        "blob": "5a3db0d69889dad66c4ed95956f18ebc06147791"
+      }
+    ],
+    "present": "yes"
+  },
+  {
+    "id": "C2-043",
+    "candidate": "9cfe45f5623b9f305a923ef4eecd5d195e07375c",
+    "inherited_sources": [
+      "4ee394a65618d9bfdd7b44cc7f7bc35287e82f7c"
+    ],
+    "import_commits": [],
+    "files": [
+      {
+        "path": "tests/tui_gateway/test_bot_relay_methods.py",
+        "blob": "5a3db0d69889dad66c4ed95956f18ebc06147791"
+      }
+    ],
+    "present": "yes"
+  },
+  {
+    "id": "C2-044",
+    "candidate": "9cfe45f5623b9f305a923ef4eecd5d195e07375c",
+    "inherited_sources": [
+      "f75cd107118d40dce505e7a771713fc99227eaca"
+    ],
+    "import_commits": [],
+    "files": [
+      {
+        "path": "tests/tui_gateway/test_bot_relay_methods.py",
+        "blob": "5a3db0d69889dad66c4ed95956f18ebc06147791"
+      }
+    ],
+    "present": "yes"
+  },
+  {
+    "id": "C2-045",
+    "candidate": "9cfe45f5623b9f305a923ef4eecd5d195e07375c",
+    "inherited_sources": [
+      "652ae861db00f675d859d011d23005894449cad7"
+    ],
+    "import_commits": [],
+    "files": [
+      {
+        "path": "tests/tui_gateway/test_bot_relay_methods.py",
+        "blob": "5a3db0d69889dad66c4ed95956f18ebc06147791"
+      }
+    ],
+    "present": "yes"
+  },
+  {
+    "id": "C2-046",
+    "candidate": "9cfe45f5623b9f305a923ef4eecd5d195e07375c",
+    "inherited_sources": [
+      "f712807094fcbe5bc866602ba89a25f5bbf14d39"
+    ],
+    "import_commits": [],
+    "files": [
+      {
+        "path": "apps/desktop/src/plugins/hermes-bots/relay.test.ts",
+        "blob": "5d01ef8034a44530e7d0efb185789e3d6e6b21e9"
+      }
+    ],
+    "present": "yes"
+  },
+  {
+    "id": "C2-047",
+    "candidate": "9cfe45f5623b9f305a923ef4eecd5d195e07375c",
+    "inherited_sources": [
+      "509896f94f6f09d3893ad133a2f240df0404dd77"
+    ],
+    "import_commits": [],
+    "files": [
+      {
+        "path": "gateway/platforms/api_server.py",
+        "blob": "ad2590cb468522b2a395583b1e337176b6aecd6b"
+      },
+      {
+        "path": "gateway/platforms/api_server_peer_ping.py",
+        "blob": "5d0116e560062454d5b66c7a3abe8f50495716d2"
+      },
+      {
+        "path": "hermes_cli/subcommands/peer.py",
+        "blob": "c01dcbdb9d90c9f79db86148b88993e9ef9101d6"
+      },
+      {
+        "path": "tests/gateway/test_peer_ping_receipt.py",
+        "blob": "6921310228c3141c4990b91cb2380178e4eb3444"
+      },
+      {
+        "path": "tests/hermes_cli/test_peer_ping.py",
+        "blob": "4f3ae287f5ffb02794ca8a147e064f25fcd18b37"
+      }
+    ],
+    "present": "yes"
+  },
+  {
+    "id": "C2-048",
+    "candidate": "9cfe45f5623b9f305a923ef4eecd5d195e07375c",
+    "inherited_sources": [
+      "8a643f5766b2f3efd49a073b6993365702d3e909"
+    ],
+    "import_commits": [],
+    "files": [
+      {
+        "path": "gateway/platforms/api_server.py",
+        "blob": "ad2590cb468522b2a395583b1e337176b6aecd6b"
+      },
+      {
+        "path": "gateway/platforms/api_server_runs.py",
+        "blob": "dbaea0bfabd78d9ba4ca726c003d832c84e88a0a"
+      },
+      {
+        "path": "tests/gateway/test_api_server.py",
+        "blob": "bec21c8f5357f8ba9820aa3aed91c92d1c47908c"
+      },
+      {
+        "path": "tests/gateway/test_api_server_runs.py",
+        "blob": "83f67a191f0ee60b7b075ca79ae9c12aa79647ce"
+      },
+      {
+        "path": "tests/tools/test_fleet_message_drain.py",
+        "blob": "f0bf91f5714fcfe16b7e8e10d73255d1e1cf2134"
+      },
+      {
+        "path": "tests/tools/test_fleet_message_expiry_sender_notice.py",
+        "blob": "45d952e88b79d480d062e614ea30efb876db5a10"
+      },
+      {
+        "path": "tests/tui_gateway/test_fleet_message_drain_hook.py",
+        "blob": "036b9f71d0fa52118c822be0f8e187fc7fc350a7"
+      },
+      {
+        "path": "tools/fleet_message_drain.py",
+        "blob": "45e46a565c6a9652337186ac33470828208dfc08"
+      },
+      {
+        "path": "tui_gateway/prompt_turn.py",
+        "blob": "7d31df73dfbb4341c581b657670fde500cf31cfb"
+      },
+      {
+        "path": "tui_gateway/session_notifications.py",
+        "blob": "ce17fd7e48e8436961c909ed36a0fcc32f5968d3"
+      }
+    ],
+    "present": "yes"
+  },
+  {
+    "id": "C2-049",
+    "candidate": "9cfe45f5623b9f305a923ef4eecd5d195e07375c",
+    "inherited_sources": [],
+    "import_commits": [
+      "7678d46b047d1afc88fc3b5d2f86105d917f7f9a"
+    ],
+    "files": [
+      {
+        "path": "tests/tools/test_fleet_message_drain.py",
+        "blob": "f0bf91f5714fcfe16b7e8e10d73255d1e1cf2134"
+      },
+      {
+        "path": "tests/tools/test_fleet_message_expiry_sender_notice.py",
+        "blob": "45d952e88b79d480d062e614ea30efb876db5a10"
+      },
+      {
+        "path": "tools/fleet_message_drain.py",
+        "blob": "45e46a565c6a9652337186ac33470828208dfc08"
+      }
+    ],
+    "present": "yes"
+  },
+  {
+    "id": "C2-050",
+    "candidate": "9cfe45f5623b9f305a923ef4eecd5d195e07375c",
+    "inherited_sources": [],
+    "import_commits": [],
+    "files": [
+      {
+        "path": "gateway/hosted_rooms.py",
+        "blob": "36f03ba2aee8d2203c6db0d50a596a52fae142cd"
+      },
+      {
+        "path": "gateway/platforms/api_server_run_idempotency.py",
+        "blob": "0820896aa9926743f034857a87f4b7dd40362d8e"
+      },
+      {
+        "path": "gateway/platforms/api_server_runs.py",
+        "blob": "dbaea0bfabd78d9ba4ca726c003d832c84e88a0a"
+      },
+      {
+        "path": "tests/tui_gateway/test_hosted_room_peer_http.py",
+        "blob": "0ae5bb63d812e59aec66118a21df152b8cc8450b"
+      },
+      {
+        "path": "tui_gateway/hosted_room_peer_http.py",
+        "blob": "416b7262260f959edab0798e27ecfde6556c90cf"
+      }
+    ],
+    "present": "no"
+  },
+  {
+    "id": "C2-051",
+    "candidate": "9cfe45f5623b9f305a923ef4eecd5d195e07375c",
+    "inherited_sources": [],
+    "import_commits": [
+      "a3e996f62d4ca5dd4a8713290bf3d1dd12e9f742"
+    ],
+    "files": [
+      {
+        "path": "agent/chat_completion_helpers.py",
+        "blob": "7ec80a2a242d03ab23ba1f7a83bc38db70664225"
+      },
+      {
+        "path": "hermes_platform/resolver/known_dirs.py",
+        "blob": "785a8a0025bba6c3270511dc690d1c373038da59"
+      },
+      {
+        "path": "tests/agent/test_stream_rate_limit_logging.py",
+        "blob": "14d0fd7f827e087bc55323a23dd6e850a2887b89"
+      },
+      {
+        "path": "tests/tools/test_fleet_message_drain.py",
+        "blob": "f0bf91f5714fcfe16b7e8e10d73255d1e1cf2134"
+      },
+      {
+        "path": "tools/bot_mode_dm.py",
+        "blob": "0388464ec15e8a9c8b60705240de54d74310d244"
+      },
+      {
+        "path": "tools/fleet_message_drain.py",
+        "blob": "45e46a565c6a9652337186ac33470828208dfc08"
+      }
+    ],
+    "present": "yes"
+  },
+  {
+    "id": "C2-052",
+    "candidate": "9cfe45f5623b9f305a923ef4eecd5d195e07375c",
+    "inherited_sources": [
+      "a5baa290b17d1feb1677e902a9c437d5059ec648"
+    ],
+    "import_commits": [],
+    "files": [
+      {
+        "path": "tests/gateway/test_api_server.py",
+        "blob": "bec21c8f5357f8ba9820aa3aed91c92d1c47908c"
+      },
+      {
+        "path": "tests/tools/test_fleet_message_drain.py",
+        "blob": "f0bf91f5714fcfe16b7e8e10d73255d1e1cf2134"
+      },
+      {
+        "path": "tests/tools/test_fleet_message_drain_surface_gate.py",
+        "blob": "8cbd213f5b49b5da424878554bab70b595ba3510"
+      },
+      {
+        "path": "tools/fleet_message_drain.py",
+        "blob": "45e46a565c6a9652337186ac33470828208dfc08"
+      }
+    ],
+    "present": "yes"
+  },
+  {
+    "id": "C2-053",
+    "candidate": "9cfe45f5623b9f305a923ef4eecd5d195e07375c",
+    "inherited_sources": [],
+    "import_commits": [],
+    "files": [
+      {
+        "path": "agent/system_prompt.py",
+        "blob": "52c9de8b732b99fcea76ef8a1fcae69e5f76fe42"
+      },
+      {
+        "path": "tests/gateway/test_api_server.py",
+        "blob": "bec21c8f5357f8ba9820aa3aed91c92d1c47908c"
+      },
+      {
+        "path": "tests/tools/test_bot_mode_dm_surfaces.py",
+        "blob": "173526d1418bac35211abcb341cc3ca18563f21b"
+      },
+      {
+        "path": "tests/tools/test_fleet_message_drain.py",
+        "blob": "f0bf91f5714fcfe16b7e8e10d73255d1e1cf2134"
+      },
+      {
+        "path": "tests/tools/test_fleet_message_drain_surface_gate.py",
+        "blob": "8cbd213f5b49b5da424878554bab70b595ba3510"
+      },
+      {
+        "path": "tools/bot_mode_dm.py",
+        "blob": "0388464ec15e8a9c8b60705240de54d74310d244"
+      },
+      {
+        "path": "tools/fleet_message_drain.py",
+        "blob": "45e46a565c6a9652337186ac33470828208dfc08"
+      }
+    ],
+    "present": "yes"
+  },
+  {
+    "id": "C2-054",
+    "candidate": "9cfe45f5623b9f305a923ef4eecd5d195e07375c",
+    "inherited_sources": [
+      "a2115a587602f3fd96549fb9c7146fb867656c34"
+    ],
+    "import_commits": [],
+    "files": [
+      {
+        "path": "hermes_cli/commands_platforms.py",
+        "blob": "0106625d17b19a618317571c51bf9e396756d236"
+      },
+      {
+        "path": "plugins/platforms/slack/adapter.py",
+        "blob": "19d92f1ba2e5a0a7f6b05b55fa6860555653784f"
+      },
+      {
+        "path": "tests/gateway/test_slack_slash_aliases.py",
+        "blob": "e4df164736be3454b110c8a08952332972354a1f"
+      }
+    ],
+    "present": "yes"
+  },
+  {
+    "id": "C2-055",
+    "candidate": "9cfe45f5623b9f305a923ef4eecd5d195e07375c",
+    "inherited_sources": [
+      "2f78a6ddd8ab42adb2e5e6b27d18799cbbb411de"
+    ],
+    "import_commits": [],
+    "files": [
+      {
+        "path": "hermes_cli/commands_platforms.py",
+        "blob": "0106625d17b19a618317571c51bf9e396756d236"
+      },
+      {
+        "path": "hermes_cli/slack_cli.py",
+        "blob": "046f74c7df6a0bed7ceed5570756bb6277751d99"
+      },
+      {
+        "path": "plugins/platforms/slack/adapter.py",
+        "blob": "19d92f1ba2e5a0a7f6b05b55fa6860555653784f"
+      },
+      {
+        "path": "tests/gateway/test_slack_slash_aliases.py",
+        "blob": "e4df164736be3454b110c8a08952332972354a1f"
+      },
+      {
+        "path": "tests/hermes_cli/test_slack_cli.py",
+        "blob": "f05e53da6116289d5747eb924779b1612a8302f1"
+      }
+    ],
+    "present": "yes"
+  },
+  {
+    "id": "C2-056",
+    "candidate": "9cfe45f5623b9f305a923ef4eecd5d195e07375c",
+    "inherited_sources": [
+      "2f931fdb3f4fd29a00e3a48ff724738a1113b0e9"
+    ],
+    "import_commits": [],
+    "files": [
+      {
+        "path": "hermes_cli/commands_platforms.py",
+        "blob": "0106625d17b19a618317571c51bf9e396756d236"
+      },
+      {
+        "path": "hermes_cli/slack_cli.py",
+        "blob": "046f74c7df6a0bed7ceed5570756bb6277751d99"
+      },
+      {
+        "path": "tests/gateway/test_slack_slash_aliases.py",
+        "blob": "e4df164736be3454b110c8a08952332972354a1f"
+      },
+      {
+        "path": "tests/hermes_cli/test_slack_cli.py",
+        "blob": "f05e53da6116289d5747eb924779b1612a8302f1"
+      }
+    ],
+    "present": "yes"
+  },
+  {
+    "id": "C2-057",
+    "candidate": "9cfe45f5623b9f305a923ef4eecd5d195e07375c",
+    "inherited_sources": [
+      "ee7f4de3bc42d6ff7dc62e0beba6f9fe39839057"
+    ],
+    "import_commits": [],
+    "files": [
+      {
+        "path": "hermes_cli/doctor.py",
+        "blob": "b8407ce6e6549cb7ae722c0e162c9d3a515ab0b3"
+      },
+      {
+        "path": "hermes_cli/doctor_state.py",
+        "blob": "85919e2b0189d7e3ca0547b78137f75de7b2da92"
+      },
+      {
+        "path": "tests/hermes_cli/test_doctor_bot_turn_locks.py",
+        "blob": "b74fabfd9f998e7112185f06a5e3d5e9831ecdd3"
+      },
+      {
+        "path": "tests/tools/test_bot_relay_lock_watchdog.py",
+        "blob": "110a085758e220e0b6987ab6aebd1407e3c7f05a"
+      },
+      {
+        "path": "tools/bot_relay.py",
+        "blob": "67112e3c77ccb95ef9b4ffe577fb6c94713dea6c"
+      },
+      {
+        "path": "tools/bot_relay_lock_watchdog.py",
+        "blob": "945c3a7d61f57e314bc760ac0214da14dc3c08a4"
+      }
+    ],
+    "present": "yes"
+  },
+  {
+    "id": "C2-058",
+    "candidate": "9cfe45f5623b9f305a923ef4eecd5d195e07375c",
+    "inherited_sources": [
+      "4c45e21ddfe743b0db19f1dc2d384818de5f8e87"
+    ],
+    "import_commits": [],
+    "files": [
+      {
+        "path": "tests/tools/test_bot_dm_child_deadline.py",
+        "blob": "a60b714f2f2cc8d5d368bd03729a9bf7dc3bbb99"
+      },
+      {
+        "path": "tools/bot_mode_dm.py",
+        "blob": "0388464ec15e8a9c8b60705240de54d74310d244"
+      }
+    ],
+    "present": "yes"
+  },
+  {
+    "id": "C2-059",
+    "candidate": "9cfe45f5623b9f305a923ef4eecd5d195e07375c",
+    "inherited_sources": [
+      "db3773720c5a26987f7f487e8dc6ff1da4d2147e"
+    ],
+    "import_commits": [],
+    "files": [
+      {
+        "path": "hermes_cli/quiet_single_query.py",
+        "blob": "f2a9f8390046b0decc53ffabc61a0fc233b0d7ca"
+      },
+      {
+        "path": "tests/cron/test_bot_chat_timeout_marker.py",
+        "blob": "2229849411f36d4b420add35b56fb3091a036322"
+      },
+      {
+        "path": "tests/tools/test_bot_dm_child_deadline.py",
+        "blob": "a60b714f2f2cc8d5d368bd03729a9bf7dc3bbb99"
+      },
+      {
+        "path": "tests/tui_gateway/test_bot_relay_methods.py",
+        "blob": "5a3db0d69889dad66c4ed95956f18ebc06147791"
+      },
+      {
+        "path": "tools/bot_failure_reasons.py",
+        "blob": "54105f6b9d45ae0429456b6674d4992660229146"
+      },
+      {
+        "path": "tools/bot_mode_dm.py",
+        "blob": "0388464ec15e8a9c8b60705240de54d74310d244"
+      }
+    ],
+    "present": "yes"
+  },
+  {
+    "id": "C2-060",
+    "candidate": "9cfe45f5623b9f305a923ef4eecd5d195e07375c",
+    "inherited_sources": [
+      "569a51d4794b8900e39146cb8275ae81702e1ee9"
+    ],
+    "import_commits": [],
+    "files": [
+      {
+        "path": "hermes_cli/quiet_single_query.py",
+        "blob": "f2a9f8390046b0decc53ffabc61a0fc233b0d7ca"
+      },
+      {
+        "path": "tests/tools/test_bot_turn_linger.py",
+        "blob": "f491a9d1c00382fefb3c25f92209c3579e86767c"
+      },
+      {
+        "path": "tools/bot_mode_dm.py",
+        "blob": "0388464ec15e8a9c8b60705240de54d74310d244"
+      },
+      {
+        "path": "tui_gateway/methods_bot_relay.py",
+        "blob": "a72f2cd80aba0778bd135408e205bb403e68a182"
+      }
+    ],
+    "present": "yes"
+  },
+  {
+    "id": "C2-061",
+    "candidate": "9cfe45f5623b9f305a923ef4eecd5d195e07375c",
+    "inherited_sources": [],
+    "import_commits": [],
+    "files": [
+      {
+        "path": "hermes_cli/cli_shutdown.py",
+        "blob": "617f906e429603639da9332c5b54a6db9d6b29f1"
+      },
+      {
+        "path": "hermes_cli/cli_single_query.py",
+        "blob": "7e3b353f0417381faea5c6f4098a794d48b708a9"
+      },
+      {
+        "path": "hermes_cli/doctor.py",
+        "blob": "b8407ce6e6549cb7ae722c0e162c9d3a515ab0b3"
+      },
+      {
+        "path": "hermes_cli/doctor_state.py",
+        "blob": "85919e2b0189d7e3ca0547b78137f75de7b2da92"
+      },
+      {
+        "path": "hermes_cli/quiet_single_query.py",
+        "blob": "f2a9f8390046b0decc53ffabc61a0fc233b0d7ca"
+      },
+      {
+        "path": "pyproject.toml",
+        "blob": "e62280f3a273f17b44adc86bc6df6fe437ed068d"
+      },
+      {
+        "path": "tests/conftest.py",
+        "blob": "7a8d223124e377bf6ea50bb5b6a206f1330ee4bb"
+      },
+      {
+        "path": "tests/cron/test_bot_chat_timeout_marker.py",
+        "blob": "2229849411f36d4b420add35b56fb3091a036322"
+      },
+      {
+        "path": "tests/hermes_cli/test_doctor_bot_turn_locks.py",
+        "blob": "b74fabfd9f998e7112185f06a5e3d5e9831ecdd3"
+      },
+      {
+        "path": "tests/hermes_cli/test_single_query_hard_exit.py",
+        "blob": "5da1947b721f354eb604f555091f04ae90191f69"
+      },
+      {
+        "path": "tests/hermes_cli/test_single_query_session_finalize.py",
+        "blob": "66b9d261640ccae199c0caa80eb05c1cce55d14b"
+      },
+      {
+        "path": "tests/tools/test_bot_dm_child_deadline.py",
+        "blob": "a60b714f2f2cc8d5d368bd03729a9bf7dc3bbb99"
+      },
+      {
+        "path": "tests/tools/test_bot_relay_lock_watchdog.py",
+        "blob": "110a085758e220e0b6987ab6aebd1407e3c7f05a"
+      },
+      {
+        "path": "tests/tools/test_bot_turn_linger.py",
+        "blob": "f491a9d1c00382fefb3c25f92209c3579e86767c"
+      },
+      {
+        "path": "tests/tools/test_fleet_message_drain.py",
+        "blob": "f0bf91f5714fcfe16b7e8e10d73255d1e1cf2134"
+      },
+      {
+        "path": "tests/tools/test_oneshot_completion_linger.py",
+        "blob": "83187c8b814298b068ecd86cd1568aa6789e1373"
+      },
+      {
+        "path": "tests/tui_gateway/test_bot_relay_methods.py",
+        "blob": "5a3db0d69889dad66c4ed95956f18ebc06147791"
+      },
+      {
+        "path": "tools/bot_failure_reasons.py",
+        "blob": "54105f6b9d45ae0429456b6674d4992660229146"
+      },
+      {
+        "path": "tools/bot_mode_dm.py",
+        "blob": "0388464ec15e8a9c8b60705240de54d74310d244"
+      },
+      {
+        "path": "tools/bot_relay.py",
+        "blob": "67112e3c77ccb95ef9b4ffe577fb6c94713dea6c"
+      },
+      {
+        "path": "tools/bot_relay_lock_watchdog.py",
+        "blob": "945c3a7d61f57e314bc760ac0214da14dc3c08a4"
+      },
+      {
+        "path": "tui_gateway/methods_bot_relay.py",
+        "blob": "a72f2cd80aba0778bd135408e205bb403e68a182"
+      }
+    ],
+    "present": "no"
+  },
+  {
+    "id": "C2-062",
+    "candidate": "9cfe45f5623b9f305a923ef4eecd5d195e07375c",
+    "inherited_sources": [
+      "786a302d54527d7010f12a8aa783efbc58cac034"
+    ],
+    "import_commits": [],
+    "files": [
+      {
+        "path": "gateway/slash_commands.py",
+        "blob": "b0614a3a40badee993d8de2d4291e731f4da7a9b"
+      },
+      {
+        "path": "plugins/platforms/slack/adapter.py",
+        "blob": "19d92f1ba2e5a0a7f6b05b55fa6860555653784f"
+      },
+      {
+        "path": "tests/gateway/test_slack_bang_help.py",
+        "blob": "690c88e4dfc907d062c3c1ec303d1f9be97de43c"
+      }
+    ],
+    "present": "yes"
+  },
+  {
+    "id": "C2-063",
+    "candidate": "9cfe45f5623b9f305a923ef4eecd5d195e07375c",
+    "inherited_sources": [
+      "72f08947d221d9673c732f572a567001ce9b027f"
+    ],
+    "import_commits": [],
+    "files": [
+      {
+        "path": "docs/slack-bang-help-artifact.md",
+        "blob": "0f068c00302dbc0989a51d2c09b895255004754c"
+      },
+      {
+        "path": "gateway/slash_commands.py",
+        "blob": "b0614a3a40badee993d8de2d4291e731f4da7a9b"
+      },
+      {
+        "path": "gateway/slash_commands_slack_help.py",
+        "blob": "8da677f94f20a28ba635b9c120cbe7b93937bea7"
+      },
+      {
+        "path": "plugins/platforms/slack/adapter.py",
+        "blob": "19d92f1ba2e5a0a7f6b05b55fa6860555653784f"
+      },
+      {
+        "path": "tests/gateway/test_slack_bang_help.py",
+        "blob": "690c88e4dfc907d062c3c1ec303d1f9be97de43c"
+      }
+    ],
+    "present": "yes"
+  },
+  {
+    "id": "C2-064",
+    "candidate": "9cfe45f5623b9f305a923ef4eecd5d195e07375c",
+    "inherited_sources": [],
+    "import_commits": [],
+    "files": [
+      {
+        "path": "agent/conversation_loop.py",
+        "blob": "635f9a14d75387aa9d1e4dabf8c3841cf84cfa5c"
+      },
+      {
+        "path": "agent/turn_finalizer.py",
+        "blob": "bba38764dfe8614138efff9a0292bbf8d24addc8"
+      },
+      {
+        "path": "agent/turn_preflight_gate.py",
+        "blob": "514038fb55fe8878c8cd1a0c1ad5ce72288b894e"
+      },
+      {
+        "path": "agent/turn_usage.py",
+        "blob": "b97159839b8d63475a4e5120c33da26dce44dd2f"
+      },
+      {
+        "path": "cron/scheduler.py",
+        "blob": "bab746e7026a95d872e315ebe2ff58e6754b9340"
+      },
+      {
+        "path": "tests/agent/test_cron_token_budget.py",
+        "blob": null
+      },
+      {
+        "path": "tests/agent/test_turn_finalizer_iteration_limit_exit.py",
+        "blob": "abc0a11d2e3b0fdf1d4e63a04a7ece47158a60f0"
+      },
+      {
+        "path": "tests/cron/test_job_budgets.py",
+        "blob": null
+      },
+      {
+        "path": "website/docs/user-guide/features/cron.md",
+        "blob": "c49316ace4729fff9ef1e0be0c2398ab94e54977"
+      }
+    ],
+    "present": "no"
+  },
+  {
+    "id": "C2-065",
+    "candidate": "9cfe45f5623b9f305a923ef4eecd5d195e07375c",
+    "inherited_sources": [],
+    "import_commits": [],
+    "files": [
+      {
+        "path": "agent/turn_truncation.py",
+        "blob": "61c44e56fc12e81e7641ec51a3c58bc2feb45a29"
+      },
+      {
+        "path": "tests/agent/test_codex_reasoning_only_streak.py",
+        "blob": "78c1429d170a1dae57f71f708987858a34fa0cf6"
+      }
+    ],
+    "present": "no"
+  },
+  {
+    "id": "C2-066",
+    "candidate": "9cfe45f5623b9f305a923ef4eecd5d195e07375c",
+    "inherited_sources": [
+      "c17c830223b3c66e76845ddbce74d0ea7766ac61"
+    ],
+    "import_commits": [],
+    "files": [
+      {
+        "path": "cron/scheduler.py",
+        "blob": "bab746e7026a95d872e315ebe2ff58e6754b9340"
+      },
+      {
+        "path": "tests/cron/test_preflight_config.py",
+        "blob": "7b72ba8e30d5d53d74ce2ccfc69473a0945e7084"
+      }
+    ],
+    "present": "yes"
+  },
+  {
+    "id": "C2-067",
+    "candidate": "9cfe45f5623b9f305a923ef4eecd5d195e07375c",
+    "inherited_sources": [],
+    "import_commits": [],
+    "files": [
+      {
+        "path": "cron/scheduler.py",
+        "blob": "bab746e7026a95d872e315ebe2ff58e6754b9340"
+      },
+      {
+        "path": "tests/cron/test_preflight_config.py",
+        "blob": "7b72ba8e30d5d53d74ce2ccfc69473a0945e7084"
+      }
+    ],
+    "present": "no"
+  },
+  {
+    "id": "C2-068",
+    "candidate": "9cfe45f5623b9f305a923ef4eecd5d195e07375c",
+    "inherited_sources": [],
+    "import_commits": [
+      "a4c3e43fa400d569d4fa3c7c4d3f8aaa6d69a8ee",
+      "bf0bb184da125a6099a75c90418d4aeb4a72b1ec"
+    ],
+    "files": [
+      {
+        "path": "apps/desktop/src/app/chat/transcript-backfill.test.ts",
+        "blob": "0229522eec324a3be71ec00ef8ee672a1322e6f6"
+      },
+      {
+        "path": "apps/desktop/src/lib/stale-transcript-guard.ts",
+        "blob": "ec65236898d3155cab43d953d0261d92552ef64e"
+      }
+    ],
+    "present": "yes"
+  },
+  {
+    "id": "C2-069",
+    "candidate": "9cfe45f5623b9f305a923ef4eecd5d195e07375c",
+    "inherited_sources": [],
+    "import_commits": [],
+    "files": [
+      {
+        "path": "apps/desktop/src/app/contrib/hooks/use-session-tile-delegate.test.ts",
+        "blob": "95d802ee27cf562cf5dcfe5a8905da55cab7370e"
+      },
+      {
+        "path": "apps/desktop/src/app/contrib/hooks/use-session-tile-delegate.ts",
+        "blob": "4a619493fefdf8ea0ce641ec887cfbcd281a1046"
+      },
+      {
+        "path": "apps/desktop/src/app/session/hooks/use-prompt-actions/index.test.tsx",
+        "blob": "0503c4fb4670697711e1affb396c866b7b7b4155"
+      },
+      {
+        "path": "apps/desktop/src/app/session/hooks/use-prompt-actions/submit.ts",
+        "blob": "5241bba932d9b64b13788a40754e149dec64c65c"
+      },
+      {
+        "path": "apps/desktop/src/i18n/ar.ts",
+        "blob": "767af04d0641d0a9a09a2776abbe51e89b1e5e14"
+      },
+      {
+        "path": "apps/desktop/src/i18n/de.ts",
+        "blob": "257ee1f7a954a0dc6140bb353b099a98f075e4c9"
+      },
+      {
+        "path": "apps/desktop/src/i18n/en.ts",
+        "blob": "a2aa7a9a9a4c579d6b737d0cad5e0e17350fd5d1"
+      },
+      {
+        "path": "apps/desktop/src/i18n/es.ts",
+        "blob": "1f0e08b65f3b5e8b35c52756f2b4efcd709d4928"
+      },
+      {
+        "path": "apps/desktop/src/i18n/fr.ts",
+        "blob": "ad347f346889ddda9a43881acf8779bd1fa9bc9b"
+      },
+      {
+        "path": "apps/desktop/src/i18n/ja.ts",
+        "blob": "f8c4755b14c24a829ef026250a1c4a1dee1ec052"
+      },
+      {
+        "path": "apps/desktop/src/i18n/ru.ts",
+        "blob": "7e5fa1a706fe706df873d2b8f1cbd8c7a34426d1"
+      },
+      {
+        "path": "apps/desktop/src/i18n/types.ts",
+        "blob": "3cf0e5ed48c658f2c9a941ae3c938d5967549563"
+      },
+      {
+        "path": "apps/desktop/src/i18n/zh-hant.ts",
+        "blob": "c1fb48be20079fcc0019dbfd9c909f413e88d40c"
+      },
+      {
+        "path": "apps/desktop/src/i18n/zh.ts",
+        "blob": "7b34b184d3086cb1406b8f2643c4b645264b2a55"
+      }
+    ],
+    "present": "no"
+  },
+  {
+    "id": "C2-070",
+    "candidate": "9cfe45f5623b9f305a923ef4eecd5d195e07375c",
+    "inherited_sources": [],
+    "import_commits": [
+      "4e92a0d70b120a6acdbaa8dba1ade10168012b27",
+      "bf0bb184da125a6099a75c90418d4aeb4a72b1ec"
+    ],
+    "files": [
+      {
+        "path": "apps/desktop/src/app/session/hooks/use-prompt-actions/index.test.tsx",
+        "blob": "0503c4fb4670697711e1affb396c866b7b7b4155"
+      },
+      {
+        "path": "apps/desktop/src/app/session/hooks/use-prompt-actions/submit.ts",
+        "blob": "5241bba932d9b64b13788a40754e149dec64c65c"
+      },
+      {
+        "path": "apps/desktop/src/i18n/ar.ts",
+        "blob": "767af04d0641d0a9a09a2776abbe51e89b1e5e14"
+      },
+      {
+        "path": "apps/desktop/src/i18n/de.ts",
+        "blob": "257ee1f7a954a0dc6140bb353b099a98f075e4c9"
+      },
+      {
+        "path": "apps/desktop/src/i18n/en.ts",
+        "blob": "a2aa7a9a9a4c579d6b737d0cad5e0e17350fd5d1"
+      },
+      {
+        "path": "apps/desktop/src/i18n/es.ts",
+        "blob": "1f0e08b65f3b5e8b35c52756f2b4efcd709d4928"
+      },
+      {
+        "path": "apps/desktop/src/i18n/fr.ts",
+        "blob": "ad347f346889ddda9a43881acf8779bd1fa9bc9b"
+      },
+      {
+        "path": "apps/desktop/src/i18n/ja.ts",
+        "blob": "f8c4755b14c24a829ef026250a1c4a1dee1ec052"
+      },
+      {
+        "path": "apps/desktop/src/i18n/ru.ts",
+        "blob": "7e5fa1a706fe706df873d2b8f1cbd8c7a34426d1"
+      },
+      {
+        "path": "apps/desktop/src/i18n/types.ts",
+        "blob": "3cf0e5ed48c658f2c9a941ae3c938d5967549563"
+      },
+      {
+        "path": "apps/desktop/src/i18n/zh-hant.ts",
+        "blob": "c1fb48be20079fcc0019dbfd9c909f413e88d40c"
+      },
+      {
+        "path": "apps/desktop/src/i18n/zh.ts",
+        "blob": "7b34b184d3086cb1406b8f2643c4b645264b2a55"
+      },
+      {
+        "path": "apps/shared/src/gateway-contract.generated.ts",
+        "blob": "dd12c2d203420ad599ae60640ca2b4c0e1b54e22"
+      },
+      {
+        "path": "tests/tui_gateway/test_queue_behind_cli_lease.py",
+        "blob": "097dbdc713f7b3d70e86198dce5d5c5c283f6d47"
+      },
+      {
+        "path": "tui_gateway/methods_prompt.py",
+        "blob": "5ff29a6e451b55439f3522bd29bc5886f2b3e86f"
+      },
+      {
+        "path": "tui_gateway/session_auto_continue.py",
+        "blob": "1493d3338fc81a7a890e2ccbb910662b7248ca6a"
+      }
+    ],
+    "present": "yes"
+  },
+  {
+    "id": "C2-071",
+    "candidate": "9cfe45f5623b9f305a923ef4eecd5d195e07375c",
+    "inherited_sources": [
+      "f39122b56ea75cba1e9d357f6b9b9d10037cdca2"
+    ],
+    "import_commits": [],
+    "files": [
+      {
+        "path": "README.md",
+        "blob": "cd4d3a1d4721a784781a3eb7602318ce7e320532"
+      },
+      {
+        "path": "agent/client_lifecycle.py",
+        "blob": "65eecba109d436ab4ce1448825ede75c23039184"
+      },
+      {
+        "path": "gateway/run_shutdown.py",
+        "blob": "8e85aa9b81726ec098e4a8f300a5e4cf2da48500"
+      },
+      {
+        "path": "hermes_cli/config_defaults.py",
+        "blob": "1953886618af565a85995739c5fb561e0e83f52d"
+      },
+      {
+        "path": "hermes_cli/oneshot.py",
+        "blob": "f234a4a1df93d1232455ef002f1d0e8ec51041e7"
+      },
+      {
+        "path": "tests/gateway/test_gateway_shutdown.py",
+        "blob": "f747edb05ec7da9bbd3e8ee9dc61ec9271fabf20"
+      },
+      {
+        "path": "tests/gateway/test_shutdown_kill_off_loop.py",
+        "blob": "4265b4284a1b9d16c4eac660845d1af44ca90285"
+      },
+      {
+        "path": "tests/gateway/test_shutdown_process_survival.py",
+        "blob": "f87ebda121ba75d071e5a2802dd8c0073438929b"
+      },
+      {
+        "path": "tests/hermes_cli/test_oneshot_survival.py",
+        "blob": "95e77781ca073e229290a4a283f4ebc505d2fb25"
+      },
+      {
+        "path": "tests/tui_gateway/test_slash_stop_scope.py",
+        "blob": "08c5496204998bb54d6fd4a4e649e7a6c3ec40d9"
+      },
+      {
+        "path": "tui_gateway/methods_slash.py",
+        "blob": "f2662ac875b25ddda7b98a5c9b3eee186775790e"
+      },
+      {
+        "path": "website/docs/developer-guide/tools-runtime.md",
+        "blob": "884b61c8473f1d603c8cb966d54b5a731c1f5a54"
+      }
+    ],
+    "present": "yes"
+  },
+  {
+    "id": "C2-072",
+    "candidate": "9cfe45f5623b9f305a923ef4eecd5d195e07375c",
+    "inherited_sources": [],
+    "import_commits": [],
+    "files": [
+      {
+        "path": "hermes_cli/kanban_db.py",
+        "blob": "efb2faacaba7244452e043d237e3924012b9e702"
+      },
+      {
+        "path": "hermes_cli/kanban_db_dispatch.py",
+        "blob": "56cf757f1fc58d0e742b1d01d576d09e4d5d4acc"
+      },
+      {
+        "path": "tests/gateway/test_kanban_lifecycle_fence_repro_20260924.py",
+        "blob": "67b5accfabf2af6686181c4fcc527f21623533cf"
+      },
+      {
+        "path": "tests/gateway/test_kanban_lifecycle_fence_semantics_20260924.py",
+        "blob": "a9f2067c4d91ab4d95b33a164d315b8fd06cf919"
+      },
+      {
+        "path": "tests/hermes_cli/test_kanban_recompute_ready_ownership_20260924.py",
+        "blob": "47a8e14720ea30723635f6ac787f18c409dd1cb2"
+      }
+    ],
+    "present": "yes"
+  },
+  {
+    "id": "C2-073",
+    "candidate": "9cfe45f5623b9f305a923ef4eecd5d195e07375c",
+    "inherited_sources": [],
+    "import_commits": [],
+    "files": [
+      {
+        "path": "tests/hermes_cli/test_kanban_recompute_ready_ownership_20260924.py",
+        "blob": "47a8e14720ea30723635f6ac787f18c409dd1cb2"
+      }
+    ],
+    "present": "yes"
+  },
+  {
+    "id": "C2-074",
+    "candidate": "9cfe45f5623b9f305a923ef4eecd5d195e07375c",
+    "inherited_sources": [],
+    "import_commits": [
+      "374e575aae249fd8d30bcd03f6b35e8245c15be8",
+      "22e2dc02cfbd6070c25748cd0665d84dc5233f6d",
+      "6c2668a89ee609c1c56f847f846e0160eb18cdef",
+      "d8ba8c2f92e842769c7035d0a72c27c702119f95",
+      "9c236238a7d1ec558644e176a897b28414b6f4b3"
+    ],
+    "files": [
+      {
+        "path": "cli.py",
+        "blob": "09c47984ef142fc72a3818e4bd37a1617694c5f4"
+      },
+      {
+        "path": "gateway/kanban_watchers_dispatcher.py",
+        "blob": "f75869c9e1a0dda198342372eaa6a3e995669692"
+      },
+      {
+        "path": "gateway/status.py",
+        "blob": "f1eee3914d0fa3e7d5fa8a72128da9e4f25ed813"
+      },
+      {
+        "path": "hermes_cli/cli_single_query.py",
+        "blob": "7e3b353f0417381faea5c6f4098a794d48b708a9"
+      },
+      {
+        "path": "hermes_cli/config_defaults.py",
+        "blob": "1953886618af565a85995739c5fb561e0e83f52d"
+      },
+      {
+        "path": "hermes_cli/kanban.py",
+        "blob": "f75353faa903f8d93f415762235517ef7df8e3e8"
+      },
+      {
+        "path": "hermes_cli/kanban_db.py",
+        "blob": "efb2faacaba7244452e043d237e3924012b9e702"
+      },
+      {
+        "path": "hermes_cli/kanban_db_dispatch.py",
+        "blob": "56cf757f1fc58d0e742b1d01d576d09e4d5d4acc"
+      },
+      {
+        "path": "hermes_cli/kanban_decompose.py",
+        "blob": "38548b8df70c7f1244fb50807e283737186ff37b"
+      },
+      {
+        "path": "hermes_cli/kanban_ops.py",
+        "blob": "fbee70638747137c3126825af56041e6ee22b289"
+      },
+      {
+        "path": "hermes_cli/plugins.py",
+        "blob": "2846673542a987e986937fbdbe8d823891d0d65a"
+      },
+      {
+        "path": "tests/gateway/test_status_proc_stat_parse.py",
+        "blob": "3a68b5fd4f10dc6916af6c23495a7df77196f8a7"
+      },
+      {
+        "path": "tests/hermes_cli/test_kanban_block_comment_order.py",
+        "blob": "f34f0b9b1285cf88d1499ea6ff0420216abe1075"
+      },
+      {
+        "path": "tests/hermes_cli/test_kanban_crash_orphan_group_reap.py",
+        "blob": "b674f4b9bf19eb10b742ee8b3009c7b76cd4ea92"
+      },
+      {
+        "path": "tests/hermes_cli/test_kanban_fleet_mirror_protection_l1.py",
+        "blob": null
+      },
+      {
+        "path": "tests/hermes_cli/test_kanban_host_cap_mirror_rows.py",
+        "blob": "4024225d7d56c35e73b15da9b6f900c9de2ae4e2"
+      },
+      {
+        "path": "tests/hermes_cli/test_kanban_owner_unavailable.py",
+        "blob": "fea92d6c8242dd7d1f4a23643b8282ae391e421a"
+      },
+      {
+        "path": "tests/hermes_cli/test_kanban_worker_process_group_kill.py",
+        "blob": "cc6d5775a0f5c42443a791154cc8396b3fca19df"
+      },
+      {
+        "path": "tests/hermes_cli/test_single_query_exit_contract.py",
+        "blob": "73c1e25a78d928ba92b7c34f262f18f6177799f2"
+      },
+      {
+        "path": "website/docs/user-guide/features/kanban.md",
+        "blob": "0064b862fa09bea5f950bcbe60a5d4a6a6d2fa81"
+      }
+    ],
+    "present": "yes"
+  },
+  {
+    "id": "C2-075",
+    "candidate": "9cfe45f5623b9f305a923ef4eecd5d195e07375c",
+    "inherited_sources": [],
+    "import_commits": [
+      "6805299df2e0d363c64e04954937591fd37c2c2a"
+    ],
+    "files": [
+      {
+        "path": "hermes_cli/kanban_db_dispatch.py",
+        "blob": "56cf757f1fc58d0e742b1d01d576d09e4d5d4acc"
+      },
+      {
+        "path": "tests/hermes_cli/test_kanban_worker_argv_bootstrap.py",
+        "blob": "1c8a2a1eb95d12d4ed59f38e1979faba572dbd99"
+      }
+    ],
+    "present": "yes"
+  },
+  {
+    "id": "C2-076",
+    "candidate": "9cfe45f5623b9f305a923ef4eecd5d195e07375c",
+    "inherited_sources": [],
+    "import_commits": [
+      "e7722f0e5d618b9fe1e6b3f81f70c36fc6d75f46"
+    ],
+    "files": [
+      {
+        "path": "hermes_cli/kanban_db_dispatch.py",
+        "blob": "56cf757f1fc58d0e742b1d01d576d09e4d5d4acc"
+      },
+      {
+        "path": "tests/hermes_cli/test_kanban_spawnable_fleet_ownership.py",
+        "blob": "b9428f803b9f222a6abc73139d9fa1e8c0261aca"
+      }
+    ],
+    "present": "yes"
+  },
+  {
+    "id": "C2-077",
+    "candidate": "9cfe45f5623b9f305a923ef4eecd5d195e07375c",
+    "inherited_sources": [
+      "9bc1e23222869666c31ce56d32e6cddd136f070d"
+    ],
+    "import_commits": [],
+    "files": [
+      {
+        "path": "cli.py",
+        "blob": "09c47984ef142fc72a3818e4bd37a1617694c5f4"
+      },
+      {
+        "path": "hermes_cli/cli_single_query.py",
+        "blob": "7e3b353f0417381faea5c6f4098a794d48b708a9"
+      },
+      {
+        "path": "hermes_cli/kanban_db.py",
+        "blob": "efb2faacaba7244452e043d237e3924012b9e702"
+      },
+      {
+        "path": "hermes_cli/kanban_db_dispatch.py",
+        "blob": "56cf757f1fc58d0e742b1d01d576d09e4d5d4acc"
+      },
+      {
+        "path": "hermes_cli/kanban_ops.py",
+        "blob": "fbee70638747137c3126825af56041e6ee22b289"
+      },
+      {
+        "path": "hermes_cli/plugins.py",
+        "blob": "2846673542a987e986937fbdbe8d823891d0d65a"
+      },
+      {
+        "path": "hermes_cli/quiet_single_query.py",
+        "blob": "f2a9f8390046b0decc53ffabc61a0fc233b0d7ca"
+      },
+      {
+        "path": "tests/hermes_cli/test_kanban_profile_busy.py",
+        "blob": "2d662340cd734d81a1c64141dfdd4d2573d0bbfe"
+      },
+      {
+        "path": "tests/hermes_cli/test_single_query_exit_contract.py",
+        "blob": "73c1e25a78d928ba92b7c34f262f18f6177799f2"
+      }
+    ],
+    "present": "yes"
+  },
+  {
+    "id": "C2-078",
+    "candidate": "9cfe45f5623b9f305a923ef4eecd5d195e07375c",
+    "inherited_sources": [
+      "b18644115701b66138b092844950a20c1def53a0"
+    ],
+    "import_commits": [],
+    "files": [
+      {
+        "path": "hermes_cli/kanban_db_dispatch.py",
+        "blob": "56cf757f1fc58d0e742b1d01d576d09e4d5d4acc"
+      }
+    ],
+    "present": "yes"
+  },
+  {
+    "id": "C2-079",
+    "candidate": "9cfe45f5623b9f305a923ef4eecd5d195e07375c",
+    "inherited_sources": [
+      "2abc4538e1948e63cc3f75b327e6aba750e97fa0"
+    ],
+    "import_commits": [],
+    "files": [
+      {
+        "path": "hermes_cli/kanban_db.py",
+        "blob": "efb2faacaba7244452e043d237e3924012b9e702"
+      },
+      {
+        "path": "hermes_cli/kanban_db_dispatch.py",
+        "blob": "56cf757f1fc58d0e742b1d01d576d09e4d5d4acc"
+      }
+    ],
+    "present": "yes"
+  },
+  {
+    "id": "C2-080",
+    "candidate": "9cfe45f5623b9f305a923ef4eecd5d195e07375c",
+    "inherited_sources": [
+      "7e288eeb97996ed9a949a20a20a0411a3a2b61a0"
+    ],
+    "import_commits": [],
+    "files": [
+      {
+        "path": "hermes_cli/kanban_db_dispatch.py",
+        "blob": "56cf757f1fc58d0e742b1d01d576d09e4d5d4acc"
+      }
+    ],
+    "present": "yes"
+  },
+  {
+    "id": "C2-081",
+    "candidate": "9cfe45f5623b9f305a923ef4eecd5d195e07375c",
+    "inherited_sources": [
+      "42b032d86517d0964888f35e594b9d66d360fc61"
+    ],
+    "import_commits": [],
+    "files": [
+      {
+        "path": "tests/hermes_cli/test_kanban_profile_busy.py",
+        "blob": "2d662340cd734d81a1c64141dfdd4d2573d0bbfe"
+      }
+    ],
+    "present": "yes"
+  },
+  {
+    "id": "C2-082",
+    "candidate": "9cfe45f5623b9f305a923ef4eecd5d195e07375c",
+    "inherited_sources": [
+      "1bd25fa4a20e260e8dde812638368455c56c37b4"
+    ],
+    "import_commits": [],
+    "files": [
+      {
+        "path": "tests/hermes_cli/test_kanban_profile_busy.py",
+        "blob": "2d662340cd734d81a1c64141dfdd4d2573d0bbfe"
+      }
+    ],
+    "present": "yes"
+  },
+  {
+    "id": "C2-083",
+    "candidate": "9cfe45f5623b9f305a923ef4eecd5d195e07375c",
+    "inherited_sources": [
+      "ffc24d9334be12b7d8002ab59738ea578ffcdd5e"
+    ],
+    "import_commits": [],
+    "files": [
+      {
+        "path": "tests/hermes_cli/test_kanban_profile_busy.py",
+        "blob": "2d662340cd734d81a1c64141dfdd4d2573d0bbfe"
+      }
+    ],
+    "present": "yes"
+  },
+  {
+    "id": "C2-084",
+    "candidate": "9cfe45f5623b9f305a923ef4eecd5d195e07375c",
+    "inherited_sources": [
+      "138042791d25d714b3f01b513c033788ed185c11"
+    ],
+    "import_commits": [],
+    "files": [
+      {
+        "path": "tests/hermes_cli/test_kanban_profile_busy.py",
+        "blob": "2d662340cd734d81a1c64141dfdd4d2573d0bbfe"
+      }
+    ],
+    "present": "yes"
+  },
+  {
+    "id": "C2-085",
+    "candidate": "9cfe45f5623b9f305a923ef4eecd5d195e07375c",
+    "inherited_sources": [
+      "e5d8403e81bf4591fc3b3fef430ccdf2ec235cbd"
+    ],
+    "import_commits": [],
+    "files": [
+      {
+        "path": "hermes_cli/kanban.py",
+        "blob": "f75353faa903f8d93f415762235517ef7df8e3e8"
+      },
+      {
+        "path": "hermes_cli/kanban_parser.py",
+        "blob": "2cc2b4a0c6e2f707d0b3f9f3718f33fd959bc060"
+      },
+      {
+        "path": "hermes_cli/kanban_recover_ghost.py",
+        "blob": "31c0f1c63e87eb46b4848699bc61d3664ab9aafb"
+      },
+      {
+        "path": "tests/hermes_cli/test_kanban_recover_ghost.py",
+        "blob": "c4f531335e13413435246811f68610ab02ed4863"
+      }
+    ],
+    "present": "yes"
+  },
+  {
+    "id": "C2-086",
+    "candidate": "9cfe45f5623b9f305a923ef4eecd5d195e07375c",
+    "inherited_sources": [],
+    "import_commits": [
+      "776aa38fd7339bae8c174db77df33a22c798c5ea"
+    ],
+    "files": [
+      {
+        "path": "hermes_cli/kanban.py",
+        "blob": "f75353faa903f8d93f415762235517ef7df8e3e8"
+      },
+      {
+        "path": "tests/hermes_cli/test_kanban_cli.py",
+        "blob": "607dd176f6e5c853047f04f0ec6f11fa3058d792"
+      },
+      {
+        "path": "tests/hermes_cli/test_kanban_goal_mode.py",
+        "blob": "ba7207b73a4c0b9dde77aef5934cc5ef76a86b4a"
+      }
+    ],
+    "present": "yes"
+  },
+  {
+    "id": "C2-087",
+    "candidate": "9cfe45f5623b9f305a923ef4eecd5d195e07375c",
+    "inherited_sources": [
+      "db4958126088a9a3a2c8399ecb4d7ea051069663"
+    ],
+    "import_commits": [],
+    "files": [
+      {
+        "path": "hermes_cli/kanban_db_dispatch.py",
+        "blob": "56cf757f1fc58d0e742b1d01d576d09e4d5d4acc"
+      },
+      {
+        "path": "tests/hermes_cli/test_kanban_review_lifecycle.py",
+        "blob": "2ba1a7625345dd5f52258cae8d5a7ba01678547d"
+      }
+    ],
+    "present": "yes"
+  },
+  {
+    "id": "C2-088",
+    "candidate": "9cfe45f5623b9f305a923ef4eecd5d195e07375c",
+    "inherited_sources": [
+      "f07d34aa12b84b98fe1856f098578dc4d04840a3"
+    ],
+    "import_commits": [],
+    "files": [
+      {
+        "path": "hermes_cli/kanban_db.py",
+        "blob": "efb2faacaba7244452e043d237e3924012b9e702"
+      },
+      {
+        "path": "hermes_cli/kanban_parent_gate.py",
+        "blob": null
+      },
+      {
+        "path": "tests/hermes_cli/test_redtape_parent_and_promote.py",
+        "blob": null
+      }
+    ],
+    "present": "no"
+  },
+  {
+    "id": "C2-089",
+    "candidate": "9cfe45f5623b9f305a923ef4eecd5d195e07375c",
+    "inherited_sources": [
+      "6b2fe4f55272a2fc6dc91ba86f607481f737e7ff"
+    ],
+    "import_commits": [],
+    "files": [
+      {
+        "path": "hermes_cli/kanban_db.py",
+        "blob": "efb2faacaba7244452e043d237e3924012b9e702"
+      },
+      {
+        "path": "tests/hermes_cli/test_kanban_goal_mode.py",
+        "blob": "ba7207b73a4c0b9dde77aef5934cc5ef76a86b4a"
+      },
+      {
+        "path": "tests/tools/test_kanban_tools.py",
+        "blob": "d7d73899bbc94ebe483c72853a0026faa61606ca"
+      },
+      {
+        "path": "tools/kanban_tools.py",
+        "blob": "c72c16e59ca576de0c11794ba96174a087428122"
+      }
+    ],
+    "present": "yes"
+  },
+  {
+    "id": "C2-090",
+    "candidate": "9cfe45f5623b9f305a923ef4eecd5d195e07375c",
+    "inherited_sources": [
+      "79b366e3d09fb516a2aae1ff97155b8a976232ec"
+    ],
+    "import_commits": [],
+    "files": [
+      {
+        "path": "tests/tools/test_fleet_message_drain.py",
+        "blob": "f0bf91f5714fcfe16b7e8e10d73255d1e1cf2134"
+      },
+      {
+        "path": "tools/fleet_message_drain.py",
+        "blob": "45e46a565c6a9652337186ac33470828208dfc08"
+      }
+    ],
+    "present": "yes"
+  },
+  {
+    "id": "C2-091",
+    "candidate": "9cfe45f5623b9f305a923ef4eecd5d195e07375c",
+    "inherited_sources": [
+      "7aa27286b7dc9b648cd3ac80d5688dd3a83bbf5c"
+    ],
+    "import_commits": [],
+    "files": [
+      {
+        "path": "hermes_cli/kanban_decompose.py",
+        "blob": "38548b8df70c7f1244fb50807e283737186ff37b"
+      },
+      {
+        "path": "tests/hermes_cli/test_kanban_decompose.py",
+        "blob": "b3cad81922bfe50775241759063eb3988365b675"
+      }
+    ],
+    "present": "yes"
+  },
+  {
+    "id": "C2-092",
+    "candidate": "9cfe45f5623b9f305a923ef4eecd5d195e07375c",
+    "inherited_sources": [
+      "14a97f95f2f18db00edc05bb8d8c985fe2300615"
+    ],
+    "import_commits": [],
+    "files": [
+      {
+        "path": "hermes_cli/kanban_db_dispatch.py",
+        "blob": "56cf757f1fc58d0e742b1d01d576d09e4d5d4acc"
+      },
+      {
+        "path": "tests/hermes_cli/test_kanban_db.py",
+        "blob": "a48b1128231a047a794868ace2784b778583a75b"
+      },
+      {
+        "path": "tests/hermes_cli/test_kanban_list_undecodable_text.py",
+        "blob": "fe969a724cb5fb7dc2d96e396bccd1680cd7dbe2"
+      },
+      {
+        "path": "tests/hermes_cli/test_redtape_dispatch_guards.py",
+        "blob": "3d24dece4436f1fb37a99f6b40f2ff8b13e2e183"
+      }
+    ],
+    "present": "yes"
+  },
+  {
+    "id": "C2-093",
+    "candidate": "9cfe45f5623b9f305a923ef4eecd5d195e07375c",
+    "inherited_sources": [
+      "5d11cf91d3a633aab4c017563f4f24aba74a33ee"
+    ],
+    "import_commits": [],
+    "files": [
+      {
+        "path": "hermes_cli/kanban_db.py",
+        "blob": "efb2faacaba7244452e043d237e3924012b9e702"
+      },
+      {
+        "path": "hermes_cli/kanban_db_dispatch.py",
+        "blob": "56cf757f1fc58d0e742b1d01d576d09e4d5d4acc"
+      },
+      {
+        "path": "hermes_cli/kanban_ops.py",
+        "blob": "fbee70638747137c3126825af56041e6ee22b289"
+      },
+      {
+        "path": "tests/gateway/test_kanban_lifecycle_fence_repro_20260924.py",
+        "blob": "67b5accfabf2af6686181c4fcc527f21623533cf"
+      },
+      {
+        "path": "tests/gateway/test_kanban_lifecycle_fence_semantics_20260924.py",
+        "blob": "a9f2067c4d91ab4d95b33a164d315b8fd06cf919"
+      },
+      {
+        "path": "tests/hermes_cli/test_kanban_host_cap_mirror_rows.py",
+        "blob": "4024225d7d56c35e73b15da9b6f900c9de2ae4e2"
+      },
+      {
+        "path": "tests/hermes_cli/test_kanban_recompute_ready_ownership_20260924.py",
+        "blob": "47a8e14720ea30723635f6ac787f18c409dd1cb2"
+      }
+    ],
+    "present": "yes"
+  },
+  {
+    "id": "C2-094",
+    "candidate": "9cfe45f5623b9f305a923ef4eecd5d195e07375c",
+    "inherited_sources": [
+      "0c8508fdc28890dd0a6ec0690b35de78d8b4e8b9"
+    ],
+    "import_commits": [],
+    "files": [
+      {
+        "path": "hermes_cli/kanban_db.py",
+        "blob": "efb2faacaba7244452e043d237e3924012b9e702"
+      },
+      {
+        "path": "tests/hermes_cli/test_kanban_db.py",
+        "blob": "a48b1128231a047a794868ace2784b778583a75b"
+      }
+    ],
+    "present": "yes"
+  },
+  {
+    "id": "C2-095",
+    "candidate": "9cfe45f5623b9f305a923ef4eecd5d195e07375c",
+    "inherited_sources": [],
+    "import_commits": [
+      "02c04413b3ab42f2a71664892d68cce89456c057"
+    ],
+    "files": [
+      {
+        "path": "hermes_cli/kanban_recover_ghost.py",
+        "blob": "31c0f1c63e87eb46b4848699bc61d3664ab9aafb"
+      },
+      {
+        "path": "tests/hermes_cli/test_kanban_recover_ghost.py",
+        "blob": "c4f531335e13413435246811f68610ab02ed4863"
+      }
+    ],
+    "present": "yes"
+  },
+  {
+    "id": "C2-096",
+    "candidate": "9cfe45f5623b9f305a923ef4eecd5d195e07375c",
+    "inherited_sources": [],
+    "import_commits": [
+      "188b36a0b574fc28b5836b167e1eaa22244a1b1c"
+    ],
+    "files": [
+      {
+        "path": "hermes_cli/quiet_single_query.py",
+        "blob": "f2a9f8390046b0decc53ffabc61a0fc233b0d7ca"
+      },
+      {
+        "path": "tests/hermes_cli/test_quiet_notify_delivery.py",
+        "blob": "8d20adc08fcede3b28695f5c957ff74dd5a20ff3"
+      },
+      {
+        "path": "tools/async_delegation.py",
+        "blob": "b81cc593864e96c2e7ab14373165aa6469e1c6c8"
+      }
+    ],
+    "present": "yes"
+  },
+  {
+    "id": "C2-097",
+    "candidate": "9cfe45f5623b9f305a923ef4eecd5d195e07375c",
+    "inherited_sources": [],
+    "import_commits": [],
+    "files": [
+      {
+        "path": "hermes_cli/kanban_db_dispatch.py",
+        "blob": "56cf757f1fc58d0e742b1d01d576d09e4d5d4acc"
+      },
+      {
+        "path": "hermes_cli/kanban_ops.py",
+        "blob": "fbee70638747137c3126825af56041e6ee22b289"
+      },
+      {
+        "path": "tests/hermes_cli/test_kanban_host_cap_mirror_rows.py",
+        "blob": "4024225d7d56c35e73b15da9b6f900c9de2ae4e2"
+      }
+    ],
+    "present": "yes"
+  },
+  {
+    "id": "C2-098",
+    "candidate": "9cfe45f5623b9f305a923ef4eecd5d195e07375c",
+    "inherited_sources": [
+      "274f2e4fa7bcddcba186121c4632e842d46bec69"
+    ],
+    "import_commits": [],
+    "files": [
+      {
+        "path": "hermes_cli/cli_single_query.py",
+        "blob": "7e3b353f0417381faea5c6f4098a794d48b708a9"
+      },
+      {
+        "path": "hermes_cli/quiet_single_query.py",
+        "blob": "f2a9f8390046b0decc53ffabc61a0fc233b0d7ca"
+      },
+      {
+        "path": "pyproject.toml",
+        "blob": "e62280f3a273f17b44adc86bc6df6fe437ed068d"
+      },
+      {
+        "path": "tests/conftest.py",
+        "blob": "7a8d223124e377bf6ea50bb5b6a206f1330ee4bb"
+      },
+      {
+        "path": "tests/hermes_cli/test_kanban_worker_hard_exit.py",
+        "blob": null
+      }
+    ],
+    "present": "yes"
+  },
+  {
+    "id": "C2-099",
+    "candidate": "9cfe45f5623b9f305a923ef4eecd5d195e07375c",
+    "inherited_sources": [
+      "c2c035026cc8da57509d68bcbce035d0f82123a6"
+    ],
+    "import_commits": [],
+    "files": [
+      {
+        "path": "hermes_cli/kanban.py",
+        "blob": "f75353faa903f8d93f415762235517ef7df8e3e8"
+      },
+      {
+        "path": "hermes_cli/kanban_db_connect.py",
+        "blob": "68ddd882fb80c955b69d75063baded5afd90a883"
+      },
+      {
+        "path": "hermes_cli/kanban_db_dispatch.py",
+        "blob": "56cf757f1fc58d0e742b1d01d576d09e4d5d4acc"
+      },
+      {
+        "path": "hermes_cli/kanban_ops.py",
+        "blob": "fbee70638747137c3126825af56041e6ee22b289"
+      },
+      {
+        "path": "hermes_cli/kanban_parser.py",
+        "blob": "2cc2b4a0c6e2f707d0b3f9f3718f33fd959bc060"
+      },
+      {
+        "path": "tests/gateway/test_kanban_reconcile_orphans.py",
+        "blob": "bc2568357ace0f576ac3f90078c018052278d596"
+      },
+      {
+        "path": "tests/hermes_cli/test_kanban_cli_dispatch_passthrough.py",
+        "blob": "972449c79db81a3ac18c9cc7ebc99189b43591e9"
+      },
+      {
+        "path": "tests/hermes_cli/test_kanban_db_repair.py",
+        "blob": "e8b3660fd7612af7aa21b1377c012c5ff5340ba3"
+      },
+      {
+        "path": "tests/hermes_cli/test_kanban_dispatch_dry_run.py",
+        "blob": "e50460b59a0dabd06ee4c582ca989a2f40035023"
+      },
+      {
+        "path": "tests/hermes_cli/test_kanban_terminal_worker_reaper.py",
+        "blob": "2520fe6ffeaa9ff67f4582127ded302eabc371ca"
+      }
+    ],
+    "present": "yes"
+  },
+  {
+    "id": "C2-100",
+    "candidate": "9cfe45f5623b9f305a923ef4eecd5d195e07375c",
+    "inherited_sources": [],
+    "import_commits": [
+      "45f6334535b679f3f5a3f454e5abf50d21a8f1eb",
+      "61b24462321e65b31a2e783de85159f8ebb99c7d"
+    ],
+    "files": [
+      {
+        "path": "gateway/kanban_watchers_dispatcher.py",
+        "blob": "f75869c9e1a0dda198342372eaa6a3e995669692"
+      },
+      {
+        "path": "hermes_cli/kanban_db.py",
+        "blob": "efb2faacaba7244452e043d237e3924012b9e702"
+      },
+      {
+        "path": "hermes_cli/kanban_db_dispatch.py",
+        "blob": "56cf757f1fc58d0e742b1d01d576d09e4d5d4acc"
+      },
+      {
+        "path": "hermes_cli/kanban_ops.py",
+        "blob": "fbee70638747137c3126825af56041e6ee22b289"
+      },
+      {
+        "path": "tests/hermes_cli/test_kanban_default_assignee.py",
+        "blob": "7b31616b1cd0b7ee3092133f6267b1b6554e217b"
+      },
+      {
+        "path": "tests/hermes_cli/test_kanban_dispatch_claim_allowlist.py",
+        "blob": "e6313a8eb4f8ad4ad50c5f56e72b826741ac8034"
+      },
+      {
+        "path": "tests/hermes_cli/test_kanban_per_profile_cap.py",
+        "blob": "10791afe41db20a197a077ea1e1fe7f5f7cf44c7"
+      },
+      {
+        "path": "tests/hermes_cli/test_kanban_placeholder_dispatch.py",
+        "blob": "abe622d60b2f2063d871ed3a29278ebdb11bfde3"
+      }
+    ],
+    "present": "yes"
+  },
+  {
+    "id": "C2-101",
+    "candidate": "9cfe45f5623b9f305a923ef4eecd5d195e07375c",
+    "inherited_sources": [],
+    "import_commits": [
+      "2ef9c156e58b5c911b04aee800f927f22965bcee",
+      "61b24462321e65b31a2e783de85159f8ebb99c7d"
+    ],
+    "files": [
+      {
+        "path": "gateway/kanban_watchers.py",
+        "blob": "7d5a5ced0b3e29a75bb60c0d7d9274f1c6e5bd5a"
+      },
+      {
+        "path": "gateway/kanban_watchers_dispatcher.py",
+        "blob": "f75869c9e1a0dda198342372eaa6a3e995669692"
+      },
+      {
+        "path": "hermes_cli/kanban_db_dispatch.py",
+        "blob": "56cf757f1fc58d0e742b1d01d576d09e4d5d4acc"
+      },
+      {
+        "path": "hermes_cli/kanban_ops.py",
+        "blob": "fbee70638747137c3126825af56041e6ee22b289"
+      },
+      {
+        "path": "tests/hermes_cli/test_kanban_placeholder_dispatch.py",
+        "blob": "abe622d60b2f2063d871ed3a29278ebdb11bfde3"
+      }
+    ],
+    "present": "yes"
+  },
+  {
+    "id": "C2-102",
+    "candidate": "9cfe45f5623b9f305a923ef4eecd5d195e07375c",
+    "inherited_sources": [],
+    "import_commits": [],
+    "files": [
+      {
+        "path": "hermes_cli/kanban_db.py",
+        "blob": "efb2faacaba7244452e043d237e3924012b9e702"
+      },
+      {
+        "path": "hermes_cli/kanban_db_dispatch.py",
+        "blob": "56cf757f1fc58d0e742b1d01d576d09e4d5d4acc"
+      },
+      {
+        "path": "hermes_cli/kanban_ops.py",
+        "blob": "fbee70638747137c3126825af56041e6ee22b289"
+      }
+    ],
+    "present": "no"
+  },
+  {
+    "id": "C2-103",
+    "candidate": "9cfe45f5623b9f305a923ef4eecd5d195e07375c",
+    "inherited_sources": [],
+    "import_commits": [
+      "f23c2c2cab80d55bb7711a08a566074f8f1383a4",
+      "6bc102485cd3e501d90bc162a16cddba09314a34"
+    ],
+    "files": [
+      {
+        "path": "gateway/kanban_watchers.py",
+        "blob": "7d5a5ced0b3e29a75bb60c0d7d9274f1c6e5bd5a"
+      },
+      {
+        "path": "hermes_cli/kanban_db_dispatch.py",
+        "blob": "56cf757f1fc58d0e742b1d01d576d09e4d5d4acc"
+      },
+      {
+        "path": "hermes_cli/kanban_ops.py",
+        "blob": "fbee70638747137c3126825af56041e6ee22b289"
+      },
+      {
+        "path": "tests/hermes_cli/test_kanban_placeholder_dispatch.py",
+        "blob": "abe622d60b2f2063d871ed3a29278ebdb11bfde3"
+      }
+    ],
+    "present": "yes"
+  },
+  {
+    "id": "C2-104",
+    "candidate": "9cfe45f5623b9f305a923ef4eecd5d195e07375c",
+    "inherited_sources": [],
+    "import_commits": [
+      "1fce7fc03913ac954890b206d1c148953321d5ae",
+      "6bc102485cd3e501d90bc162a16cddba09314a34"
+    ],
+    "files": [
+      {
+        "path": "fleet-node-state/runner_health_probe.py",
+        "blob": "5a476b525bc79787ed95e8a942e6d77dd1d0d24e"
+      },
+      {
+        "path": "gateway/kanban_watchers.py",
+        "blob": "7d5a5ced0b3e29a75bb60c0d7d9274f1c6e5bd5a"
+      },
+      {
+        "path": "hermes_cli/kanban_db_dispatch.py",
+        "blob": "56cf757f1fc58d0e742b1d01d576d09e4d5d4acc"
+      },
+      {
+        "path": "hermes_cli/kanban_ops.py",
+        "blob": "fbee70638747137c3126825af56041e6ee22b289"
+      },
+      {
+        "path": "tests/hermes_cli/test_kanban_placeholder_dispatch.py",
+        "blob": "abe622d60b2f2063d871ed3a29278ebdb11bfde3"
+      },
+      {
+        "path": "tests/test_runner_health_probe.py",
+        "blob": "e2f4942b4bc9641958c953983adc51f3cad72cfa"
+      }
+    ],
+    "present": "yes"
+  },
+  {
+    "id": "C2-105",
+    "candidate": "9cfe45f5623b9f305a923ef4eecd5d195e07375c",
+    "inherited_sources": [],
+    "import_commits": [
+      "33bbcf0e0cd9ca16a6be50cbdf146e67bf4fd6d5",
+      "6bc102485cd3e501d90bc162a16cddba09314a34"
+    ],
+    "files": [
+      {
+        "path": "hermes_cli/kanban_db_dispatch.py",
+        "blob": "56cf757f1fc58d0e742b1d01d576d09e4d5d4acc"
+      },
+      {
+        "path": "tests/hermes_cli/test_kanban_placeholder_dispatch.py",
+        "blob": "abe622d60b2f2063d871ed3a29278ebdb11bfde3"
+      }
+    ],
+    "present": "yes"
+  },
+  {
+    "id": "C2-106",
+    "candidate": "9cfe45f5623b9f305a923ef4eecd5d195e07375c",
+    "inherited_sources": [
+      "3525825014280882ea5f1fc67f6969a46a32d422"
+    ],
+    "import_commits": [],
+    "files": [
+      {
+        "path": "hermes_cli/kanban_db_dispatch.py",
+        "blob": "56cf757f1fc58d0e742b1d01d576d09e4d5d4acc"
+      },
+      {
+        "path": "tests/hermes_cli/test_kanban_review_lifecycle.py",
+        "blob": "2ba1a7625345dd5f52258cae8d5a7ba01678547d"
+      }
+    ],
+    "present": "yes"
+  },
+  {
+    "id": "C2-107",
+    "candidate": "9cfe45f5623b9f305a923ef4eecd5d195e07375c",
+    "inherited_sources": [
+      "a695cdba9afbc22ec071980e466c7bee62a5cafa"
+    ],
+    "import_commits": [],
+    "files": [
+      {
+        "path": "hermes_cli/kanban_parent_gate.py",
+        "blob": null
+      },
+      {
+        "path": "tests/hermes_cli/test_redtape_parent_and_promote.py",
+        "blob": null
+      }
+    ],
+    "present": "no"
+  },
+  {
+    "id": "C2-108",
+    "candidate": "9cfe45f5623b9f305a923ef4eecd5d195e07375c",
+    "inherited_sources": [
+      "a24d0fb8ef7e5c216aec97e584e500e6be8bfac4"
+    ],
+    "import_commits": [],
+    "files": [
+      {
+        "path": "hermes_cli/kanban_parent_gate.py",
+        "blob": null
+      },
+      {
+        "path": "tests/hermes_cli/test_redtape_parent_and_promote.py",
+        "blob": null
+      }
+    ],
+    "present": "no"
+  },
+  {
+    "id": "C2-109",
+    "candidate": "9cfe45f5623b9f305a923ef4eecd5d195e07375c",
+    "inherited_sources": [
+      "07292b4ac86d854ddec41c6bac25876e729f0562"
+    ],
+    "import_commits": [],
+    "files": [
+      {
+        "path": "hermes_cli/kanban_parent_gate.py",
+        "blob": null
+      },
+      {
+        "path": "tests/hermes_cli/test_redtape_parent_and_promote.py",
+        "blob": null
+      }
+    ],
+    "present": "no"
+  },
+  {
+    "id": "C2-110",
+    "candidate": "9cfe45f5623b9f305a923ef4eecd5d195e07375c",
+    "inherited_sources": [
+      "7e5befd8f497c4b5a17fef8f078af6aaa131e971"
+    ],
+    "import_commits": [],
+    "files": [
+      {
+        "path": "hermes_cli/kanban_parent_gate.py",
+        "blob": null
+      },
+      {
+        "path": "tests/hermes_cli/test_redtape_parent_and_promote.py",
+        "blob": null
+      }
+    ],
+    "present": "no"
+  },
+  {
+    "id": "C2-111",
+    "candidate": "9cfe45f5623b9f305a923ef4eecd5d195e07375c",
+    "inherited_sources": [],
+    "import_commits": [],
+    "files": [
+      {
+        "path": "hermes_cli/gateway.py",
+        "blob": "66f418ab9b137da97ba13fc0e1c41777af59e14b"
+      },
+      {
+        "path": "hermes_cli/gateway_restart_observe.py",
+        "blob": "ab3d90b0f1a0d32bcfa6a92830f9036f7d1f14fb"
+      },
+      {
+        "path": "tests/hermes_cli/test_restart_budget.py",
+        "blob": "8e5e6cf2c7eda3b98adced7cba6659795880e4fd"
+      }
+    ],
+    "present": "no"
+  },
+  {
+    "id": "C2-112",
+    "candidate": "9cfe45f5623b9f305a923ef4eecd5d195e07375c",
+    "inherited_sources": [],
+    "import_commits": [],
+    "files": [
+      {
+        "path": "tests/gateway/test_kanban_reconcile_orphans.py",
+        "blob": "bc2568357ace0f576ac3f90078c018052278d596"
+      }
+    ],
+    "present": "yes"
+  },
+  {
+    "id": "C2-113",
+    "candidate": "9cfe45f5623b9f305a923ef4eecd5d195e07375c",
+    "inherited_sources": [],
+    "import_commits": [],
+    "files": [
+      {
+        "path": "tests/gateway/test_kanban_fleet_fence_max.py",
+        "blob": null
+      },
+      {
+        "path": "tests/hermes_cli/test_kanban_host_cap_mirror_rows.py",
+        "blob": "4024225d7d56c35e73b15da9b6f900c9de2ae4e2"
+      }
+    ],
+    "present": "no"
+  },
+  {
+    "id": "C2-114",
+    "candidate": "9cfe45f5623b9f305a923ef4eecd5d195e07375c",
+    "inherited_sources": [],
+    "import_commits": [
+      "af1ab293b1624e8dd8b0ef3b4f72eaa0773071be"
+    ],
+    "files": [
+      {
+        "path": "hermes_cli/kanban_pr_state.py",
+        "blob": "1c6344ef211e30cb0a07eda9803ef78675d6afac"
+      },
+      {
+        "path": "tests/hermes_cli/test_kanban_pr_state.py",
+        "blob": "a9d5835cd368f86375dcf7f333875e1679842543"
+      }
+    ],
+    "present": "yes"
+  },
+  {
+    "id": "C2-115",
+    "candidate": "9cfe45f5623b9f305a923ef4eecd5d195e07375c",
+    "inherited_sources": [],
+    "import_commits": [
+      "649fb3f1e35f485eff1faf092fad97eccf7c74ab"
+    ],
+    "files": [
+      {
+        "path": "hermes_cli/config_defaults.py",
+        "blob": "1953886618af565a85995739c5fb561e0e83f52d"
+      },
+      {
+        "path": "hermes_cli/kanban.py",
+        "blob": "f75353faa903f8d93f415762235517ef7df8e3e8"
+      },
+      {
+        "path": "hermes_cli/kanban_db_dispatch.py",
+        "blob": "56cf757f1fc58d0e742b1d01d576d09e4d5d4acc"
+      },
+      {
+        "path": "hermes_cli/kanban_ops.py",
+        "blob": "fbee70638747137c3126825af56041e6ee22b289"
+      },
+      {
+        "path": "hermes_cli/kanban_parser.py",
+        "blob": "2cc2b4a0c6e2f707d0b3f9f3718f33fd959bc060"
+      },
+      {
+        "path": "hermes_cli/kanban_pr_state.py",
+        "blob": "1c6344ef211e30cb0a07eda9803ef78675d6afac"
+      },
+      {
+        "path": "tests/hermes_cli/test_kanban_pr_state.py",
+        "blob": "a9d5835cd368f86375dcf7f333875e1679842543"
+      }
+    ],
+    "present": "yes"
+  },
+  {
+    "id": "C2-116",
+    "candidate": "9cfe45f5623b9f305a923ef4eecd5d195e07375c",
+    "inherited_sources": [],
+    "import_commits": [
+      "b68d3736aab4c16bc5a964857afa6b3a74391699"
+    ],
+    "files": [
+      {
+        "path": "hermes_cli/kanban_db.py",
+        "blob": "efb2faacaba7244452e043d237e3924012b9e702"
+      },
+      {
+        "path": "tests/hermes_cli/test_kanban_foreign_mirror_owner_20260928.py",
+        "blob": "f67d2a2a8a7bb0610beadf26b55619b2a03eeec6"
+      }
+    ],
+    "present": "yes"
+  },
+  {
+    "id": "C2-117",
+    "candidate": "9cfe45f5623b9f305a923ef4eecd5d195e07375c",
+    "inherited_sources": [
+      "c42e07ff6de78ac7500075c85ced7cd11340b843"
+    ],
+    "import_commits": [],
+    "files": [
+      {
+        "path": "evals/kanban_pr_acceptance_live.py",
+        "blob": "52822b4f5bd4c8da26c1c47c7f2515626800404a"
+      },
+      {
+        "path": "hermes_cli/kanban_pr_acceptance.py",
+        "blob": "3fb6d5f7e91aa88974b75f39a954a4eced6d6475"
+      },
+      {
+        "path": "hermes_cli/kanban_pr_acceptance_store.py",
+        "blob": "4b6a2bf9d54593d9d518c4df2d3d1a69a3786431"
+      },
+      {
+        "path": "tests/hermes_cli/test_kanban_pr_acceptance.py",
+        "blob": "d7ec9d02b706df19410b801a6435f1a5ed7427c0"
+      }
+    ],
+    "present": "yes"
+  },
+  {
+    "id": "C2-118",
+    "candidate": "9cfe45f5623b9f305a923ef4eecd5d195e07375c",
+    "inherited_sources": [],
+    "import_commits": [
+      "a07c56544834de9ba8dc6c70a5568cef209ac8fd"
+    ],
+    "files": [
+      {
+        "path": "hermes_cli/kanban_db_dispatch.py",
+        "blob": "56cf757f1fc58d0e742b1d01d576d09e4d5d4acc"
+      },
+      {
+        "path": "hermes_cli/kanban_decompose.py",
+        "blob": "38548b8df70c7f1244fb50807e283737186ff37b"
+      },
+      {
+        "path": "tests/hermes_cli/test_kanban_decompose_block_loop_hold.py",
+        "blob": null
+      }
+    ],
+    "present": "yes"
+  },
+  {
+    "id": "C2-119",
+    "candidate": "9cfe45f5623b9f305a923ef4eecd5d195e07375c",
+    "inherited_sources": [],
+    "import_commits": [],
+    "files": [
+      {
+        "path": "hermes_cli/kanban.py",
+        "blob": "f75353faa903f8d93f415762235517ef7df8e3e8"
+      },
+      {
+        "path": "hermes_cli/kanban_db.py",
+        "blob": "efb2faacaba7244452e043d237e3924012b9e702"
+      },
+      {
+        "path": "hermes_cli/kanban_decompose.py",
+        "blob": "38548b8df70c7f1244fb50807e283737186ff37b"
+      },
+      {
+        "path": "hermes_cli/kanban_parser.py",
+        "blob": "2cc2b4a0c6e2f707d0b3f9f3718f33fd959bc060"
+      },
+      {
+        "path": "plugins/kanban/dashboard/plugin_api.py",
+        "blob": "d01836d8dc88b51e7938c23e8e72864fffd6eb42"
+      },
+      {
+        "path": "tests/hermes_cli/test_kanban_decompose_block_loop_hold.py",
+        "blob": null
+      },
+      {
+        "path": "tools/kanban_tools.py",
+        "blob": "c72c16e59ca576de0c11794ba96174a087428122"
+      },
+      {
+        "path": "tools/kanban_tools_schemas.py",
+        "blob": "f4134e92c676f190f4a68f0ff2c328fe4f1451ba"
+      },
+      {
+        "path": "website/docs/user-guide/features/kanban.md",
+        "blob": "0064b862fa09bea5f950bcbe60a5d4a6a6d2fa81"
+      }
+    ],
+    "present": "no"
+  },
+  {
+    "id": "C2-120",
+    "candidate": "9cfe45f5623b9f305a923ef4eecd5d195e07375c",
+    "inherited_sources": [
+      "df077a7d21ecbf1a901e62c1277fa5fa44c1b03a"
+    ],
+    "import_commits": [],
+    "files": [
+      {
+        "path": "hermes_cli/config_defaults.py",
+        "blob": "1953886618af565a85995739c5fb561e0e83f52d"
+      },
+      {
+        "path": "hermes_cli/kanban_db.py",
+        "blob": "efb2faacaba7244452e043d237e3924012b9e702"
+      },
+      {
+        "path": "hermes_cli/models_catalog_static.py",
+        "blob": "1b205b9c33b5fa42d30388556d983f5748e0210c"
+      },
+      {
+        "path": "skills/autonomous-ai-agents/codex/SKILL.md",
+        "blob": "52e5bf060d41d358451cc26694ca0d3f84163b99"
+      },
+      {
+        "path": "tests/hermes_cli/test_kanban_workspace_busy.py",
+        "blob": "e4363937357f88184484a1b4ead13b44307adccb"
+      },
+      {
+        "path": "tests/hermes_cli/test_xai_grok47_catalog.py",
+        "blob": "9e3331b689b1c082b2253e268c0b34c656970305"
+      },
+      {
+        "path": "tests/tools/test_delegate.py",
+        "blob": "9b187195582f4f8a0e2dddc3bc6ba75681aa639b"
+      },
+      {
+        "path": "tests/tools/test_delegate_effort_cap.py",
+        "blob": "80749613e713ea7a1fc0d5462db95862d0aee350"
+      },
+      {
+        "path": "tools/delegate_tool_config.py",
+        "blob": "cb26683dde34b46034546f09a5722e7b9e13e991"
+      },
+      {
+        "path": "tools/x_search_tool.py",
+        "blob": "89e49371d4890751339374dcf2216d2e83fba3f0"
+      }
+    ],
+    "present": "yes"
+  },
+  {
+    "id": "C2-121",
+    "candidate": "9cfe45f5623b9f305a923ef4eecd5d195e07375c",
+    "inherited_sources": [
+      "0a876cb844d0a2235b1d6b2d1e03b5aac622d983"
+    ],
+    "import_commits": [],
+    "files": [
+      {
+        "path": "gateway/kanban_watchers.py",
+        "blob": "7d5a5ced0b3e29a75bb60c0d7d9274f1c6e5bd5a"
+      },
+      {
+        "path": "gateway/kanban_watchers_dispatcher.py",
+        "blob": "f75869c9e1a0dda198342372eaa6a3e995669692"
+      },
+      {
+        "path": "hermes_cli/kanban_db_connect.py",
+        "blob": "68ddd882fb80c955b69d75063baded5afd90a883"
+      },
+      {
+        "path": "hermes_cli/kanban_db_notify.py",
+        "blob": "2304eb103ada8dc6c3d7a5bf5af6e1948eb195a1"
+      },
+      {
+        "path": "hermes_cli/kanban_recover_ghost.py",
+        "blob": "31c0f1c63e87eb46b4848699bc61d3664ab9aafb"
+      },
+      {
+        "path": "tests/hermes_cli/test_kanban_ro_open_wal.py",
+        "blob": "3bb9786cefb46488f5b63b0482cd4b51238ea848"
+      }
+    ],
+    "present": "yes"
+  },
+  {
+    "id": "C2-122",
+    "candidate": "9cfe45f5623b9f305a923ef4eecd5d195e07375c",
+    "inherited_sources": [
+      "82f845753f9803f084f96cae3f5ea130a6898acc"
+    ],
+    "import_commits": [],
+    "files": [
+      {
+        "path": "agent/vault_backends/onepassword.py",
+        "blob": "4d8ba11f22773b8fb40cbe61edaf916135610afd"
+      },
+      {
+        "path": "tests/agent/test_vault_backends.py",
+        "blob": "0cae9dbf50b54a5a9635047a6ceac361322b9832"
+      }
+    ],
+    "present": "yes"
+  },
+  {
+    "id": "C2-123",
+    "candidate": "9cfe45f5623b9f305a923ef4eecd5d195e07375c",
+    "inherited_sources": [
+      "14e290b9aef766c85013eb7119572f9997d4c0c4"
+    ],
+    "import_commits": [],
+    "files": [
+      {
+        "path": "BOARD_OPS.md",
+        "blob": null
+      },
+      {
+        "path": "BOARD_OPS_MAKER_REPORT.md",
+        "blob": null
+      },
+      {
+        "path": "BOARD_OPS_TODO.md",
+        "blob": null
+      },
+      {
+        "path": "gateway/kanban_board_ops.py",
+        "blob": "7eb072618deb1130661aee7d6a7cf3fc068e143c"
+      },
+      {
+        "path": "gateway/kanban_watchers.py",
+        "blob": "7d5a5ced0b3e29a75bb60c0d7d9274f1c6e5bd5a"
+      },
+      {
+        "path": "hermes_cli/kanban.py",
+        "blob": "f75353faa903f8d93f415762235517ef7df8e3e8"
+      },
+      {
+        "path": "hermes_cli/kanban_board_ops.py",
+        "blob": "21c8bcbfeb4d648f06d65928a5c0f751f9a03928"
+      },
+      {
+        "path": "hermes_cli/kanban_board_ops_actions.py",
+        "blob": "e06473d1af9aa9c5eea44dcd460ea9a75807e06d"
+      },
+      {
+        "path": "hermes_cli/kanban_board_ops_cli.py",
+        "blob": "d216fc84325ee32aaab84d73b11332d9b6cb5aaf"
+      },
+      {
+        "path": "hermes_cli/kanban_board_ops_policy.py",
+        "blob": "92bf6692aee8c78de2c7317d8320b6b71a8b0fb9"
+      },
+      {
+        "path": "hermes_cli/kanban_board_ops_store.py",
+        "blob": "9b8bfaf4bdc7035d519ec69f8ee3f510741b9df3"
+      },
+      {
+        "path": "hermes_cli/kanban_board_ops_transactions.py",
+        "blob": "00396c9247bf4ba35ab99a44b31838eab77d8461"
+      },
+      {
+        "path": "hermes_cli/kanban_db.py",
+        "blob": "efb2faacaba7244452e043d237e3924012b9e702"
+      },
+      {
+        "path": "hermes_cli/kanban_db_connect.py",
+        "blob": "68ddd882fb80c955b69d75063baded5afd90a883"
+      },
+      {
+        "path": "hermes_cli/kanban_parser.py",
+        "blob": "2cc2b4a0c6e2f707d0b3f9f3718f33fd959bc060"
+      },
+      {
+        "path": "tests/hermes_cli/test_kanban_board_ops.py",
+        "blob": "02086b2612fe6cd7a661a4db6a804f62f894785d"
+      }
+    ],
+    "present": "yes"
+  },
+  {
+    "id": "C2-124",
+    "candidate": "9cfe45f5623b9f305a923ef4eecd5d195e07375c",
+    "inherited_sources": [
+      "ea1f1826d2026c38af7b5bfef8c6bbc74329650e"
+    ],
+    "import_commits": [],
+    "files": [
+      {
+        "path": "hermes_cli/kanban_db.py",
+        "blob": "efb2faacaba7244452e043d237e3924012b9e702"
+      }
+    ],
+    "present": "yes"
+  },
+  {
+    "id": "C2-125",
+    "candidate": "9cfe45f5623b9f305a923ef4eecd5d195e07375c",
+    "inherited_sources": [
+      "e7a434c88be6ac789142b4addf40fb9d9058e33e"
+    ],
+    "import_commits": [],
+    "files": [
+      {
+        "path": "hermes_cli/kanban.py",
+        "blob": "f75353faa903f8d93f415762235517ef7df8e3e8"
+      },
+      {
+        "path": "hermes_cli/kanban_db.py",
+        "blob": "efb2faacaba7244452e043d237e3924012b9e702"
+      },
+      {
+        "path": "hermes_cli/kanban_parser.py",
+        "blob": "2cc2b4a0c6e2f707d0b3f9f3718f33fd959bc060"
+      },
+      {
+        "path": "hermes_cli/kanban_specify.py",
+        "blob": "185bf1236ea110a5d41e780f39c8dc845502fad8"
+      },
+      {
+        "path": "tests/hermes_cli/test_kanban_specify_keep_spec.py",
+        "blob": "49398e2a41d24242aade11d8ecf196c9cda46682"
+      },
+      {
+        "path": "website/docs/user-guide/features/kanban.md",
+        "blob": "0064b862fa09bea5f950bcbe60a5d4a6a6d2fa81"
+      },
+      {
+        "path": "website/i18n/zh-Hans/docusaurus-plugin-content-docs/current/user-guide/features/kanban.md",
+        "blob": "0438589d7c2c548a8ad3b7b867c778879ecfdc02"
+      }
+    ],
+    "present": "yes"
+  },
+  {
+    "id": "C2-126",
+    "candidate": "9cfe45f5623b9f305a923ef4eecd5d195e07375c",
+    "inherited_sources": [
+      "a5343602bd393a46c17cbbcccd09fadcefc54148"
+    ],
+    "import_commits": [],
+    "files": [
+      {
+        "path": "hermes_cli/kanban.py",
+        "blob": "f75353faa903f8d93f415762235517ef7df8e3e8"
+      },
+      {
+        "path": "tests/hermes_cli/test_kanban_specify_keep_spec.py",
+        "blob": "49398e2a41d24242aade11d8ecf196c9cda46682"
+      }
+    ],
+    "present": "yes"
+  },
+  {
+    "id": "C2-127",
+    "candidate": "9cfe45f5623b9f305a923ef4eecd5d195e07375c",
+    "inherited_sources": [
+      "727a85630e58dec36b41ddd8d04954a3ee02970a"
+    ],
+    "import_commits": [],
+    "files": [
+      {
+        "path": "hermes_cli/kanban.py",
+        "blob": "f75353faa903f8d93f415762235517ef7df8e3e8"
+      },
+      {
+        "path": "hermes_cli/kanban_db.py",
+        "blob": "efb2faacaba7244452e043d237e3924012b9e702"
+      },
+      {
+        "path": "hermes_cli/kanban_db_triage_unblock.py",
+        "blob": "5767e6346a46018d3f96112dfd3a8f41db19f47a"
+      },
+      {
+        "path": "hermes_cli/kanban_parser.py",
+        "blob": "2cc2b4a0c6e2f707d0b3f9f3718f33fd959bc060"
+      },
+      {
+        "path": "tests/hermes_cli/test_kanban_triage_unblock.py",
+        "blob": "07a94f97adc2d0328ee2b43a96c37684407a0671"
+      },
+      {
+        "path": "website/docs/user-guide/features/kanban.md",
+        "blob": "0064b862fa09bea5f950bcbe60a5d4a6a6d2fa81"
+      }
+    ],
+    "present": "yes"
+  },
+  {
+    "id": "C2-128",
+    "candidate": "9cfe45f5623b9f305a923ef4eecd5d195e07375c",
+    "inherited_sources": [
+      "e46f39ed71a4fbe48d5d80e38f9790811d0bae30"
+    ],
+    "import_commits": [],
+    "files": [
+      {
+        "path": "tests/tools/test_fleet_message_drain.py",
+        "blob": "f0bf91f5714fcfe16b7e8e10d73255d1e1cf2134"
+      }
+    ],
+    "present": "yes"
+  },
+  {
+    "id": "C2-129",
+    "candidate": "9cfe45f5623b9f305a923ef4eecd5d195e07375c",
+    "inherited_sources": [],
+    "import_commits": [
+      "2e18d5de94df51e037f27b3f63a68df837faf768"
+    ],
+    "files": [
+      {
+        "path": "apps/shared/src/gateway-contract.generated.ts",
+        "blob": "dd12c2d203420ad599ae60640ca2b4c0e1b54e22"
+      },
+      {
+        "path": "apps/shared/src/gateway-contract.openrpc.json",
+        "blob": "4f04950f1b153722ed542798c5a366d9446e3ff2"
+      },
+      {
+        "path": "tests/tui_gateway/test_compute_host_queued_admission.py",
+        "blob": "f5d3ad2093b86309daa0d44c6c8414b21e0a1cd9"
+      },
+      {
+        "path": "tests/tui_gateway/test_compute_host_queued_admission_lifecycle.py",
+        "blob": "8ecf876e321c529d15e1e7b0034bb3a7d4df93a7"
+      },
+      {
+        "path": "tests/tui_gateway/test_prompt_receipt.py",
+        "blob": "553908fced64a207a9e5446ba04e2129498948a7"
+      },
+      {
+        "path": "tests/tui_gateway/test_prompt_receipt_compute_host.py",
+        "blob": "d5c21ee17c393d0f263ac5f239e24f2cea06d3b1"
+      },
+      {
+        "path": "tui_gateway/compute_host.py",
+        "blob": "7ced0684121633e0d639bbd59091b6f0a6792d7a"
+      },
+      {
+        "path": "tui_gateway/contracts/events.py",
+        "blob": "87d06b9565ebd4759aad61c2d530d55a79798cca"
+      },
+      {
+        "path": "tui_gateway/contracts/prompt_voice.py",
+        "blob": "133f651e77873277cff1e40656f423f281929c64"
+      },
+      {
+        "path": "tui_gateway/methods_prompt.py",
+        "blob": "5ff29a6e451b55439f3522bd29bc5886f2b3e86f"
+      },
+      {
+        "path": "tui_gateway/session_auto_continue.py",
+        "blob": "1493d3338fc81a7a890e2ccbb910662b7248ca6a"
+      },
+      {
+        "path": "tui_gateway/session_workdir.py",
+        "blob": "9af586e3f11d34150a50bb8465c17ba6c9cd4c46"
+      }
+    ],
+    "present": "yes"
+  },
+  {
+    "id": "C2-130",
+    "candidate": "9cfe45f5623b9f305a923ef4eecd5d195e07375c",
+    "inherited_sources": [
+      "67211f127fb08e6f50272efc5dc29c9b082656bd"
+    ],
+    "import_commits": [],
+    "files": [
+      {
+        "path": "plugins/memory/supermemory/tunnel_key_helper.py",
+        "blob": "37302d66509a186814d5e30ce8d30f0c6f21284a"
+      },
+      {
+        "path": "tests/plugins/memory/test_supermemory_tunnel_helper.py",
+        "blob": "96c9fa16680853d5ab754fe112ac01e62eb53a44"
+      }
+    ],
+    "present": "yes"
+  },
+  {
+    "id": "C2-131",
+    "candidate": "9cfe45f5623b9f305a923ef4eecd5d195e07375c",
+    "inherited_sources": [],
+    "import_commits": [
+      "88204b260c4311e81339e87ba49bb48da32c0965"
+    ],
+    "files": [
+      {
+        "path": "hermes_cli/gateway_launchd.py",
+        "blob": "f51ee81de987b4fef8126eeec8a95130db55eecd"
+      },
+      {
+        "path": "tests/hermes_cli/test_launchd_launcher_preflight.py",
+        "blob": "8b559ddf0ba88cc0d38e8a91247aa7ece207d6c5"
+      },
+      {
+        "path": "tests/hermes_cli/test_launchd_refresh_reporting.py",
+        "blob": "60ce289483c877e23051f0509c4b012ad2f4da77"
+      }
+    ],
+    "present": "yes"
+  },
+  {
+    "id": "C2-132",
+    "candidate": "9cfe45f5623b9f305a923ef4eecd5d195e07375c",
+    "inherited_sources": [
+      "13b2913b03daea261dededb868b63401c3c7a2f2"
+    ],
+    "import_commits": [],
+    "files": [
+      {
+        "path": "agent/auxiliary_client.py",
+        "blob": "3e76fe467b80f9d1718e9447edfb2eaf736d6d8e"
+      },
+      {
+        "path": "gateway/platforms/api_server.py",
+        "blob": "ad2590cb468522b2a395583b1e337176b6aecd6b"
+      },
+      {
+        "path": "gateway/run.py",
+        "blob": "4d84d8884473d6a061bd647b9af1b5a8163ae9f1"
+      },
+      {
+        "path": "gateway/run_turn.py",
+        "blob": "44bfdcb2becf766454792c07728884c664e7d4b1"
+      },
+      {
+        "path": "hermes_cli/models_detect.py",
+        "blob": "a39ce540cddfa65f9d19a03da50e3e5a9288e206"
+      },
+      {
+        "path": "tests/agent/test_auxiliary_client.py",
+        "blob": "3c30381432438f8f71a89c2e9def19b18fb0ea37"
+      },
+      {
+        "path": "tests/gateway/test_api_server.py",
+        "blob": "bec21c8f5357f8ba9820aa3aed91c92d1c47908c"
+      },
+      {
+        "path": "tests/hermes_cli/test_codex_credential_host_binding.py",
+        "blob": "d052933ff99b648580d17e36cfbfde4e3a8c7bf9"
+      }
+    ],
+    "present": "yes"
+  },
+  {
+    "id": "C2-133",
+    "candidate": "9cfe45f5623b9f305a923ef4eecd5d195e07375c",
+    "inherited_sources": [
+      "38e22cd02472ec46e4fe2a74b8b62ca3817fbcfd"
+    ],
+    "import_commits": [],
+    "files": [
+      {
+        "path": "gateway/platforms/api_server.py",
+        "blob": "ad2590cb468522b2a395583b1e337176b6aecd6b"
+      },
+      {
+        "path": "gateway/run_turn.py",
+        "blob": "44bfdcb2becf766454792c07728884c664e7d4b1"
+      },
+      {
+        "path": "gateway/run_turn_runner.py",
+        "blob": "4d597686ac40ab89bf95134aa7cfc865b6b43a7a"
+      },
+      {
+        "path": "tests/gateway/test_pre_agent_fallback_notice.py",
+        "blob": "ecd76f2f80139ab7564e80d6a4c2f233da22cbb7"
+      }
+    ],
+    "present": "yes"
+  },
+  {
+    "id": "C2-134",
+    "candidate": "9cfe45f5623b9f305a923ef4eecd5d195e07375c",
+    "inherited_sources": [],
+    "import_commits": [
+      "e5a8152820422e997323e3ec9466955e5c1f3615"
+    ],
+    "files": [
+      {
+        "path": "hermes_cli/gateway.py",
+        "blob": "66f418ab9b137da97ba13fc0e1c41777af59e14b"
+      },
+      {
+        "path": "hermes_cli/gateway_launchd.py",
+        "blob": "f51ee81de987b4fef8126eeec8a95130db55eecd"
+      },
+      {
+        "path": "hermes_cli/restart_budget.py",
+        "blob": "a95f8c3ddf6c4a60ef8a5c4ae33d3fa0aca6d55d"
+      },
+      {
+        "path": "tests/hermes_cli/test_gateway_s6_dispatch.py",
+        "blob": "b2292ed81ae68fa173ce615750ef2db1891c9032"
+      },
+      {
+        "path": "tests/hermes_cli/test_restart_budget.py",
+        "blob": "8e5e6cf2c7eda3b98adced7cba6659795880e4fd"
+      }
+    ],
+    "present": "yes"
+  },
+  {
+    "id": "C2-135",
+    "candidate": "9cfe45f5623b9f305a923ef4eecd5d195e07375c",
+    "inherited_sources": [],
+    "import_commits": [
+      "7ec0c6c94534dbe8e0e4c1a8035687bec68bbdd9"
+    ],
+    "files": [
+      {
+        "path": "hermes_cli/gateway_launchd.py",
+        "blob": "f51ee81de987b4fef8126eeec8a95130db55eecd"
+      },
+      {
+        "path": "tests/hermes_cli/test_gateway_service.py",
+        "blob": "a299e14f2d5fe2d260a5c3d3385afa57ba853322"
+      },
+      {
+        "path": "tests/hermes_cli/test_launchd_launcher_preflight.py",
+        "blob": "8b559ddf0ba88cc0d38e8a91247aa7ece207d6c5"
+      }
+    ],
+    "present": "yes"
+  },
+  {
+    "id": "C2-136",
+    "candidate": "9cfe45f5623b9f305a923ef4eecd5d195e07375c",
+    "inherited_sources": [],
+    "import_commits": [
+      "e5a8152820422e997323e3ec9466955e5c1f3615"
+    ],
+    "files": [
+      {
+        "path": "hermes_cli/gateway.py",
+        "blob": "66f418ab9b137da97ba13fc0e1c41777af59e14b"
+      },
+      {
+        "path": "hermes_cli/restart_budget.py",
+        "blob": "a95f8c3ddf6c4a60ef8a5c4ae33d3fa0aca6d55d"
+      },
+      {
+        "path": "hermes_cli/update_cmd_fleet.py",
+        "blob": "aa6c735828d9245d81bea7c9e008c581a22c9185"
+      },
+      {
+        "path": "tests/hermes_cli/test_restart_budget.py",
+        "blob": "8e5e6cf2c7eda3b98adced7cba6659795880e4fd"
+      },
+      {
+        "path": "tests/hermes_cli/test_update_restart_budget_record.py",
+        "blob": "ab5662c687f3768af697865175f2acf3f040c42f"
+      }
+    ],
+    "present": "yes"
+  },
+  {
+    "id": "C2-137",
+    "candidate": "9cfe45f5623b9f305a923ef4eecd5d195e07375c",
+    "inherited_sources": [],
+    "import_commits": [
+      "7d024d0bf3f28c722195387070a6374f264a59cd"
+    ],
+    "files": [
+      {
+        "path": "hermes_cli/gateway.py",
+        "blob": "66f418ab9b137da97ba13fc0e1c41777af59e14b"
+      },
+      {
+        "path": "hermes_cli/gateway_launchd.py",
+        "blob": "f51ee81de987b4fef8126eeec8a95130db55eecd"
+      },
+      {
+        "path": "pm/environments.py",
+        "blob": "9a3a451fd29cf20d8541931dbef908db8d85e8b0"
+      },
+      {
+        "path": "tests/hermes_cli/test_gateway_service_paths.py",
+        "blob": "e692a3ad35bce5c87a93acaa237548bc74176ff3"
+      },
+      {
+        "path": "tests/pm/test_runtime_selection.py",
+        "blob": "6dd9d236cb6d4e70100264f34b3a9bc552694af5"
+      }
+    ],
+    "present": "yes"
+  },
+  {
+    "id": "C2-138",
+    "candidate": "9cfe45f5623b9f305a923ef4eecd5d195e07375c",
+    "inherited_sources": [],
+    "import_commits": [
+      "e5a8152820422e997323e3ec9466955e5c1f3615"
+    ],
+    "files": [
+      {
+        "path": "hermes_cli/gateway.py",
+        "blob": "66f418ab9b137da97ba13fc0e1c41777af59e14b"
+      },
+      {
+        "path": "hermes_cli/restart_budget.py",
+        "blob": "a95f8c3ddf6c4a60ef8a5c4ae33d3fa0aca6d55d"
+      },
+      {
+        "path": "tests/hermes_cli/test_restart_budget.py",
+        "blob": "8e5e6cf2c7eda3b98adced7cba6659795880e4fd"
+      }
+    ],
+    "present": "yes"
+  },
+  {
+    "id": "C2-139",
+    "candidate": "9cfe45f5623b9f305a923ef4eecd5d195e07375c",
+    "inherited_sources": [],
+    "import_commits": [],
+    "files": [
+      {
+        "path": "agent/auxiliary_client.py",
+        "blob": "3e76fe467b80f9d1718e9447edfb2eaf736d6d8e"
+      },
+      {
+        "path": "gateway/platforms/api_server.py",
+        "blob": "ad2590cb468522b2a395583b1e337176b6aecd6b"
+      },
+      {
+        "path": "gateway/run.py",
+        "blob": "4d84d8884473d6a061bd647b9af1b5a8163ae9f1"
+      },
+      {
+        "path": "gateway/run_turn.py",
+        "blob": "44bfdcb2becf766454792c07728884c664e7d4b1"
+      },
+      {
+        "path": "hermes_cli/models_detect.py",
+        "blob": "a39ce540cddfa65f9d19a03da50e3e5a9288e206"
+      },
+      {
+        "path": "tests/agent/test_auxiliary_client.py",
+        "blob": "3c30381432438f8f71a89c2e9def19b18fb0ea37"
+      },
+      {
+        "path": "tests/gateway/test_api_server.py",
+        "blob": "bec21c8f5357f8ba9820aa3aed91c92d1c47908c"
+      },
+      {
+        "path": "tests/hermes_cli/test_codex_credential_host_binding.py",
+        "blob": "d052933ff99b648580d17e36cfbfde4e3a8c7bf9"
+      }
+    ],
+    "present": "no"
+  },
+  {
+    "id": "C2-140",
+    "candidate": "9cfe45f5623b9f305a923ef4eecd5d195e07375c",
+    "inherited_sources": [
+      "ee64a1ef2f88270e000dcb3fddee1a5737e57668"
+    ],
+    "import_commits": [],
+    "files": [
+      {
+        "path": "apps/desktop/src/app/chat/transcript-backfill.test.ts",
+        "blob": "0229522eec324a3be71ec00ef8ee672a1322e6f6"
+      },
+      {
+        "path": "apps/desktop/src/app/contrib/hooks/use-session-tile-delegate.test.ts",
+        "blob": "95d802ee27cf562cf5dcfe5a8905da55cab7370e"
+      },
+      {
+        "path": "apps/desktop/src/app/contrib/hooks/use-session-tile-delegate.ts",
+        "blob": "4a619493fefdf8ea0ce641ec887cfbcd281a1046"
+      },
+      {
+        "path": "apps/desktop/src/app/session/hooks/use-prompt-actions/index.test.tsx",
+        "blob": "0503c4fb4670697711e1affb396c866b7b7b4155"
+      },
+      {
+        "path": "apps/desktop/src/app/session/hooks/use-prompt-actions/submit.ts",
+        "blob": "5241bba932d9b64b13788a40754e149dec64c65c"
+      },
+      {
+        "path": "apps/desktop/src/i18n/ar.ts",
+        "blob": "767af04d0641d0a9a09a2776abbe51e89b1e5e14"
+      },
+      {
+        "path": "apps/desktop/src/i18n/de.ts",
+        "blob": "257ee1f7a954a0dc6140bb353b099a98f075e4c9"
+      },
+      {
+        "path": "apps/desktop/src/i18n/en.ts",
+        "blob": "a2aa7a9a9a4c579d6b737d0cad5e0e17350fd5d1"
+      },
+      {
+        "path": "apps/desktop/src/i18n/es.ts",
+        "blob": "1f0e08b65f3b5e8b35c52756f2b4efcd709d4928"
+      },
+      {
+        "path": "apps/desktop/src/i18n/fr.ts",
+        "blob": "ad347f346889ddda9a43881acf8779bd1fa9bc9b"
+      },
+      {
+        "path": "apps/desktop/src/i18n/ja.ts",
+        "blob": "f8c4755b14c24a829ef026250a1c4a1dee1ec052"
+      },
+      {
+        "path": "apps/desktop/src/i18n/ru.ts",
+        "blob": "7e5fa1a706fe706df873d2b8f1cbd8c7a34426d1"
+      },
+      {
+        "path": "apps/desktop/src/i18n/types.ts",
+        "blob": "3cf0e5ed48c658f2c9a941ae3c938d5967549563"
+      },
+      {
+        "path": "apps/desktop/src/i18n/zh-hant.ts",
+        "blob": "c1fb48be20079fcc0019dbfd9c909f413e88d40c"
+      },
+      {
+        "path": "apps/desktop/src/i18n/zh.ts",
+        "blob": "7b34b184d3086cb1406b8f2643c4b645264b2a55"
+      },
+      {
+        "path": "apps/desktop/src/lib/stale-transcript-guard.ts",
+        "blob": "ec65236898d3155cab43d953d0261d92552ef64e"
+      },
+      {
+        "path": "apps/desktop/src/plugins/hermes-bots/relay.test.ts",
+        "blob": "5d01ef8034a44530e7d0efb185789e3d6e6b21e9"
+      },
+      {
+        "path": "apps/desktop/src/plugins/hermes-bots/relay.ts",
+        "blob": "f1eddf0b2869f626d3e3089256b8ce05e288ebb9"
+      },
+      {
+        "path": "apps/shared/src/gateway-contract.generated.ts",
+        "blob": "dd12c2d203420ad599ae60640ca2b4c0e1b54e22"
+      },
+      {
+        "path": "apps/shared/src/gateway-contract.openrpc.json",
+        "blob": "4f04950f1b153722ed542798c5a366d9446e3ff2"
+      },
+      {
+        "path": "cli.py",
+        "blob": "09c47984ef142fc72a3818e4bd37a1617694c5f4"
+      },
+      {
+        "path": "gateway/platforms/api_server.py",
+        "blob": "ad2590cb468522b2a395583b1e337176b6aecd6b"
+      },
+      {
+        "path": "gateway/run.py",
+        "blob": "4d84d8884473d6a061bd647b9af1b5a8163ae9f1"
+      },
+      {
+        "path": "gateway/run_busy.py",
+        "blob": "66ae8d9cbe6d05ccd724cb7c30ecf9051540dc71"
+      },
+      {
+        "path": "gateway/shutdown_flush.py",
+        "blob": "cf3484404619571cb8074515d0818b04e6132522"
+      },
+      {
+        "path": "hermes_cli/cli_single_query.py",
+        "blob": "7e3b353f0417381faea5c6f4098a794d48b708a9"
+      },
+      {
+        "path": "hermes_cli/quiet_single_query.py",
+        "blob": "f2a9f8390046b0decc53ffabc61a0fc233b0d7ca"
+      },
+      {
+        "path": "tests/gateway/test_api_server_active_work_drain.py",
+        "blob": "4714995bde10baca3bba03fb11415623e3af23f9"
+      },
+      {
+        "path": "tests/gateway/test_gateway_draining_session_chat_recovery.py",
+        "blob": "0f91a144131646b982f411735d3b518ff13b4776"
+      },
+      {
+        "path": "tests/gateway/test_subagent_protection.py",
+        "blob": "f7e2218f46d5317b04cbfc725c556cc1ed2ba5dc"
+      },
+      {
+        "path": "tests/hermes_cli/test_quiet_notify_delivery.py",
+        "blob": "8d20adc08fcede3b28695f5c957ff74dd5a20ff3"
+      },
+      {
+        "path": "tests/hermes_cli/test_quiet_single_query.py",
+        "blob": "7e839ebfbb02055a85fbdfc135ee73a1866d9c6a"
+      },
+      {
+        "path": "tests/hermes_cli/test_single_query_fleet_turn_end_drain.py",
+        "blob": "bcf3f78b630504c5ed287aa95042c4a979741abf"
+      },
+      {
+        "path": "tests/tools/test_a2a_reason_roundtrip.py",
+        "blob": "ad368448d29fc4e08aa9b9e705f102474ece7fba"
+      },
+      {
+        "path": "tests/tools/test_bot_failure_reasons.py",
+        "blob": "2d626ee14069b8ec876dd8eca9ecb0ee690377c9"
+      },
+      {
+        "path": "tests/tools/test_bot_mode_dm_busy_queue.py",
+        "blob": "34155e55af0afaed9086bfbf769da0de97ba7689"
+      },
+      {
+        "path": "tests/tools/test_bot_relay.py",
+        "blob": "56ca9858e7914019cb82291bcdc3b29ec1ac5cab"
+      },
+      {
+        "path": "tests/tools/test_bot_turn_lock.py",
+        "blob": "04a39e68a3ec3f29ff773d971d00757a22cd8491"
+      },
+      {
+        "path": "tests/tools/test_fleet_busy_ack_requires_recipient_drain.py",
+        "blob": "98f10fef286a5df14be4fd50eb93213cc655067e"
+      },
+      {
+        "path": "tests/tools/test_fleet_message_enqueue.py",
+        "blob": "ea4cb021ccdb8a523bb74d5e54be5be9d51ef673"
+      },
+      {
+        "path": "tests/tools/test_fleet_message_expiry_sender_notice.py",
+        "blob": "45d952e88b79d480d062e614ea30efb876db5a10"
+      },
+      {
+        "path": "tests/tui_gateway/test_bot_relay_methods.py",
+        "blob": "5a3db0d69889dad66c4ed95956f18ebc06147791"
+      },
+      {
+        "path": "tests/tui_gateway/test_queue_behind_cli_lease.py",
+        "blob": "097dbdc713f7b3d70e86198dce5d5c5c283f6d47"
+      },
+      {
+        "path": "tools/async_delegation.py",
+        "blob": "b81cc593864e96c2e7ab14373165aa6469e1c6c8"
+      },
+      {
+        "path": "tools/bot_failure_reasons.py",
+        "blob": "54105f6b9d45ae0429456b6674d4992660229146"
+      },
+      {
+        "path": "tools/bot_mode_dm.py",
+        "blob": "0388464ec15e8a9c8b60705240de54d74310d244"
+      },
+      {
+        "path": "tools/bot_relay.py",
+        "blob": "67112e3c77ccb95ef9b4ffe577fb6c94713dea6c"
+      },
+      {
+        "path": "tools/fleet_message_drain.py",
+        "blob": "45e46a565c6a9652337186ac33470828208dfc08"
+      },
+      {
+        "path": "tools/fleet_message_enqueue.py",
+        "blob": "fc41c28e38268b424474a6ecc8dbe72dbe7a6271"
+      },
+      {
+        "path": "tui_gateway/contracts/groups_bot_relay.py",
+        "blob": "e177727be08654af356ad8f0f04e8f4238180cb2"
+      },
+      {
+        "path": "tui_gateway/methods_bot_relay.py",
+        "blob": "a72f2cd80aba0778bd135408e205bb403e68a182"
+      },
+      {
+        "path": "tui_gateway/methods_prompt.py",
+        "blob": "5ff29a6e451b55439f3522bd29bc5886f2b3e86f"
+      },
+      {
+        "path": "tui_gateway/session_auto_continue.py",
+        "blob": "1493d3338fc81a7a890e2ccbb910662b7248ca6a"
+      },
+      {
+        "path": "tui_gateway/session_notifications.py",
+        "blob": "ce17fd7e48e8436961c909ed36a0fcc32f5968d3"
+      }
+    ],
+    "present": "yes"
+  },
+  {
+    "id": "C2-141",
+    "candidate": "9cfe45f5623b9f305a923ef4eecd5d195e07375c",
+    "inherited_sources": [
+      "fe4c39765b969f4d9b899ca3359b956a648db503"
+    ],
+    "import_commits": [],
+    "files": [
+      {
+        "path": "gateway/platforms/api_server.py",
+        "blob": "ad2590cb468522b2a395583b1e337176b6aecd6b"
+      }
+    ],
+    "present": "no"
+  },
+  {
+    "id": "C2-142",
+    "candidate": "9cfe45f5623b9f305a923ef4eecd5d195e07375c",
+    "inherited_sources": [
+      "0775b5b796ab9eb0d0754ba500d7ebeb89217443"
+    ],
+    "import_commits": [],
+    "files": [
+      {
+        "path": "tests/tools/test_fleet_message_drain.py",
+        "blob": "f0bf91f5714fcfe16b7e8e10d73255d1e1cf2134"
+      },
+      {
+        "path": "tools/fleet_message_drain.py",
+        "blob": "45e46a565c6a9652337186ac33470828208dfc08"
+      }
+    ],
+    "present": "yes"
+  },
+  {
+    "id": "C2-143",
+    "candidate": "9cfe45f5623b9f305a923ef4eecd5d195e07375c",
+    "inherited_sources": [],
+    "import_commits": [],
+    "files": [
+      {
+        "path": "gateway/run_busy.py",
+        "blob": "66ae8d9cbe6d05ccd724cb7c30ecf9051540dc71"
+      },
+      {
+        "path": "tests/gateway/test_subagent_protection.py",
+        "blob": "f7e2218f46d5317b04cbfc725c556cc1ed2ba5dc"
+      }
+    ],
+    "present": "no"
+  },
+  {
+    "id": "C2-144",
+    "candidate": "9cfe45f5623b9f305a923ef4eecd5d195e07375c",
+    "inherited_sources": [
+      "2371a47491e5f0d1a96eac11c4fa1789aae6e11e"
+    ],
+    "import_commits": [],
+    "files": [
+      {
+        "path": "gateway/run.py",
+        "blob": "4d84d8884473d6a061bd647b9af1b5a8163ae9f1"
+      },
+      {
+        "path": "gateway/run_config_loaders.py",
+        "blob": "b25951fc9cf87d7896d961f7979d173d159a160c"
+      },
+      {
+        "path": "tests/gateway/test_busy_input_default_queue.py",
+        "blob": "d959230d549cbad0ba4a2cfeef3a54134d210ca3"
+      }
+    ],
+    "present": "yes"
+  },
+  {
+    "id": "C2-145",
+    "candidate": "9cfe45f5623b9f305a923ef4eecd5d195e07375c",
+    "inherited_sources": [
+      "ac4573c090e85ecc63865cc122006282fd7c4d14"
+    ],
+    "import_commits": [],
+    "files": [
+      {
+        "path": "tests/tools/test_fleet_message_drain.py",
+        "blob": "f0bf91f5714fcfe16b7e8e10d73255d1e1cf2134"
+      },
+      {
+        "path": "tools/fleet_message_drain.py",
+        "blob": "45e46a565c6a9652337186ac33470828208dfc08"
+      }
+    ],
+    "present": "yes"
+  },
+  {
+    "id": "C2-146",
+    "candidate": "9cfe45f5623b9f305a923ef4eecd5d195e07375c",
+    "inherited_sources": [],
+    "import_commits": [
+      "63929e20bd5f649db7877d11de4bca5c3975329c"
+    ],
+    "files": [
+      {
+        "path": "gateway/platforms/api_server.py",
+        "blob": "ad2590cb468522b2a395583b1e337176b6aecd6b"
+      },
+      {
+        "path": "hermes_cli/cli_single_query.py",
+        "blob": "7e3b353f0417381faea5c6f4098a794d48b708a9"
+      },
+      {
+        "path": "tests/gateway/test_gateway_draining_session_chat_recovery.py",
+        "blob": "0f91a144131646b982f411735d3b518ff13b4776"
+      },
+      {
+        "path": "tests/hermes_cli/test_single_query_fleet_turn_end_drain.py",
+        "blob": "bcf3f78b630504c5ed287aa95042c4a979741abf"
+      },
+      {
+        "path": "tests/tools/test_bot_mode_dm_busy_queue.py",
+        "blob": "34155e55af0afaed9086bfbf769da0de97ba7689"
+      },
+      {
+        "path": "tests/tools/test_bot_turn_lock.py",
+        "blob": "04a39e68a3ec3f29ff773d971d00757a22cd8491"
+      },
+      {
+        "path": "tests/tools/test_fleet_busy_ack_requires_recipient_drain.py",
+        "blob": "98f10fef286a5df14be4fd50eb93213cc655067e"
+      },
+      {
+        "path": "tests/tui_gateway/test_bot_relay_methods.py",
+        "blob": "5a3db0d69889dad66c4ed95956f18ebc06147791"
+      },
+      {
+        "path": "tools/bot_mode_dm.py",
+        "blob": "0388464ec15e8a9c8b60705240de54d74310d244"
+      },
+      {
+        "path": "tui_gateway/methods_bot_relay.py",
+        "blob": "a72f2cd80aba0778bd135408e205bb403e68a182"
+      }
+    ],
+    "present": "yes"
+  },
+  {
+    "id": "C2-147",
+    "candidate": "9cfe45f5623b9f305a923ef4eecd5d195e07375c",
+    "inherited_sources": [],
+    "import_commits": [],
+    "files": [
+      {
+        "path": "hermes_cli/gateway.py",
+        "blob": "66f418ab9b137da97ba13fc0e1c41777af59e14b"
+      }
+    ],
+    "present": "no"
+  },
+  {
+    "id": "C2-148",
+    "candidate": "9cfe45f5623b9f305a923ef4eecd5d195e07375c",
+    "inherited_sources": [],
+    "import_commits": [
+      "e5a8152820422e997323e3ec9466955e5c1f3615"
+    ],
+    "files": [
+      {
+        "path": "hermes_cli/gateway.py",
+        "blob": "66f418ab9b137da97ba13fc0e1c41777af59e14b"
+      },
+      {
+        "path": "tests/hermes_cli/test_restart_budget.py",
+        "blob": "8e5e6cf2c7eda3b98adced7cba6659795880e4fd"
+      }
+    ],
+    "present": "yes"
+  },
+  {
+    "id": "C2-149",
+    "candidate": "9cfe45f5623b9f305a923ef4eecd5d195e07375c",
+    "inherited_sources": [],
+    "import_commits": [
+      "e5a8152820422e997323e3ec9466955e5c1f3615"
+    ],
+    "files": [
+      {
+        "path": "hermes_cli/gateway.py",
+        "blob": "66f418ab9b137da97ba13fc0e1c41777af59e14b"
+      },
+      {
+        "path": "hermes_cli/gateway_restart_observe.py",
+        "blob": "ab3d90b0f1a0d32bcfa6a92830f9036f7d1f14fb"
+      },
+      {
+        "path": "hermes_cli/restart_budget.py",
+        "blob": "a95f8c3ddf6c4a60ef8a5c4ae33d3fa0aca6d55d"
+      },
+      {
+        "path": "tests/hermes_cli/conftest.py",
+        "blob": "0a0cf24eb5df77b70d0946e38b58b96bbc779276"
+      },
+      {
+        "path": "tests/hermes_cli/test_restart_budget.py",
+        "blob": "8e5e6cf2c7eda3b98adced7cba6659795880e4fd"
+      }
+    ],
+    "present": "yes"
+  },
+  {
+    "id": "C2-150",
+    "candidate": "9cfe45f5623b9f305a923ef4eecd5d195e07375c",
+    "inherited_sources": [],
+    "import_commits": [
+      "e5a8152820422e997323e3ec9466955e5c1f3615"
+    ],
+    "files": [
+      {
+        "path": "hermes_cli/restart_budget.py",
+        "blob": "a95f8c3ddf6c4a60ef8a5c4ae33d3fa0aca6d55d"
+      },
+      {
+        "path": "tests/hermes_cli/test_restart_budget.py",
+        "blob": "8e5e6cf2c7eda3b98adced7cba6659795880e4fd"
+      }
+    ],
+    "present": "yes"
+  },
+  {
+    "id": "C2-151",
+    "candidate": "9cfe45f5623b9f305a923ef4eecd5d195e07375c",
+    "inherited_sources": [],
+    "import_commits": [],
+    "files": [
+      {
+        "path": "hermes_cli/gateway_restart_observe.py",
+        "blob": "ab3d90b0f1a0d32bcfa6a92830f9036f7d1f14fb"
+      },
+      {
+        "path": "tests/hermes_cli/test_restart_budget.py",
+        "blob": "8e5e6cf2c7eda3b98adced7cba6659795880e4fd"
+      }
+    ],
+    "present": "no"
+  },
+  {
+    "id": "C2-152",
+    "candidate": "9cfe45f5623b9f305a923ef4eecd5d195e07375c",
+    "inherited_sources": [],
+    "import_commits": [
+      "e5a8152820422e997323e3ec9466955e5c1f3615"
+    ],
+    "files": [
+      {
+        "path": "hermes_cli/gateway_restart_observe.py",
+        "blob": "ab3d90b0f1a0d32bcfa6a92830f9036f7d1f14fb"
+      },
+      {
+        "path": "tests/hermes_cli/test_restart_budget.py",
+        "blob": "8e5e6cf2c7eda3b98adced7cba6659795880e4fd"
+      }
+    ],
+    "present": "yes"
+  },
+  {
+    "id": "C2-153",
+    "candidate": "9cfe45f5623b9f305a923ef4eecd5d195e07375c",
+    "inherited_sources": [
+      "34e86b3834ad6d77969a3e3898faf7976cd91422"
+    ],
+    "import_commits": [],
+    "files": [
+      {
+        "path": "gateway/run_shutdown.py",
+        "blob": "8e85aa9b81726ec098e4a8f300a5e4cf2da48500"
+      },
+      {
+        "path": "tests/gateway/test_shutdown_process_survival.py",
+        "blob": "f87ebda121ba75d071e5a2802dd8c0073438929b"
+      },
+      {
+        "path": "tools/process_registry.py",
+        "blob": "369c2b9b54b703e19221f951f12d247a27537deb"
+      }
+    ],
+    "present": "yes"
+  },
+  {
+    "id": "C2-154",
+    "candidate": "9cfe45f5623b9f305a923ef4eecd5d195e07375c",
+    "inherited_sources": [],
+    "import_commits": [
+      "9868c9ec9881cab514517891cffd4c9e56224f67",
+      "4850ed193aadeeba71448f765a8690a5d855970b"
+    ],
+    "files": [
+      {
+        "path": "hermes_cli/quiet_single_query.py",
+        "blob": "f2a9f8390046b0decc53ffabc61a0fc233b0d7ca"
+      },
+      {
+        "path": "tests/hermes_cli/test_quiet_single_query.py",
+        "blob": "7e839ebfbb02055a85fbdfc135ee73a1866d9c6a"
+      },
+      {
+        "path": "tests/tools/test_fleet_message_drain.py",
+        "blob": "f0bf91f5714fcfe16b7e8e10d73255d1e1cf2134"
+      },
+      {
+        "path": "tools/fleet_message_drain.py",
+        "blob": "45e46a565c6a9652337186ac33470828208dfc08"
+      }
+    ],
+    "present": "yes"
+  },
+  {
+    "id": "C2-155",
+    "candidate": "9cfe45f5623b9f305a923ef4eecd5d195e07375c",
+    "inherited_sources": [
+      "feec50f7e75ad26fe1293827b2df489d6cd62c50"
+    ],
+    "import_commits": [],
+    "files": [
+      {
+        "path": "gateway/platforms/api_server.py",
+        "blob": "ad2590cb468522b2a395583b1e337176b6aecd6b"
+      },
+      {
+        "path": "tests/tools/test_fleet_message_drain.py",
+        "blob": "f0bf91f5714fcfe16b7e8e10d73255d1e1cf2134"
+      },
+      {
+        "path": "tools/fleet_message_drain.py",
+        "blob": "45e46a565c6a9652337186ac33470828208dfc08"
+      }
+    ],
+    "present": "yes"
+  },
+  {
+    "id": "C2-156",
+    "candidate": "9cfe45f5623b9f305a923ef4eecd5d195e07375c",
+    "inherited_sources": [
+      "b16afb768d75d668bd29c018eef7979f8f052d2f"
+    ],
+    "import_commits": [],
+    "files": [
+      {
+        "path": "gateway/platforms/api_server.py",
+        "blob": "ad2590cb468522b2a395583b1e337176b6aecd6b"
+      },
+      {
+        "path": "gateway/platforms/api_server_runs.py",
+        "blob": "dbaea0bfabd78d9ba4ca726c003d832c84e88a0a"
+      },
+      {
+        "path": "hermes_cli/cli_single_query.py",
+        "blob": "7e3b353f0417381faea5c6f4098a794d48b708a9"
+      },
+      {
+        "path": "tests/gateway/test_api_server.py",
+        "blob": "bec21c8f5357f8ba9820aa3aed91c92d1c47908c"
+      },
+      {
+        "path": "tests/gateway/test_api_server_runs.py",
+        "blob": "83f67a191f0ee60b7b075ca79ae9c12aa79647ce"
+      },
+      {
+        "path": "tests/hermes_cli/test_quiet_single_query.py",
+        "blob": "7e839ebfbb02055a85fbdfc135ee73a1866d9c6a"
+      },
+      {
+        "path": "tests/tools/test_fleet_message_drain.py",
+        "blob": "f0bf91f5714fcfe16b7e8e10d73255d1e1cf2134"
+      },
+      {
+        "path": "tests/tui_gateway/test_fleet_message_drain_hook.py",
+        "blob": "036b9f71d0fa52118c822be0f8e187fc7fc350a7"
+      },
+      {
+        "path": "tools/fleet_message_drain.py",
+        "blob": "45e46a565c6a9652337186ac33470828208dfc08"
+      }
+    ],
+    "present": "yes"
+  },
+  {
+    "id": "C2-157",
+    "candidate": "9cfe45f5623b9f305a923ef4eecd5d195e07375c",
+    "inherited_sources": [
+      "a5c914f7efa8196a809a868a8a1264213b8d0e6a"
+    ],
+    "import_commits": [],
+    "files": [
+      {
+        "path": "gateway/platforms/api_server.py",
+        "blob": "ad2590cb468522b2a395583b1e337176b6aecd6b"
+      },
+      {
+        "path": "gateway/platforms/api_server_openai_routes.py",
+        "blob": "f396cd390932b1150d78839b72c97a5962e133f5"
+      },
+      {
+        "path": "gateway/platforms/api_server_runs.py",
+        "blob": "dbaea0bfabd78d9ba4ca726c003d832c84e88a0a"
+      },
+      {
+        "path": "tests/gateway/test_api_server_target_busy.py",
+        "blob": "c17e83b1d8eb6708ef3a7300ef70314ac6ccfb8d"
+      }
+    ],
+    "present": "yes"
+  },
+  {
+    "id": "C2-158",
+    "candidate": "9cfe45f5623b9f305a923ef4eecd5d195e07375c",
+    "inherited_sources": [
+      "36b96e9caf7f565557bb9973e5261fab06651998"
+    ],
+    "import_commits": [],
+    "files": [
+      {
+        "path": "agent/system_prompt.py",
+        "blob": "52c9de8b732b99fcea76ef8a1fcae69e5f76fe42"
+      },
+      {
+        "path": "tests/tools/test_bot_mode_dm_surfaces.py",
+        "blob": "173526d1418bac35211abcb341cc3ca18563f21b"
+      },
+      {
+        "path": "tools/bot_mode_dm.py",
+        "blob": "0388464ec15e8a9c8b60705240de54d74310d244"
+      }
+    ],
+    "present": "yes"
+  },
+  {
+    "id": "C2-159",
+    "candidate": "9cfe45f5623b9f305a923ef4eecd5d195e07375c",
+    "inherited_sources": [
+      "39e341ef7250ec37fed6e32a1af2916fa0f01696"
+    ],
+    "import_commits": [],
+    "files": [
+      {
+        "path": "agent/agent_init.py",
+        "blob": "9d77a3b0aaeaea3cf9cfc6e7ba7722875ce79e5f"
+      },
+      {
+        "path": "agent/agent_runtime_helpers.py",
+        "blob": "5d81a7b335b9464d641ac3537baadee2e5c8f668"
+      },
+      {
+        "path": "agent/context_compressor.py",
+        "blob": "91de7c7b9cfb03cb2469b4fe94f9fc4232adc337"
+      },
+      {
+        "path": "agent/fallback_cooldown.py",
+        "blob": "2c44e685b78626380c49d212fa041631b6da4aa1"
+      },
+      {
+        "path": "agent/turn_context.py",
+        "blob": "3e33a0b2cd76ae1fa96df7ca0967f4612ccaba99"
+      },
+      {
+        "path": "agent/turn_finalizer.py",
+        "blob": "bba38764dfe8614138efff9a0292bbf8d24addc8"
+      },
+      {
+        "path": "gateway/run_config_loaders.py",
+        "blob": "b25951fc9cf87d7896d961f7979d173d159a160c"
+      },
+      {
+        "path": "hermes_cli/config_defaults.py",
+        "blob": "1953886618af565a85995739c5fb561e0e83f52d"
+      },
+      {
+        "path": "hermes_cli/fallback_config.py",
+        "blob": "76a54da69c302934b2c84e9b4e1786734412d66d"
+      },
+      {
+        "path": "tests/agent/test_live_fallback_chain_refresh.py",
+        "blob": "7ff2bbc5bf9d45874672b146fc8d379e77d74c21"
+      },
+      {
+        "path": "tests/agent/test_metered_compression_cap.py",
+        "blob": "d93257541dce023d940fccf5e522b3b4df88bc95"
+      },
+      {
+        "path": "tests/agent/test_restore_primary_after_cooldown.py",
+        "blob": "4e73e83241466f384bdb49a5c77b4eb4a2b6bf31"
+      },
+      {
+        "path": "tests/gateway/test_fallback_chain_reload.py",
+        "blob": "15f6a2dc6809e1d2ecdf016fa5c28915b76ac37d"
+      }
+    ],
+    "present": "yes"
+  },
+  {
+    "id": "C2-160",
+    "candidate": "9cfe45f5623b9f305a923ef4eecd5d195e07375c",
+    "inherited_sources": [
+      "a306b6d6bbc1836f78f76c5022d707292b67c900"
+    ],
+    "import_commits": [],
+    "files": [
+      {
+        "path": "hermes_cli/cli_shutdown.py",
+        "blob": "617f906e429603639da9332c5b54a6db9d6b29f1"
+      },
+      {
+        "path": "tests/hermes_cli/test_single_query_session_finalize.py",
+        "blob": "66b9d261640ccae199c0caa80eb05c1cce55d14b"
+      },
+      {
+        "path": "tests/tools/test_oneshot_completion_linger.py",
+        "blob": "83187c8b814298b068ecd86cd1568aa6789e1373"
+      }
+    ],
+    "present": "yes"
+  },
+  {
+    "id": "C2-161",
+    "candidate": "9cfe45f5623b9f305a923ef4eecd5d195e07375c",
+    "inherited_sources": [
+      "fc9b3c5432eaf2550a941b547efc7c55d9fdbfe8"
+    ],
+    "import_commits": [],
+    "files": [
+      {
+        "path": "hermes_cli/cli_shutdown.py",
+        "blob": "617f906e429603639da9332c5b54a6db9d6b29f1"
+      },
+      {
+        "path": "tests/hermes_cli/test_single_query_session_finalize.py",
+        "blob": "66b9d261640ccae199c0caa80eb05c1cce55d14b"
+      },
+      {
+        "path": "tests/tools/test_oneshot_completion_linger.py",
+        "blob": "83187c8b814298b068ecd86cd1568aa6789e1373"
+      }
+    ],
+    "present": "yes"
+  },
+  {
+    "id": "C2-162",
+    "candidate": "9cfe45f5623b9f305a923ef4eecd5d195e07375c",
+    "inherited_sources": [
+      "19ffd84a8e94f1a17d058824bb2844f657056c4b"
+    ],
+    "import_commits": [],
+    "files": [
+      {
+        "path": "tests/tools/test_fleet_message_drain.py",
+        "blob": "f0bf91f5714fcfe16b7e8e10d73255d1e1cf2134"
+      },
+      {
+        "path": "tests/tools/test_fleet_message_expiry_sender_notice.py",
+        "blob": "45d952e88b79d480d062e614ea30efb876db5a10"
+      },
+      {
+        "path": "tools/fleet_message_drain.py",
+        "blob": "45e46a565c6a9652337186ac33470828208dfc08"
+      }
+    ],
+    "present": "yes"
+  },
+  {
+    "id": "C2-163",
+    "candidate": "9cfe45f5623b9f305a923ef4eecd5d195e07375c",
+    "inherited_sources": [],
+    "import_commits": [
+      "ea1b3fe013a5445bdb7db05eaea1b53969289f64"
+    ],
+    "files": [
+      {
+        "path": "agent/deadline.py",
+        "blob": "1b89a51464f04c190d4554ecc17a2df75304f3a5"
+      },
+      {
+        "path": "hermes_cli/_subprocess_compat.py",
+        "blob": "9ddaf4b8c53c6850bcc5edbd18cc71d00131970d"
+      },
+      {
+        "path": "tests/tools/test_dual_home_process_receipts.py",
+        "blob": "873ec918cff597e679e04c2c7369649df4a8606a"
+      },
+      {
+        "path": "tests/tools/test_existing_receipt_identity.py",
+        "blob": "2ce9d959c4835328c12a5ffff002d3ad38056445"
+      },
+      {
+        "path": "tests/tools/test_process_registry.py",
+        "blob": "b9d20b8d6356d0f5cb7eaaefe7d4368aaaccf5e4"
+      },
+      {
+        "path": "tests/tools/test_terminal_bounded_execute.py",
+        "blob": "e6b286b8b977090dece10d5a9bff856d00d82a89"
+      },
+      {
+        "path": "tests/tools/test_terminal_timeout_provenance.py",
+        "blob": "b459247e4385894bfae4b31b0dfd5b2017bfe15c"
+      },
+      {
+        "path": "tools/environments/base.py",
+        "blob": "f24054d5db6dbf7ad9d91448ae8a480246b534d0"
+      },
+      {
+        "path": "tools/environments/local.py",
+        "blob": "697fa36672a5c2e536551dff020c33d525e0a3f8"
+      },
+      {
+        "path": "tools/process_registry.py",
+        "blob": "369c2b9b54b703e19221f951f12d247a27537deb"
+      },
+      {
+        "path": "tools/process_registry_results.py",
+        "blob": "e601d5ac95257d034004545cf57d4541cf28e613"
+      }
+    ],
+    "present": "yes"
+  },
+  {
+    "id": "C2-164",
+    "candidate": "9cfe45f5623b9f305a923ef4eecd5d195e07375c",
+    "inherited_sources": [
+      "09cee59f95c63d9253d12b380ed1e3b614f7a27e"
+    ],
+    "import_commits": [],
+    "files": [
+      {
+        "path": "plugins/memory/supermemory/README.md",
+        "blob": "d2672aea316dacd4a833f8ffb283b56e31818e8f"
+      }
+    ],
+    "present": "yes"
+  },
+  {
+    "id": "C2-165",
+    "candidate": "9cfe45f5623b9f305a923ef4eecd5d195e07375c",
+    "inherited_sources": [
+      "955aeeebcf102d220728006bcf1005ca06e17e5e"
+    ],
+    "import_commits": [],
+    "files": [
+      {
+        "path": "plugins/memory/supermemory/README.md",
+        "blob": "d2672aea316dacd4a833f8ffb283b56e31818e8f"
+      },
+      {
+        "path": "website/docs/user-guide/features/memory-providers.md",
+        "blob": "153b47b3c4b26fddf91484441ea91a677655ea4c"
+      }
+    ],
+    "present": "yes"
+  },
+  {
+    "id": "C2-166",
+    "candidate": "9cfe45f5623b9f305a923ef4eecd5d195e07375c",
+    "inherited_sources": [
+      "a9165b566b9655f236e103f6b5f366292a4238ed"
+    ],
+    "import_commits": [],
+    "files": [
+      {
+        "path": "plugins/memory/supermemory/README.md",
+        "blob": "d2672aea316dacd4a833f8ffb283b56e31818e8f"
+      },
+      {
+        "path": "website/docs/user-guide/features/memory-providers.md",
+        "blob": "153b47b3c4b26fddf91484441ea91a677655ea4c"
+      }
+    ],
+    "present": "yes"
+  },
+  {
+    "id": "C2-167",
+    "candidate": "9cfe45f5623b9f305a923ef4eecd5d195e07375c",
+    "inherited_sources": [
+      "86963ea204978872aba0cc98bcf9bb03acb3392a"
+    ],
+    "import_commits": [],
+    "files": [
+      {
+        "path": "plugins/memory/supermemory/README.md",
+        "blob": "d2672aea316dacd4a833f8ffb283b56e31818e8f"
+      }
+    ],
+    "present": "yes"
+  },
+  {
+    "id": "C2-168",
+    "candidate": "9cfe45f5623b9f305a923ef4eecd5d195e07375c",
+    "inherited_sources": [
+      "6f4477f60865ca7ad8555d0a3f78a4848d45e020"
+    ],
+    "import_commits": [],
+    "files": [
+      {
+        "path": "plugins/memory/supermemory/tunnel_key_helper.py",
+        "blob": "37302d66509a186814d5e30ce8d30f0c6f21284a"
+      },
+      {
+        "path": "tests/plugins/memory/test_supermemory_tunnel_helper.py",
+        "blob": "96c9fa16680853d5ab754fe112ac01e62eb53a44"
+      }
+    ],
+    "present": "yes"
+  },
+  {
+    "id": "C2-169",
+    "candidate": "9cfe45f5623b9f305a923ef4eecd5d195e07375c",
+    "inherited_sources": [
+      "4ea6775febff0b6f9ca2d0de083356cf39211398"
+    ],
+    "import_commits": [],
+    "files": [
+      {
+        "path": "plugins/memory/supermemory/__init__.py",
+        "blob": "7cc6185fbe68e175f17a8ec198518dfc09723230"
+      },
+      {
+        "path": "tests/plugins/memory/test_supermemory_guards.py",
+        "blob": "42d363f79de3b9077ebbbd5fd3a939d5cdd65909"
+      }
+    ],
+    "present": "yes"
+  },
+  {
+    "id": "C2-170",
+    "candidate": "9cfe45f5623b9f305a923ef4eecd5d195e07375c",
+    "inherited_sources": [
+      "21da9b9db92e095e4666d09e8552a31ab27ff9f0"
+    ],
+    "import_commits": [],
+    "files": [
+      {
+        "path": "plugins/memory/supermemory/__init__.py",
+        "blob": "7cc6185fbe68e175f17a8ec198518dfc09723230"
+      },
+      {
+        "path": "plugins/memory/supermemory/tunnel_key_helper.py",
+        "blob": "37302d66509a186814d5e30ce8d30f0c6f21284a"
+      },
+      {
+        "path": "tests/plugins/memory/test_supermemory_guards.py",
+        "blob": "42d363f79de3b9077ebbbd5fd3a939d5cdd65909"
+      },
+      {
+        "path": "tests/plugins/memory/test_supermemory_socket_transport.py",
+        "blob": "ce003b8191d339f4bdecfc2ea3d386e22c089d9b"
+      },
+      {
+        "path": "tests/plugins/memory/test_supermemory_tunnel_helper.py",
+        "blob": "96c9fa16680853d5ab754fe112ac01e62eb53a44"
+      }
+    ],
+    "present": "yes"
+  },
+  {
+    "id": "C2-171",
+    "candidate": "9cfe45f5623b9f305a923ef4eecd5d195e07375c",
+    "inherited_sources": [
+      "994381dc91f0a33be3028b96f6abd2e43c3ef449"
+    ],
+    "import_commits": [],
+    "files": [
+      {
+        "path": "plugins/memory/supermemory/__init__.py",
+        "blob": "7cc6185fbe68e175f17a8ec198518dfc09723230"
+      },
+      {
+        "path": "tests/plugins/memory/test_supermemory_guards.py",
+        "blob": "42d363f79de3b9077ebbbd5fd3a939d5cdd65909"
+      }
+    ],
+    "present": "yes"
+  },
+  {
+    "id": "C2-172",
+    "candidate": "9cfe45f5623b9f305a923ef4eecd5d195e07375c",
+    "inherited_sources": [
+      "4c0be71c4cf2fe719418fc810c578bd2d92e6643"
+    ],
+    "import_commits": [],
+    "files": [
+      {
+        "path": "plugins/memory/supermemory/__init__.py",
+        "blob": "7cc6185fbe68e175f17a8ec198518dfc09723230"
+      },
+      {
+        "path": "tests/plugins/memory/test_supermemory_guards.py",
+        "blob": "42d363f79de3b9077ebbbd5fd3a939d5cdd65909"
+      }
+    ],
+    "present": "yes"
+  },
+  {
+    "id": "C2-173",
+    "candidate": "9cfe45f5623b9f305a923ef4eecd5d195e07375c",
+    "inherited_sources": [
+      "e5e7a0ada2f59798b7f0f51642bb381703f8ec44"
+    ],
+    "import_commits": [],
+    "files": [
+      {
+        "path": "plugins/memory/supermemory/__init__.py",
+        "blob": "7cc6185fbe68e175f17a8ec198518dfc09723230"
+      },
+      {
+        "path": "plugins/memory/supermemory/tunnel_key_helper.py",
+        "blob": "37302d66509a186814d5e30ce8d30f0c6f21284a"
+      },
+      {
+        "path": "tests/plugins/memory/test_supermemory_guards.py",
+        "blob": "42d363f79de3b9077ebbbd5fd3a939d5cdd65909"
+      },
+      {
+        "path": "tests/plugins/memory/test_supermemory_socket_transport.py",
+        "blob": "ce003b8191d339f4bdecfc2ea3d386e22c089d9b"
+      }
+    ],
+    "present": "yes"
+  },
+  {
+    "id": "C2-174",
+    "candidate": "9cfe45f5623b9f305a923ef4eecd5d195e07375c",
+    "inherited_sources": [
+      "b2768786931ecdd39e002d005de97376cfb97b3e"
+    ],
+    "import_commits": [],
+    "files": [
+      {
+        "path": "plugins/memory/supermemory/__init__.py",
+        "blob": "7cc6185fbe68e175f17a8ec198518dfc09723230"
+      },
+      {
+        "path": "tests/plugins/memory/test_supermemory_guards.py",
+        "blob": "42d363f79de3b9077ebbbd5fd3a939d5cdd65909"
+      },
+      {
+        "path": "tests/plugins/memory/test_supermemory_tunnel_helper.py",
+        "blob": "96c9fa16680853d5ab754fe112ac01e62eb53a44"
+      }
+    ],
+    "present": "yes"
+  },
+  {
+    "id": "C2-175",
+    "candidate": "9cfe45f5623b9f305a923ef4eecd5d195e07375c",
+    "inherited_sources": [
+      "cbb6adc34bf789f7ab0c6569022739c8cb63e1ee"
+    ],
+    "import_commits": [],
+    "files": [
+      {
+        "path": "plugins/memory/supermemory/__init__.py",
+        "blob": "7cc6185fbe68e175f17a8ec198518dfc09723230"
+      },
+      {
+        "path": "tests/plugins/memory/test_supermemory_guards.py",
+        "blob": "42d363f79de3b9077ebbbd5fd3a939d5cdd65909"
+      }
+    ],
+    "present": "yes"
+  },
+  {
+    "id": "C2-176",
+    "candidate": "9cfe45f5623b9f305a923ef4eecd5d195e07375c",
+    "inherited_sources": [
+      "345e8bdc4596771b2f15205dcc20c2dd33b5d01b"
+    ],
+    "import_commits": [],
+    "files": [
+      {
+        "path": "plugins/memory/supermemory/__init__.py",
+        "blob": "7cc6185fbe68e175f17a8ec198518dfc09723230"
+      },
+      {
+        "path": "tests/plugins/memory/test_supermemory_guards.py",
+        "blob": "42d363f79de3b9077ebbbd5fd3a939d5cdd65909"
+      }
+    ],
+    "present": "yes"
+  },
+  {
+    "id": "C2-177",
+    "candidate": "9cfe45f5623b9f305a923ef4eecd5d195e07375c",
+    "inherited_sources": [
+      "b5c53b373958658a02c49e73e5624a790c479207"
+    ],
+    "import_commits": [],
+    "files": [
+      {
+        "path": "plugins/memory/supermemory/__init__.py",
+        "blob": "7cc6185fbe68e175f17a8ec198518dfc09723230"
+      },
+      {
+        "path": "tests/plugins/memory/test_supermemory_guards.py",
+        "blob": "42d363f79de3b9077ebbbd5fd3a939d5cdd65909"
+      }
+    ],
+    "present": "yes"
+  },
+  {
+    "id": "C2-178",
+    "candidate": "9cfe45f5623b9f305a923ef4eecd5d195e07375c",
+    "inherited_sources": [],
+    "import_commits": [],
+    "files": [
+      {
+        "path": "plugins/memory/supermemory/__init__.py",
+        "blob": "7cc6185fbe68e175f17a8ec198518dfc09723230"
+      },
+      {
+        "path": "tests/plugins/memory/test_supermemory_guards.py",
+        "blob": "42d363f79de3b9077ebbbd5fd3a939d5cdd65909"
+      }
+    ],
+    "present": "yes"
+  },
+  {
+    "id": "C2-179",
+    "candidate": "9cfe45f5623b9f305a923ef4eecd5d195e07375c",
+    "inherited_sources": [],
+    "import_commits": [
+      "77755283f8119b744f1ef2a8137b5d215b1c4ff2"
+    ],
+    "files": [
+      {
+        "path": "hermes_cli/gateway.py",
+        "blob": "66f418ab9b137da97ba13fc0e1c41777af59e14b"
+      },
+      {
+        "path": "pm/environments.py",
+        "blob": "9a3a451fd29cf20d8541931dbef908db8d85e8b0"
+      },
+      {
+        "path": "tests/hermes_cli/test_gateway_service_paths.py",
+        "blob": "e692a3ad35bce5c87a93acaa237548bc74176ff3"
+      },
+      {
+        "path": "tests/tools/test_local_env_blocklist.py",
+        "blob": "5d2096ddad040d3ba155fc988d9f5d4168ce3b6e"
+      },
+      {
+        "path": "tools/environments/local.py",
+        "blob": "697fa36672a5c2e536551dff020c33d525e0a3f8"
+      }
+    ],
+    "present": "yes"
+  },
+  {
+    "id": "C2-180",
+    "candidate": "9cfe45f5623b9f305a923ef4eecd5d195e07375c",
+    "inherited_sources": [],
+    "import_commits": [
+      "8922b5425badbb13e98b19b580aa8cbfd5a71ec0"
+    ],
+    "files": [
+      {
+        "path": "agent/tool_executor.py",
+        "blob": "93f79cb1ac6f1ef3bf04b440a6c5cf98f25c8f3a"
+      },
+      {
+        "path": "tests/agent/test_self_bounded_tool_deadline.py",
+        "blob": "d176be63cd43772ae527ae0196b5290b10b84304"
+      }
+    ],
+    "present": "yes"
+  },
+  {
+    "id": "C2-181",
+    "candidate": "9cfe45f5623b9f305a923ef4eecd5d195e07375c",
+    "inherited_sources": [
+      "9b1a8015b34748c380adc7def94444f563e442de"
+    ],
+    "import_commits": [],
+    "files": [
+      {
+        "path": "tests/tools/test_fleet_message_enqueue.py",
+        "blob": "ea4cb021ccdb8a523bb74d5e54be5be9d51ef673"
+      },
+      {
+        "path": "tools/fleet_message_enqueue.py",
+        "blob": "fc41c28e38268b424474a6ecc8dbe72dbe7a6271"
+      }
+    ],
+    "present": "yes"
+  },
+  {
+    "id": "C2-182",
+    "candidate": "9cfe45f5623b9f305a923ef4eecd5d195e07375c",
+    "inherited_sources": [
+      "c70d9769c333caac85837ad055d730395cade762"
+    ],
+    "import_commits": [],
+    "files": [
+      {
+        "path": "tests/tools/test_file_operations.py",
+        "blob": "5087924e4e43000817e657c27b8a27e0ad8a5a23"
+      },
+      {
+        "path": "tests/tools/test_file_ops_env_not_ready.py",
+        "blob": "0a08af9cc483e62384235e8dfc3823d60f0b693f"
+      },
+      {
+        "path": "tests/tools/test_file_ops_single_roundtrip.py",
+        "blob": "62c318b79c1c908eaf75afe21b102fa4fc211605"
+      },
+      {
+        "path": "tests/tools/test_file_ops_stray_fork_line.py",
+        "blob": "5a0da6eeca04843875018ad0f443942cbccbad11"
+      },
+      {
+        "path": "tools/environments/local.py",
+        "blob": "697fa36672a5c2e536551dff020c33d525e0a3f8"
+      },
+      {
+        "path": "tools/file_operations.py",
+        "blob": "e940dc108722ecc565d0800ec10e740b504adfaf"
+      }
+    ],
+    "present": "yes"
+  },
+  {
+    "id": "C2-183",
+    "candidate": "9cfe45f5623b9f305a923ef4eecd5d195e07375c",
+    "inherited_sources": [],
+    "import_commits": [
+      "3b6b7978ff8337d56653152b00d46292f647816e"
+    ],
+    "files": [
+      {
+        "path": "tests/tools/test_local_env_blocklist.py",
+        "blob": "5d2096ddad040d3ba155fc988d9f5d4168ce3b6e"
+      }
+    ],
+    "present": "yes"
+  },
+  {
+    "id": "C2-184",
+    "candidate": "9cfe45f5623b9f305a923ef4eecd5d195e07375c",
+    "inherited_sources": [],
+    "import_commits": [],
+    "files": [
+      {
+        "path": "tests/tools/test_process_registry.py",
+        "blob": "b9d20b8d6356d0f5cb7eaaefe7d4368aaaccf5e4"
+      }
+    ],
+    "present": "yes"
+  },
+  {
+    "id": "C2-185",
+    "candidate": "9cfe45f5623b9f305a923ef4eecd5d195e07375c",
+    "inherited_sources": [
+      "af1acce726e9f906b5dda88b6080679b37f6250e"
+    ],
+    "import_commits": [],
+    "files": [
+      {
+        "path": "tests/tools/test_process_registry_survival.py",
+        "blob": "34225d999356cfc45a0fee85dfb4fe9904a49714"
+      },
+      {
+        "path": "tools/process_registry.py",
+        "blob": "369c2b9b54b703e19221f951f12d247a27537deb"
+      },
+      {
+        "path": "tools/process_registry_checkpoint.py",
+        "blob": "49b5afac8e0468cf185a166450a7e7287fbe8946"
+      },
+      {
+        "path": "website/docs/developer-guide/tools-runtime.md",
+        "blob": "884b61c8473f1d603c8cb966d54b5a731c1f5a54"
+      }
+    ],
+    "present": "yes"
+  },
+  {
+    "id": "C2-186",
+    "candidate": "9cfe45f5623b9f305a923ef4eecd5d195e07375c",
+    "inherited_sources": [
+      "bfbcd6936d31ac55a1f210f34a2526bbf0fe57aa"
+    ],
+    "import_commits": [],
+    "files": [
+      {
+        "path": "tests/tools/test_process_registry.py",
+        "blob": "b9d20b8d6356d0f5cb7eaaefe7d4368aaaccf5e4"
+      },
+      {
+        "path": "tests/tools/test_process_registry_survival.py",
+        "blob": "34225d999356cfc45a0fee85dfb4fe9904a49714"
+      },
+      {
+        "path": "tools/process_registry.py",
+        "blob": "369c2b9b54b703e19221f951f12d247a27537deb"
+      },
+      {
+        "path": "tools/process_registry_checkpoint.py",
+        "blob": "49b5afac8e0468cf185a166450a7e7287fbe8946"
+      },
+      {
+        "path": "tools/terminal_tool_background.py",
+        "blob": "dda518d3b61918b706a4acffd05101926a3981d7"
+      }
+    ],
+    "present": "yes"
+  },
+  {
+    "id": "C2-187",
+    "candidate": "9cfe45f5623b9f305a923ef4eecd5d195e07375c",
+    "inherited_sources": [
+      "386b6291db60bff1fd81be92210580d8e2820cbe"
+    ],
+    "import_commits": [],
+    "files": [
+      {
+        "path": "tests/tools/test_process_registry_list_exit.py",
+        "blob": "a9ce410727626036064767fc644c60fbd0fdd690"
+      },
+      {
+        "path": "tests/tools/test_process_registry_survival.py",
+        "blob": "34225d999356cfc45a0fee85dfb4fe9904a49714"
+      },
+      {
+        "path": "tools/process_registry.py",
+        "blob": "369c2b9b54b703e19221f951f12d247a27537deb"
+      }
+    ],
+    "present": "yes"
+  },
+  {
+    "id": "C2-188",
+    "candidate": "9cfe45f5623b9f305a923ef4eecd5d195e07375c",
+    "inherited_sources": [
+      "30cacff57955119fdf1754d84bd2d3ef480d45cd"
+    ],
+    "import_commits": [],
+    "files": [
+      {
+        "path": "tools/terminal_tool_background.py",
+        "blob": "dda518d3b61918b706a4acffd05101926a3981d7"
+      }
+    ],
+    "present": "yes"
+  },
+  {
+    "id": "C2-189",
+    "candidate": "9cfe45f5623b9f305a923ef4eecd5d195e07375c",
+    "inherited_sources": [
+      "859bb7acb51f8f279119bb2761a133d13457eaec"
+    ],
+    "import_commits": [],
+    "files": [
+      {
+        "path": "tests/tools/test_process_registry_survival.py",
+        "blob": "34225d999356cfc45a0fee85dfb4fe9904a49714"
+      }
+    ],
+    "present": "yes"
+  },
+  {
+    "id": "C2-190",
+    "candidate": "9cfe45f5623b9f305a923ef4eecd5d195e07375c",
+    "inherited_sources": [],
+    "import_commits": [],
+    "files": [
+      {
+        "path": "agent/agent_init.py",
+        "blob": "9d77a3b0aaeaea3cf9cfc6e7ba7722875ce79e5f"
+      },
+      {
+        "path": "agent/agent_runtime_helpers.py",
+        "blob": "5d81a7b335b9464d641ac3537baadee2e5c8f668"
+      },
+      {
+        "path": "agent/context_compressor.py",
+        "blob": "91de7c7b9cfb03cb2469b4fe94f9fc4232adc337"
+      },
+      {
+        "path": "agent/fallback_cooldown.py",
+        "blob": "2c44e685b78626380c49d212fa041631b6da4aa1"
+      },
+      {
+        "path": "agent/turn_context.py",
+        "blob": "3e33a0b2cd76ae1fa96df7ca0967f4612ccaba99"
+      },
+      {
+        "path": "agent/turn_finalizer.py",
+        "blob": "bba38764dfe8614138efff9a0292bbf8d24addc8"
+      },
+      {
+        "path": "gateway/run_config_loaders.py",
+        "blob": "b25951fc9cf87d7896d961f7979d173d159a160c"
+      },
+      {
+        "path": "hermes_cli/config_defaults.py",
+        "blob": "1953886618af565a85995739c5fb561e0e83f52d"
+      },
+      {
+        "path": "hermes_cli/fallback_config.py",
+        "blob": "76a54da69c302934b2c84e9b4e1786734412d66d"
+      },
+      {
+        "path": "hermes_cli/kanban_db.py",
+        "blob": "efb2faacaba7244452e043d237e3924012b9e702"
+      },
+      {
+        "path": "hermes_cli/models_catalog_static.py",
+        "blob": "1b205b9c33b5fa42d30388556d983f5748e0210c"
+      },
+      {
+        "path": "skills/autonomous-ai-agents/codex/SKILL.md",
+        "blob": "52e5bf060d41d358451cc26694ca0d3f84163b99"
+      },
+      {
+        "path": "tests/agent/test_live_fallback_chain_refresh.py",
+        "blob": "7ff2bbc5bf9d45874672b146fc8d379e77d74c21"
+      },
+      {
+        "path": "tests/agent/test_metered_compression_cap.py",
+        "blob": "d93257541dce023d940fccf5e522b3b4df88bc95"
+      },
+      {
+        "path": "tests/agent/test_restore_primary_after_cooldown.py",
+        "blob": "4e73e83241466f384bdb49a5c77b4eb4a2b6bf31"
+      },
+      {
+        "path": "tests/gateway/test_fallback_chain_reload.py",
+        "blob": "15f6a2dc6809e1d2ecdf016fa5c28915b76ac37d"
+      },
+      {
+        "path": "tests/hermes_cli/test_kanban_workspace_busy.py",
+        "blob": "e4363937357f88184484a1b4ead13b44307adccb"
+      },
+      {
+        "path": "tests/hermes_cli/test_xai_grok47_catalog.py",
+        "blob": "9e3331b689b1c082b2253e268c0b34c656970305"
+      },
+      {
+        "path": "tests/tools/test_delegate.py",
+        "blob": "9b187195582f4f8a0e2dddc3bc6ba75681aa639b"
+      },
+      {
+        "path": "tests/tools/test_delegate_effort_cap.py",
+        "blob": "80749613e713ea7a1fc0d5462db95862d0aee350"
+      },
+      {
+        "path": "tools/delegate_tool_config.py",
+        "blob": "cb26683dde34b46034546f09a5722e7b9e13e991"
+      },
+      {
+        "path": "tools/x_search_tool.py",
+        "blob": "89e49371d4890751339374dcf2216d2e83fba3f0"
+      }
+    ],
+    "present": "yes"
+  },
+  {
+    "id": "C2-191",
+    "candidate": "9cfe45f5623b9f305a923ef4eecd5d195e07375c",
+    "inherited_sources": [],
+    "import_commits": [
+      "ba9cc7ab2473a9e988974e7f6057677f4701d0c6"
+    ],
+    "files": [
+      {
+        "path": "agent/vault_backends/onepassword.py",
+        "blob": "4d8ba11f22773b8fb40cbe61edaf916135610afd"
+      },
+      {
+        "path": "tests/agent/test_onepassword_service_account_vault.py",
+        "blob": "d917d810b6b29284bb79d847b4e4d66677c1cc6f"
+      },
+      {
+        "path": "tools/browser_vault_tool.py",
+        "blob": "cb560322dd1f43f5b54c10863ac5767ecaafca60"
+      }
+    ],
+    "present": "yes"
+  },
+  {
+    "id": "C2-192",
+    "candidate": "9cfe45f5623b9f305a923ef4eecd5d195e07375c",
+    "inherited_sources": [
+      "558b842ee30eeed1e91cea3125c05ab951c8e5d7"
+    ],
+    "import_commits": [],
+    "files": [
+      {
+        "path": "cli-config.yaml.example",
+        "blob": "256e91823fa25f9d5776a2da317779496e270354"
+      },
+      {
+        "path": "hermes_cli/config_defaults.py",
+        "blob": "1953886618af565a85995739c5fb561e0e83f52d"
+      },
+      {
+        "path": "hermes_cli/update_cmd.py",
+        "blob": "25898205aecc9a3c7400f72a4edc4a25d5ad5b48"
+      },
+      {
+        "path": "hermes_cli/update_cmd_carried.py",
+        "blob": "cfbc6641593dea4b6be1fbe4c6f7b635776cdea5"
+      },
+      {
+        "path": "hermes_cli/update_cmd_git.py",
+        "blob": "7fc3d46b8337c8ec67156b00934d0182d2f8ad6b"
+      },
+      {
+        "path": "hermes_cli/web_server_config.py",
+        "blob": "0bd8ca9f6122bce160b68dc448d320f4c8ffce50"
+      },
+      {
+        "path": "tests/hermes_cli/test_update_autostash.py",
+        "blob": "7b3f82ec42815ee4bbeaca4b8e57e86966d25de1"
+      },
+      {
+        "path": "tests/hermes_cli/test_update_carried_commits_guard.py",
+        "blob": "20d81d380190f58ed2677b0e9baaac60ef8455bc"
+      },
+      {
+        "path": "website/docs/getting-started/updating.md",
+        "blob": "50a95b20159b6fac84da352b2b248cff2449139c"
+      },
+      {
+        "path": "website/docs/reference/cli-commands.md",
+        "blob": "e3c2b8775b1423301dbc1406e9ea93da999b94fa"
+      },
+      {
+        "path": "website/docs/user-guide/configuration.md",
+        "blob": "eed545e1dfe63be3c752bdb0fb58d7e219513702"
+      }
+    ],
+    "present": "yes"
+  },
+  {
+    "id": "C2-193",
+    "candidate": "9cfe45f5623b9f305a923ef4eecd5d195e07375c",
+    "inherited_sources": [],
+    "import_commits": [],
+    "files": [
+      {
+        "path": "cli-config.yaml.example",
+        "blob": "256e91823fa25f9d5776a2da317779496e270354"
+      },
+      {
+        "path": "hermes_cli/config_defaults.py",
+        "blob": "1953886618af565a85995739c5fb561e0e83f52d"
+      },
+      {
+        "path": "hermes_cli/web_server_config.py",
+        "blob": "0bd8ca9f6122bce160b68dc448d320f4c8ffce50"
+      },
+      {
+        "path": "website/docs/getting-started/updating.md",
+        "blob": "50a95b20159b6fac84da352b2b248cff2449139c"
+      },
+      {
+        "path": "website/docs/reference/cli-commands.md",
+        "blob": "e3c2b8775b1423301dbc1406e9ea93da999b94fa"
+      },
+      {
+        "path": "website/docs/user-guide/configuration.md",
+        "blob": "eed545e1dfe63be3c752bdb0fb58d7e219513702"
+      }
+    ],
+    "present": "no"
+  },
+  {
+    "id": "C2-194",
+    "candidate": "9cfe45f5623b9f305a923ef4eecd5d195e07375c",
+    "inherited_sources": [],
+    "import_commits": [],
+    "files": [
+      {
+        "path": "hermes_cli/update_cmd_carried.py",
+        "blob": "cfbc6641593dea4b6be1fbe4c6f7b635776cdea5"
+      }
+    ],
+    "present": "no"
+  },
+  {
+    "id": "C2-195",
+    "candidate": "9cfe45f5623b9f305a923ef4eecd5d195e07375c",
+    "inherited_sources": [],
+    "import_commits": [],
+    "files": [
+      {
+        "path": "hermes_cli/update_cmd.py",
+        "blob": "25898205aecc9a3c7400f72a4edc4a25d5ad5b48"
+      },
+      {
+        "path": "hermes_cli/update_cmd_carried.py",
+        "blob": "cfbc6641593dea4b6be1fbe4c6f7b635776cdea5"
+      },
+      {
+        "path": "hermes_cli/update_cmd_git.py",
+        "blob": "7fc3d46b8337c8ec67156b00934d0182d2f8ad6b"
+      },
+      {
+        "path": "tests/hermes_cli/test_update_autostash.py",
+        "blob": "7b3f82ec42815ee4bbeaca4b8e57e86966d25de1"
+      }
+    ],
+    "present": "no"
+  },
+  {
+    "id": "C2-196",
+    "candidate": "9cfe45f5623b9f305a923ef4eecd5d195e07375c",
+    "inherited_sources": [],
+    "import_commits": [],
+    "files": [
+      {
+        "path": "hermes_cli/update_cmd.py",
+        "blob": "25898205aecc9a3c7400f72a4edc4a25d5ad5b48"
+      },
+      {
+        "path": "hermes_cli/update_cmd_carried.py",
+        "blob": "cfbc6641593dea4b6be1fbe4c6f7b635776cdea5"
+      },
+      {
+        "path": "hermes_cli/update_cmd_git.py",
+        "blob": "7fc3d46b8337c8ec67156b00934d0182d2f8ad6b"
+      },
+      {
+        "path": "hermes_cli/update_cmd_stash.py",
+        "blob": "8c78f5c6bd3337e1f4ff77817816d0b60f57202a"
+      },
+      {
+        "path": "tests/hermes_cli/test_update_diverged_rescue_ref.py",
+        "blob": "27ffb4062572898a442992548d7b3f3c7968652b"
+      }
+    ],
+    "present": "no"
+  },
+  {
+    "id": "C2-197",
+    "candidate": "9cfe45f5623b9f305a923ef4eecd5d195e07375c",
+    "inherited_sources": [],
+    "import_commits": [],
+    "files": [
+      {
+        "path": "hermes_cli/update_cmd_carried.py",
+        "blob": "cfbc6641593dea4b6be1fbe4c6f7b635776cdea5"
+      },
+      {
+        "path": "hermes_cli/update_cmd_git.py",
+        "blob": "7fc3d46b8337c8ec67156b00934d0182d2f8ad6b"
+      }
+    ],
+    "present": "no"
+  },
+  {
+    "id": "C2-198",
+    "candidate": "9cfe45f5623b9f305a923ef4eecd5d195e07375c",
+    "inherited_sources": [],
+    "import_commits": [],
+    "files": [
+      {
+        "path": "cli-config.yaml.example",
+        "blob": "256e91823fa25f9d5776a2da317779496e270354"
+      },
+      {
+        "path": "hermes_cli/config_defaults.py",
+        "blob": "1953886618af565a85995739c5fb561e0e83f52d"
+      },
+      {
+        "path": "hermes_cli/update_cmd.py",
+        "blob": "25898205aecc9a3c7400f72a4edc4a25d5ad5b48"
+      },
+      {
+        "path": "hermes_cli/update_cmd_git.py",
+        "blob": "7fc3d46b8337c8ec67156b00934d0182d2f8ad6b"
+      },
+      {
+        "path": "hermes_cli/update_cmd_stash.py",
+        "blob": "8c78f5c6bd3337e1f4ff77817816d0b60f57202a"
+      },
+      {
+        "path": "hermes_cli/web_server_config.py",
+        "blob": "0bd8ca9f6122bce160b68dc448d320f4c8ffce50"
+      },
+      {
+        "path": "tests/hermes_cli/test_update_autostash.py",
+        "blob": "7b3f82ec42815ee4bbeaca4b8e57e86966d25de1"
+      },
+      {
+        "path": "tests/hermes_cli/test_update_carried_commits_guard.py",
+        "blob": "20d81d380190f58ed2677b0e9baaac60ef8455bc"
+      },
+      {
+        "path": "tests/hermes_cli/test_update_diverged_rescue_ref.py",
+        "blob": "27ffb4062572898a442992548d7b3f3c7968652b"
+      },
+      {
+        "path": "website/docs/getting-started/updating.md",
+        "blob": "50a95b20159b6fac84da352b2b248cff2449139c"
+      },
+      {
+        "path": "website/docs/user-guide/configuration.md",
+        "blob": "eed545e1dfe63be3c752bdb0fb58d7e219513702"
+      }
+    ],
+    "present": "no"
+  },
+  {
+    "id": "C2-199",
+    "candidate": "9cfe45f5623b9f305a923ef4eecd5d195e07375c",
+    "inherited_sources": [],
+    "import_commits": [],
+    "files": [
+      {
+        "path": "hermes_cli/update_cmd.py",
+        "blob": "25898205aecc9a3c7400f72a4edc4a25d5ad5b48"
+      },
+      {
+        "path": "hermes_cli/update_cmd_carried.py",
+        "blob": "cfbc6641593dea4b6be1fbe4c6f7b635776cdea5"
+      },
+      {
+        "path": "hermes_cli/update_cmd_git.py",
+        "blob": "7fc3d46b8337c8ec67156b00934d0182d2f8ad6b"
+      }
+    ],
+    "present": "no"
+  },
+  {
+    "id": "C2-200",
+    "candidate": "9cfe45f5623b9f305a923ef4eecd5d195e07375c",
+    "inherited_sources": [],
+    "import_commits": [],
+    "files": [
+      {
+        "path": "tests/hermes_cli/test_update_carried_commits_guard.py",
+        "blob": "20d81d380190f58ed2677b0e9baaac60ef8455bc"
+      }
+    ],
+    "present": "no"
+  },
+  {
+    "id": "C2-201",
+    "candidate": "9cfe45f5623b9f305a923ef4eecd5d195e07375c",
+    "inherited_sources": [],
+    "import_commits": [],
+    "files": [
+      {
+        "path": "tests/hermes_cli/test_update_carried_commits_guard.py",
+        "blob": "20d81d380190f58ed2677b0e9baaac60ef8455bc"
+      }
+    ],
+    "present": "no"
+  },
+  {
+    "id": "C2-202",
+    "candidate": "9cfe45f5623b9f305a923ef4eecd5d195e07375c",
+    "inherited_sources": [],
+    "import_commits": [],
+    "files": [
+      {
+        "path": "tests/hermes_cli/test_update_carried_commits_guard.py",
+        "blob": "20d81d380190f58ed2677b0e9baaac60ef8455bc"
+      }
+    ],
+    "present": "no"
+  },
+  {
+    "id": "C2-203",
+    "candidate": "9cfe45f5623b9f305a923ef4eecd5d195e07375c",
+    "inherited_sources": [],
+    "import_commits": [],
+    "files": [
+      {
+        "path": "tests/hermes_cli/test_update_carried_commits_guard.py",
+        "blob": "20d81d380190f58ed2677b0e9baaac60ef8455bc"
+      }
+    ],
+    "present": "no"
+  },
+  {
+    "id": "C2-204",
+    "candidate": "9cfe45f5623b9f305a923ef4eecd5d195e07375c",
+    "inherited_sources": [],
+    "import_commits": [],
+    "files": [
+      {
+        "path": "tests/hermes_cli/test_update_carried_commits_guard.py",
+        "blob": "20d81d380190f58ed2677b0e9baaac60ef8455bc"
+      }
+    ],
+    "present": "no"
+  },
+  {
+    "id": "C2-205",
+    "candidate": "9cfe45f5623b9f305a923ef4eecd5d195e07375c",
+    "inherited_sources": [],
+    "import_commits": [],
+    "files": [
+      {
+        "path": "tests/hermes_cli/test_update_carried_commits_guard.py",
+        "blob": "20d81d380190f58ed2677b0e9baaac60ef8455bc"
+      }
+    ],
+    "present": "no"
+  },
+  {
+    "id": "C2-206",
+    "candidate": "9cfe45f5623b9f305a923ef4eecd5d195e07375c",
+    "inherited_sources": [
+      "c371b811905ba99e23f41959a0f7574943e64cda"
+    ],
+    "import_commits": [],
+    "files": [
+      {
+        "path": "plugins/memory/supermemory/__init__.py",
+        "blob": "7cc6185fbe68e175f17a8ec198518dfc09723230"
+      },
+      {
+        "path": "tests/plugins/memory/test_supermemory_socket_transport.py",
+        "blob": "ce003b8191d339f4bdecfc2ea3d386e22c089d9b"
+      }
+    ],
+    "present": "yes"
+  },
+  {
+    "id": "C2-207",
+    "candidate": "9cfe45f5623b9f305a923ef4eecd5d195e07375c",
+    "inherited_sources": [],
+    "import_commits": [],
+    "files": [
+      {
+        "path": "tests/hermes_cli/test_codex_credential_host_binding.py",
+        "blob": "d052933ff99b648580d17e36cfbfde4e3a8c7bf9"
+      }
+    ],
+    "present": "no"
+  },
+  {
+    "id": "C2-208",
+    "candidate": "9cfe45f5623b9f305a923ef4eecd5d195e07375c",
+    "inherited_sources": [],
+    "import_commits": [],
+    "files": [
+      {
+        "path": "tests/agent/test_auxiliary_client.py",
+        "blob": "3c30381432438f8f71a89c2e9def19b18fb0ea37"
+      },
+      {
+        "path": "tests/agent/test_codex_cloudflare_headers.py",
+        "blob": "c6e881800a26047e29bd1004ab64154b9c9abc4e"
+      },
+      {
+        "path": "tests/agent/test_codex_usage_attribution.py",
+        "blob": "ea0938b24a9bc91fa1f69ec46a9af80682192f71"
+      }
+    ],
+    "present": "no"
+  },
+  {
+    "id": "C2-209",
+    "candidate": "9cfe45f5623b9f305a923ef4eecd5d195e07375c",
+    "inherited_sources": [
+      "cecfa4ed0bd05cba7cfc588293aca6c9ffc892bb"
+    ],
+    "import_commits": [],
+    "files": [
+      {
+        "path": "hermes_cli/cli_single_query.py",
+        "blob": "7e3b353f0417381faea5c6f4098a794d48b708a9"
+      },
+      {
+        "path": "hermes_cli/goals.py",
+        "blob": "7c17c7f878fb22049416054b41db0376875c4778"
+      },
+      {
+        "path": "tests/hermes_cli/test_redtape_goal_loop.py",
+        "blob": "6b58f536df8814d4ba83fd32f6677db282d6be69"
+      }
+    ],
+    "present": "yes"
+  },
+  {
+    "id": "C2-210",
+    "candidate": "9cfe45f5623b9f305a923ef4eecd5d195e07375c",
+    "inherited_sources": [],
+    "import_commits": [],
+    "files": [
+      {
+        "path": "tests/hermes_cli/test_codex_credential_host_binding.py",
+        "blob": "d052933ff99b648580d17e36cfbfde4e3a8c7bf9"
+      }
+    ],
+    "present": "no"
+  },
+  {
+    "id": "C2-211",
+    "candidate": "9cfe45f5623b9f305a923ef4eecd5d195e07375c",
+    "inherited_sources": [
+      "0e29ce5aee9ab3b7eebb01aa2988407c005a648b"
+    ],
+    "import_commits": [],
+    "files": [
+      {
+        "path": "agent/turn_recovery.py",
+        "blob": "24397b67e7594fedaae50be4b7b667f67bc70c94"
+      },
+      {
+        "path": "agent/turn_retry_state.py",
+        "blob": "d914208fbec352ca1f6734e0aa71bb5ac5627eba"
+      },
+      {
+        "path": "tests/agent/test_same_account_pool_eager_fallback.py",
+        "blob": "2ad19a5080f01b2ed508049f7302478aa3bbbbac"
+      }
+    ],
+    "present": "yes"
+  },
+  {
+    "id": "C2-212",
+    "candidate": "9cfe45f5623b9f305a923ef4eecd5d195e07375c",
+    "inherited_sources": [
+      "4db6429c574beb52ec373da3d7329605472ad29d"
+    ],
+    "import_commits": [],
+    "files": [
+      {
+        "path": "tests/agent/test_auxiliary_client.py",
+        "blob": "3c30381432438f8f71a89c2e9def19b18fb0ea37"
+      },
+      {
+        "path": "tests/agent/test_codex_cloudflare_headers.py",
+        "blob": "c6e881800a26047e29bd1004ab64154b9c9abc4e"
+      },
+      {
+        "path": "tests/agent/test_codex_usage_attribution.py",
+        "blob": "ea0938b24a9bc91fa1f69ec46a9af80682192f71"
+      },
+      {
+        "path": "tests/plugins/image_gen/test_openai_codex_provider.py",
+        "blob": "8c0f8c5df10fe0976704ce852b37e34901dee1ce"
+      }
+    ],
+    "present": "yes"
+  },
+  {
+    "id": "C2-213",
+    "candidate": "9cfe45f5623b9f305a923ef4eecd5d195e07375c",
+    "inherited_sources": [
+      "cdde15c724dc30920ff0c3a3ba30464a3cd1e607"
+    ],
+    "import_commits": [],
+    "files": [
+      {
+        "path": "hermes_cli/kanban.py",
+        "blob": "f75353faa903f8d93f415762235517ef7df8e3e8"
+      },
+      {
+        "path": "hermes_cli/kanban_db.py",
+        "blob": "efb2faacaba7244452e043d237e3924012b9e702"
+      },
+      {
+        "path": "hermes_cli/kanban_specify.py",
+        "blob": "185bf1236ea110a5d41e780f39c8dc845502fad8"
+      },
+      {
+        "path": "website/docs/user-guide/features/kanban.md",
+        "blob": "0064b862fa09bea5f950bcbe60a5d4a6a6d2fa81"
+      },
+      {
+        "path": "website/i18n/zh-Hans/docusaurus-plugin-content-docs/current/user-guide/features/kanban.md",
+        "blob": "0438589d7c2c548a8ad3b7b867c778879ecfdc02"
+      }
+    ],
+    "present": "yes"
+  },
+  {
+    "id": "C2-214",
+    "candidate": "9cfe45f5623b9f305a923ef4eecd5d195e07375c",
+    "inherited_sources": [
+      "da93a3d77b60beb0cca21fdb76358fc4c426ad8e"
+    ],
+    "import_commits": [],
+    "files": [
+      {
+        "path": "hermes_cli/kanban_db.py",
+        "blob": "efb2faacaba7244452e043d237e3924012b9e702"
+      },
+      {
+        "path": "hermes_cli/kanban_parser.py",
+        "blob": "2cc2b4a0c6e2f707d0b3f9f3718f33fd959bc060"
+      },
+      {
+        "path": "tests/hermes_cli/test_kanban_specify_keep_spec.py",
+        "blob": "49398e2a41d24242aade11d8ecf196c9cda46682"
+      },
+      {
+        "path": "website/docs/user-guide/features/kanban.md",
+        "blob": "0064b862fa09bea5f950bcbe60a5d4a6a6d2fa81"
+      },
+      {
+        "path": "website/i18n/zh-Hans/docusaurus-plugin-content-docs/current/user-guide/features/kanban.md",
+        "blob": "0438589d7c2c548a8ad3b7b867c778879ecfdc02"
+      }
+    ],
+    "present": "yes"
+  },
+  {
+    "id": "C2-215",
+    "candidate": "9cfe45f5623b9f305a923ef4eecd5d195e07375c",
+    "inherited_sources": [
+      "93886ae6acf5bae0be9f3aa76f92c9d9c0123cf8"
+    ],
+    "import_commits": [],
+    "files": [
+      {
+        "path": "hermes_cli/cli_single_query.py",
+        "blob": "7e3b353f0417381faea5c6f4098a794d48b708a9"
+      },
+      {
+        "path": "hermes_cli/quiet_single_query.py",
+        "blob": "f2a9f8390046b0decc53ffabc61a0fc233b0d7ca"
+      },
+      {
+        "path": "pyproject.toml",
+        "blob": "e62280f3a273f17b44adc86bc6df6fe437ed068d"
+      },
+      {
+        "path": "tests/conftest.py",
+        "blob": "7a8d223124e377bf6ea50bb5b6a206f1330ee4bb"
+      },
+      {
+        "path": "tests/hermes_cli/test_kanban_worker_hard_exit.py",
+        "blob": null
+      },
+      {
+        "path": "tests/hermes_cli/test_single_query_hard_exit.py",
+        "blob": "5da1947b721f354eb604f555091f04ae90191f69"
+      }
+    ],
+    "present": "yes"
+  },
+  {
+    "id": "C2-216",
+    "candidate": "9cfe45f5623b9f305a923ef4eecd5d195e07375c",
+    "inherited_sources": [
+      "8f9234f3d79a515c68deb6e184f96f2b44bd2235"
+    ],
+    "import_commits": [],
+    "files": [
+      {
+        "path": "hermes_cli/quiet_single_query.py",
+        "blob": "f2a9f8390046b0decc53ffabc61a0fc233b0d7ca"
+      },
+      {
+        "path": "tests/hermes_cli/test_single_query_hard_exit.py",
+        "blob": "5da1947b721f354eb604f555091f04ae90191f69"
+      }
+    ],
+    "present": "yes"
+  },
+  {
+    "id": "C2-217",
+    "candidate": "9cfe45f5623b9f305a923ef4eecd5d195e07375c",
+    "inherited_sources": [],
+    "import_commits": [
+      "f428c62692cdfb3d7c67435aba0eee8c500ecbbd"
+    ],
+    "files": [
+      {
+        "path": "agent/account_usage.py",
+        "blob": "872ff2b340ce5207418d232b974ff0200117d080"
+      },
+      {
+        "path": "hermes_cli/subcommands/usage.py",
+        "blob": "9d42e748d22c2dfebbaa8d28529b954a67a73395"
+      },
+      {
+        "path": "tests/agent/test_account_usage_fetch.py",
+        "blob": "ed162f9f6f27e2d5e66964726ad25cc1af2749fa"
+      },
+      {
+        "path": "tests/hermes_cli/test_usage_command.py",
+        "blob": "705d1dfd43c35bbaa355992429c3875fe8eaac67"
+      },
+      {
+        "path": "website/docs/reference/cli-commands.md",
+        "blob": "e3c2b8775b1423301dbc1406e9ea93da999b94fa"
+      }
+    ],
+    "present": "yes"
+  },
+  {
+    "id": "C2-218",
+    "candidate": "9cfe45f5623b9f305a923ef4eecd5d195e07375c",
+    "inherited_sources": [],
+    "import_commits": [],
+    "files": [
+      {
+        "path": "apps/desktop/src/plugins/hermes-bots/relay.test.ts",
+        "blob": "5d01ef8034a44530e7d0efb185789e3d6e6b21e9"
+      },
+      {
+        "path": "apps/desktop/src/plugins/hermes-bots/relay.ts",
+        "blob": "f1eddf0b2869f626d3e3089256b8ce05e288ebb9"
+      },
+      {
+        "path": "apps/shared/src/gateway-contract.generated.ts",
+        "blob": "dd12c2d203420ad599ae60640ca2b4c0e1b54e22"
+      },
+      {
+        "path": "apps/shared/src/gateway-contract.openrpc.json",
+        "blob": "4f04950f1b153722ed542798c5a366d9446e3ff2"
+      },
+      {
+        "path": "cli.py",
+        "blob": "09c47984ef142fc72a3818e4bd37a1617694c5f4"
+      },
+      {
+        "path": "hermes_cli/cli_single_query.py",
+        "blob": "7e3b353f0417381faea5c6f4098a794d48b708a9"
+      },
+      {
+        "path": "tests/hermes_cli/test_quiet_single_query.py",
+        "blob": "7e839ebfbb02055a85fbdfc135ee73a1866d9c6a"
+      },
+      {
+        "path": "tests/tools/test_a2a_reason_roundtrip.py",
+        "blob": "ad368448d29fc4e08aa9b9e705f102474ece7fba"
+      },
+      {
+        "path": "tests/tools/test_bot_failure_reasons.py",
+        "blob": "2d626ee14069b8ec876dd8eca9ecb0ee690377c9"
+      },
+      {
+        "path": "tests/tools/test_bot_relay.py",
+        "blob": "56ca9858e7914019cb82291bcdc3b29ec1ac5cab"
+      },
+      {
+        "path": "tests/tui_gateway/test_bot_relay_methods.py",
+        "blob": "5a3db0d69889dad66c4ed95956f18ebc06147791"
+      },
+      {
+        "path": "tools/bot_failure_reasons.py",
+        "blob": "54105f6b9d45ae0429456b6674d4992660229146"
+      },
+      {
+        "path": "tools/bot_mode_dm.py",
+        "blob": "0388464ec15e8a9c8b60705240de54d74310d244"
+      },
+      {
+        "path": "tools/bot_relay.py",
+        "blob": "67112e3c77ccb95ef9b4ffe577fb6c94713dea6c"
+      },
+      {
+        "path": "tui_gateway/contracts/groups_bot_relay.py",
+        "blob": "e177727be08654af356ad8f0f04e8f4238180cb2"
+      },
+      {
+        "path": "tui_gateway/methods_bot_relay.py",
+        "blob": "a72f2cd80aba0778bd135408e205bb403e68a182"
+      }
+    ],
+    "present": "yes"
+  },
+  {
+    "id": "C2-219",
+    "candidate": "9cfe45f5623b9f305a923ef4eecd5d195e07375c",
+    "inherited_sources": [],
+    "import_commits": [
+      "a728a4c5ddbfb5ae50f1cb4c2fae971113296000",
+      "a2af6167d6a8e7d6f883658e76b32d05582b4740"
+    ],
+    "files": [
+      {
+        "path": "hermes_cli/gateway_launchd.py",
+        "blob": "f51ee81de987b4fef8126eeec8a95130db55eecd"
+      },
+      {
+        "path": "pm/environments.py",
+        "blob": "9a3a451fd29cf20d8541931dbef908db8d85e8b0"
+      },
+      {
+        "path": "tests/hermes_cli/test_gateway_service.py",
+        "blob": "a299e14f2d5fe2d260a5c3d3385afa57ba853322"
+      },
+      {
+        "path": "tests/hermes_cli/test_launchd_launcher_preflight.py",
+        "blob": "8b559ddf0ba88cc0d38e8a91247aa7ece207d6c5"
+      },
+      {
+        "path": "tests/hermes_cli/test_launchd_refresh_reporting.py",
+        "blob": "60ce289483c877e23051f0509c4b012ad2f4da77"
+      },
+      {
+        "path": "tests/tools/test_bot_mode_dm_busy_queue.py",
+        "blob": "34155e55af0afaed9086bfbf769da0de97ba7689"
+      },
+      {
+        "path": "tests/tools/test_fleet_busy_ack_requires_recipient_drain.py",
+        "blob": "98f10fef286a5df14be4fd50eb93213cc655067e"
+      },
+      {
+        "path": "tests/tools/test_fleet_message_drain.py",
+        "blob": "f0bf91f5714fcfe16b7e8e10d73255d1e1cf2134"
+      },
+      {
+        "path": "tools/bot_mode_dm.py",
+        "blob": "0388464ec15e8a9c8b60705240de54d74310d244"
+      },
+      {
+        "path": "tools/fleet_message_drain.py",
+        "blob": "45e46a565c6a9652337186ac33470828208dfc08"
+      }
+    ],
+    "present": "yes"
+  },
+  {
+    "id": "C2-220",
+    "candidate": "9cfe45f5623b9f305a923ef4eecd5d195e07375c",
+    "inherited_sources": [],
+    "import_commits": [
+      "2a3cccc8a2fa44a35e8ba058f1925ec8f469a13f"
+    ],
+    "files": [
+      {
+        "path": "hermes_cli/kanban_db_dispatch.py",
+        "blob": "56cf757f1fc58d0e742b1d01d576d09e4d5d4acc"
+      },
+      {
+        "path": "tests/hermes_cli/test_kanban_placeholder_dispatch.py",
+        "blob": "abe622d60b2f2063d871ed3a29278ebdb11bfde3"
+      }
+    ],
+    "present": "yes"
+  },
+  {
+    "id": "C2-221",
+    "candidate": "9cfe45f5623b9f305a923ef4eecd5d195e07375c",
+    "inherited_sources": [],
+    "import_commits": [
+      "aafca268745c8ce4471578eb117587bd3733e6f7"
+    ],
+    "files": [
+      {
+        "path": "tests/hermes_cli/test_kanban_placeholder_dispatch.py",
+        "blob": "abe622d60b2f2063d871ed3a29278ebdb11bfde3"
+      }
+    ],
+    "present": "yes"
+  },
+  {
+    "id": "C2-222",
+    "candidate": "9cfe45f5623b9f305a923ef4eecd5d195e07375c",
+    "inherited_sources": [
+      "786a302d54527d7010f12a8aa783efbc58cac034"
+    ],
+    "import_commits": [
+      "0cccb3b2d28f09370fccc2e2ca294d46f7cd0221",
+      "c022dea619d361683ec2cae4c8b93fbe2fb0a00e"
+    ],
+    "files": [
+      {
+        "path": "tests/tools/test_fleet_message_drain.py",
+        "blob": "f0bf91f5714fcfe16b7e8e10d73255d1e1cf2134"
+      },
+      {
+        "path": "tools/fleet_message_drain.py",
+        "blob": "45e46a565c6a9652337186ac33470828208dfc08"
+      }
+    ],
+    "present": "yes"
+  },
+  {
+    "id": "C2-223",
+    "candidate": "9cfe45f5623b9f305a923ef4eecd5d195e07375c",
+    "inherited_sources": [],
+    "import_commits": [
+      "53e174c5cfcc18b75c3159e592fec8b44de6e1fa"
+    ],
+    "files": [
+      {
+        "path": "hermes_cli/kanban_db.py",
+        "blob": "efb2faacaba7244452e043d237e3924012b9e702"
+      },
+      {
+        "path": "hermes_cli/kanban_db_dispatch.py",
+        "blob": "56cf757f1fc58d0e742b1d01d576d09e4d5d4acc"
+      },
+      {
+        "path": "tests/hermes_cli/test_kanban_recovery_fleet_ownership.py",
+        "blob": "8ee84ecb6197b77352182aac3424f56fa90b4780"
+      }
+    ],
+    "present": "yes"
+  }
+]
