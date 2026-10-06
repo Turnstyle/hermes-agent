@@ -61,3 +61,30 @@ def test_gateway_draining_spool_replays_via_session_chat_dispatch(tmp_path, monk
         assert not flush_dir.joinpath("drain-spool.json").exists()
 
     asyncio.run(_exercise_replay())
+
+
+def test_failed_replay_turn_keeps_the_spool_for_a_later_replay(tmp_path, monkeypatch):
+    """A replayed turn that fails (after its retry) is not a success: the sole spool survives."""
+    flush_dir = tmp_path / "pending_messages"
+    flush_dir.mkdir()
+    monkeypatch.setattr("gateway.shutdown_flush._get_flush_dir", lambda: flush_dir)
+    _write_draining_spool(flush_dir, session_id="bot-chat", text="deliver me after restart")
+
+    api = APIServerAdapter.__new__(APIServerAdapter)
+    api._concurrency_limited_response = lambda: None
+    api._build_session_chat_ctx = AsyncMock(return_value=({"session_id": "bot-chat", "run_kwargs": {}}, None))
+    api._answer_through_live_bot_chat = AsyncMock(return_value=None)
+    api._conversation_history_for_session = AsyncMock(return_value=[])
+    failed = {"failed": True, "error": "Error code: 503 - upstream overloaded"}
+    api._run_agent = AsyncMock(return_value=(failed, None))
+    runner = SimpleNamespace(adapters={Platform.API_SERVER: api})
+
+    async def _exercise() -> None:
+        assert await recover_gateway_draining_session_chats(runner) == 0
+        assert flush_dir.joinpath("drain-spool.json").exists()
+
+        api._run_agent = AsyncMock(return_value=({"final_response": "done"}, None))
+        assert await recover_gateway_draining_session_chats(runner) == 1
+        assert not flush_dir.joinpath("drain-spool.json").exists()
+
+    asyncio.run(_exercise())

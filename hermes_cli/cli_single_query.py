@@ -395,6 +395,7 @@ def _run_quiet_single_query(cli, effective_query, emitter=None):
             )
 
         _report_turn(result)
+        owns_chat = True
         if isinstance(result, dict) and not result.get("failed"):
             history = result.get("messages") or cli.conversation_history
             linger_budget = quiet_notify_linger_seconds()
@@ -458,12 +459,15 @@ def _run_quiet_single_query(cli, effective_query, emitter=None):
                 # Another writer holds the chat now; ending its row here is the #88234 class
                 # (a leg vanishes from history). That writer's own exit finalizes it.
                 _handed_off_session_ids.add(getattr(cli, "session_id", None))
+                owns_chat = False
             if isinstance(continued, dict):
                 result = continued
                 # A teammate's reply displaced the answer this run prints; tell the spawner.
                 _report_turn(result)
         response = result.get("final_response", "") if isinstance(result, dict) else str(result)
-        if _single_query_exit_code(result) == 0:
+        # Without the lease this process's history is stale and another writer owns the chat: leave the
+        # queued fleet messages for that owner's own turn-end drain.
+        if owns_chat and _single_query_exit_code(result) == 0:
             try:
                 _drain_quiet_bot_chat(cli, history)
             except Exception as exc:

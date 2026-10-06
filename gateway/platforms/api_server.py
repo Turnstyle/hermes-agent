@@ -3407,8 +3407,9 @@ class APIServerAdapter(OpenAICompatRoutesMixin, BasePlatformAdapter):
     async def dispatch_session_chat_turn(self, *, session_id: str, message: str) -> bool:
         """Run one session-chat turn (same path as POST /api/sessions/{id}/chat when not draining).
 
-        Returns True once the turn dispatch is accepted and completes; False when admission refuses
-        or the turn raises, leaving drain spool files for a later restart attempt.
+        Returns True only when the replayed turn succeeded; False when admission refuses, the turn
+        raises, or its final result (after the policy-gated retry) is a failure. False keeps the drain
+        spool for a later restart attempt, the message's only durable copy.
         """
         from tools.bot_failure_reasons import RETRY_NONE, result_retry_action
 
@@ -3428,11 +3429,16 @@ class APIServerAdapter(OpenAICompatRoutesMixin, BasePlatformAdapter):
             result, _usage = await self._run_agent(conversation_history=history, **ctx["run_kwargs"])
             if result_retry_action(result) != RETRY_NONE:
                 history = await self._conversation_history_for_session(sid)
-                await self._run_agent(
+                result, _usage = await self._run_agent(
                     conversation_history=history, resume_unanswered_turn=True, **ctx["run_kwargs"])
         except Exception:
             logger.warning(
                 "Gateway-draining session chat replay failed for %s", sid, exc_info=True)
+            return False
+        if not isinstance(result, dict) or result.get("failed"):
+            logger.warning(
+                "Gateway-draining session chat replay turn failed for %s: %s",
+                sid, (result.get("error") if isinstance(result, dict) else result) or "no result")
             return False
         return True
 
