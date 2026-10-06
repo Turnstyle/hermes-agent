@@ -349,11 +349,12 @@ def generate_launchd_plist() -> str:
     log_dir.mkdir(parents=True, exist_ok=True)
     label = _gw().get_launchd_label()
 
-    # launchd's default PATH misses Homebrew, nvm, cargo…; prepend venv/bin + node dirs (as in the
-    # systemd unit) so node stays resolvable even if the shell PATH changes, then the shell PATH.
+    # launchd's default PATH misses Homebrew, nvm, cargo…; prepend source launcher + node dirs
+    # so they stay resolvable even if the shell PATH changes, then the shell PATH.
     priority_dirs = _gw()._build_service_path_dirs()
     _gw()._append_node_dir_for_service(priority_dirs)
-    sane_path = ":".join(dict.fromkeys(priority_dirs + [p for p in os.environ.get("PATH", "").split(":") if p]))
+    entries = dict.fromkeys(priority_dirs + [p for p in os.environ.get("PATH", "").split(":") if p])
+    sane_path = ":".join(_gw()._persisted_service_path_entries(list(entries)))
 
     # ProgramArguments (incl. --profile); the stderr wrapper keeps launchd restart semantics while timestamping
     # stderr; the osascript wrapper gives the job a Local Network identity (see launchd_program_arguments).

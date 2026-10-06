@@ -3035,6 +3035,12 @@ def _build_service_path_dirs(project_root: Path | None = None) -> list[str]:
 
     candidates = []
     # Python and dependency executable paths are selected at boot, not persisted.
+    source_launcher = project_root / ".hermes" / "bin" / "hermes"
+    try:
+        if source_launcher.is_file():
+            candidates.append(str(source_launcher.parent))
+    except OSError:
+        pass
 
     hermes_home = get_hermes_home()
     extras = (project_root / "node_modules" / ".bin", hermes_home / "node" / "bin", hermes_home / "node_modules" / ".bin")
@@ -3042,6 +3048,25 @@ def _build_service_path_dirs(project_root: Path | None = None) -> list[str]:
         if _is_dir(extra):
             candidates.append(str(extra))
     return candidates
+
+
+def _persisted_service_path_entries(entries: list[str]) -> list[str]:
+    """Keep service PATH entries outside disposable PM installs, preserving their spelling."""
+    from pm.environments import installs_root
+
+    try:
+        root = installs_root().resolve()
+    except OSError:
+        return entries
+    retained = []
+    for entry in entries:
+        try:
+            if Path(entry).resolve().is_relative_to(root):
+                continue
+        except OSError:
+            pass
+        retained.append(entry)
+    return retained
 
 
 def _stable_service_working_dir() -> str:
@@ -3236,7 +3261,7 @@ def generate_systemd_unit(system: bool = False, run_as_user: str | None = None) 
     path_entries.extend(_build_user_local_paths(user_home, path_entries))
     path_entries.extend(_build_wsl_interop_paths(path_entries))
     path_entries.extend(["/usr/local/sbin", "/usr/local/bin", "/usr/sbin", "/usr/bin", "/sbin", "/bin"])
-    sane_path = ":".join(path_entries)
+    sane_path = ":".join(_persisted_service_path_entries(path_entries))
     start = installation_command(project_root, [*shlex.split(profile_arg), "gateway", "run"],
                             python=python_path, home=hermes_home)
     cleanup = installation_command(project_root, module="gateway.cgroup_cleanup",
