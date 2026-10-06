@@ -3521,7 +3521,23 @@ def _rotate_worker_log(
 
 def _module_hermes_argv() -> list[str]:
     """Interpreter-bound Hermes CLI invocation (``hermes_cli.main`` is the
-    console-script target — there is no top-level ``hermes`` package)."""
+    console-script target — there is no top-level ``hermes`` package).
+
+    A bare interpreter (PM's store Python, no venv) finds ``hermes_cli`` and its
+    dependencies only through the PYTHONPATH that boot activation exported, and the
+    worker env builder strips that PYTHONPATH as Hermes-owned. ``python -m
+    hermes_cli.main`` then dies with "No module named 'hermes_cli'" before the
+    worker starts. Use the installation-bound runtime command instead: it pins the
+    repo root and runs ``hermes_bootstrap`` (dependency selection) in the child.
+    A venv interpreter carries its own packages and keeps the plain module form.
+    """
+    if sys.prefix == sys.base_prefix:
+        try:
+            from hermes_cli._launchers import runtime_command
+
+            return runtime_command(Path(__file__).resolve().parents[1], python=sys.executable)
+        except Exception:
+            pass
     return [sys.executable, "-m", "hermes_cli.main"]
 
 
