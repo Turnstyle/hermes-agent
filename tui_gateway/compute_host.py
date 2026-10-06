@@ -258,10 +258,30 @@ class ComputeHost:
                 hermes_undo.on_user_message_appended(session["session_key"])
             with contextlib.suppress(Exception):
                 server._persist_branch_seed(session)
-            server._run_prompt_submit(
+            frame_metadata = frame.get("display_metadata") if isinstance(frame.get("display_metadata"), dict) else {}
+            if client_ids := server._ac_queued_client_ids(frame_metadata):
+                # The parent routed this send here without writing its row: write it now, carrying the send
+                # occurrences, and receipt them (relayed like any event) so the sender's bubbles bind by id.
+                server._persist_queued_user_row(
+                    sid, session, text, client_ids, frame.get("queued_prompt_generation"),
+                    display_kind=frame.get("display_kind") or None)
+            queued_gen = frame.get("queued_prompt_generation")
+            # The generation gate above released history_lock for DB setup; a Stop landing there must
+            # still keep the cancelled send from the model, so admission re-checks the claim (t_c220db5c).
+            started = server._run_prompt_submit(
                 request_id, sid, session, text, display_kind=frame.get("display_kind") or None,
                 display_metadata=(frame.get("display_metadata")
-                                  if isinstance(frame.get("display_metadata"), dict) else None))
+                                  if isinstance(frame.get("display_metadata"), dict) else None),
+                queued_prompt_generation=None if queued_gen is None else int(queued_gen))
+            if started is False and queued_gen is not None:
+                with session["history_lock"]:
+                    stale = int(session.get("_queued_prompt_generation", 0)) != int(queued_gen)
+                    if stale:
+                        session["running"] = False
+                        server._clear_inflight_turn(session)
+                if stale:
+                    self._reply("turn.end", sid, request_id, interrupted=True, ended_ns=now_ns())
+                    return
             run_thread = session.get("_run_thread")
             if run_thread is not None and hasattr(run_thread, "join"):
                 while run_thread.is_alive():

@@ -205,6 +205,27 @@ class MessageCompletePayload(Payload):
 event("message.complete", MessageCompletePayload, doc="The turn ended: final text, usage and outcome.")
 
 
+class PromptReceiptStatus(WireEnum):
+    persisted = "persisted"
+    dropped = "dropped"
+
+
+class PromptReceiptPayload(Payload):
+    """``session_auto_continue._emit_prompt_receipt``: the client send occurrences
+    (``prompt.submit`` ``client_message_id``) a durable user row now answers. Text-only sends
+    queued behind a busy turn merge into ONE row, so several ids can share ``user_row_id``.
+    ``dropped``: the gateway discarded the queued copy as a duplicate of the live turn's
+    prompt; no row will be written for it."""
+
+    client_message_ids: list[str]
+    status: PromptReceiptStatus
+    user_row_id: int | None = None
+
+
+event("prompt.receipt", PromptReceiptPayload,
+      doc="A queued or live send's user row was written (or the queued copy was dropped).")
+
+
 class StatusUpdatePayload(Payload):
     """``server._status_update`` and the direct emitters (goal / loop / heartbeat / process)."""
 

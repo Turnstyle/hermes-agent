@@ -43,6 +43,10 @@ class PromptSubmitParams(SessionParams):
     confirm_truncate: bool | None = None
     confirm_empty_truncate: bool | None = None
     rebind_survivor_row_ids: list[int] | None = None
+    # The client's id for THIS send occurrence (its optimistic bubble). Stored on the user row
+    # (``display_metadata.client_message_ids``) and echoed by ``prompt.receipt`` once the row is
+    # written, including for sends that sat in the busy queue. Malformed values are ignored.
+    client_message_id: str | None = None
     # In-process only: injected by the hosted-room / bot-relay handlers, never accepted from a
     # client (a client dict for ``_turn_author`` answers 4124). Excluded from the rendered wire.
     hosted_task: JsonValue | None = Field(default=None, exclude=True, alias="_hosted_task")

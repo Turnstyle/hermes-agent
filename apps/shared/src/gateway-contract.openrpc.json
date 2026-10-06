@@ -25240,6 +25240,48 @@
         "title": "ProjectsUpdateParams",
         "type": "object"
       },
+      "PromptReceiptPayload": {
+        "additionalProperties": false,
+        "description": "``session_auto_continue._emit_prompt_receipt``: the client send occurrences\n(``prompt.submit`` ``client_message_id``) a durable user row now answers. Text-only sends\nqueued behind a busy turn merge into ONE row, so several ids can share ``user_row_id``.\n``dropped``: the gateway discarded the queued copy as a duplicate of the live turn's\nprompt; no row will be written for it.",
+        "properties": {
+          "client_message_ids": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Client Message Ids",
+            "type": "array"
+          },
+          "status": {
+            "$ref": "#/components/schemas/PromptReceiptStatus"
+          },
+          "user_row_id": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "User Row Id"
+          }
+        },
+        "required": [
+          "client_message_ids",
+          "status"
+        ],
+        "title": "PromptReceiptPayload",
+        "type": "object"
+      },
+      "PromptReceiptStatus": {
+        "enum": [
+          "persisted",
+          "dropped"
+        ],
+        "title": "PromptReceiptStatus",
+        "type": "string"
+      },
       "PromptSubmitParams": {
         "additionalProperties": false,
         "description": "``text`` is normally a string; the relay / hosted paths may hand a structured (parts list)\npayload, and the busy path renders it. Truncation (rewind / edit / regenerate) needs explicit\nconsent: ``confirm_truncate`` plus one durable target (``truncate_before_row_id`` preferred,\n``truncate_before_message_id``, or the legacy ``truncate_before_user_ordinal``).",
@@ -25410,6 +25452,18 @@
             ],
             "default": null,
             "title": "Rebind Survivor Row Ids"
+          },
+          "client_message_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Client Message Id"
           }
         },
         "required": [
@@ -38144,6 +38198,18 @@
           "name": "payload",
           "schema": {
             "$ref": "#/components/schemas/PreviewRestartProgressPayload"
+          }
+        }
+      ]
+    },
+    {
+      "name": "prompt.receipt",
+      "summary": "A queued or live send's user row was written (or the queued copy was dropped).",
+      "params": [
+        {
+          "name": "payload",
+          "schema": {
+            "$ref": "#/components/schemas/PromptReceiptPayload"
           }
         }
       ]

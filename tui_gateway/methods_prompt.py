@@ -444,7 +444,7 @@ def _storage_error_data(failure, raw) -> dict:
     return {"code": failure.code, "cause": failure.cause, "details": storage_failure_details(raw)}
 
 
-def _persist_session_row_for_submit(rid, session, text=None, display_kind=None):
+def _persist_session_row_for_submit(rid, session, text=None, display_kind=None, client_message_ids=None):
     """Lazily persist the DB row now that the user sent a message (a branch becomes real
     here), then the message itself (#111868: a freeze during the first build must leave a
     resumable transcript); the error reply is the only user-visible signal (desktop maps it to a toast)."""
@@ -459,7 +459,7 @@ def _persist_session_row_for_submit(rid, session, text=None, display_kind=None):
                 data=_storage_error_data(failure, _db_error))
         else:
             _persist_branch_seed(session)
-            _persist_submit_user_row(session, text, display_kind)
+            _persist_submit_user_row(session, text, display_kind, client_message_ids)
             return None
     except Exception as exc:
         failure = describe_storage_failure(exc)
@@ -571,11 +571,18 @@ def _(rid, params: dict) -> dict:
     # whitelisted to "hidden" — this RPC must not mint kinds.
     display_kind = "hidden" if params.get("display_kind") == "hidden" else None
     title_preview = params.get("title_preview")
+    # The client's id for this send occurrence; bounded so a hostile value can't bloat the row.
+    raw_client_id = params.get("client_message_id")
+    client_message_id = (
+        raw_client_id if isinstance(raw_client_id, str) and 0 < len(raw_client_id) <= 128 else None)
     display_metadata = (
         {"title_preview": title_preview[:1000]}
         if isinstance(title_preview, str) and title_preview.strip()
         else None
     )
+    if client_message_id:
+        # Rides on the turn's user dict too, so a compaction copy of the row keeps the occurrence ids.
+        display_metadata = {**(display_metadata or {}), "client_message_ids": [client_message_id]}
     if (stopped := _typed_stop_phrase_response(rid, text)) is not None:
         return stopped
     if params.get("interrupted"):
@@ -649,7 +656,8 @@ def _(rid, params: dict) -> dict:
             # for `running` to clear and resubmits with the truncation intact.
             return _err(rid, 4009, "session busy")
         busy_response = _handle_busy_submit(
-            rid, sid, session, text, busy_transport, queued=bool(params.get("queued")), turn_author=turn_author)
+            rid, sid, session, text, busy_transport, queued=bool(params.get("queued")), turn_author=turn_author,
+            client_message_id=client_message_id)
         if busy_response is not None:
             return busy_response
     raw_rebind_ids = params.get("rebind_survivor_row_ids")
@@ -681,12 +689,17 @@ def _(rid, params: dict) -> dict:
         logger.warning(
             "compute-host dispatch failed for session %s; falling back inline: %s", sid,
             isolated_response["error"].get("message", "unknown error"))
-    if (err := _persist_session_row_for_submit(rid, session, text, display_kind)) is not None:
+    if (err := _persist_session_row_for_submit(
+            rid, session, text, display_kind, [client_message_id] if client_message_id else None)) is not None:
         return err
     # Capture before starting the worker: it consumes the staging dict and may finish before the RPC returns.
     staged_user = session.get("_submit_user_row") or {}
     if isinstance(staged_user.get("_row_id"), int):
         survivor_fields["user_row_id"] = staged_user["_row_id"]
+        if client_message_id:
+            # Same receipt the queue drain emits: survives a lost RPC reply (event replay) and a
+            # client whose runtime id changed while the send was in flight.
+            _emit_prompt_receipt(sid, [client_message_id], user_row_id=staged_user["_row_id"])
     # A completed FAILED build must not wedge the session: rebuild, don't replay it.
     if not _restart_completed_failed_agent_build(sid, session, session.get("agent_ready")):
         _start_agent_build(sid, session)
