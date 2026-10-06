@@ -29,6 +29,40 @@ EMU = os.environ.get("FLEET_MESSAGES_EMULATOR", "")
 PROJECT = "mission-control-444444"
 
 
+
+@pytest.mark.parametrize("override, expected", [
+    ("/fixture/selected.json", "/fixture/selected.json"),
+    (None, "/fixture/os-user/.config/conductive-admin/conductive-admin-sa-key.json"),
+])
+def test_live_source_uses_selected_account_and_caches_it(monkeypatch, override, expected):
+    """Keep the A-L3 source choice when the fleet queue moves to a plugin."""
+    import pwd
+    import google.auth
+    from google.oauth2 import service_account
+
+    monkeypatch.setattr(google.auth, "default", lambda **kw: pytest.fail("ADC is forbidden"))
+    monkeypatch.setenv("HOME", "/fixture/profile-home")
+    monkeypatch.setattr(pwd, "getpwuid", lambda uid: SimpleNamespace(pw_dir="/fixture/os-user"))
+    if override is None:
+        monkeypatch.delenv("FLEET_MESSAGES_SA_KEY_FILE", raising=False)
+    else:
+        monkeypatch.setenv("FLEET_MESSAGES_SA_KEY_FILE", override)
+    calls = []
+    account = SimpleNamespace(valid=True, token="fixture-result")
+
+    def load(path, *, scopes):
+        calls.append((path, scopes))
+        return account
+
+    monkeypatch.setattr(service_account.Credentials, "from_service_account_file", load)
+    monkeypatch.setattr(fmd, "_live_credentials", None)
+    monkeypatch.setattr(fmd, "_credentials_warned", False)
+    monkeypatch.setattr(fmd.subprocess, "run", lambda *a, **kw: pytest.fail("unexpected fallback"))
+    assert fmd._live_token() == "fixture-result"
+    assert fmd._live_token() == "fixture-result"
+    assert calls == [(expected, ["https://www.googleapis.com/auth/datastore"])]
+
+
 def test_live_token_falls_back_to_gcloud_and_warns_once_per_failed_streak(monkeypatch, caplog, tmp_path):
     import google.auth
     from google.auth.exceptions import RefreshError
