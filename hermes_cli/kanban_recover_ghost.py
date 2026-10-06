@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 from contextlib import closing
 import json
+import logging
 import os
 import re
 import socket
@@ -16,6 +17,42 @@ from pathlib import Path
 from hermes_cli import kanban_db as kb
 from hermes_cli import kanban_db_connect as kbc
 from hermes_cli import kanban_db_dispatch as kbd
+
+_log = logging.getLogger(__name__)
+_FLEET_NODE_UNPARSEABLE = "\x00fleet-node-unparseable"
+_FLEET_TRIGGER_NODE_RE = re.compile(
+    r"INSERT\s+INTO\s+fleet_kanban_issue_map\s*\([^)]*\)\s*VALUES\s*\(\s*"
+    r"NEW\s*\.\s*id\s*,\s*.+?\s*,\s*NEW\s*\.\s*title\s*,\s*NEW\s*\.\s*body\s*,\s*"
+    r"'((?:[^']|'')+)'",
+    re.IGNORECASE | re.DOTALL,
+)
+
+
+def _installed_fleet_node_id(conn: sqlite3.Connection) -> str | None:
+    """Use kanban_db's helper when present, else read the board's installed trigger."""
+    helper = getattr(kb, "_fleet_adapter_installed_node_id", None)
+    if helper is not None:
+        return helper(conn)
+    row = conn.execute(
+        "SELECT sql FROM sqlite_master "
+        "WHERE type = 'trigger' AND name = 'fleet_kanban_task_insert'"
+    ).fetchone()
+    if row is None or not row[0]:
+        return None
+    match = _FLEET_TRIGGER_NODE_RE.search(row[0])
+    if match is None:
+        _log.warning(
+            "kanban recompute_ready: fleet_kanban_task_insert trigger exists "
+            "but its installed node id could not be parsed. Failing closed: "
+            "every Fleet-mapped task is treated as foreign (not auto-promoted) "
+            "until the trigger text is recognized again."
+        )
+        return _FLEET_NODE_UNPARSEABLE
+    return match.group(1).replace("''", "'")
+
+
+def _unparseable_fleet_node_id() -> str:
+    return getattr(kb, "_FLEET_NODE_UNPARSEABLE", _FLEET_NODE_UNPARSEABLE)
 
 
 class RecoveryRefused(RuntimeError):
@@ -196,8 +233,8 @@ def _checks(conn: sqlite3.Connection, snapshot: dict, task_id: str, run_id: int,
         owner = mapping.get("current_node")
         if owner is None:
             owner = mapping.get("source_node")
-        installed = kb._fleet_adapter_installed_node_id(conn)
-        checks.append(_check("fleet owner", bool(owner and installed and installed != kb._FLEET_NODE_UNPARSEABLE
+        installed = _installed_fleet_node_id(conn)
+        checks.append(_check("fleet owner", bool(owner and installed and installed != _unparseable_fleet_node_id()
                                                    and owner == installed),
                              f"issue owner={owner!r}, installed node={installed!r}"))
         if _table_exists(conn, "fleet_kanban_verified_leases"):

@@ -57,6 +57,41 @@ def _invoke(task_id, run_id):
     return cli.kanban_command(args)
 
 
+def test_fleet_owner_fallback_reads_installed_trigger_and_fails_closed(tmp_path, monkeypatch):
+    home, task_id, run_id = _board(tmp_path, monkeypatch)
+    monkeypatch.delattr(kb, "_fleet_adapter_installed_node_id", raising=False)
+    monkeypatch.delattr(kb, "_FLEET_NODE_UNPARSEABLE", raising=False)
+    with kbc.connect_closing() as conn:
+        conn.execute(
+            "CREATE TABLE fleet_kanban_issue_map (local_task_id TEXT, issue_id TEXT, "
+            "title TEXT, body TEXT, current_node TEXT, source_node TEXT)"
+        )
+        conn.execute(
+            "INSERT INTO fleet_kanban_issue_map(local_task_id, issue_id, current_node) "
+            "VALUES(?, 'issue-1', 'max')", (task_id,)
+        )
+        conn.execute(
+            "CREATE TRIGGER fleet_kanban_task_insert AFTER INSERT ON tasks BEGIN "
+            "INSERT INTO fleet_kanban_issue_map(local_task_id, issue_id, title, body, source_node) "
+            "VALUES(NEW.id, 'issue-2', NEW.title, NEW.body, 'max'); END"
+        )
+        conn.commit()
+        snapshot = ghost._snapshot(conn, task_id, run_id)
+        checks = ghost._checks(conn, snapshot, task_id, run_id, "default", home / "kanban.db", int(time.time()))
+        owner = next(check for check in checks if check["check"] == "fleet owner")
+        assert owner["result"] == "PASS"
+
+        conn.execute("DROP TRIGGER fleet_kanban_task_insert")
+        conn.execute(
+            "CREATE TRIGGER fleet_kanban_task_insert AFTER INSERT ON tasks BEGIN SELECT 1; END"
+        )
+        conn.commit()
+        checks = ghost._checks(conn, snapshot, task_id, run_id, "default", home / "kanban.db", int(time.time()))
+        owner = next(check for check in checks if check["check"] == "fleet owner")
+        assert owner["result"] == "FAIL"
+        assert "fleet-node-unparseable" in owner["reason"]
+
+
 def test_live_worker_or_claim_refuses_without_writes(tmp_path, monkeypatch, capsys):
     home, task_id, run_id = _board(tmp_path, monkeypatch)
     with kbc.connect_closing() as conn:
