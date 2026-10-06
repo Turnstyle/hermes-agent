@@ -97,12 +97,63 @@ def _gc_retention_days() -> int:
         return 30
 
 
+# Principal of the machine-root drain marker that paused dispatch last, so the
+# pause is logged once per engagement (not every tick); None while not paused.
+_drain_pause_logged_for: Optional[str] = None
+
+
+def _machine_root_drain_active() -> bool:
+    """True while an ACTIVE drain marker sits at the machine root (``~/.hermes/.drain_request.json``).
+
+    The coordinated-restart script writes the marker at the machine root, and a
+    profile-home gateway (``HERMES_HOME=<root>/profiles/<name>``) must still
+    see it, so the root is read explicitly; the gateway's own HERMES_HOME
+    marker counts too. ``drain_control.drain_requested`` applies the epoch and
+    max-age staleness rules, so a stale or orphaned marker never pauses
+    dispatch. Fails open (False) on any error: a broken reader must not wedge
+    the board.
+    """
+    global _drain_pause_logged_for
+    try:
+        from gateway import drain_control
+        from hermes_constants import get_default_hermes_root, get_hermes_home
+
+        homes = [Path(get_default_hermes_root())]
+        own = Path(get_hermes_home())
+        if own.resolve() != homes[0].resolve():
+            homes.append(own)
+        for home in homes:
+            if drain_control.drain_requested(home=home):
+                body = drain_control.read_drain_request(home=home) or {}
+                tag = f"{home}:{body.get('principal')}:{body.get('requested_at')}"
+                if _drain_pause_logged_for != tag:
+                    _drain_pause_logged_for = tag
+                    logger.warning(
+                        "kanban dispatcher: PAUSED by drain marker %s (principal=%s); no new workers or "
+                        "auto-decompose until it is cleared. Running workers continue.",
+                        drain_control.drain_request_path(home), body.get("principal"),
+                    )
+                return True
+    except Exception:
+        logger.debug("kanban dispatcher: drain-marker check failed; dispatch not paused", exc_info=True)
+        return False
+    if _drain_pause_logged_for is not None:
+        logger.info("kanban dispatcher: drain marker cleared; dispatch resumes")
+        _drain_pause_logged_for = None
+    return False
+
+
 def _kanban_dispatch_allowed() -> bool:
-    """False while the global emergency stop (`hermes pause`) is engaged.
+    """False while the global emergency stop (`hermes pause`) is engaged or a drain is active.
 
     Checked every tick before spawning, so a pause applies on the next tick;
-    in-flight workers are never touched. Fails open if estop is unimportable.
+    in-flight workers are never touched. The drain check covers the
+    coordinated gateway restart: its marker refuses new chat turns, and it must
+    refuse new Kanban workers too, or the restart deadline cuts them (Sheldon
+    restart r-20261006-141811-f1f1). Fails open if estop is unimportable.
     """
+    if _machine_root_drain_active():
+        return False
     try:
         from agent.estop import check_paused
     except ImportError:
