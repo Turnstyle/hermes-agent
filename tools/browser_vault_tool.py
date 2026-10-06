@@ -364,6 +364,13 @@ def browser_vault_enter_code(handle: str = "", task_id: Optional[str] = None) ->
     source = "user"
     backend = backend_for_handle(handle) if handle else None
     if backend is not None:
+        # An authenticator seed is as origin-bound as its password: a stale handle must not
+        # mint a code on a different website (including a sibling subdomain).
+        meta = backend.get_meta(handle)
+        allowed = (list(meta.allowed_origins) or ([str(meta.origin)] if meta.origin else [])) if meta else []
+        if not meta or origin not in allowed:
+            return json.dumps({"success": False, "error_type": "origin_mismatch",
+                               "error": "The saved login is not bound to this page's exact origin; no code was resolved."})
         try:
             code = backend.resolve_otp(handle)
         except Exception:

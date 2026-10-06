@@ -267,86 +267,47 @@ def test_onepassword_service_account_no_configured_vault_merges_across_vaults():
     with patch.object(backend, "_run", side_effect=fake_run):
         items = backend.list_items()
 
-    assert [item.id for item in items] == ["op:item-1", "op:item-common", "op:item-2"]
+    assert [item.id for item in items] == ["op:item-1", "op:item-2"]
+    assert "item-common" not in backend._admitted
     item_list_calls = [c for c in calls if c[:2] == ["item", "list"]]
     assert len(item_list_calls) == 2
     assert all("--vault" in c for c in item_list_calls)
     assert any(c[:2] == ["vault", "list"] for c in calls)
 
 
-def test_onepassword_service_account_configured_vault_and_multi_vault_fallback():
-    """Service-account mode with a configured vault passes --vault on get and otp.
-    When unconfigured, resolve_password and resolve_otp try each vault until success."""
+@pytest.mark.parametrize("configured", [True, False])
+def test_onepassword_service_account_reads_only_the_listed_vault(configured):
+    """Listing can span vaults; a read uses only the item's exact listed vault."""
     from agent.vault_backends.onepassword import OnePasswordLoginBackend
-
-    # 1. Configured vault "V"
-    backend = OnePasswordLoginBackend({"enabled": True, "vault": "V"})
+    backend = OnePasswordLoginBackend({"vault": "vault-2"} if configured else {})
     backend._service_token = "fake-sa-token"
-
     calls = []
 
-    def fake_run(*args: str) -> str:
+    def fake_run(*args):
         calls.append(list(args))
-        if "--vault" not in args:
-            raise RuntimeError("op failed: [ERROR] a vault query must be provided when called by a service account")
+        if args[:2] == ("vault", "list"):
+            return json.dumps([{"id": "vault-1"}, {"id": "vault-2"}])
         vault = args[args.index("--vault") + 1]
-        if vault != "V":
-            raise RuntimeError(f"op failed: wrong vault {vault}")
-        if "--fields" in args:
-            return "secret-password\n"
-        if "--otp" in args:
-            return "123456\n"
-        raise RuntimeError(f"unexpected op call: {args}")
+        if args[:2] == ("item", "list"):
+            return json.dumps([] if vault == "vault-1" else [{
+                "id": "item-2", "vault": {"id": "vault-2"},
+                "urls": [{"href": "https://example.com"}]}])
+        assert vault == "vault-2"
+        return "654321" if "--otp" in args else "fixture-password"
 
     with patch.object(backend, "_run", side_effect=fake_run):
-        pw = backend.resolve_password("op:item-1")
-        otp = backend.resolve_otp("op:item-1")
-
-    assert pw == "secret-password"
-    assert otp == "123456"
-    assert len(calls) == 2
-    assert calls[0] == ["item", "get", "item-1", "--fields", "label=password", "--reveal", "--vault", "V"]
-    assert calls[1] == ["item", "get", "item-1", "--otp", "--vault", "V"]
-
-    # 2. Unconfigured vault: tries vault-1 (fails), then vault-2 (succeeds)
-    backend_unconf = OnePasswordLoginBackend({"enabled": True})
-    backend_unconf._service_token = "fake-sa-token"
-
-    unconf_calls = []
-
-    def fake_run_unconf(*args: str) -> str:
-        unconf_calls.append(list(args))
-        if args[:3] == ("vault", "list", "--format"):
-            return json.dumps([{"id": "vault-1", "name": "V1"}, {"id": "vault-2", "name": "V2"}])
-        if "--vault" not in args:
-            raise RuntimeError("op failed: [ERROR] a vault query must be provided when called by a service account")
-        vault = args[args.index("--vault") + 1]
-        if vault == "vault-1":
-            raise RuntimeError("op failed: [ERROR] item not found in vault vault-1")
-        if vault == "vault-2":
-            if "--fields" in args:
-                return "secret-from-v2\n"
-            if "--otp" in args:
-                return "654321\n"
-        raise RuntimeError(f"unexpected op call: {args}")
-
-    with patch.object(backend_unconf, "_run", side_effect=fake_run_unconf):
-        pw2 = backend_unconf.resolve_password("op:item-2")
-        otp2 = backend_unconf.resolve_otp("op:item-2")
-
-    assert pw2 == "secret-from-v2"
-    assert otp2 == "654321"
-
-    # 3. Both vaults fail: resolve_password raises the last RuntimeError; resolve_otp returns None
-    def fake_run_all_fail(*args: str) -> str:
-        if args[:3] == ("vault", "list", "--format"):
-            return json.dumps([{"id": "vault-1"}, {"id": "vault-2"}])
-        raise RuntimeError("op failed: [ERROR] item not found in vault")
-
-    with patch.object(backend_unconf, "_run", side_effect=fake_run_all_fail):
-        with pytest.raises(RuntimeError, match="item not found in vault"):
-            backend_unconf.resolve_password("op:missing")
-        assert backend_unconf.resolve_otp("op:missing") is None
+        assert backend.get_meta("op:item-2").origin == "https://example.com"
+        assert backend.resolve_password("op:item-2") == "fixture-password"
+        assert backend.resolve_otp("op:item-2") == "654321"
+        with pytest.raises(RuntimeError, match="association"):
+            backend.resolve_password("op:missing")
+        assert backend.resolve_otp("op:missing") is None
+    assert [c for c in calls if c[:2] == ["item", "get"]] == [
+        ["item", "get", "item-2", "--vault", "vault-2", "--fields", "label=password", "--reveal"],
+        ["item", "get", "item-2", "--vault", "vault-2", "--otp"],
+    ]
+    if configured:
+        assert all(c[:2] != ["vault", "list"] and c[c.index("--vault") + 1] == "vault-2" for c in calls)
 
 
 def test_onepassword_non_service_account_mode_argv_unchanged():

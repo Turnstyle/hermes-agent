@@ -15,7 +15,7 @@ import logging
 import os
 import subprocess
 from pathlib import Path
-from typing import Dict, List, Optional, Set
+from typing import Dict, List, Optional
 
 from agent.secret_sources.base import run_cli
 from agent.secret_sources.onepassword import _OP_ENV_ALLOWLIST, _scrub, find_op
@@ -39,6 +39,7 @@ class OnePasswordLoginBackend(LoginBackend):
         from agent.secret_scope import get_secret
         env_name = str(self.cfg.get("service_account_token_env") or "OP_SERVICE_ACCOUNT_TOKEN")
         self._service_token = get_secret(env_name, "") or ""
+        self._admitted: Dict[str, tuple] = {}
 
     # ── auth ────────────────────────────────────────────────────────────────
 
@@ -91,6 +92,8 @@ class OnePasswordLoginBackend(LoginBackend):
         proc = run_cli([str(self._op()), *args], env=self._env(token), timeout=_TIMEOUT, label="op",
                        timeout_message="op timed out", stdin=subprocess.DEVNULL)
         if proc.returncode != 0:
+            if self._service_token:
+                raise RuntimeError("op operation failed (service account)")
             err = _scrub(proc.stderr or "")
             if "session" in err.lower() or "sign in" in err.lower() or "not signed in" in err.lower():
                 _unlock.lock(self.name)
@@ -105,74 +108,98 @@ class OnePasswordLoginBackend(LoginBackend):
         vaults = [str(v.get("id") or v.get("name") or "").strip() for v in raw if isinstance(raw, list) and isinstance(v, dict)]
         return [v for v in vaults if v]
 
-    def _parse_items(self, raw: list, seen: Optional[Set[str]] = None) -> List[VaultItemMeta]:
-        out: List[VaultItemMeta] = []
-        for item in raw if isinstance(raw, list) else []:
-            item_id = str(item.get("id") or "")
-            if seen is not None:
-                if item_id in seen:
-                    continue
-                seen.add(item_id)
-            urls = [str(u["href"]) for u in item.get("urls") or [] if isinstance(u, dict) and u.get("href")]
-            origins = _all_origins(urls)
-            if not origins:
-                continue
-            username = str(item.get("additional_information") or "").strip() or None
-            out.append(VaultItemMeta(
-                id=f"{self.prefix}{item_id}", kind="login", label=str(item.get("title") or origins[0]),
-                origin=origins[0], created_at=str(item.get("created_at") or ""),
-                identifier_type="username" if username else None, identifier=username,
-                allowed_origins=_web_origins(origins)))
-        return out
+    def _listed_items(self) -> list:
+        if not self._service_token:
+            raw = json.loads(self._run("item", "list", "--categories", "Login", "--format", "json") or "[]")
+            return raw if isinstance(raw, list) else []
+        items = []
+        for vault in self._vaults():
+            raw = json.loads(self._run("item", "list", "--categories", "Login", "--format", "json", "--vault", vault) or "[]")
+            if isinstance(raw, list):
+                items.extend(raw)
+        return items
 
     # ── backend contract ───────────────────────────────────────────────────
     def list_items(self) -> List[VaultItemMeta]:
         if not self.is_unlocked():
             return []
-        if not self._service_token:
-            raw = json.loads(self._run("item", "list", "--categories", "Login", "--format", "json") or "[]")
-            return self._parse_items(raw)
+        raw = self._listed_items()
         out: List[VaultItemMeta] = []
-        seen: Set[str] = set()
-        for v in self._vaults():
-            raw = json.loads(self._run("item", "list", "--categories", "Login", "--format", "json", "--vault", v) or "[]")
-            out.extend(self._parse_items(raw, seen=seen))
+        self._admitted.clear()
+        counts: Dict[str, int] = {}
+        for item in raw if isinstance(raw, list) else []:
+            if not isinstance(item, dict):
+                continue
+            item_id = item.get("id")
+            if not isinstance(item_id, str) or not item_id:
+                continue
+            counts[item_id] = counts.get(item_id, 0) + 1
+            urls = [str(u["href"]) for u in item.get("urls") or [] if isinstance(u, dict) and u.get("href")]
+            origins = _all_origins(urls)
+            if not origins:
+                continue
+            if self._service_token:
+                self._admitted[item_id] = (self._vault_id(item), tuple(origins))
+            username = str(item.get("additional_information") or "").strip() or None
+            out.append(VaultItemMeta(
+                id=f"{self.prefix}{item.get('id')}", kind="login", label=str(item.get("title") or origins[0]),
+                origin=origins[0], created_at=str(item.get("created_at") or ""),
+                identifier_type="username" if username else None, identifier=username,
+                allowed_origins=_web_origins(origins)))
+        for item_id, count in counts.items():
+            if count != 1:
+                self._admitted.pop(item_id, None)
+        if self._service_token:
+            out = [meta for meta in out if meta.id[len(self.prefix):] in self._admitted]
         return out
 
     def get_meta(self, handle: str) -> Optional[VaultItemMeta]:
-        return next((m for m in self.list_items() if m.id == handle), None)
+        matches = [m for m in self.list_items() if m.id == handle]
+        return matches[0] if len(matches) == 1 else None
+
+    @staticmethod
+    def _vault_id(item: Dict) -> Optional[str]:
+        vault = item.get("vault")
+        value = vault.get("id") if isinstance(vault, dict) else None
+        if (not isinstance(value, str) or not value or value != value.strip()
+                or value.startswith("-") or any(ch.isspace() or ord(ch) < 32 for ch in value)):
+            return None
+        return value
+
+
+    def _vault_selector(self, handle: str) -> tuple:
+        """Choose only the unique currently authorized list record; never accept a caller's vault."""
+        if not self._service_token:
+            return ()
+        if not handle.startswith(self.prefix) or not handle[len(self.prefix):]:
+            raise RuntimeError("1Password vault association unavailable")
+        item_id = handle[len(self.prefix):]
+        raw = self._listed_items()
+        matches = [item for item in raw if isinstance(item, dict) and item.get("id") == item_id] if isinstance(raw, list) else []
+        if len(matches) != 1:
+            raise RuntimeError("1Password vault association unavailable or ambiguous")
+        item = matches[0]
+        vault_id = self._vault_id(item)
+        urls = [str(u["href"]) for u in item.get("urls") or [] if isinstance(u, dict) and u.get("href")]
+        association = (vault_id, tuple(_all_origins(urls)))
+        if not vault_id or not association[1] or (item_id in self._admitted and self._admitted[item_id] != association):
+            raise RuntimeError("1Password vault association unavailable or changed")
+        return ("--vault", vault_id)
+
 
     def resolve_password(self, handle: str) -> str:
         item_id = handle[len(self.prefix):]
-        if not self._service_token:
-            return self._run("item", "get", item_id, "--fields", "label=password", "--reveal").rstrip("\r\n")
-        last_err: Optional[Exception] = None
-        for v in self._vaults():
-            try:
-                return self._run("item", "get", item_id, "--fields", "label=password", "--reveal", "--vault", v).rstrip("\r\n")
-            except RuntimeError as err:
-                last_err = err
-        if last_err is not None:
-            raise last_err
-        raise RuntimeError(f"op failed: item {item_id} not found in any vault")
+        vault = self._vault_selector(handle)
+        return self._run("item", "get", item_id, *vault, "--fields", "label=password", "--reveal").rstrip("\r\n")
 
     def resolve_otp(self, handle: str) -> Optional[str]:
         # `--otp` mints the current TOTP from the item's one-time-password field; items without one error out.
-        item_id = handle[len(self.prefix):]
-        if not self._service_token:
-            try:
-                code = self._run("item", "get", item_id, "--otp").strip()
-            except Exception:
-                return None
-            return code if code.isdigit() else None
-        for v in self._vaults():
-            try:
-                code = self._run("item", "get", item_id, "--otp", "--vault", v).strip()
-                if code.isdigit():
-                    return code
-            except Exception:
-                continue
-        return None
+        try:
+            vault = self._vault_selector(handle)
+            code = self._run("item", "get", handle[len(self.prefix):], *vault, "--otp").strip()
+        except Exception:
+            return None
+        return code if code.isdigit() else None
 
 
 def _web_origins(origins: List[str]) -> tuple:
