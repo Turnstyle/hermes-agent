@@ -1389,6 +1389,29 @@ def _systemd_service_is_start_limited(system: bool = False) -> bool:
     return _systemd_unit_is_start_limited(_read_systemd_unit_properties(system=system))
 
 
+def _systemd_action_was_start_limited(exc_or_result, *, system: bool) -> bool:
+    """True when ``systemctl start|restart`` was refused for start-limit.
+
+    A zero exit, or a stub that did not return a process result, is not a
+    refusal. A zero exit stays acceptance even if the unit still carries an
+    older limit.
+    """
+    if isinstance(exc_or_result, subprocess.CompletedProcess):
+        if not exc_or_result.returncode:
+            return False
+        exc_or_result = subprocess.CalledProcessError(
+            exc_or_result.returncode,
+            getattr(exc_or_result, "args", None) or "systemctl",
+            getattr(exc_or_result, "stdout", None),
+            getattr(exc_or_result, "stderr", None),
+        )
+    elif not isinstance(exc_or_result, subprocess.CalledProcessError):
+        return False
+    if _systemd_error_indicates_start_limit(exc_or_result):
+        return True
+    return _systemd_service_is_start_limited(system=system)
+
+
 def _print_systemd_start_limit_wait(system: bool = False) -> None:
     svc = get_service_name()
     scope_label = _service_scope_label(system).capitalize()
@@ -3747,6 +3770,13 @@ def systemd_stop(system: bool = False):
 
 
 def systemd_restart(system: bool = False):
+    """Restart the systemd unit. Returns a :class:`RestartSignal`.
+
+    Start-limit rejection is ``REJECTED`` (no restart was accepted). Every other
+    path that signals systemd or the live process is ``INITIATED``.
+    """
+    from hermes_cli.restart_budget import RestartSignal
+
     system = _systemd_scope_preamble("restart", system, preflight_user=True)
     # HERMES_HOME sync happens in refresh's systemd_unit_is_current gate; its os.environ mutation
     # persists for the get_running_pid / drain-timeout reads below.
@@ -3771,18 +3801,26 @@ def systemd_restart(system: bool = False):
         _escalate_wedged_gateway(pid)
         svc = get_service_name()
         _run_systemctl(["reset-failed", svc], system=system, check=False, timeout=30)
-        _run_systemctl(["restart", svc], system=system, check=False, timeout=90)
+        restarted = _run_systemctl(["restart", svc], system=system, check=False, timeout=90)
+        if _systemd_action_was_start_limited(restarted, system=system):
+            _print_systemd_start_limit_wait(system=system)
+            return RestartSignal.REJECTED
+        if getattr(restarted, "returncode", 0) != 0:
+            # Any other nonzero systemctl result (unit not found, permission,
+            # timeout) started no replacement: do not keep the hour claim.
+            print(f"✗ systemctl restart {svc} failed (exit {restarted.returncode})")
+            return RestartSignal.REJECTED
         _wait_for_systemd_service_restart(system=system, previous_pid=pid)
-        return
+        return RestartSignal.INITIATED
     if pid is not None:
         service_action = _systemd_graceful_restart_action(system, pid)
         if service_action:
-            _systemd_reset_and_run(service_action, system=system, previous_pid=pid)
-        return
+            return _systemd_reset_and_run(service_action, system=system, previous_pid=pid)
+        return RestartSignal.INITIATED
 
     if _recover_pending_systemd_restart(system=system, previous_pid=pid):
-        return
-    _systemd_reset_and_run("restart", system=system, previous_pid=pid)
+        return RestartSignal.INITIATED
+    return _systemd_reset_and_run("restart", system=system, previous_pid=pid)
 
 
 def _systemd_graceful_restart_action(system: bool, pid: int) -> str | None:
@@ -3834,25 +3872,32 @@ def _systemd_graceful_restart_action(system: bool, pid: int) -> str | None:
     return "start"
 
 
-def _systemd_reset_and_run(action: str, *, system: bool, previous_pid) -> None:
-    """``reset-failed`` then ``systemctl <action>``, then wait for the relaunch. Start-limit
-    rejection prints the wait hint instead of raising; a 90s timeout prints where to look."""
+def _systemd_reset_and_run(action: str, *, system: bool, previous_pid):
+    """``reset-failed`` then ``systemctl <action>``, then wait for the relaunch.
+
+    Returns :class:`RestartSignal.REJECTED` when systemd refuses for start-limit
+    (the restart was not accepted). A 90s timeout still means the action was
+    sent, so that path is ``INITIATED`` and only prints where to look.
+    """
+    from hermes_cli.restart_budget import RestartSignal
+
     svc = get_service_name()
     _run_systemctl(["reset-failed", svc], system=system, check=False, timeout=30)
     try:
         _run_systemctl([action, svc], system=system, check=True, timeout=90)
     except subprocess.CalledProcessError as exc:
-        if _systemd_error_indicates_start_limit(exc) or _systemd_service_is_start_limited(system=system):
+        if _systemd_action_was_start_limited(exc, system=system):
             _print_systemd_start_limit_wait(system=system)
-            return
+            return RestartSignal.REJECTED
         raise
     except subprocess.TimeoutExpired:
         print(
             f"Gateway {_service_scope_label(system)} service is still restarting after 90s; "
             "check `hermes gateway status` or logs for final state."
         )
-        return
+        return RestartSignal.INITIATED
     _wait_for_systemd_service_restart(system=system, previous_pid=previous_pid)
+    return RestartSignal.INITIATED
 
 
 def systemd_status(deep: bool = False, system: bool = False, full: bool = False):
@@ -4814,9 +4859,14 @@ def _service_call(backend: str, verb: str, system: bool | None = False) -> None:
 # Main Command Handler
 # =============================================================================
 
-def _dispatch_via_service_manager_if_s6(action: str, profile: str | None = None) -> bool:
-    """Dispatch start/stop/restart via s6 inside an s6 container; True iff dispatched (caller returns).
-    Profile defaults to the current one; missing slot / s6 errors become actionable CLI messages."""
+def _dispatch_via_service_manager_if_s6(action: str, profile: str | None = None):
+    """Dispatch start/stop/restart via s6 inside an s6 container.
+
+    ``False`` when this host is not s6 (caller falls through). Otherwise
+    :class:`RestartSignal.INITIATED` after the supervisor action. Missing slot /
+    s6 errors become actionable CLI messages and exit.
+    """
+    from hermes_cli.restart_budget import RestartSignal
     from hermes_cli.service_manager import (
         GatewayNotRegisteredError, detect_service_manager, get_service_manager,
         register_unregistered_profile_gateway,
@@ -4844,13 +4894,21 @@ def _dispatch_via_service_manager_if_s6(action: str, profile: str | None = None)
     except (RuntimeError, ValueError, OSError) as exc:  # S6Error is a RuntimeError
         print(f"✗ {exc}")
         sys.exit(1)
-    return True
+    return RestartSignal.INITIATED
 
 
-def _dispatch_all_via_service_manager_if_s6(action: str) -> bool:
-    """Dispatch ``--all`` stop/restart to every registered profile gateway under s6; True iff dispatched.
-    A bare pkill is seen by s6-supervise as a crash and restarted ~1s later; the service manager flips
-    ``want up``/``want down`` correctly. ``start --all`` is not a CLI surface."""
+def _dispatch_all_via_service_manager_if_s6(action: str):
+    """Dispatch ``--all`` stop/restart to every registered profile gateway under s6.
+
+    ``False`` when this host is not s6 (caller falls through). Otherwise a
+    :class:`RestartSignal`: ``INITIATED`` when at least one service action ran,
+    ``NOOP`` when nothing is registered, ``REJECTED`` when every call failed.
+    A bare pkill is seen by s6-supervise as a crash and restarted ~1s later; the
+    service manager flips ``want up``/``want down`` correctly. ``start --all``
+    is not a CLI surface. The signal stays truthy so stop still returns here
+    instead of falling through to pkill.
+    """
+    from hermes_cli.restart_budget import RestartSignal
     from hermes_cli.service_manager import (detect_service_manager, get_service_manager)
     if detect_service_manager() != "s6" or action not in ("stop", "restart"):
         return False
@@ -4858,7 +4916,7 @@ def _dispatch_all_via_service_manager_if_s6(action: str) -> bool:
     profiles = mgr.list_profile_gateways()
     if not profiles:
         print("✗ No profile gateways registered under s6")
-        return True
+        return RestartSignal.NOOP
     fn = mgr.stop if action == "stop" else mgr.restart
     errors: list[tuple[str, Exception]] = []
     for profile in profiles:
@@ -4872,7 +4930,9 @@ def _dispatch_all_via_service_manager_if_s6(action: str) -> bool:
         print(f"✓ {verb.capitalize()} {succeeded} profile gateway(s) under s6")
     for profile, exc in errors:
         print(f"✗ Could not {action} gateway-{profile}: {exc}")
-    return True
+    if succeeded:
+        return RestartSignal.INITIATED
+    return RestartSignal.REJECTED
 
 
 def gateway_command(args):
@@ -5362,7 +5422,7 @@ def _discard_dead_host_record() -> bool:
         return False
 
 
-def _restart_all(system: bool) -> None:
+def _restart_all(system: bool, before_foreground=None) -> None:
     owner = _host_multiplexer_for_all_verb()
     if owner is not None and not _host_multiplexer_is_ours(owner):
         # `--all` means "restart the ONE host multiplexer" — and this profile does not own it.
@@ -5399,11 +5459,50 @@ def _restart_all(system: bool) -> None:
     # Even without a registered task, gateway_windows.start() uses the detached launcher.
     kind = _installed_service_kind_for(is_windows)
     if kind is None:
+        # Manual foreground start: settle the caller's restart claim first, because
+        # run_gateway may os._exit and skip the caller's context manager.
+        if before_foreground is not None:
+            before_foreground()
         # replace=True: if the old owner is still draining (a long drain, an ineffective SIGKILL, a
         # foreign-home owner the scan never saw), take the host over instead of attaching to it.
         run_gateway(verbose=0, replace=True)
     else:
         _service_call(kind, "start", system)
+
+
+def _settle_restart_claim(outcome) -> bool:
+    """Return True when ``outcome`` means this backend handled the restart verb.
+
+    ``False`` means the helper declined the verb (not this service manager), so
+    a later backend may still run. ``NOOP``, ``REJECTED``, and ``INITIATED`` are
+    all handled attempts; the caller must observe a new live PID before keeping
+    the hour claim.
+    """
+    return outcome is not False
+
+
+def _keep_restart_claim_if_observed(claim, before, *, all_profiles: bool, signal) -> None:
+    from hermes_cli.gateway_restart_observe import replacement_was_observed
+    from hermes_cli.restart_budget import RestartSignal
+
+    if replacement_was_observed(before, all_profiles=all_profiles):
+        claim.keep()
+        return
+    hint = ""
+    if signal is RestartSignal.INITIATED:
+        hint = " (supervisor reported restart initiated)"
+    elif signal is RestartSignal.REJECTED:
+        hint = " (supervisor rejected the restart)"
+    elif signal is RestartSignal.NOOP:
+        hint = " (no supervisor action ran)"
+    print(f"No restart was observed.{hint}")
+
+
+def _finish_restart_attempt(claim, before, outcome, *, all_profiles: bool) -> bool:
+    if not _settle_restart_claim(outcome):
+        return False
+    _keep_restart_claim_if_observed(claim, before, all_profiles=all_profiles, signal=outcome)
+    return True
 
 
 def _cmd_restart(args):
@@ -5414,71 +5513,97 @@ def _cmd_restart(args):
     system = getattr(args, "system", False)
     restart_all = getattr(args, "all", False)
     force = getattr(args, "force", False)
-    # `--all` targets the ONE host multiplexer and _restart_all does its own ownership check with
-    # the right one-liner; running the generic named-profile guard first made that branch
-    # unreachable for `-p X gateway restart --all` (it printed a bare `gateway restart` instead).
-    if not restart_all:
-        _guard_named_profile_under_multiplexer(force=force)
-    if restart_all and _dispatch_all_via_service_manager_if_s6("restart"):
-        return
-    if not restart_all and _dispatch_via_service_manager_if_s6("restart"):
-        return
-    if restart_all:
-        _restart_all(system)
-        return
+    from hermes_cli.restart_budget import restart_budget_session
 
-    # The Windows restart path handles both registered installs and detached restarts.
-    kind = _installed_service_kind_for(is_windows)
-    service_configured = kind is not None and (kind != "windows" or _gw_windows().is_installed())
-    if kind is not None:
-        swallow = (RuntimeError, OSError) if kind == "windows" else ()
-        try:
-            _service_call(kind, "restart", system)
+    with restart_budget_session(force=force) as claim:
+        from hermes_cli.gateway_restart_observe import snapshot_gateway_pids
+
+        before = snapshot_gateway_pids(all_profiles=restart_all)
+        # `--all` targets the ONE host multiplexer and _restart_all does its own ownership check with
+        # the right one-liner; running the generic named-profile guard first made that branch
+        # unreachable for `-p X gateway restart --all` (it printed a bare `gateway restart` instead).
+        if not restart_all:
+            _guard_named_profile_under_multiplexer(force=force)
+        if restart_all and _finish_restart_attempt(
+            claim, before, _dispatch_all_via_service_manager_if_s6("restart"), all_profiles=True
+        ):
             return
-        except (subprocess.CalledProcessError, *swallow):
-            pass
+        if not restart_all and _finish_restart_attempt(
+            claim, before, _dispatch_via_service_manager_if_s6("restart"), all_profiles=False
+        ):
+            return
+        if restart_all:
+            foreground = []
 
-    # Linger only explains a FAILED systemd unit restart. Without an installed unit the
-    # detached run below is the restart; bailing here left `hermes gateway restart` a
-    # silent exit-0 no-op on any Linux login session (Desktop read it as success).
-    if kind == "systemd" and supports_systemd_services():
-        linger_ok, _detail = get_systemd_linger_status()
-        if linger_ok is not True:
-            import getpass
+            def _settle_before_foreground():
+                foreground.append(True)
+                claim.rollback()
+
+            _restart_all(system, before_foreground=_settle_before_foreground)
+            if not foreground:
+                _keep_restart_claim_if_observed(claim, before, all_profiles=True, signal=None)
+            return
+
+        # The Windows restart path handles both registered installs and detached restarts.
+        kind = _installed_service_kind_for(is_windows)
+        service_configured = kind is not None and (kind != "windows" or _gw_windows().is_installed())
+        if kind is not None:
+            swallow = (RuntimeError, OSError) if kind == "windows" else ()
+            try:
+                service_outcome = _service_call(kind, "restart", system)
+            except (subprocess.CalledProcessError, *swallow):
+                pass
+            else:
+                if _finish_restart_attempt(
+                    claim, before, service_outcome, all_profiles=False
+                ):
+                    return
+
+        # Linger only explains a FAILED systemd unit restart. Without an installed unit the
+        # detached run below is the restart; bailing here left `hermes gateway restart` a
+        # silent exit-0 no-op on any Linux login session (Desktop read it as success).
+        if kind == "systemd" and supports_systemd_services():
+            linger_ok, _detail = get_systemd_linger_status()
+            if linger_ok is not True:
+                import getpass
+                _print_lines(
+                    "", "⚠ Cannot restart gateway as a service — linger is not enabled.",
+                    "  The gateway user service requires linger to function on headless servers.", "",
+                    f"  Run:  sudo loginctl enable-linger {getpass.getuser()}", "",
+                    "  Then restart the gateway:", "    hermes gateway restart",
+                )
+                return
+
+        if service_configured:
             _print_lines(
-                "", "⚠ Cannot restart gateway as a service — linger is not enabled.",
-                "  The gateway user service requires linger to function on headless servers.", "",
-                f"  Run:  sudo loginctl enable-linger {getpass.getuser()}", "",
-                "  Then restart the gateway:", "    hermes gateway restart",
+                "", "✗ Gateway service restart failed.",
+                "  The service definition exists, but the service manager did not recover it.",
+                "  Fix the service, then retry: hermes gateway start",
             )
+            sys.exit(1)
+
+        # A gateway that declares an external supervisor (custom launchd agent / unit running
+        # `gateway run --external-supervisor`) restarts by exiting back to it: the stop + foreground
+        # run below would stamp this CLI's PID as the gateway and wedge every respawn (#110637).
+        from gateway.status import get_running_pid
+        from hermes_cli.gateway_supervised_restart import (
+            gateway_declares_external_supervisor, restart_externally_supervised_gateway,
+        )
+        supervised_pid = get_running_pid()
+        if supervised_pid and gateway_declares_external_supervisor(supervised_pid):
+            restart_externally_supervised_gateway(supervised_pid)
+            _keep_restart_claim_if_observed(claim, before, all_profiles=False, signal=None)
             return
 
-    if service_configured:
-        _print_lines(
-            "", "✗ Gateway service restart failed.",
-            "  The service definition exists, but the service manager did not recover it.",
-            "  Fix the service, then retry: hermes gateway start",
-        )
-        sys.exit(1)
-
-    # A gateway that declares an external supervisor (custom launchd agent / unit running
-    # `gateway run --external-supervisor`) restarts by exiting back to it: the stop + foreground
-    # run below would stamp this CLI's PID as the gateway and wedge every respawn (#110637).
-    from gateway.status import get_running_pid
-    from hermes_cli.gateway_supervised_restart import (
-        gateway_declares_external_supervisor, restart_externally_supervised_gateway,
-    )
-    supervised_pid = get_running_pid()
-    if supervised_pid and gateway_declares_external_supervisor(supervised_pid):
-        restart_externally_supervised_gateway(supervised_pid)
-        return
-
-    if stop_profile_gateway():
-        print("✓ Stopped gateway for this profile")
-    _wait_for_gateway_exit(timeout=10.0, force_after=5.0)
-    _wait_for_api_server_port_free()
-    print("Starting gateway...")
-    run_gateway(verbose=0, force=force)
+        # Manual interactive start (no installed service): not a supervised restart, so do not
+        # consume the hourly budget. run_gateway may os._exit and skip the session context.
+        claim.rollback()
+        if stop_profile_gateway():
+            print("✓ Stopped gateway for this profile")
+        _wait_for_gateway_exit(timeout=10.0, force_after=5.0)
+        _wait_for_api_server_port_free()
+        print("Starting gateway...")
+        run_gateway(verbose=0, force=force)
 
 
 # ``hermes gateway status`` hints for a manually-run / stopped gateway, keyed by host kind.

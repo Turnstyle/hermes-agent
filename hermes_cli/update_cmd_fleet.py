@@ -749,6 +749,15 @@ def _systemd_restart_timeout(scope_cmd: list, svc_name: str, *, start_only: bool
     return min(sum(budgets.values()) + 15.0, _SYSTEMCTL_RESTART_TIMEOUT_MAX)
 
 
+def _note_gateway_restart_budget(home=None) -> None:
+    """Remember a restart the updater already signaled. Never refuses the update."""
+    try:
+        from hermes_cli.restart_budget import record_restart_budget
+        record_restart_budget(home=Path(home) if home is not None else None)
+    except Exception as exc:
+        logger.warning("Could not record gateway restart budget: %s", exc)
+
+
 def _systemctl_reset_and_restart(manage_cmd: list, svc_name: str, *, scope_cmd: list | None = None):
     """``reset-failed`` then ``restart``: a unit parked in failed state by systemd's own
     auto-restart can wedge a plain ``restart`` against RestartSec backoff and stay dead."""
@@ -756,7 +765,10 @@ def _systemctl_reset_and_restart(manage_cmd: list, svc_name: str, *, scope_cmd: 
     # restart/reset-failed but deny show. Keep the same user/system manager scope.
     timeout = _systemd_restart_timeout(scope_cmd if scope_cmd is not None else manage_cmd, svc_name)
     _systemctl(manage_cmd + ["reset-failed", svc_name], timeout=10)
-    return _systemctl(manage_cmd + ["restart", svc_name], timeout=timeout)
+    result = _systemctl(manage_cmd + ["restart", svc_name], timeout=timeout)
+    if result.returncode == 0:
+        _note_gateway_restart_budget(None)
+    return result
 
 
 def _systemd_unit_owned_by_update(scope_cmd: list, svc_name: str) -> bool:
@@ -899,6 +911,7 @@ def _restart_launchd_gateway_after_update(
         old_pid = _launchctl_supervised_pid(current_label) if supervision_verify else None
         try:
             launchd_restart()
+            _note_gateway_restart_budget(None)
         except subprocess.CalledProcessError as e:
             stderr = (getattr(e, "stderr", "") or "").strip()
             print(
@@ -1010,10 +1023,16 @@ def _restart_macos_launchd_gateways(
                     on_progress=drain_progress_reporter(_gateway_home_for_pid(old_pid), budget_s=drain_budget))
             if graceful_ok and _wait_for_launchd_service_pid(label, old_pid=old_pid, timeout=10.0, domain=domain):
                 # KeepAlive already respawned it on new code — a kickstart would kill it.
+                _note_gateway_restart_budget(
+                    _gateway_home_for_pid(old_pid) if isinstance(old_pid, int) and old_pid > 0 else None
+                )
                 restarted_services.append(label)
                 continue
             try:
                 _launchd_kickstart(label, domain)
+                _note_gateway_restart_budget(
+                    _gateway_home_for_pid(old_pid) if isinstance(old_pid, int) and old_pid > 0 else None
+                )
             except subprocess.CalledProcessError as e:
                 stderr = (getattr(e, "stderr", "") or "").strip()
                 failed_or_stale_units.append(label)
@@ -1174,16 +1193,22 @@ def _drain_or_signal_gateway_for_update(
         accepted = _request_gateway_self_restart(pid)
         if accepted and self_restart_pending is not None:
             self_restart_pending.add(pid)
+        if accepted:
+            _note_gateway_restart_budget(_gateway_home_for_pid(pid))
         return accepted
     if probe_gateway_loop_liveness(pid) == GATEWAY_LOOP_WEDGED:
         print(f"  ⚠ {label}: gateway event loop is unresponsive — skipping drain, forcing a bounded stop...")
         _escalate_wedged_gateway(pid)
+        _note_gateway_restart_budget(_gateway_home_for_pid(pid))
         return True
     print(f"  → {label}: draining (up to {int(drain_budget)}s)...")
     from hermes_cli.update_cmd_drain_report import drain_progress_reporter
-    return _graceful_restart_via_sigusr1(
+    signalled = _graceful_restart_via_sigusr1(
         pid, drain_timeout=drain_budget,
         on_progress=drain_progress_reporter(_gateway_home_for_pid(pid), budget_s=drain_budget))
+    if signalled:
+        _note_gateway_restart_budget(_gateway_home_for_pid(pid))
+    return signalled
 
 
 def _gateway_home_for_pid(pid: int):
@@ -1568,6 +1593,7 @@ def _restart_manual_gateways(out: _GatewayRestartOutcome, _drain_budget) -> None
                 pid, _drain_budget, proc.profile, self_restart_pending=out.self_restart_pending_pids):
             with suppress(ProcessLookupError, PermissionError):
                 os.kill(pid, _signal.SIGTERM)
+                _note_gateway_restart_budget(_gateway_home_for_pid(pid))
         # Wait ≤5s for exit: Telegram keeps the old getUpdates session ~30s; a new gateway
         # inside that window gets a 409 (_handle_polling_conflict retries, but a brief
         # wait avoids it on fast machines).
@@ -1583,6 +1609,7 @@ def _restart_manual_gateways(out: _GatewayRestartOutcome, _drain_budget) -> None
             continue
         with suppress(ProcessLookupError, PermissionError):
             os.kill(pid, _signal.SIGTERM)
+            _note_gateway_restart_budget(_gateway_home_for_pid(pid))
             out.killed_pids.add(pid)
             out.stopped_unmapped_pids.add(pid)
 
