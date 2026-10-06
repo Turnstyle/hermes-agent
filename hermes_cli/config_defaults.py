@@ -1922,6 +1922,11 @@ DEFAULT_CONFIG = {
         # root profile named "default", so on a shared kanban.db every home can otherwise claim
         # default-assigned cards.
         "dispatch_profiles": None,
+        # Assignee names / fnmatch patterns served outside this home's dispatcher (terminal lanes
+        # that pull via claim_task, or profiles another home runs). Their ready cards wait quietly.
+        # Any other non-profile assignee (not a lane, not excluded by dispatch_profiles) is a
+        # missing owner: the card gets one deduped ``owner_unavailable`` event.
+        "control_plane_lanes": [],
         # Auto-run the decomposer on Triage tasks every tick. False = manual via `hermes kanban
         # decompose <id>` or the dashboard's Decompose button.
         "auto_decompose": True,

@@ -11,6 +11,7 @@ import contextlib
 import os
 import re
 import signal
+import socket as _socket
 import sqlite3
 import subprocess
 import sys
@@ -288,6 +289,7 @@ class DispatchResult:
     tick before spawning, so telemetry/CLI/dashboard can show the dispatcher
     acting on the fallback rule rather than explicit assignments."""
     skipped_nonspawnable: list[str] = field(default_factory=list)
+    owner_unavailable: list[tuple[str, str]] = field(default_factory=list)
     """Ready task ids whose assignee names a control-plane lane (e.g. a Claude
     Code terminal like ``orion-cc``), not a Hermes profile. Expected steady-state
     on multi-lane setups, NOT operator-actionable; tracked apart so health
@@ -2578,6 +2580,124 @@ def _dispatch_profile_allowlist(normalize_profile_name) -> Optional[frozenset]:
     return frozenset(allowed)
 
 
+def _control_plane_lane_patterns() -> tuple[str, ...]:
+    """``kanban.control_plane_lanes``: assignee names/``fnmatch`` patterns that
+    are served by something other than this home's dispatcher — terminal lanes
+    that pull via ``claim_task``, or profiles another home owns on a shared
+    board. Their ready cards are expected to wait quietly.
+
+    Accepts a list or a comma-separated string. Absent, empty or unreadable
+    config yields ``()``: no assignee is exempted as a lane. (An unreadable
+    config also makes ``dispatch_profiles`` fail closed, so this home claims
+    nothing and every skipped card reads as ``foreign`` until it is fixed.)
+    """
+    try:
+        from hermes_cli.config_effective import load_user_config_effective
+        kanban = (load_user_config_effective(fail_closed=True) or {}).get("kanban", {})
+    except Exception as exc:
+        _kb._log.warning(
+            "kanban: could not read kanban.control_plane_lanes (%s: %s) — "
+            "no assignee is exempted as a control-plane lane",
+            type(exc).__name__, exc,
+        )
+        return ()
+    if not isinstance(kanban, Mapping):
+        return ()
+    raw = kanban.get("control_plane_lanes")
+    if not raw:
+        return ()
+    names = [str(n) for n in raw] if isinstance(raw, (list, tuple)) else str(raw).split(",")
+    return tuple(n.strip().lower() for n in names if n and n.strip())
+
+
+def _nonspawnable_kind(assignee: str) -> str:
+    """Why ``assignee`` failed the spawn gate: ``"lane"`` (configured
+    control-plane lane), ``"foreign"`` (this home's ``dispatch_profiles`` does
+    not list it — another home owns it) or ``"missing"`` (this home should run
+    it but has no such profile)."""
+    import fnmatch
+
+    name = (assignee or "").strip().lower()
+    if any(fnmatch.fnmatchcase(name, pat) for pat in _control_plane_lane_patterns()):
+        return "lane"
+    try:
+        from hermes_cli.profiles import normalize_profile_name
+    except Exception:
+        return "missing"
+    allowlist = _dispatch_profile_allowlist(normalize_profile_name)
+    if allowlist is not None:
+        try:
+            canon = normalize_profile_name(assignee)
+        except ValueError:
+            return "missing"
+        if canon not in allowlist:
+            return "foreign"
+    return "missing"
+
+
+OWNER_UNAVAILABLE_EVENT = "owner_unavailable"
+
+
+def _record_owner_unavailable(conn: sqlite3.Connection, task_id: str, assignee: str) -> bool:
+    """Append ONE ``owner_unavailable`` event per unavailability episode.
+
+    Deduped against the task's latest ``owner_unavailable`` / ``assigned`` /
+    ``claimed`` event: repeat ticks for the same assignee write nothing; a
+    reassignment or a later claim starts a new episode. Returns True when a
+    row was written. The common repeat-tick case is a plain read (no write
+    lock); the check is repeated inside the write transaction. A write refused
+    by a board fence is logged and skipped — it must never abort the tick.
+    """
+    def _still_waiting() -> bool:
+        # The row list was read at tick start; a reassign/claim may have
+        # landed since. Only flag a card still queued for this assignee.
+        row = conn.execute(
+            "SELECT status, assignee, claim_lock FROM tasks WHERE id = ?", (task_id,),
+        ).fetchone()
+        return (
+            row is not None and row["status"] in ("ready", "review")
+            and row["assignee"] == assignee and row["claim_lock"] is None
+        )
+
+    def _already_recorded() -> bool:
+        last = conn.execute(
+            "SELECT kind, payload FROM task_events WHERE task_id = ? "
+            "AND kind IN (?, 'assigned', 'claimed') ORDER BY id DESC LIMIT 1",
+            (task_id, OWNER_UNAVAILABLE_EVENT),
+        ).fetchone()
+        if last is None or last["kind"] != OWNER_UNAVAILABLE_EVENT:
+            return False
+        prev = _kb._json_or(last["payload"], {})
+        return isinstance(prev, dict) and prev.get("assignee") == assignee
+
+    try:
+        if _already_recorded():
+            return False
+        with _kb.write_txn(conn):
+            if _already_recorded() or not _still_waiting():
+                return False
+            _kb._append_event(
+                conn, task_id, OWNER_UNAVAILABLE_EVENT,
+                {
+                    "assignee": assignee,
+                    "reason": "profile_not_found",
+                    "node": _socket.gethostname(),
+                    "detail": (
+                        f"assignee {assignee!r} is not a runnable profile on this home and "
+                        "is not a configured kanban.control_plane_lanes entry; recover with "
+                        "one explicit reassign_task(..., reason=...)"
+                    ),
+                },
+            )
+        return True
+    except sqlite3.Error as exc:
+        _kb._log.warning(
+            "kanban: could not record owner_unavailable on %s (%s: %s)",
+            task_id, type(exc).__name__, exc,
+        )
+        return False
+
+
 def dispatch_profile_allowlist_summary() -> str:
     """Human-readable resolution of ``kanban.dispatch_profiles`` for this home.
 
@@ -2910,6 +3030,10 @@ def _dispatch_lane_task(
     profile_exists = _profile_exists_fn()
     if profile_exists is not None and not profile_exists(assignee):
         result.skipped_nonspawnable.append(task_id)
+        if _nonspawnable_kind(assignee) == "missing":
+            result.owner_unavailable.append((task_id, assignee))
+            if not dry_run:
+                _record_owner_unavailable(conn, task_id, assignee)
         return False
     # Per-profile cap: one profile's local model / API quota / browser pool
     # must not be overwhelmed by a fan-out even with global headroom.

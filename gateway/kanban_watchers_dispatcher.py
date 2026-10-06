@@ -324,7 +324,23 @@ def _log_spawn_results(results: Optional[list]) -> bool:
     """Log per-board spawn summaries; returns whether any board spawned."""
     any_spawned = False
     for slug, res in (results or []):
-        if res is not None and getattr(res, "spawned", None):
+        if res is None:
+            continue
+        claim_errors = getattr(res, "claim_errors", None) or []
+        reclaim_errors = getattr(res, "reclaim_errors", None) or []
+        if claim_errors:
+            logger.warning(
+                "kanban dispatcher [%s]: %d claim refusal(s): %s",
+                slug, len(claim_errors),
+                "; ".join(f"{tid}: {err}" for tid, err in claim_errors),
+            )
+        if reclaim_errors:
+            logger.warning(
+                "kanban dispatcher [%s]: %d reclaim refusal(s): %s",
+                slug, len(reclaim_errors),
+                "; ".join(f"{tid}: {err}" for tid, err in reclaim_errors),
+            )
+        if getattr(res, "spawned", None):
             any_spawned = True
             # Quiet by default: an idle gateway stays silent.
             logger.info(

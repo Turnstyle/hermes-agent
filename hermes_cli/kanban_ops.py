@@ -103,6 +103,9 @@ def _cmd_dispatch(args: argparse.Namespace) -> int:
             ],
             "skipped_unassigned": res.skipped_unassigned,
             "skipped_nonspawnable": res.skipped_nonspawnable,
+            "owner_unavailable": [
+                {"task_id": tid, "assignee": who} for (tid, who) in res.owner_unavailable
+            ],
             "skipped_per_profile_capped": [
                 {"task_id": tid, "assignee": who, "current": current}
                 for (tid, who, current) in res.skipped_per_profile_capped
@@ -121,6 +124,12 @@ def _cmd_dispatch(args: argparse.Namespace) -> int:
             "skipped_locked": res.skipped_locked,
             "memory_pressure": res.memory_pressure,
             "capacity_held": res.capacity_held,
+            "reclaim_errors": [
+                {"task_id": tid, "error": err} for tid, err in res.reclaim_errors
+            ],
+            "claim_errors": [
+                {"task_id": tid, "error": err} for tid, err in res.claim_errors
+            ],
         }, ascii=True)
         return 0
     print(f"Reclaimed:    {res.reclaimed}")
@@ -151,11 +160,15 @@ def _cmd_dispatch(args: argparse.Namespace) -> int:
         print(f"Skipped (unassigned): {', '.join(res.skipped_unassigned)}")
     for tid, who, current in res.skipped_per_profile_capped:
         print(f"Deferred ({who} at per-profile cap, {current} running): {tid}")
-    if res.skipped_nonspawnable:
+    missing = {tid for tid, _who in res.owner_unavailable}
+    quiet = [tid for tid in res.skipped_nonspawnable if tid not in missing]
+    if quiet:
         print(
             f"Skipped (non-spawnable assignee — terminal lane, OK): "
-            f"{', '.join(res.skipped_nonspawnable)}"
+            f"{', '.join(quiet)}"
         )
+    for tid, who in res.owner_unavailable:
+        print(f"Owner unavailable (no profile {who!r} on this home; reassign to recover): {tid}")
     for tid, reason in res.respawn_guarded:
         print(f"Guarded ({reason}): {tid}")
     for tid, reason in res.respawn_guard_lifted:
@@ -171,6 +184,10 @@ def _cmd_dispatch(args: argparse.Namespace) -> int:
         print(f"Memory pressure {res.memory_pressure}: new workers restricted this tick")
     if res.capacity_held:
         print(f"Held ({res.capacity_held}): no new workers this tick")
+    for tid, err in res.reclaim_errors:
+        print(f"Reclaim refused ({tid}): {err}")
+    for tid, err in res.claim_errors:
+        print(f"Claim refused ({tid}): {err}")
     return 0
 
 
