@@ -10,6 +10,7 @@ from pathlib import Path
 import contextlib
 import json
 import os
+import plistlib
 import shlex
 import subprocess
 import sys
@@ -458,6 +459,42 @@ def launchd_plist_is_current() -> bool:
     return norm(installed) == norm(_gw().generate_launchd_plist())
 
 
+def _preflight_launchd_plist_launchers(plist: str, *, report: bool = True) -> bool:
+    """Refuse a definition whose actual ProgramArguments launchers cannot start."""
+    launcher = "<invalid ProgramArguments>"
+    try:
+        args = plistlib.loads(plist.encode("utf-8"))["ProgramArguments"]
+        if args[:2] == ["/usr/bin/osascript", "-e"]:
+            script = args[2]
+            if not script.startswith("do shell script "):
+                raise ValueError("unrecognized osascript command")
+            shell = json.loads(script[len("do shell script "):])
+            parts = shlex.split(shell)
+            if parts[0] != "exec":
+                raise ValueError("unrecognized shell command")
+            launchers = [parts[1], parts[parts.index("--") + 1]]
+        else:
+            launchers = [args[0]]
+        for launcher in dict.fromkeys(launchers):
+            env = os.environ.copy()
+            env.pop("HERMES_HOME", None)
+            result = subprocess.run([launcher, "--version"], timeout=20, capture_output=True,
+                                    text=True, encoding="utf-8", errors="replace", env=env)
+            if result.returncode:
+                raise RuntimeError((result.stderr or result.stdout or f"exit {result.returncode}").splitlines()[0])
+        return True
+    except (OSError, ValueError, KeyError, IndexError, TypeError, RuntimeError,
+            subprocess.TimeoutExpired) as exc:
+        detail = str(exc).splitlines()[0]
+        if isinstance(exc, subprocess.TimeoutExpired) and exc.stderr:
+            stderr = exc.stderr.decode("utf-8", errors="replace") if isinstance(exc.stderr, bytes) else exc.stderr
+            detail = stderr.splitlines()[0]
+        if report:
+            print(f"✗ Refusing gateway launchd plist: launcher {launcher} cannot start: {detail}")
+            _gw().logger.error("Refusing gateway launchd plist: launcher %s cannot start: %s", launcher, detail)
+        return False
+
+
 def _spawn_deferred_launchd_reload(
     *, domain: str, label: str, target: str, plist_path: Path, gateway_pid: int
 ) -> bool:
@@ -538,6 +575,8 @@ def refresh_launchd_plist_if_needed() -> bool:
         return False
 
     _gw()._prepare_service_launcher()
+    if not _preflight_launchd_plist_launchers(new_plist):
+        return False
     plist_path.write_text(new_plist, encoding="utf-8")
     label = _gw().get_launchd_label()
     domain = _gw()._launchd_domain()
@@ -608,6 +647,8 @@ def launchd_install(force: bool = False, *, start_now: bool = True):
             if _gw().refresh_launchd_plist_if_needed():
                 print("✓ Service definition updated")
             else:
+                if not _preflight_launchd_plist_launchers(_gw().generate_launchd_plist(), report=False):
+                    return False
                 # The plist was rewritten but launchd never registered it (or the write was refused):
                 # a success line here would hide an unloaded service with no KeepAlive.
                 from hermes_constants import display_hermes_home
@@ -622,8 +663,10 @@ def launchd_install(force: bool = False, *, start_now: bool = True):
     new_plist = _gw().generate_launchd_plist()
     if _gw()._refuse_temp_home_service_write(new_plist, "launchd plist"):
         return
-    print(f"Installing launchd service to: {plist_path}")
     _gw()._prepare_service_launcher()
+    if not _preflight_launchd_plist_launchers(new_plist):
+        return False
+    print(f"Installing launchd service to: {plist_path}")
     plist_path.write_text(new_plist, encoding="utf-8")
 
     if not load:
@@ -680,12 +723,17 @@ def launchd_start():
         print("↻ launchd plist missing; regenerating service definition")
         plist_path.parent.mkdir(parents=True, exist_ok=True)
         _gw()._prepare_service_launcher()
+        if not _preflight_launchd_plist_launchers(new_plist):
+            return False
         plist_path.write_text(new_plist, encoding="utf-8")
         if _launchd_bootstrap_and_kickstart(plist_path, label):
             _launchd_ok("✓ Service started")
         return
 
-    _gw().refresh_launchd_plist_if_needed()
+    refresh_ok = _gw().refresh_launchd_plist_if_needed()
+    if (not refresh_ok and not _gw().launchd_plist_is_current()
+            and not _preflight_launchd_plist_launchers(_gw().generate_launchd_plist(), report=False)):
+        return False
     try:
         _launchctl_kickstart_current(label)
     except subprocess.CalledProcessError as e:
@@ -771,6 +819,10 @@ def launchd_restart():
     # bootout/bootstrap-retry path, which is bounded and reports its own
     # failure instead of stalling the update for 90s.
     refresh_ok = _gw().refresh_launchd_plist_if_needed()
+    if (not refresh_ok and _gw().get_launchd_plist_path().exists()
+            and not _gw().launchd_plist_is_current()
+            and not _preflight_launchd_plist_launchers(_gw().generate_launchd_plist(), report=False)):
+        return False
     from gateway.status import get_running_pid
     try:
         pid = get_running_pid()
