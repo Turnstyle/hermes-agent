@@ -31,6 +31,20 @@ def installs_root() -> Path:
     return dependency_home_root() / "installs"
 
 
+def source_launcher_dir(project_root: Path) -> Path | None:
+    """Return a checkout's launcher directory, never a copied installs workspace."""
+    try:
+        if project_root.resolve().is_relative_to(installs_root().resolve()):
+            return None
+    except OSError:
+        pass
+    launcher_dir = project_root / ".hermes" / "bin"
+    try:
+        return launcher_dir if (launcher_dir / "hermes").is_file() else None
+    except OSError:
+        return None
+
+
 def install_state_dir(project_root: Path) -> Path:
     return installs_root() / install_key(project_root)
 
@@ -344,9 +358,9 @@ def activate_dependencies(project_root: Path) -> None:
     os.environ.pop("VIRTUAL_ENV", None)
     executable_dir = venv_bin_dir(environment)
     path_head = []
-    source_launcher_dir = project_root / ".hermes" / "bin"
-    if (source_launcher_dir / "hermes").exists():
-        path_head.append(str(source_launcher_dir))
+    launcher_dir = source_launcher_dir(project_root)
+    if launcher_dir is not None:
+        path_head.append(str(launcher_dir))
     if executable_dir.is_dir():
         path_head.append(str(executable_dir))
     if path_head:

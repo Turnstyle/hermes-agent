@@ -3058,12 +3058,10 @@ def _build_service_path_dirs(project_root: Path | None = None) -> list[str]:
 
     candidates = []
     # Python and dependency executable paths are selected at boot, not persisted.
-    source_launcher = project_root / ".hermes" / "bin" / "hermes"
-    try:
-        if source_launcher.is_file():
-            candidates.append(str(source_launcher.parent))
-    except OSError:
-        pass
+    from pm.environments import source_launcher_dir
+    launcher_dir = source_launcher_dir(project_root)
+    if launcher_dir is not None:
+        candidates.append(str(launcher_dir))
 
     hermes_home = get_hermes_home()
     extras = (project_root / "node_modules" / ".bin", hermes_home / "node" / "bin", hermes_home / "node_modules" / ".bin")
