@@ -13,6 +13,7 @@ import contextlib
 import json
 from pathlib import Path
 import logging
+import math
 import os
 import random
 import threading
@@ -840,6 +841,90 @@ def _resolve_sequential_tool_timeout() -> float | None:
     return resolve_timeout("tools.sequential_call", default=_resolve_concurrent_tool_timeout())
 
 
+# Headroom above a self-bounded tool's own deadline before the generic guard fires, so the tool's
+# own timeout path (kill + partial output + exit code) always runs first.
+_SELF_BOUNDED_TOOL_GRACE_S = 60.0
+
+
+def _positive_seconds(raw: Any) -> float | None:
+    """A finite, positive number of seconds, else ``None``. Non-finite values (inf/nan) and
+    oversized integers are rejected: extending a deadline by them would disarm the guard."""
+    if isinstance(raw, bool):
+        return None
+    try:
+        value = float(raw)
+    except (TypeError, ValueError, OverflowError):
+        return None
+    return value if value > 0 and math.isfinite(value) else None
+
+
+def _terminal_default_timeout_s() -> float | None:
+    """``terminal.timeout`` as the terminal tool reads it: scope-aware (per-profile policy under
+    gateway multiplexing) and integer-parsed. Unreadable/refused -> ``None`` (generic applies)."""
+    try:
+        from tools.terminal_scope import terminal_env
+        raw = terminal_env("TERMINAL_TIMEOUT", "180")
+        return _positive_seconds(int(raw))
+    except Exception:
+        return None
+
+
+def _process_wait_ceiling_s() -> float | None:
+    """``process(action="wait")`` clamps to ambient ``TERMINAL_TIMEOUT`` with an int parse and a
+    180s fallback (tools/process_registry.py ``wait``); mirror that exactly."""
+    try:
+        ceiling = int(os.getenv("TERMINAL_TIMEOUT", "180"))
+    except (TypeError, ValueError):
+        ceiling = 180
+    return _positive_seconds(ceiling)
+
+
+def _terminal_foreground_cap_s() -> float | None:
+    try:
+        from tools.terminal_tool import FOREGROUND_MAX_TIMEOUT
+        return _positive_seconds(FOREGROUND_MAX_TIMEOUT)
+    except Exception:
+        return _positive_seconds(os.getenv("TERMINAL_MAX_FOREGROUND_TIMEOUT", "600"))
+
+
+def _tool_self_bound_s(function_name: str, function_args: Any) -> float | None:
+    """Seconds a tool that enforces its OWN deadline may legitimately block, from its args.
+
+    ``terminal`` (foreground) kills its command at its own ``timeout`` (explicit arg, else
+    ``terminal.timeout``); ``process(action="wait")`` returns at its own clamped wait window.
+    The generic 420s guard sat BELOW both, so a foreground ``claude``/``codex``/``agy`` run
+    asked for 600s (or a profile ``terminal.timeout`` of 1800s) was interrupted and its
+    process tree killed at 420s. ``None`` = not self-bounded; the generic deadline applies."""
+    if not isinstance(function_args, dict):
+        return None
+    if function_name == "terminal":
+        if function_args.get("background"):
+            return None  # returns as soon as the process is registered
+        explicit = _positive_seconds(function_args.get("timeout"))
+        if explicit is not None:
+            cap = _terminal_foreground_cap_s()
+            # Over-cap foreground requests are promoted to background and return at once.
+            return None if cap is not None and explicit > cap else explicit
+        return _terminal_default_timeout_s()
+    if function_name == "process" and function_args.get("action") == "wait":
+        ceiling = _process_wait_ceiling_s()
+        requested = _positive_seconds(function_args.get("timeout"))
+        if requested is None or ceiling is None:
+            return ceiling
+        return min(requested, ceiling)
+    return None
+
+
+def _effective_tool_deadline(generic_s: float | None, function_name: str, function_args: Any) -> float | None:
+    """Generic deadline raised (never lowered) to cover a self-bounded tool's own deadline + grace."""
+    if generic_s is None:
+        return None
+    own = _tool_self_bound_s(function_name, function_args)
+    if own is None:
+        return generic_s
+    return max(generic_s, own + _SELF_BOUNDED_TOOL_GRACE_S)
+
+
 # Tools whose call blocks on a long-running operation that supervises its own liveness: no generic
 # sequential deadline. ``delegate_task`` in a nested orchestrator blocks for the whole batch by design
 # (children carry heartbeats, the stale monitor, and ``delegation.child_timeout_seconds``); under the
@@ -903,7 +988,8 @@ def _run_sequential_tool_execution_middleware(
     generic deadline would report ``tool_timeout`` while the prompt is still live. They
     are ``_NEVER_PARALLEL_TOOLS`` and run inline below, before any deadline is armed, so
     they need no ``_SEQUENTIAL_DEADLINE_EXEMPT_TOOLS`` entry."""
-    timeout_s = None if function_name in _SEQUENTIAL_DEADLINE_EXEMPT_TOOLS else _resolve_sequential_tool_timeout()
+    timeout_s = None if function_name in _SEQUENTIAL_DEADLINE_EXEMPT_TOOLS else _effective_tool_deadline(
+        _resolve_sequential_tool_timeout(), function_name, function_args)
     ref = _ToolCallRef(function_name, function_args, effective_task_id, tool_call_id, middleware_trace)
     kwargs = dict(ref.middleware_kwargs(), execute=execute, scope_block=scope_block, display_index=display_index)
     from agent.terminal_approval_batch import take_prepared_call
@@ -1565,6 +1651,10 @@ def execute_tool_calls_concurrent(agent, assistant_message, messages: list, effe
 
     # Resolved before the batch is built so the start-order gate can clamp under the deadline.
     timeout_s = _resolve_concurrent_tool_timeout()
+    # One batch deadline: raise it to cover the longest self-bounded call in the batch.
+    for pc in parsed_calls:
+        if pc.parse_error is None:
+            timeout_s = _effective_tool_deadline(timeout_s, pc.name, pc.args)
     batch = _ConcurrentBatch(agent, messages, effective_task_id, parsed_calls, timeout_s)
     agent._current_tool = tool_names_str
     agent._touch_activity(f"executing {num_tools} tools concurrently: {tool_names_str}")
