@@ -109,6 +109,46 @@ _EXPLICIT_DO_NOT_DISPATCH_MARKERS = (
     "king seat is already doing this",
 )
 
+
+def _active_pr_keys(conn: sqlite3.Connection, task_id: str, assignee: Optional[str],
+                    task_body: Optional[str], now: int) -> set[tuple[str, str, int]]:
+    """PRs behind the existing ready-lane hold, without consulting the network/cache."""
+    if not assignee:
+        return set()
+    input_prs = {
+        _respawn_guard_pr_key(match)
+        for match in _RESPAWN_GUARD_PR_URL_RE.finditer(_kb._lossy_text(task_body) or "")
+    }
+    guarded: set[tuple[str, str, int]] = set()
+    for c in conn.execute(
+        "SELECT author, body, created_at FROM task_comments "
+        "WHERE task_id = ? AND created_at >= ? ORDER BY created_at DESC",
+        (task_id, now - _RESPAWN_GUARD_PR_WINDOW),
+    ).fetchall():
+        if c["author"] != assignee:
+            continue
+        prs = {
+            key for match in _RESPAWN_GUARD_PR_URL_RE.finditer(_kb._lossy_text(c["body"]) or "")
+            if (key := _respawn_guard_pr_key(match)) not in input_prs
+        }
+        if not prs:
+            continue
+        created_at = int(c["created_at"] or 0)
+        if conn.execute(
+            "SELECT 1 FROM task_events WHERE task_id = ? AND created_at > ? "
+            "AND kind = 'unblocked' LIMIT 1", (task_id, created_at),
+        ).fetchone():
+            continue
+        events = conn.execute(
+            "SELECT kind, payload FROM task_events WHERE task_id = ? AND created_at > ? "
+            "AND kind IN ('assigned', 'changes_requested', 'review_reopened')",
+            (task_id, created_at),
+        ).fetchall()
+        if any(_is_handoff_event(e["kind"], e["payload"]) for e in events):
+            return guarded
+        guarded.update(prs)
+    return guarded
+
 # ---------------------------------------------------------------------------
 # Lifecycle-guard fence recognition
 # ---------------------------------------------------------------------------
@@ -268,6 +308,8 @@ class DispatchResult:
     """``(task_id, reason)`` skipped by the respawn guard: ``"blocker_auth"``
     (quota/auth error — also auto-blocked), ``"recent_success"`` (completed run
     within guard window), ``"active_pr"`` (GitHub PR URL in a recent comment)."""
+    respawn_guard_lifted: list[tuple[str, str]] = field(default_factory=list)
+    """``(task_id, reason)`` ready-lane PR holds lifted by fresh terminal cache evidence."""
     rate_limited: list[str] = field(default_factory=list)
     """Task ids whose workers bailed on a provider rate-limit / quota wall
     (EX_TEMPFAIL sentinel exit) and were released to ``ready`` WITHOUT counting
@@ -1954,6 +1996,7 @@ def _clear_failure_counter(conn: sqlite3.Connection, task_id: str) -> None:
 
 def check_respawn_guard(
     conn: sqlite3.Connection, task_id: str, *, lane: str = "ready",
+    lifted: Optional[list[tuple[str, str]]] = None,
 ) -> Optional[str]:
     """Return a guard reason if ``task_id`` should NOT be re-spawned, else None.
 
@@ -2082,40 +2125,12 @@ def check_respawn_guard(
     #    now work on THAT PR — a closer or the implementer finishing it, not a
     #    duplicate implementation (#111910). A crash/reclaim is not a handoff,
     #    so the worker that opened the PR is still not re-spawned against it.
-    pr_cutoff = now - _RESPAWN_GUARD_PR_WINDOW
-    input_prs = {
-        _respawn_guard_pr_key(match)
-        for match in _RESPAWN_GUARD_PR_URL_RE.finditer(_kb._lossy_text(row["body"]) or "")
-    }
-    for c in conn.execute(
-        "SELECT author, body, created_at FROM task_comments "
-        "WHERE task_id = ? AND created_at >= ? ORDER BY created_at DESC",
-        (task_id, pr_cutoff),
-    ).fetchall():
-        if not row["assignee"] or c["author"] != row["assignee"]:
-            continue
-        body = _kb._lossy_text(c["body"])
-        if not any(
-            _respawn_guard_pr_key(match) not in input_prs
-            for match in _RESPAWN_GUARD_PR_URL_RE.finditer(body)
-        ):
-            continue
-        requeued_after = conn.execute(
-            "SELECT 1 FROM task_events "
-            "WHERE task_id = ? AND created_at > ? "
-            "AND kind = 'unblocked' LIMIT 1",
-            (task_id, int(c["created_at"] or 0)),
-        ).fetchone()
-        if requeued_after:
-            continue
-        events = conn.execute(
-            # Strictly after: a same-second tie stays guarded (fail closed).
-            "SELECT kind, payload FROM task_events "
-            "WHERE task_id = ? AND created_at > ? "
-            "AND kind IN ('assigned', 'changes_requested', 'review_reopened')",
-            (task_id, int(c["created_at"] or 0)),
-        ).fetchall()
-        if any(_is_handoff_event(e["kind"], e["payload"]) for e in events):
+    prs = _active_pr_keys(conn, task_id, row["assignee"], row["body"], now)
+    if prs:
+        from hermes_cli.kanban_pr_state import all_terminal
+        if all_terminal(prs, now):
+            if lifted is not None:
+                lifted.append((task_id, "active_pr_lifted_terminal"))
             return None
         return "active_pr"
 
@@ -2555,7 +2570,9 @@ def _dispatch_lane_task(
         if current >= per_profile_cap:
             result.skipped_per_profile_capped.append((task_id, assignee, current))
             return False
-    guard_reason = check_respawn_guard(conn, task_id, lane=lane)
+    guard_reason = check_respawn_guard(
+        conn, task_id, lane=lane, lifted=result.respawn_guard_lifted,
+    )
     if guard_reason is not None:
         result.respawn_guarded.append((task_id, guard_reason))
         # Event so ``hermes kanban tail`` shows why the task looks stuck.

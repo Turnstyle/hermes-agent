@@ -13,6 +13,7 @@ import argparse
 from hermes_cli import kanban_db as kb
 from hermes_cli import kanban_db_dispatch as kbd
 from hermes_cli import kanban_db_notify as kbn
+from hermes_cli.kanban_pr_state import PR_REFRESH_MAX, PR_REFRESH_TIMEOUT_SECONDS
 
 
 def _arg(*flags: str, **kw):
@@ -389,6 +390,12 @@ _SPECS = [
                   f"(spawn_failed, timed_out, or crashed; default: {kbd.DEFAULT_FAILURE_LIMIT})"),
         _json_flag(),
     ], help="One dispatcher pass: reclaim stale, promote ready, spawn workers"),
+    _cmd("refresh-pr-state", [
+        _arg("--max-prs", type=int, default=PR_REFRESH_MAX,
+             help="Maximum PRs to query once (1-20; default: 20)"),
+        _arg("--timeout", type=float, default=PR_REFRESH_TIMEOUT_SECONDS,
+             help="Per-PR gh timeout in seconds (0-5; default: 5)"),
+    ], help="Refresh local PR-state cache for ready cards; never runs in dispatcher"),
     _cmd("daemon", [
         _arg("--interval", type=float, default=60.0, help="Seconds between dispatch ticks (default: 60)"),
         _arg("--max", type=int, help="Cap number of spawns per tick"),

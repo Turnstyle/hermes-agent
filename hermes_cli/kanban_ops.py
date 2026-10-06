@@ -112,6 +112,10 @@ def _cmd_dispatch(args: argparse.Namespace) -> int:
                 {"task_id": tid, "reason": reason}
                 for (tid, reason) in res.respawn_guarded
             ],
+            "respawn_guard_lifted": [
+                {"task_id": tid, "reason": reason}
+                for (tid, reason) in res.respawn_guard_lifted
+            ],
             "rate_limited": res.rate_limited,
             "profile_busy": res.profile_busy,
             "skipped_locked": res.skipped_locked,
@@ -154,6 +158,8 @@ def _cmd_dispatch(args: argparse.Namespace) -> int:
         )
     for tid, reason in res.respawn_guarded:
         print(f"Guarded ({reason}): {tid}")
+    for tid, reason in res.respawn_guard_lifted:
+        print(f"Guard lifted ({reason}): {tid}")
     if res.rate_limited:
         print(f"Rate-limited (released to ready, no failure counted): {', '.join(res.rate_limited)}")
     if res.profile_busy:
@@ -165,6 +171,15 @@ def _cmd_dispatch(args: argparse.Namespace) -> int:
         print(f"Memory pressure {res.memory_pressure}: new workers restricted this tick")
     if res.capacity_held:
         print(f"Held ({res.capacity_held}): no new workers this tick")
+    return 0
+
+
+def _cmd_refresh_pr_state(args: argparse.Namespace) -> int:
+    from hermes_cli.kanban_pr_state import refresh_pr_state
+
+    with kbc.connect_readonly_closing() as conn:
+        counts = refresh_pr_state(conn, max_prs=args.max_prs, timeout=args.timeout)
+    print("PR state cache: " + ", ".join(f"{key}={value}" for key, value in counts.items()))
     return 0
 
 
