@@ -280,10 +280,15 @@ def _cmd_daemon(args: argparse.Namespace) -> int:
             if now - health_state["last_warn_at"] >= 300:
                 held = kbd.describe_suppression([res])
                 held = f" Last tick held back: {held}." if held else ""
+                spawn_msg = (
+                    "eligible tasks failing despite active spawns"
+                    if bool(getattr(res, "spawned", None))
+                    else "0 workers spawned successfully"
+                )
                 print(
                     f"[{_fmt_ts(now)}] WARN dispatcher stuck: ready queue non-empty for "
-                    f"{health_state['bad_ticks']} consecutive ticks but 0 workers spawned "
-                    f"successfully.{held} Check profile health (venv, PATH, credentials) and `hermes "
+                    f"{health_state['bad_ticks']} consecutive ticks but {spawn_msg}.{held} "
+                    f"Check profile health (venv, PATH, credentials) and `hermes "
                     f"kanban list --status ready` / `hermes kanban list --status blocked` for "
                     f"recent spawn_failed tasks.",
                     file=sys.stderr, flush=True,

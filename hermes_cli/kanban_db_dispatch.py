@@ -382,6 +382,78 @@ def describe_suppression(results: Iterable[Optional["DispatchResult"]]) -> str:
     return ", ".join(parts)
 
 
+def eligible_work_stalled(
+    results: Iterable[Any],
+    ready_spawnable: int,
+) -> bool:
+    """Determine whether eligible work itself failed to start this tick.
+
+    Returns True if there was eligible ready work that could not spawn due to
+    dispatcher failure (e.g. lease refusal, claim error, spawn failure, or
+    unheld ready work failing to start), rather than being held back by policy
+    guards (active_pr, recent_success, rate_limited), capacity limits (host/board
+    caps, memory pressure), profile busy/concurrency caps, or placeholder profiles.
+    """
+    res_list: list["DispatchResult"] = []
+    for item in results:
+        if item is None:
+            continue
+        if isinstance(item, tuple) and len(item) == 2 and (isinstance(item[0], str) or item[0] is None):
+            res = item[1]
+        else:
+            res = item
+        if res is not None and isinstance(res, DispatchResult):
+            res_list.append(res)
+
+    # 1. Explicit claim/lease refusal or auto-blocked failure on eligible cards.
+    # An explicit failure must NEVER be masked by worker spawns on other cards,
+    # capacity holds on other boards, or the card being removed to blocked status.
+    has_claim_or_spawn_errors = any(
+        bool(getattr(r, "claim_errors", None)) or bool(getattr(r, "auto_blocked", None))
+        for r in res_list
+    )
+    if has_claim_or_spawn_errors:
+        return True
+
+    if ready_spawnable <= 0:
+        return False
+
+    if not res_list:
+        return True
+
+    # 2. If any worker spawned this tick and no cards explicitly failed, the dispatcher made progress.
+    if any(bool(r.spawned) for r in res_list):
+        return False
+
+    # 3. Host-wide capacity or critical memory pressure halts all spawns host-wide.
+    host_capacity_held = any(
+        (getattr(r, "capacity_held", None) or "").startswith("host cap")
+        or getattr(r, "memory_pressure", None) == "critical"
+        for r in res_list
+    )
+    if host_capacity_held:
+        return False
+
+    # 4. If all reporting boards are held by board capacity caps or locked DBs,
+    # then no board had capacity to dispatch.
+    if all(bool(getattr(r, "capacity_held", None)) or bool(getattr(r, "skipped_locked", False)) for r in res_list):
+        return False
+
+    # 5. Account for all legitimately held spawnable tasks (profile caps, profile busy, rate limits).
+    # Note: respawn_guarded (active_pr, recent_success, etc.) tasks are already excluded from
+    # ready_spawnable by _count_spawnable and must NEVER be subtracted from ready_spawnable here;
+    # doing so would allow an unrelated policy-held card to hide an eligible card's failure.
+    held_spawnable_count = 0
+    for r in res_list:
+        if getattr(r, "capacity_held", None) or getattr(r, "skipped_locked", False):
+            continue
+        held_spawnable_count += len(getattr(r, "skipped_per_profile_capped", []) or [])
+        held_spawnable_count += len(getattr(r, "profile_busy", []) or [])
+        held_spawnable_count += len(getattr(r, "rate_limited", []) or [])
+
+    return ready_spawnable > held_spawnable_count
+
+
 # Bounded registry of recently-reaped worker exits, filled by the reap loop in
 # ``dispatch_once`` and read by ``detect_crashed_workers`` to classify a dead-pid
 # task. Entry: ``pid -> (raw_wait_status, reaped_at_epoch)``; raw status kept so

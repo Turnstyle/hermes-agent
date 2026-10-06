@@ -334,18 +334,23 @@ class GatewayKanbanWatchersMixin:
                     if held:
                         logger.info("kanban dispatcher: dispatch held back: %s (non-paging)", held)
 
-                    # Paging predicate: reflect whether a card can dispatch this tick.
-                    # Work held back by policy guards or capacity limits cannot dispatch this tick.
-                    can_dispatch = ready_spawnable > 0 and not held
-                    bad_ticks = bad_ticks + 1 if can_dispatch and not any_spawned else 0
+                    # Report failures on eligible cards even when another card is held or spawns.
+                    stalled = _kbd.eligible_work_stalled(results or [], ready_spawnable)
+                    bad_ticks = bad_ticks + 1 if stalled else 0
                 now = int(time.time())
                 if bad_ticks >= _HEALTH_WINDOW and now - last_warn_at >= 300:
+                    held = _kbd.describe_suppression(res for _slug, res in (results or []))
+                    spawn_clause = (
+                        "eligible tasks failing despite active spawns"
+                        if any_spawned
+                        else "0 workers spawned"
+                    )
                     logger.warning(
                         "kanban dispatcher stuck: ready queue non-empty for "
-                        "%d consecutive ticks but 0 workers spawned. Check "
+                        "%d consecutive ticks but %s.%s Check "
                         "profile health (venv, PATH, credentials) and "
                         "`hermes kanban list --status ready`.",
-                        bad_ticks,
+                        bad_ticks, spawn_clause, f" Last tick held back: {held}." if held else "",
                     )
                     last_warn_at = now
             except asyncio.CancelledError:
