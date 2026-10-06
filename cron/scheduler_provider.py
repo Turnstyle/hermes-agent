@@ -180,27 +180,32 @@ class CronScheduler(ABC):
         from cron.executions import create_execution, finish_execution, set_execution_occurrence
         from cron.jobs import claim_job_for_fire
 
-        execution = create_execution(job_id, source=self.name)
-        claim_kwargs = {"return_job": True}
-        if force:
-            claim_kwargs["force"] = True
-        if manual:
-            claim_kwargs["manual"] = True
-        try:
-            claimed_job = claim_job_for_fire(job_id, **claim_kwargs)
-            if isinstance(claimed_job, dict):
-                set_execution_occurrence(execution["id"], claimed_job.get("_scheduled_instant"))
-        except BaseException as exc:
-            finish_execution(
-                execution["id"], success=False,
-                error=f"Fire claim failed before dispatch: {type(exc).__name__}: {exc}",
-            )
-            raise
-        if not isinstance(claimed_job, dict):
-            finish_execution(execution["id"], success=False, error="Fire claim was not acquired")
-            return None
-        claimed_job["execution_id"] = execution["id"]
-        return claimed_job
+        from hermes_cli.kanban_launch import launch_guard
+
+        with launch_guard(wait_seconds=1.0) as admitted:
+            if not admitted:
+                return None
+            execution = create_execution(job_id, source=self.name)
+            claim_kwargs = {"return_job": True}
+            if force:
+                claim_kwargs["force"] = True
+            if manual:
+                claim_kwargs["manual"] = True
+            try:
+                claimed_job = claim_job_for_fire(job_id, **claim_kwargs)
+                if isinstance(claimed_job, dict):
+                    set_execution_occurrence(execution["id"], claimed_job.get("_scheduled_instant"))
+            except BaseException as exc:
+                finish_execution(
+                    execution["id"], success=False,
+                    error=f"Fire claim failed before dispatch: {type(exc).__name__}: {exc}",
+                )
+                raise
+            if not isinstance(claimed_job, dict):
+                finish_execution(execution["id"], success=False, error="Fire claim was not acquired")
+                return None
+            claimed_job["execution_id"] = execution["id"]
+            return claimed_job
 
     def fire_claimed(
         self, claimed_job: dict, *, adapters: Any = None, loop: Any = None,
@@ -210,8 +215,7 @@ class CronScheduler(ABC):
         cooperatively (e.g. dashboard lifespan drain)."""
         from cron.scheduler import run_one_job
 
-        run_one_job(claimed_job, adapters=adapters, loop=loop, cancel_event=cancel_event)
-        return True
+        return run_one_job(claimed_job, adapters=adapters, loop=loop, cancel_event=cancel_event)
 
     def reconcile(self) -> None:
         """Converge the external registry toward jobs.json (desired state). Built-in: no-op."""

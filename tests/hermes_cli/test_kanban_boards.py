@@ -15,6 +15,8 @@ Covers the pieces added when boards became a first-class concept:
 
 from __future__ import annotations
 
+from tests.hermes_cli.kanban_spawn_helpers import claim_for_spawn
+
 import json
 import os
 import subprocess
@@ -274,7 +276,7 @@ class TestWorkerSpawnEnv:
             tenant=None,
         )
 
-        kbd._default_spawn(task, str(fresh_home / "ws"), board="spawntest")
+        kbd._default_spawn(claim_for_spawn(task, board='spawntest'), str(fresh_home / "ws"), board="spawntest")
 
         env = captured["env"]
         assert env["HERMES_KANBAN_BOARD"] == "spawntest"

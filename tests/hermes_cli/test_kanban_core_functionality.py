@@ -10,6 +10,8 @@ parity across every registered verb.
 
 from __future__ import annotations
 
+from tests.hermes_cli.kanban_spawn_helpers import claim_for_spawn
+
 import os
 import time
 from pathlib import Path
@@ -703,7 +705,7 @@ def test_default_spawn_does_not_auto_load_any_skill(kanban_home, monkeypatch):
                              assignee="some-profile")
         task = kb.get_task(conn, tid)
         workspace = kbw.resolve_workspace(task)
-        pid = kbd._default_spawn(task, str(workspace))
+        pid = kbd._default_spawn(claim_for_spawn(task), str(workspace))
         assert pid == 99999
     finally:
         conn.close()

@@ -1,7 +1,6 @@
 """In-process tick admission and dispatch; job execution stays in scheduler.py."""
 
 import concurrent.futures
-import contextlib
 
 
 def tick(verbose=True, adapters=None, loop=None, sync=True, *, can_dispatch=None):
@@ -37,11 +36,11 @@ def _tick_admitted(
         return 0
 
     try:
-        # `hermes pause` ESTOP: skip dispatch, never touch in-flight runs; check_paused logs once.
-        with contextlib.suppress(ImportError):
-            from agent.estop import check_paused as _estop_check_paused
-            if _estop_check_paused("cron", _sched.logger):
-                return 0
+        from hermes_cli.kanban_launch import pause_reason
+        reason = pause_reason()
+        if reason:
+            _sched.logger.warning("Cron dispatch skipped: %s", reason)
+            return 0
 
         if can_dispatch is not None and not can_dispatch():
             _sched.logger.debug("Cron dispatch paused while gateway drains existing work")

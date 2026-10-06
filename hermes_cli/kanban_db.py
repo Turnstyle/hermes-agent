@@ -2571,35 +2571,40 @@ def claim_task(
     Returns the claimed ``Task`` on success, ``None`` if the task was
     already claimed (or is not in ``ready`` status).
     """
-    now = int(time.time())
-    lock = claimer or _claimer_id()
-    expires = now + _resolve_claim_ttl_seconds(ttl_seconds)
-    with write_txn(conn):
-        # Single enforcement point: never ready -> running with an undone
-        # parent, whichever writer set 'ready'. Demote to 'todo';
-        # recompute_ready re-promotes when the parents finish.
-        if not _parents_satisfied(conn, task_id):
-            conn.execute(
-                "UPDATE tasks SET status = 'todo' "
-                "WHERE id = ? AND status = 'ready'", (task_id,),
+    from hermes_cli.kanban_launch import launch_guard
+
+    with launch_guard(conn) as admitted:
+        if not admitted:
+            return None
+        now = int(time.time())
+        lock = claimer or _claimer_id()
+        expires = now + _resolve_claim_ttl_seconds(ttl_seconds)
+        with write_txn(conn):
+            # Single enforcement point: never ready -> running with an undone
+            # parent, whichever writer set 'ready'. Demote to 'todo';
+            # recompute_ready re-promotes when the parents finish.
+            if not _parents_satisfied(conn, task_id):
+                conn.execute(
+                    "UPDATE tasks SET status = 'todo' "
+                    "WHERE id = ? AND status = 'ready'", (task_id,),
+                )
+                _append_event(conn, task_id, "claim_rejected", {"reason": "parents_not_done"})
+                return None
+            # Workspace guard (H24): prevent multiple running tasks on the same worktree / dir workspace
+            busy_path = _is_workspace_busy(conn, task_id)
+            if busy_path:
+                _append_event(conn, task_id, "claim_rejected", {"reason": "workspace_busy", "workspace_path": busy_path})
+                return None
+            # Close a leaked prior run so the CAS below doesn't strand it.
+            _reclaim_dangling_run(
+                conn, task_id, statuses=("ready",), now=now, note="invariant recovery on re-claim",
             )
-            _append_event(conn, task_id, "claim_rejected", {"reason": "parents_not_done"})
-            return None
-        # Workspace guard (H24): prevent multiple running tasks on the same worktree / dir workspace
-        busy_path = _is_workspace_busy(conn, task_id)
-        if busy_path:
-            _append_event(conn, task_id, "claim_rejected", {"reason": "workspace_busy", "workspace_path": busy_path})
-            return None
-        # Close a leaked prior run so the CAS below doesn't strand it.
-        _reclaim_dangling_run(
-            conn, task_id, statuses=("ready",), now=now, note="invariant recovery on re-claim",
-        )
-        run_id = _claim_and_open_run(conn, task_id, "ready", lock, expires, now)
-        if run_id is None:
-            return None
-        claimed = get_task(conn, task_id)
-    _fire_task_hook("kanban_task_claimed", claimed, task_id, run_id)
-    return claimed
+            run_id = _claim_and_open_run(conn, task_id, "ready", lock, expires, now)
+            if run_id is None:
+                return None
+            claimed = get_task(conn, task_id)
+        _fire_task_hook("kanban_task_claimed", claimed, task_id, run_id)
+        return claimed
 
 
 def claim_review_task(
@@ -2609,31 +2614,36 @@ def claim_review_task(
     """Atomic ``review -> running`` (None when lost). Parents are re-checked
     (one may have reopened meanwhile) and a NEW run tracks the reviewer
     separately from the implementer."""
-    now = int(time.time())
-    lock = claimer or _claimer_id()
-    expires = now + _resolve_claim_ttl_seconds(ttl_seconds)
-    with write_txn(conn):
-        if not _parents_satisfied(conn, task_id):
-            demoted = conn.execute(
-                "UPDATE tasks SET status = 'todo' "
-                "WHERE id = ? AND status = 'review' AND claim_lock IS NULL", (task_id,),
-            )
-            if demoted.rowcount == 1:
-                _append_event(
-                    conn, task_id, "dependency_wait",
-                    {"reason": "parent_reopened", "source_status": "review"},
+    from hermes_cli.kanban_launch import launch_guard
+
+    with launch_guard(conn) as admitted:
+        if not admitted:
+            return None
+        now = int(time.time())
+        lock = claimer or _claimer_id()
+        expires = now + _resolve_claim_ttl_seconds(ttl_seconds)
+        with write_txn(conn):
+            if not _parents_satisfied(conn, task_id):
+                demoted = conn.execute(
+                    "UPDATE tasks SET status = 'todo' "
+                    "WHERE id = ? AND status = 'review' AND claim_lock IS NULL", (task_id,),
                 )
-            return None
-        busy_path = _is_workspace_busy(conn, task_id)
-        if busy_path:
-            _append_event(conn, task_id, "claim_rejected", {"reason": "workspace_busy", "workspace_path": busy_path})
-            return None
-        run_id = _claim_and_open_run(
-            conn, task_id, "review", lock, expires, now, event_extra={"source_status": "review"},
-        )
-        if run_id is None:
-            return None
-        return get_task(conn, task_id)
+                if demoted.rowcount == 1:
+                    _append_event(
+                        conn, task_id, "dependency_wait",
+                        {"reason": "parent_reopened", "source_status": "review"},
+                    )
+                return None
+            busy_path = _is_workspace_busy(conn, task_id)
+            if busy_path:
+                _append_event(conn, task_id, "claim_rejected", {"reason": "workspace_busy", "workspace_path": busy_path})
+                return None
+            run_id = _claim_and_open_run(
+                conn, task_id, "review", lock, expires, now, event_extra={"source_status": "review"},
+            )
+            if run_id is None:
+                return None
+            return get_task(conn, task_id)
 
 
 def _retry_status_for_run(
