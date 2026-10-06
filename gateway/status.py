@@ -472,6 +472,11 @@ def _get_process_start_time(pid: int) -> Optional[int]:
     we fall back to ``psutil.Process(pid).create_time()`` — a float epoch
     timestamp — quantized to an int (centiseconds) for stable equality.
 
+    The ``stat`` line is split after the LAST ``)``: the process name (field 2)
+    may itself contain spaces and parentheses (npm sets its title to
+    ``npm exec <pkg>``), which would shift a plain whitespace split onto the
+    wrong field.
+
     The two sources are never mixed on a single platform: ``/proc`` always
     succeeds first on Linux, and always fails on macOS/Windows so psutil is
     always used there.  Because the guard only compares the value recorded at
@@ -480,8 +485,10 @@ def _get_process_start_time(pid: int) -> Optional[int]:
     """
     stat_path = Path(f"/proc/{pid}/stat")
     try:
-        # Field 22 in /proc/<pid>/stat is process start time (clock ticks).
-        return int(stat_path.read_text(encoding="utf-8").split()[21])  # windows-footgun: ok (/proc is BOM-free)
+        raw = stat_path.read_text(encoding="utf-8")  # windows-footgun: ok (/proc is BOM-free)
+        # After "pid (comm)" the remaining fields start at field 3 (state), so
+        # field 22 (start time in clock ticks) is index 19.
+        return int(raw.rpartition(")")[2].split()[19])
     except (FileNotFoundError, IndexError, PermissionError, ValueError, OSError):
         pass
 
@@ -902,8 +909,9 @@ def _pid_exists(pid: int) -> bool:
 def _posix_is_zombie(pid: int) -> bool:
     """Zombie via ``/proc/<pid>/stat`` field 3, or ``ps -o state=`` without /proc (macOS/BSD)."""
     try:
-        stat_fields = Path(f"/proc/{pid}/stat").read_text(encoding="utf-8").split()
-        return len(stat_fields) > 2 and stat_fields[2] == "Z"
+        # Split after the last ")": the process name (field 2) may contain spaces.
+        stat_fields = Path(f"/proc/{pid}/stat").read_text(encoding="utf-8").rpartition(")")[2].split()
+        return len(stat_fields) > 0 and stat_fields[0] == "Z"
     except FileNotFoundError:
         with contextlib.suppress(Exception):
             r = subprocess.run(
