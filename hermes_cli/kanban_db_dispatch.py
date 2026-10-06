@@ -2718,12 +2718,39 @@ def dispatch_profile_allowlist_summary() -> str:
             "profile, or the config could not be read — omit the key to allow any)")
 
 
-def _has_spawnable(conn: sqlite3.Connection, status: str) -> bool:
-    rows = conn.execute(
-        "SELECT DISTINCT assignee FROM tasks "
-        "WHERE status = ? AND assignee IS NOT NULL AND claim_lock IS NULL",
-        (status,),
+def _owned_assignee_rows(conn: sqlite3.Connection, status: str) -> list:
+    """Distinct assignees of unclaimed ``status`` rows THIS Fleet node owns.
+
+    Same ownership rule as :func:`kanban_db._is_foreign_fleet_mirror`, applied
+    set-wise (no per-row WARNING: this runs every tick): no Fleet adapter or no
+    ``fleet_kanban_issue_map`` row -> local; owner = ``source_node`` only when
+    ``current_node`` IS NULL; a blank/NULL owner or an unparseable adapter
+    trigger -> foreign. Foreign mirrors are refused by the lease fence by
+    design, so counting them made a node holding only foreign cards log
+    "dispatcher stuck" forever (t_46ff0060).
+    """
+    base = ("SELECT DISTINCT t.assignee FROM tasks t "
+            "WHERE t.status = ? AND t.assignee IS NOT NULL AND t.claim_lock IS NULL")
+    node_id = _kb._fleet_adapter_installed_node_id(conn)
+    has_map = node_id is not None and conn.execute(
+        "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'fleet_kanban_issue_map'"
+    ).fetchone() is not None
+    if not has_map:
+        return conn.execute(base, (status,)).fetchall()
+    owner = "(CASE WHEN m.current_node IS NULL THEN m.source_node ELSE m.current_node END)"
+    return conn.execute(
+        base + " AND NOT EXISTS ("
+        "SELECT 1 FROM fleet_kanban_issue_map m WHERE m.local_task_id = t.id AND ("
+        f"{owner} IS NULL OR typeof({owner}) <> 'text'"
+        # str.strip() parity: space, \t, \n, \v, \f, \r.
+        f" OR trim({owner}, char(32, 9, 10, 11, 12, 13)) = ''"
+        f" OR {owner} <> ?))",
+        (status, node_id),
     ).fetchall()
+
+
+def _has_spawnable(conn: sqlite3.Connection, status: str) -> bool:
+    rows = _owned_assignee_rows(conn, status)
     if not rows:
         return False
     profile_exists = _profile_exists_fn()
