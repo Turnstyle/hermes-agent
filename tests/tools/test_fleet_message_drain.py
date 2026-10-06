@@ -569,6 +569,10 @@ def _fake_reported_bot_chat(monkeypatch, tmp_path, *, mode: str, linger: float =
         "if os.environ['FAKE_MODE'] != 'never' and report:\n"
         "    pathlib.Path(report).write_text(json.dumps({'pid': os.getpid(), 'exit_code': "
         "7 if os.environ['FAKE_MODE'] == 'failed' else 0, 'error': '', 'reply': ''}))\n"
+        "release = os.environ.get('FAKE_RELEASE')\n"
+        "deadline = time.monotonic() + 15\n"
+        "while release and not pathlib.Path(release).exists() and time.monotonic() < deadline:\n"
+        "    time.sleep(0.02)\n"
         "time.sleep(float(os.environ['FAKE_LINGER']))\n"
         "pathlib.Path(os.environ['FAKE_FINISHED']).write_text('finished')\n"
         "print('final output', flush=True)\n"
@@ -617,9 +621,10 @@ def test_reported_linger_finishes_after_short_lived_drain_script_exits(monkeypat
     from pathlib import Path
 
     home, started, finished, report_name = _fake_reported_bot_chat(
-        monkeypatch, tmp_path, mode="settled", linger=1.5)
+        monkeypatch, tmp_path, mode="settled", linger=0)
     from tools import bot_relay
 
+    release = tmp_path / "release-child"
     driver = (
         "import os, sys\n"
         "from pathlib import Path\n"
@@ -627,18 +632,20 @@ def test_reported_linger_finishes_after_short_lived_drain_script_exits(monkeypat
         "bot_relay._hermes_cli = lambda: sys.argv[1]\n"
         "bot_relay.TURN_ATTEMPT_TIMEOUT_SECONDS = 0.2\n"
         "bot_relay.delivery_env = lambda author, home: {key: os.environ[key] for key in "
-        "('FAKE_STARTED', 'FAKE_FINISHED', 'FAKE_REPORT_NAME', 'FAKE_MODE', 'FAKE_LINGER')}\n"
+        "('FAKE_STARTED', 'FAKE_FINISHED', 'FAKE_REPORT_NAME', 'FAKE_MODE', 'FAKE_LINGER', 'FAKE_RELEASE')}\n"
         "assert fmd._idle_cli_turn(Path(sys.argv[2]), 'queued message', None)['status'] == 'settled'\n"
     )
     env = {
         "PYTHONPATH": str(Path(__file__).resolve().parents[2]), "HERMES_HOME": str(home),
         "FAKE_STARTED": str(started), "FAKE_FINISHED": str(finished),
-        "FAKE_REPORT_NAME": str(report_name), "FAKE_MODE": "settled", "FAKE_LINGER": "1.5",
+        "FAKE_REPORT_NAME": str(report_name), "FAKE_MODE": "settled", "FAKE_LINGER": "0",
+        "FAKE_RELEASE": str(release), "TMPDIR": os.environ["TMPDIR"], "HOME": str(tmp_path),
     }
     result = fmd.subprocess.run([sys.executable, "-c", driver, str(bot_relay._hermes_cli()), str(home)],
                                 env=env, capture_output=True, text=True, timeout=5)
     assert result.returncode == 0, result.stderr
     assert started.exists() and not finished.exists()
+    release.touch()
     deadline = time.monotonic() + 3
     while not finished.exists() and time.monotonic() < deadline:
         time.sleep(0.05)
