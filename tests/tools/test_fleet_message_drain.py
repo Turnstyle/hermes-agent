@@ -7,11 +7,14 @@ semantics, and again against a real Firestore emulator when FLEET_MESSAGES_EMULA
 from __future__ import annotations
 
 import datetime
+import contextlib
 import itertools
 import json
 import os
+import sys
 import threading
 import urllib.error
+import time
 import urllib.request
 import uuid
 from types import SimpleNamespace
@@ -262,9 +265,10 @@ def test_idle_cli_turn_runs_with_parent_turn_lock_and_records_receipt(tmp_path, 
         with pytest.raises(TurnBusyError):
             with acquire_turn_lock(tmp_path, ME, timeout_seconds=0):
                 pass
+        fmd.Path(kwargs["report_path"]).write_text(json.dumps({"pid": 99999999, "exit_code": 0}))
         return SimpleNamespace(returncode=0)
 
-    monkeypatch.setattr(fmd.subprocess, "run", child_boundary)
+    monkeypatch.setattr("hermes_cli.quiet_single_query.run_reported_turn", child_boundary)
     monkeypatch.setattr("tools.bot_relay._hermes_cli", lambda: "hermes")
     monkeypatch.setattr("tools.bot_relay.delivery_env", lambda author, home: {})
     with acquire_turn_lock(tmp_path, ME, timeout_seconds=0):
@@ -528,15 +532,141 @@ def test_api_drain_cli_child_has_turn_deadline(monkeypatch, tmp_path):
     def fake_run(argv, **kwargs):
         payload = fmd.Path(argv[-1])
         seen.append((payload.read_text(), kwargs["timeout"], payload, kwargs))
+        fmd.Path(kwargs["report_path"]).write_text(json.dumps({"pid": 99999999, "exit_code": 0}))
         return SimpleNamespace(returncode=0)
 
-    monkeypatch.setattr(fmd.subprocess, "run", fake_run)
+    monkeypatch.setattr("hermes_cli.quiet_single_query.run_reported_turn", fake_run)
+    home.mkdir(parents=True)
     assert fmd._idle_cli_turn(home, "queued message", None) == {"status": "settled", "error": ""}
     assert seen[0][0] == "queued message"
     assert seen[0][1] == bot_relay.TURN_ATTEMPT_TIMEOUT_SECONDS
+    assert seen[0][3]["cwd"] == str(home)
     assert seen[0][3]["stdout"] == fmd.subprocess.DEVNULL
     assert seen[0][3]["stderr"] == fmd.subprocess.DEVNULL
     assert not seen[0][2].exists()
+    assert not fmd.Path(seen[0][3]["report_path"]).exists()
+
+
+def _fake_reported_bot_chat(monkeypatch, tmp_path, *, mode: str, linger: float = 0) -> tuple:
+    """A real child reports its turn independently of its later process exit."""
+    from tools import bot_relay
+
+    home = tmp_path / "profiles" / ME
+    home.mkdir(parents=True)
+    started = tmp_path / "child-pid"
+    finished = tmp_path / "child-finished"
+    report_name = tmp_path / "report-name"
+    child = tmp_path / "fake-hermes"
+    child.write_text(
+        f"#!{sys.executable}\n"
+        "import json, os, pathlib, sys, time\n"
+        "pathlib.Path(os.environ['FAKE_STARTED']).write_text(str(os.getpid()))\n"
+        "report = os.environ.get('HERMES_QUIET_TURN_REPORT_FILE')\n"
+        "if report:\n"
+        "    pathlib.Path(os.environ['FAKE_REPORT_NAME']).write_text(report)\n"
+        "if os.environ['FAKE_MODE'] != 'never' and report:\n"
+        "    pathlib.Path(report).write_text(json.dumps({'pid': os.getpid(), 'exit_code': "
+        "7 if os.environ['FAKE_MODE'] == 'failed' else 0, 'error': '', 'reply': ''}))\n"
+        "time.sleep(float(os.environ['FAKE_LINGER']))\n"
+        "pathlib.Path(os.environ['FAKE_FINISHED']).write_text('finished')\n"
+        "print('final output', flush=True)\n"
+        "sys.exit(0)\n",
+        encoding="utf-8",
+    )
+    child.chmod(0o700)
+    monkeypatch.setattr(bot_relay, "_hermes_cli", lambda: str(child))
+    monkeypatch.setattr(bot_relay, "TURN_ATTEMPT_TIMEOUT_SECONDS", 0.2)
+    monkeypatch.setattr(bot_relay, "delivery_env", lambda author, profile_home: {
+        "FAKE_STARTED": str(started), "FAKE_FINISHED": str(finished),
+        "FAKE_REPORT_NAME": str(report_name), "FAKE_MODE": mode, "FAKE_LINGER": str(linger),
+    })
+    return home, started, finished, report_name
+
+
+@pytest.mark.platforms("posix")
+def test_reported_linger_books_done_and_keeps_child_busy(monkeypatch, tmp_path):
+    home, started, finished, report_name = _fake_reported_bot_chat(
+        monkeypatch, tmp_path, mode="settled", linger=4)
+    store = MemoryStore()
+    store.seed("reported", msg(5, attempts=0))
+    store.seed("next", msg(2, attempts=0))
+    try:
+        assert fmd.idle_tick(home, store=store,
+                             config=fmd.DrainConfig(target="emulator", emulator_host="fake"),
+                             now=NOW)
+        row = store.get("reported").fields
+        assert row["status"] == "done" and row["attempts"] == 0
+        assert not finished.exists()
+        assert fmd._idle_bot_chat_busy(home)
+        assert not fmd.idle_tick(home, store=store,
+                                 config=fmd.DrainConfig(target="emulator", emulator_host="fake"),
+                                 now=NOW)
+        assert store.get("next").fields["status"] == "queued"
+        assert store.get("next").fields["attempts"] == 0
+        assert not os.path.exists(report_name.read_text())
+    finally:
+        if started.exists():
+            with contextlib.suppress(ProcessLookupError):
+                os.kill(int(started.read_text()), 15)
+
+
+@pytest.mark.platforms("posix")
+def test_reported_linger_finishes_after_short_lived_drain_script_exits(monkeypatch, tmp_path):
+    from pathlib import Path
+
+    home, started, finished, report_name = _fake_reported_bot_chat(
+        monkeypatch, tmp_path, mode="settled", linger=1.5)
+    from tools import bot_relay
+
+    driver = (
+        "import os, sys\n"
+        "from pathlib import Path\n"
+        "from tools import bot_relay, fleet_message_drain as fmd\n"
+        "bot_relay._hermes_cli = lambda: sys.argv[1]\n"
+        "bot_relay.TURN_ATTEMPT_TIMEOUT_SECONDS = 0.2\n"
+        "bot_relay.delivery_env = lambda author, home: {key: os.environ[key] for key in "
+        "('FAKE_STARTED', 'FAKE_FINISHED', 'FAKE_REPORT_NAME', 'FAKE_MODE', 'FAKE_LINGER')}\n"
+        "assert fmd._idle_cli_turn(Path(sys.argv[2]), 'queued message', None)['status'] == 'settled'\n"
+    )
+    env = {
+        "PYTHONPATH": str(Path(__file__).resolve().parents[2]), "HERMES_HOME": str(home),
+        "FAKE_STARTED": str(started), "FAKE_FINISHED": str(finished),
+        "FAKE_REPORT_NAME": str(report_name), "FAKE_MODE": "settled", "FAKE_LINGER": "1.5",
+    }
+    result = fmd.subprocess.run([sys.executable, "-c", driver, str(bot_relay._hermes_cli()), str(home)],
+                                env=env, capture_output=True, text=True, timeout=5)
+    assert result.returncode == 0, result.stderr
+    assert started.exists() and not finished.exists()
+    deadline = time.monotonic() + 3
+    while not finished.exists() and time.monotonic() < deadline:
+        time.sleep(0.05)
+    assert finished.exists(), "the quiet child must complete after the drain script exits"
+    assert not os.path.exists(report_name.read_text())
+    deadline = time.monotonic() + 2
+    while fmd._idle_bot_chat_busy(home) and time.monotonic() < deadline:
+        time.sleep(0.05)
+    assert not fmd._idle_bot_chat_busy(home)
+
+
+@pytest.mark.platforms("posix")
+@pytest.mark.parametrize("mode, expected", [("never", "timed out"), ("failed", "exited 7")])
+def test_unreported_or_failed_turn_requeues(monkeypatch, tmp_path, mode, expected):
+    home, started, _, _ = _fake_reported_bot_chat(monkeypatch, tmp_path, mode=mode,
+                                                   linger=4 if mode == "never" else 0)
+    store = MemoryStore()
+    store.seed("retry", msg(5, attempts=0))
+    def tick():
+        return fmd.idle_tick(home, store=store,
+                             config=fmd.DrainConfig(target="emulator", emulator_host="fake"),
+                             now=NOW)
+    if mode == "never":
+        with pytest.raises(fmd.subprocess.TimeoutExpired):
+            tick()
+    else:
+        assert tick()
+    row = store.get("retry").fields
+    assert row["status"] == "queued" and row["attempts"] == 1
+    assert expected in row["last_error"]
 
 
 def test_api_drain_worker_keeps_each_profile_scope(monkeypatch, tmp_path):

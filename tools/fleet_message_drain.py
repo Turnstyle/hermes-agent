@@ -13,7 +13,8 @@ An idle TUI owner polls at a bounded interval; a profile's no-agent cron can run
 ``python -m tools.fleet_message_drain idle-tick`` for a Bot Chat without a live UI owner.
 Both paths use the same atomic claim and hand-off. Expired docs cannot starve fresh docs.
 API turn-end follow-ups use the canonical quiet Bot Chat CLI with the relay's 600-second
-subprocess deadline; the child is killed and its claim requeued if that deadline expires.
+turn deadline. A reported turn is booked before its child finishes lingering for a reply;
+only an unreported turn is killed and requeued at the deadline.
 
 Status transitions this module performs (every write carries an ``updateTime`` precondition, so a
 doc that anyone else touched in between is never overwritten):
@@ -601,12 +602,14 @@ def turn_end_drain_query(
 
 
 def drain_agent_turn(agent: Any, profile_home: Path | str, history: Optional[list] = None) -> bool:
-    """Claim one API Bot Chat message and run its canonical CLI turn with a hard deadline."""
+    """Claim one API Bot Chat message and run its canonical CLI turn with a turn deadline."""
     # Strict Bot Chat gate (carry t_2e0ceb41): a Slack/Meet session that carries message_agent
     # via bot_mode.message_agent_platforms must never drain the Bot Chat mailbox.
     from tools.bot_mode_dm import is_canonical_bot_chat
 
     if not is_canonical_bot_chat(agent):
+        return False
+    if _reported_linger_busy(Path(profile_home)):
         return False
     triplet = turn_end_drain_query(profile_home)
     if triplet is None:
@@ -738,12 +741,39 @@ def idle_tick(profile_home: Path | str, *, config: Optional[DrainConfig] = None,
 
 def _idle_bot_chat_busy(home: Path) -> bool:
     from tools.bot_live_delivery import find_canonical_live_owner
-    return find_canonical_live_owner(home) is not None
+    return _reported_linger_busy(home) or find_canonical_live_owner(home) is not None
+
+
+def _linger_marker(home: Path) -> Path:
+    return home / "runtime" / "fleet_message_drain" / "linger.json"
+
+
+def _reported_linger_busy(home: Path) -> bool:
+    """A reported CLI child may still wake for a nested reply after its drain script exits."""
+    marker = _linger_marker(home)
+    try:
+        record = json.loads(marker.read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        return False
+    except (OSError, ValueError):
+        logger.warning("fleet message drain: unreadable linger marker at %s", marker)
+        return True
+    if not isinstance(record, dict):
+        logger.warning("fleet message drain: invalid linger marker at %s", marker)
+        return True
+    from gateway.status import _pid_exists, get_process_start_time
+
+    pid, started = record.get("pid"), record.get("started")
+    if (isinstance(pid, int) and pid > 0 and (started is None or isinstance(started, int))
+            and _pid_exists(pid) and (started is None or get_process_start_time(pid) == started)):
+        return True
+    return False
 
 
 def _idle_cli_turn(home: Path, text: str, author: Optional[dict]) -> dict:
     """Run the claimed input in the recipient's canonical Bot Chat through its CLI."""
     import tempfile
+    from hermes_cli.quiet_single_query import run_reported_turn
     from tools.bot_relay import BOT_CHAT_TURN_ARGS, TURN_ATTEMPT_TIMEOUT_SECONDS, _hermes_cli, delivery_env
 
     with tempfile.NamedTemporaryFile(mode="w", encoding="utf-8", prefix="fleet-msg-", suffix=".txt",
@@ -752,11 +782,29 @@ def _idle_cli_turn(home: Path, text: str, author: Optional[dict]) -> dict:
         path = Path(payload.name)
     try:
         argv = [_hermes_cli(), "-p", bot_identity(home), *BOT_CHAT_TURN_ARGS, "--query-file", str(path)]
-        proc = subprocess.run(argv, env=delivery_env(author, home), stdin=subprocess.DEVNULL,
-                              stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False,
-                              timeout=TURN_ATTEMPT_TIMEOUT_SECONDS)
-        return {"status": "settled" if proc.returncode == 0 else "failed",
-                "error": f"Bot Chat turn exited {proc.returncode}" if proc.returncode else ""}
+        with tempfile.TemporaryDirectory(prefix="fleet-turn-report-") as report_dir:
+            report_path = Path(report_dir) / "turn.json"
+            proc = run_reported_turn(
+                argv, env=delivery_env(author, home), report_path=str(report_path),
+                timeout=TURN_ATTEMPT_TIMEOUT_SECONDS, cwd=str(home),
+                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            report = json.loads(report_path.read_text(encoding="utf-8")) if report_path.exists() else None
+            exit_code = report.get("exit_code") if isinstance(report, dict) else None
+            # The quiet CLI releases its transcript lease during the one-shot linger.
+            # The outer idle-tick flock also ends with this call, so pin the still-live
+            # child for the next tick and for an API turn-end drain.
+            if isinstance(report, dict):
+                from gateway.status import _pid_exists, get_process_start_time
+                from utils import atomic_json_write
+
+                pid = report.get("pid")
+                if isinstance(pid, int) and pid > 0 and _pid_exists(pid):
+                    started = get_process_start_time(pid)
+                    atomic_json_write(_linger_marker(home), {"pid": pid, "started": started}, mode=0o600)
+        if not isinstance(exit_code, int):
+            return {"status": "failed", "error": f"Bot Chat turn exited {proc.returncode} without turn report"}
+        return {"status": "settled" if exit_code == 0 else "failed",
+                "error": f"Bot Chat turn exited {exit_code}" if exit_code else ""}
     finally:
         path.unlink(missing_ok=True)
 
