@@ -2671,11 +2671,14 @@ def _apply_default_assignee(
         return True
     try:
         with _kb.write_txn(conn):
-            conn.execute(
+            updated = conn.execute(
                 "UPDATE tasks SET assignee = ? WHERE id = ? "
+                "AND status = 'ready' AND claim_lock IS NULL "
                 "AND (assignee IS NULL OR assignee = '')",
                 (assignee, task_id),
             )
+            if updated.rowcount != 1:
+                return False
             _kb._append_event(
                 conn, task_id, "assigned",
                 {"assignee": assignee, "source": "kanban.default_assignee"},
