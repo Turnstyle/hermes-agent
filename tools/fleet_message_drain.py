@@ -393,10 +393,11 @@ _live_credentials: Any = None
 _gcloud_token_cached = ""
 _gcloud_token_until = 0.0
 _credentials_warned = False
+_FLEET_GOOGLE_ACCOUNT = "conductive-admin-sa@fifth-flame-482113-v8.iam.gserviceaccount.com"
 
 
 class NoGoogleCredentials(RuntimeError):
-    """Neither host ADC nor the operator's gcloud login can authorize Firestore."""
+    """Neither the named service-account source nor its gcloud login can authorize Firestore."""
 
 
 def _named_key_credentials() -> Any:
@@ -404,7 +405,7 @@ def _named_key_credentials() -> Any:
 
     Owner's firm rule (5 Oct 2026, card A-L3): no ADC. The path comes from FLEET_MESSAGES_SA_KEY_FILE,
     else this machine's conductive-admin key. A missing or unreadable file raises, and _live_token
-    then uses gcloud's active named account (see `gcloud auth list`). Try next: ask the Keys Router
+    then uses the explicitly bound fleet service account in gcloud. Try next: ask the Keys Router
     to place the key, or set FLEET_MESSAGES_SA_KEY_FILE to a key with datastore access.
     """
     import pwd
@@ -415,7 +416,7 @@ def _named_key_credentials() -> Any:
 
 
 def _live_token() -> str:
-    """Prefer host ADC; use a short, cached gcloud token when ADC is unavailable."""
+    """Prefer the named key source; fall back to the same explicitly named gcloud account."""
     global _live_credentials, _gcloud_token_cached, _gcloud_token_until, _credentials_warned
     with _live_lock:
         try:
@@ -426,7 +427,7 @@ def _live_token() -> str:
             if not _live_credentials.valid:
                 _live_credentials.refresh(google.auth.transport.requests.Request())
             if not _live_credentials.token:
-                raise ValueError("ADC returned no token")
+                raise ValueError("Named service-account source returned no token")
             _credentials_warned = False
             return _live_credentials.token
         except Exception:
@@ -436,11 +437,11 @@ def _live_token() -> str:
                 # gcloud runs its own Python; the Hermes bootstrap's PYTHONPATH/PYTHONHOME would load
                 # Hermes's crypto packages into it and crash it (pyOpenSSL: no attribute GEN_EMAIL).
                 gcloud_env = {k: v for k, v in os.environ.items()
-                              if k not in ("PYTHONPATH", "PYTHONHOME", "VIRTUAL_ENV")}
+                              if k not in ("PYTHONPATH", "PYTHONHOME", "VIRTUAL_ENV", "GOOGLE_APPLICATION_CREDENTIALS")}
                 gcloud = locate_command("gcloud", known_dirs=known_dirs.snap_bin_dirs()).command
                 if not gcloud:
                     raise FileNotFoundError("gcloud executable not found")
-                proc = subprocess.run([*gcloud, "auth", "print-access-token"], capture_output=True,
+                proc = subprocess.run([*gcloud, "auth", "print-access-token", f"--account={_FLEET_GOOGLE_ACCOUNT}"], capture_output=True,
                                       text=True, check=True, timeout=3, env=gcloud_env)
                 token = proc.stdout.strip()
                 if not token:
@@ -451,10 +452,10 @@ def _live_token() -> str:
             return _gcloud_token_cached
         except Exception as exc:
             if not _credentials_warned:
-                logger.warning("fleet message drain: no Google credentials (ADC expired and gcloud token failed); "
+                logger.warning("fleet message drain: no Google credentials (named service account and gcloud token failed); "
                                "drain skipped, turns unaffected")
                 _credentials_warned = True
-            raise NoGoogleCredentials("ADC expired and gcloud token failed") from exc
+            raise NoGoogleCredentials("named service account and gcloud token failed") from exc
 
 
 def store_for(config: DrainConfig) -> FirestoreStore:

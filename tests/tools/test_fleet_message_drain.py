@@ -39,6 +39,7 @@ def test_live_token_falls_back_to_gcloud_and_warns_once_per_failed_streak(monkey
         def refresh(self, request):
             raise RefreshError("expired")
 
+    monkeypatch.setattr(google.auth, "default", lambda **kw: pytest.fail("ADC must never be used"))
     monkeypatch.setattr(fmd, "_named_key_credentials", lambda: Expired())
     monkeypatch.setattr(fmd, "_live_credentials", None)
     monkeypatch.setattr(fmd, "_gcloud_token_cached", "")
@@ -63,18 +64,19 @@ def test_live_token_falls_back_to_gcloud_and_warns_once_per_failed_streak(monkey
     monkeypatch.setenv("PYTHONHOME", "/hermes/python")
     assert fmd._live_token() == "gcloud-token"
     assert fmd._live_token() == "gcloud-token"
-    assert commands == [[str(gcloud_exe), "auth", "print-access-token"]]
+    assert commands == [[str(gcloud_exe), "auth", "print-access-token", "--account=conductive-admin-sa@fifth-flame-482113-v8.iam.gserviceaccount.com"]]
     assert len(calls) == 1 and calls[0]["timeout"] <= 3
+    assert "GOOGLE_APPLICATION_CREDENTIALS" not in calls[0]["env"]
     # gcloud runs its own Python: the Hermes bootstrap's PYTHONPATH/PYTHONHOME must not leak into it.
     assert "PYTHONPATH" not in calls[0]["env"] and "PYTHONHOME" not in calls[0]["env"]
 
     monkeypatch.setattr(fmd, "_gcloud_token_cached", "")
     monkeypatch.setattr(fmd.subprocess, "run", lambda *a, **kw: (_ for _ in ()).throw(OSError("offline")))
     for _ in range(2):
-        with pytest.raises(fmd.NoGoogleCredentials, match="ADC expired and gcloud token failed"):
+        with pytest.raises(fmd.NoGoogleCredentials, match="named service account and gcloud token failed"):
             fmd._live_token()
     assert [r.message for r in caplog.records if "no Google credentials" in r.message] == [
-        "fleet message drain: no Google credentials (ADC expired and gcloud token failed); "
+        "fleet message drain: no Google credentials (named service account and gcloud token failed); "
         "drain skipped, turns unaffected"]
 
 
@@ -82,10 +84,10 @@ def test_live_token_fails_closed_when_gcloud_cannot_be_resolved(monkeypatch):
     import google.auth
     from hermes_platform.resolver import known_dirs
 
-    def no_adc(**kwargs):
-        raise google.auth.exceptions.DefaultCredentialsError("no ADC")
+    def no_named_source():
+        raise FileNotFoundError("fixture source unavailable")
 
-    monkeypatch.setattr(google.auth, "default", no_adc)
+    monkeypatch.setattr(fmd, "_named_key_credentials", no_named_source)
     monkeypatch.setattr(fmd, "_live_credentials", None)
     monkeypatch.setattr(fmd, "_gcloud_token_cached", "")
     monkeypatch.setattr(fmd, "_credentials_warned", False)
@@ -93,7 +95,7 @@ def test_live_token_fails_closed_when_gcloud_cannot_be_resolved(monkeypatch):
     monkeypatch.setenv("PATH", "")
     monkeypatch.setattr(fmd.subprocess, "run", lambda *args, **kwargs: pytest.fail("unexpected token command"))
 
-    with pytest.raises(fmd.NoGoogleCredentials, match="ADC expired and gcloud token failed"):
+    with pytest.raises(fmd.NoGoogleCredentials, match="named service account and gcloud token failed"):
         fmd._live_token()
 
 
@@ -917,13 +919,13 @@ def test_reclaimer_skips_conflicts_and_cli_dry_run_never_writes(monkeypatch, cap
     assert "orderBy" not in structured and structured["limit"] == 200
 
     def unavailable(config):
-        raise fmd.NoGoogleCredentials("ADC expired and gcloud token failed")
+        raise fmd.NoGoogleCredentials("named service account and gcloud token failed")
 
     monkeypatch.setattr(fmd, "store_for", unavailable)
     assert fmd.main(["reclaim-stale"]) == 1
     output = capsys.readouterr()
     assert output.out == ""
-    assert output.err == "fleet message reclaim-stale: ADC expired and gcloud token failed\n"
+    assert output.err == "fleet message reclaim-stale: named service account and gcloud token failed\n"
 
 
 def test_terminal_outcome_is_recorded_once(store):
