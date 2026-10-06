@@ -25,7 +25,12 @@ _IS_WINDOWS = platform.system() == "Windows"
 # (not merely "not Windows") so macOS and other POSIX platforms never touch systemd.
 # See #70716.
 _IS_LINUX = platform.system() == "Linux"
-from tools.environments.local import _find_shell, _resolve_safe_cwd, _sanitize_subprocess_env
+from tools.environments.local import (
+    _find_shell,
+    _kill_process_group_posix,
+    _resolve_safe_cwd,
+    _sanitize_subprocess_env,
+)
 from hermes_cli._subprocess_compat import windows_hide_flags
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Literal, NamedTuple, Optional
@@ -559,6 +564,9 @@ class ProcessSession:
     # Session-db id of the spawning conversation; lets the gateway drop completions whose
     # session was closed at a user boundary (/new) instead of injecting into the NEW one.
     parent_session_id: str = ""
+    receipt_home: str = ""                    # Hermes home that owns durable process-results
+    late_kill_requested_at: Optional[float] = None  # kill arrived after a concrete natural exit
+    late_kill_source: str = ""                # termination_source of the late kill request
     notify_on_complete: bool = False            # Queue agent notification on exit
     completion_output_chars: int = 0            # Output chars the completion carries; 0 = COMPLETION_OUTPUT_CHARS
     watch_patterns: List[str] = field(default_factory=list)
@@ -615,7 +623,7 @@ _CHECKPOINT_FIELDS = (
     "command", "pid", "pid_scope", "host_start_time", "systemd_unit", "cwd",
     "started_at", "task_id", "owner_task_id", "session_key",
     *(f"watcher_{k}" for k in _WATCHER_ROUTE_KEYS), "watcher_interval",
-    "parent_session_id", "notify_on_complete", "completion_output_chars", "watch_patterns",
+    "parent_session_id", "receipt_home", "notify_on_complete", "completion_output_chars", "watch_patterns",
     "heartbeat_seconds", "output_log_path", "exit_file_path", "log_offset_bytes")
 _CHECKPOINT_DEFAULTS = {
     f.name: ([] if f.name == "watch_patterns" else f.default)
@@ -1138,6 +1146,7 @@ class ProcessRegistry(ProcessCheckpointMixin):
             id=f"proc_{uuid.uuid4().hex[:12]}", command=command, task_id=task_id,
             owner_task_id=owner_task_id, session_key=session_key, cwd=cwd,
             parent_session_id=get_session_env("HERMES_SESSION_ID", ""),
+            receipt_home=str(get_hermes_home()),
             started_at=time.time(), **extra)
 
     @staticmethod
@@ -1279,6 +1288,9 @@ class ProcessRegistry(ProcessCheckpointMixin):
             errors="replace", stdout=subprocess.DEVNULL if session.output_log_path else subprocess.PIPE,
             stderr=subprocess.DEVNULL if session.output_log_path else subprocess.STDOUT, stdin=subprocess.DEVNULL,
             start_new_session=True, **_popen_kwargs)
+        if not _IS_WINDOWS:
+            with suppress(ProcessLookupError):
+                proc._hermes_pgid = os.getpgid(proc.pid)
         session.process = proc
         session.pid = proc.pid
         session.host_start_time = self._safe_host_start_time(session.pid)
@@ -1304,9 +1316,8 @@ class ProcessRegistry(ProcessCheckpointMixin):
                 self._terminate_host_pid(proc.pid, session.host_start_time)
             elif not _IS_WINDOWS:
                 try:
-                    kill_signal = getattr(signal, "SIGKILL", signal.SIGTERM)
-                    os.killpg(os.getpgid(proc.pid), kill_signal)  # windows-footgun: ok - guarded by _IS_WINDOWS above
-                except (ProcessLookupError, PermissionError, OSError):
+                    _kill_process_group_posix(proc)
+                except Exception:
                     proc.kill()
             else:
                 proc.kill()
@@ -2274,24 +2285,62 @@ class ProcessRegistry(ProcessCheckpointMixin):
                     "process_running": True}
             # Capture output, mark consumed, THEN expose ``exited`` to watcher tasks —
             # closes the delayed-notification race without losing the transcript.
+            from tools.process_registry_results import (
+                _load_existing_receipt_record,
+                _record_is_concrete_natural_exit,
+            )
             with session._lock:
                 output = _completion_output(session)
                 if consume_output:
                     self._completion_consumed.add(session_id)
+                natural_snapshot = None
+                if (
+                    session.completion_reason == "exited"
+                    and session.exit_code is not None
+                ):
+                    natural_snapshot = (
+                        session.exit_code,
+                        session.completion_reason,
+                        session.termination_source or "",
+                    )
+                existing_receipt = _load_existing_receipt_record(session)
+                disk_natural = bool(
+                    existing_receipt and _record_is_concrete_natural_exit(existing_receipt)
+                )
                 session.exited = True
                 session.exit_code = -15  # SIGTERM
                 session.completion_reason = "killed"
                 session.termination_source = source
+                # late_kill_* only when a concrete natural exit already exists
+                # (in-memory and/or on disk); a first-time kill is not "late".
+                if natural_snapshot is not None or disk_natural:
+                    session.late_kill_requested_at = time.time()
+                    session.late_kill_source = source
+                else:
+                    session.late_kill_requested_at = None
+                    session.late_kill_source = ""
             # The reader thread can finalise the session while the signal path
-            # blocks in the SIGKILL grace window: its ``save_completed_result``
-            # then persists this kill as a plain ``exited``. Re-write the receipt
-            # so the durable record matches what the caller was told.
-            if not self._move_to_finished(session):
+            # blocks in the SIGKILL grace window. A concrete natural exit on the
+            # receipt must survive; record this kill separately (late_kill_*).
+            moved = self._move_to_finished(session)
+            if natural_snapshot is not None:
+                with session._lock:
+                    session.exit_code = natural_snapshot[0]
+                    session.completion_reason = natural_snapshot[1]
+                    session.termination_source = natural_snapshot[2]
+                # Re-save after restore: the first _move_to_finished write may have
+                # raced before any on-disk natural receipt existed for preserve.
+                save_completed_result(session)
+            elif not moved:
                 save_completed_result(session)
             self._write_checkpoint()
             return {
-                "status": "killed", "session_id": session.id, "completion_reason": session.completion_reason,
-                "termination_source": session.termination_source, **output}
+                "status": "killed",
+                "session_id": session.id,
+                "completion_reason": "killed",
+                "termination_source": source,
+                **output,
+            }
         except Exception as e:
             return {"status": "error", "error": str(e)}
 
@@ -2304,7 +2353,7 @@ class ProcessRegistry(ProcessCheckpointMixin):
                 session._pty.terminate(force=True)
             except Exception:
                 if session.pid:
-                    os.kill(session.pid, signal.SIGTERM)
+                    self._terminate_host_pid(session.pid, session.host_start_time)
         elif session.process:
             # Tree kill: on Windows Popen.terminate() only kills the shell wrapper and
             # leaves Git Bash descendants behind.

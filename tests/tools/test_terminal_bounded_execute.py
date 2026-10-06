@@ -8,6 +8,7 @@ survives a wedged wait, and ``on_timeout`` kills the process tree.
 
 from __future__ import annotations
 
+import os
 import time
 from types import SimpleNamespace
 
@@ -20,8 +21,9 @@ def test_execute_returns_when_wait_loop_never_returns(monkeypatch):
     monkeypatch.setattr(base_mod, "_EXECUTE_WAIT_BOUND_GRACE_S", 0.05)
 
     env = LocalEnvironment()
-    fake_proc = SimpleNamespace(pid=424242)
+    fake_proc = SimpleNamespace(pid=424242, poll=lambda: None)
     monkeypatch.setattr(env, "_run_bash", lambda *a, **k: fake_proc)
+    monkeypatch.setattr(os, "kill", lambda pid, sig: None)
 
     def _hang(*_a, **_k):
         time.sleep(30)
@@ -45,6 +47,20 @@ def test_execute_returns_when_wait_loop_never_returns(monkeypatch):
     assert "timed out" in result["output"].lower()
     assert ("kill", fake_proc) in killed
     assert ("tree", 424242) in killed
+
+
+def test_kill_spawned_tree_skips_kill_process_tree_when_child_already_reaped(monkeypatch):
+    """Backstop must not signal a PID that _kill_process already reaped (#107029 class)."""
+    env = LocalEnvironment()
+    dead_proc = SimpleNamespace(pid=424242, poll=lambda: 0)
+    tree_calls: list[int] = []
+    monkeypatch.setattr(env, "_kill_process", lambda _proc: None)
+    monkeypatch.setattr(
+        "agent.deadline.kill_process_tree",
+        lambda pid, **_k: tree_calls.append(pid) or True,
+    )
+    env._kill_spawned_tree(dead_proc)
+    assert tree_calls == []
 
 
 def test_execute_parent_interrupt_still_kills_wait_on_deadline_worker(monkeypatch):

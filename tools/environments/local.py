@@ -792,6 +792,14 @@ def _sweep_escaped_descendants(descendants: list, pgid: int) -> None:
             continue
 
 
+def _cached_hermes_pgid(proc) -> int | None:
+    """Return a stamped process-group id only when it is a positive int (never MagicMock)."""
+    cached = getattr(proc, "_hermes_pgid", None)
+    if isinstance(cached, int) and cached > 0:
+        return cached
+    return None
+
+
 def _kill_process_group_posix(proc) -> None:
     """TERM the group, wait, KILL, then sweep setsid escapees. Descendants are
     snapshotted BEFORE the first signal — once the wrapper dies they reparent to
@@ -800,7 +808,7 @@ def _kill_process_group_posix(proc) -> None:
     try:
         pgid = os.getpgid(proc.pid)
     except ProcessLookupError:
-        if (pgid := getattr(proc, "_hermes_pgid", None)) is None:
+        if (pgid := _cached_hermes_pgid(proc)) is None:
             raise
     try:  # psutil children snapshot; empty on any failure (must never break the kill)
         import psutil

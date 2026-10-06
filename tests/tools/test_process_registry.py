@@ -1390,13 +1390,13 @@ class TestKillProcess:
             registry._running.pop(s.id, None)
 
     def test_kill_receipt_rewritten_when_reader_finalises_first(self, registry):
-        """A kill racing the reader thread must not persist as a plain exit.
+        """A kill racing the reader thread must not erase a concrete natural exit.
 
         The signal path blocks for the SIGKILL grace window, during which the
         reader thread can observe the exit and finalise the session first. The
         durable receipt from that first save says ``exited``; the kill result
-        returned to the caller says ``killed``. The second save must rewrite
-        the receipt so the persisted record matches what the caller was told.
+        returned to the caller still says ``killed``. The second save must keep
+        the natural exit fields and record the late kill separately.
         """
         s = _make_session(sid="proc_kill_race", command="sleep 999")
         s.pid = 424243
@@ -1435,8 +1435,10 @@ class TestKillProcess:
             assert result["termination_source"] == "process.kill"
             # First save: the reader won the race and persisted a plain exit.
             assert saved[0] == ("exited", "", 0)
-            # Second save: the receipt rewritten with the kill outcome.
-            assert saved[-1] == ("killed", "process.kill", -15)
+            # Second save: natural exit preserved; late kill recorded on the session.
+            assert saved[-1] == ("exited", "", 0)
+            assert s.late_kill_source == "process.kill"
+            assert s.late_kill_requested_at is not None
         finally:
             registry._running.pop(s.id, None)
             registry._finished.pop(s.id, None)
