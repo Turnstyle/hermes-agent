@@ -100,6 +100,166 @@ def test_kanban_edit_updates_documented_task_fields(kanban_home):
     assert any(event.kind == "reprioritized" for event in events)
 
 
+@pytest.mark.parametrize("status", ["todo", "triage", "missing", "done", "archived"])
+@pytest.mark.parametrize("result", ["work finished", None])
+def test_complete_refusal_names_task_status(kanban_home, capsys, status, result):
+    with kbc.connect_closing() as conn:
+        if status == "todo":
+            parent_id = kb.create_task(conn, title="parent")
+            task_id = kb.create_task(conn, title="waiting child", parents=(parent_id,))
+            # A removed dependency can leave the card in todo until it is promoted.
+            conn.execute("DELETE FROM task_links WHERE child_id = ?", (task_id,))
+            conn.commit()
+        elif status == "missing":
+            task_id = "t_ffffffff"
+        else:
+            task_id = kb.create_task(conn, title=status, triage=status == "triage")
+            if status in {"done", "archived"}:
+                assert kb.complete_task(conn, task_id, result="already finished")
+                if status == "archived":
+                    assert kb.archive_task(conn, task_id)
+        row = conn.execute("SELECT * FROM tasks WHERE id = ?", (task_id,)).fetchone()
+        before = dict(row) if row else None
+
+    rc = kc._cmd_complete(argparse.Namespace(
+        task_ids=[task_id], result=result, summary=None, metadata=None, force=False,
+    ))
+    output = capsys.readouterr()
+
+    assert rc != 0
+    expected = (
+        f"cannot complete {task_id}: card is {status}; promote it to ready first "
+        f"(hermes kanban promote {task_id})"
+        if status in {"todo", "triage"} else
+        f"cannot complete {task_id}: unknown id" if status == "missing" else
+        f"cannot complete {task_id}: already {status}"
+    )
+    assert expected in output.err
+    with kbc.connect_closing() as conn:
+        after_row = conn.execute("SELECT * FROM tasks WHERE id = ?", (task_id,)).fetchone()
+    assert (dict(after_row) if after_row else None) == before
+
+
+@pytest.mark.parametrize("status", ["todo", "triage"])
+def test_complete_waiting_card_names_open_parents(kanban_home, capsys, status):
+    with kbc.connect_closing() as conn:
+        parent = kb.create_task(conn, title="open parent")
+        other_parent = kb.create_task(conn, title="blocked parent", initial_status="blocked")
+        task_id = kb.create_task(
+            conn, title="waiting child", parents=(parent, other_parent),
+            triage=status == "triage",
+        )
+        assert kb.get_task(conn, task_id).status == status
+        blockers = kb.unsatisfied_parents(conn, task_id)
+
+    rc = kc._cmd_complete(argparse.Namespace(
+        task_ids=[task_id], result="finished", summary=None, metadata=None, force=False,
+    ))
+    output = capsys.readouterr().err
+
+    detail = ", ".join(f"{pid} ({parent_status})" for pid, parent_status in blockers)
+    assert rc == 1
+    assert output.strip() == (
+        f"cannot complete {task_id}: card is {status} and has unsatisfied parent dependencies: "
+        f"{detail}; complete the parents first, or `hermes kanban unlink <parent> {task_id}`."
+    )
+    assert "promote it to ready first" not in output
+
+
+def test_complete_todo_without_parent_suggests_promotion(kanban_home, capsys):
+    with kbc.connect_closing() as conn:
+        parent = kb.create_task(conn, title="former parent")
+        task_id = kb.create_task(conn, title="todo child", parents=(parent,))
+        # Keep the status after removing the dependency, as a stale todo can remain.
+        conn.execute("DELETE FROM task_links WHERE child_id = ?", (task_id,))
+        conn.commit()
+        assert kb.get_task(conn, task_id).status == "todo"
+        assert kb.unsatisfied_parents(conn, task_id) == []
+
+    rc = kc._cmd_complete(argparse.Namespace(
+        task_ids=[task_id], result="finished", summary=None, metadata=None, force=False,
+    ))
+    assert rc == 1
+    assert capsys.readouterr().err.strip() == (
+        f"cannot complete {task_id}: card is todo; promote it to ready first "
+        f"(hermes kanban promote {task_id})"
+    )
+
+
+def test_complete_done_with_open_parent_stays_already_done(kanban_home, capsys):
+    with kbc.connect_closing() as conn:
+        task_id = kb.create_task(conn, title="completed child")
+        assert kb.complete_task(conn, task_id, result="finished")
+        parent = kb.create_task(conn, title="open parent")
+        kb.link_tasks(conn, parent, task_id)
+        assert kb.unsatisfied_parents(conn, task_id) == [(parent, "ready")]
+
+    rc = kc._cmd_complete(argparse.Namespace(
+        task_ids=[task_id], result="finished", summary=None, metadata=None, force=False,
+    ))
+    assert rc == 1
+    assert capsys.readouterr().err.strip() == f"cannot complete {task_id}: already done"
+
+
+def test_complete_ready_with_open_parent_keeps_existing_text(kanban_home, capsys):
+    with kbc.connect_closing() as conn:
+        parent = kb.create_task(conn, title="parent")
+        assert kb.complete_task(conn, parent, result="finished")
+        task_id = kb.create_task(conn, title="ready child", parents=(parent,))
+        # A parent can reopen after a child was made ready.
+        conn.execute(
+            "UPDATE tasks SET status = 'ready', completed_at = NULL WHERE id = ?", (parent,)
+        )
+        conn.commit()
+        assert kb.get_task(conn, task_id).status == "ready"
+
+    rc = kc._cmd_complete(argparse.Namespace(
+        task_ids=[task_id], result="finished", summary=None, metadata=None, force=False,
+    ))
+    assert rc == 1
+    assert capsys.readouterr().err.strip() == (
+        f"cannot complete {task_id}: unsatisfied parent dependencies: {parent} (ready); "
+        f"complete the parents first, or `hermes kanban unlink <parent> {task_id}`."
+    )
+
+
+def test_bulk_complete_waiting_and_missing_have_separate_messages(kanban_home, capsys):
+    with kbc.connect_closing() as conn:
+        parent = kb.create_task(conn, title="open parent")
+        task_id = kb.create_task(conn, title="waiting child", parents=(parent,))
+    missing_id = "t_ffffffff"
+
+    rc = kc._cmd_complete(argparse.Namespace(
+        task_ids=[task_id, missing_id], result="finished", summary=None,
+        metadata=None, force=False,
+    ))
+    lines = capsys.readouterr().err.splitlines()
+
+    assert rc == 1
+    assert lines == [
+        f"cannot complete {task_id}: card is todo and has unsatisfied parent dependencies: "
+        f"{parent} (ready); complete the parents first, or "
+        f"`hermes kanban unlink <parent> {task_id}`.",
+        f"cannot complete {missing_id}: unknown id",
+    ]
+
+
+def test_ready_complete_path_unchanged(kanban_home, capsys):
+    with kbc.connect_closing() as conn:
+        task_id = kb.create_task(conn, title="ready card")
+        assert kb.get_task(conn, task_id).status == "ready"
+
+    rc = kc._cmd_complete(argparse.Namespace(
+        task_ids=[task_id], result="finished", summary=None, metadata=None, force=False,
+    ))
+
+    assert rc == 0
+    assert f"Completed {task_id}" in capsys.readouterr().out
+    with kbc.connect_closing() as conn:
+        task = kb.get_task(conn, task_id)
+    assert (task.status, task.result) == ("done", "finished")
+
+
 def test_worker_link_preserves_foreign_child_rules(kanban_home, monkeypatch):
     with kbc.connect_closing() as conn:
         worker = kb.create_task(conn, title="worker")
@@ -239,5 +399,3 @@ def test_run_slash_reclaim_running_task(kanban_home):
 # ---------------------------------------------------------------------------
 # /kanban help / no-args / unknown-action UX (issue #21794)
 # ---------------------------------------------------------------------------
-
-
