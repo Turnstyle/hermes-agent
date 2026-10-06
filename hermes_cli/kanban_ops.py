@@ -257,20 +257,19 @@ def _cmd_daemon(args: argparse.Namespace) -> int:
     HEALTH_WINDOW = 6  # ticks (default 30s at interval=5)
     health_state = {"bad_ticks": 0, "last_warn_at": 0}
 
-    def _ready_queue_nonempty() -> bool:
-        """Is there a ready+assigned+unclaimed task the dispatcher would spawn for?
+    def _ready_queue_spawnable_count() -> int:
+        """Count unclaimed ready tasks whose assignee has dispatch enabled.
         Control-plane lanes pulled via ``claim_task`` are correctly idle, not stuck."""
         try:
             with kbc.connect_closing() as conn:
-                return kbd.has_spawnable_ready(conn)
+                return kbd.count_spawnable_ready(conn)
         except Exception:
-            return False
+            return 0
 
     def _on_tick(res):
-        ready_pending = _ready_queue_nonempty()
-        held = kbd.describe_suppression([res])
-        can_dispatch = ready_pending and not held
-        if can_dispatch and not res.spawned:
+        ready_spawnable = _ready_queue_spawnable_count()
+        stalled = kbd.eligible_work_stalled([res], ready_spawnable)
+        if stalled:
             health_state["bad_ticks"] += 1
         else:
             health_state["bad_ticks"] = 0
