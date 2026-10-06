@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import hashlib
-import importlib
+import contextlib
 import json
 import logging
 import os
@@ -278,9 +278,11 @@ class _SupermemoryClient:
     def __init__(self, api_key: str, timeout: float, container_tag: str,
                  search_mode: str = "hybrid", base_url: str = "", tunnel: Optional[Dict[str, str]] = None,
                  socket_pin: Optional[Tuple[int, int]] = None):
-        # Lazy-install the SDK on demand (honors security.allow_lazy_installs and sealed Docker
-        # venvs). On failure fall through so the raw import produces the canonical ImportError.
-        _quietly(lambda: importlib.import_module("tools.lazy_deps").ensure("memory.supermemory", prompt=False))
+        # Make the pinned extra importable; on failure fall through so the raw
+        # import below produces the canonical ImportError message.
+        with contextlib.suppress(Exception):
+            from pm import ensure_import as _lazy_ensure
+            _lazy_ensure("supermemory")
         from supermemory import Supermemory
         self._api_key, self._container_tag, self._timeout = api_key, container_tag, timeout
         self._search_mode = search_mode if search_mode in _VALID_SEARCH_MODES else "hybrid"

@@ -91,10 +91,15 @@ class FakeTunnel:
 @pytest.fixture
 def sock_dir():
     # Short and canonical: sun_path holds 104 bytes on macOS, and the socket path may not pass through a symlink.
-    path = os.path.realpath(tempfile.mkdtemp(prefix="smt-", dir="/tmp"))
+    path = os.path.realpath(tempfile.mkdtemp(prefix="smt-", dir=tempfile.gettempdir()))
     os.chmod(path, 0o700)
-    yield path
-    shutil.rmtree(path, ignore_errors=True)
+    try:
+        reason, _ = helper.check_socket(os.path.join(path, "probe.sock"), os.getuid())
+        if reason == "socket_dir_unsafe":
+            pytest.skip("socket integration requires trusted ancestors of TMPDIR")
+        yield path
+    finally:
+        shutil.rmtree(path, ignore_errors=True)
 
 
 @pytest.fixture
@@ -140,8 +145,7 @@ def tcp_listener():
 
 @pytest.fixture
 def env(monkeypatch, tmp_path):
-    import tools.lazy_deps as lazy_deps
-    monkeypatch.setattr(lazy_deps, "ensure", lambda *a, **k: None)  # the SDK is installed; never install in a test
+    monkeypatch.setattr("pm.ensure_import", lambda *a, **k: None)
     monkeypatch.setenv("HERMES_HOME", str(tmp_path))
     for name in [n for n in os.environ if n.startswith("SUPERMEMORY_") or n.lower().endswith("_proxy")]:
         monkeypatch.delenv(name)
@@ -310,7 +314,7 @@ def test_unsafe_socket_or_directory_is_refused_before_any_request(env, sock_dir,
 
 def test_symlinked_socket_directory_is_refused(env, sock_dir, tunnels, tmp_path):
     tunnel = tunnels(f"{sock_dir}/rosie.sock:127.0.0.1:6768")
-    link = Path(tempfile.mkdtemp(prefix="sml-", dir="/tmp"))
+    link = Path(tempfile.mkdtemp(prefix="sml-", dir=tempfile.gettempdir()))
     try:
         (link / "d").symlink_to(sock_dir)
         p = _provider(env, _tunnel_config(f"{os.path.realpath(link)}/d/rosie.sock:127.0.0.1:6768"))

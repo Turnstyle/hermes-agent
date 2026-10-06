@@ -311,10 +311,15 @@ def test_tunnel_argv_rejected(argv):
 @pytest.fixture
 def sock_dir():
     # Short and canonical: sun_path holds 104 bytes on macOS, and the socket path may not pass through a symlink.
-    path = os.path.realpath(tempfile.mkdtemp(prefix="smh-", dir="/tmp"))
+    path = os.path.realpath(tempfile.mkdtemp(prefix="smh-", dir=tempfile.gettempdir()))
     os.chmod(path, 0o700)
-    yield path
-    shutil.rmtree(path, ignore_errors=True)
+    try:
+        reason, _ = helper.check_socket(os.path.join(path, "probe.sock"), os.getuid())
+        if reason == "socket_dir_unsafe":
+            pytest.skip("socket integration requires trusted ancestors of TMPDIR")
+        yield path
+    finally:
+        shutil.rmtree(path, ignore_errors=True)
 
 
 def _bound_socket(path: str, mode: int = 0o600) -> socket.socket:

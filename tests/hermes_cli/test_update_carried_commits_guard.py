@@ -92,12 +92,13 @@ def update_tree(tmp_path, monkeypatch):
 
     requests = []
 
-    def hand_off(args, **kwargs):
-        requests.append(kwargs)
+    def complete(request):
+        requests.append(request)
+        return {"exit_code": 0, "receipt": None}
 
-    monkeypatch.setattr(update_cmd, "_hand_off_post_swap", hand_off)
+    monkeypatch.setattr(update_cmd, "run_completion", complete)
     args = SimpleNamespace(branch=None, yes=True, force=True, force_venv=True, check=False, plan=False,
-                           gateway=False, keep_stash=False)
+                           gateway=False, keep_stash=False, channel='main', install_id=False, set_channel=None)
     return SimpleNamespace(origin=origin, clone=clone, base=base, wanted=wanted, newer=newer,
                            args=args, resumed=resumed, requests=requests)
 
@@ -116,6 +117,27 @@ def _carry(t, count=2, *, lockfile=False):
         _commit(t.clone, f"carried-{n}.txt", f"carried {n}\n")
     if lockfile:
         _commit(t.clone, "package-lock.json", '{"lockfileVersion": 3}\n', "carry a lockfile")
+
+
+@pytest.mark.parametrize('detached', [False, True])
+@pytest.mark.parametrize('release', ['base', 'newer'])
+def test_release_checkout_preserves_carried_head_and_dirty_files(update_tree, detached, release):
+    t = update_tree
+    _carry(t)
+    git(t.clone, 'fetch', '-q', 'origin')
+    if detached:
+        git(t.clone, 'checkout', '-q', '--detach')
+    (t.clone / 'content.txt').write_text('uncommitted work\n', encoding='utf-8')
+    before = _state(t)
+    with pytest.raises(SystemExit) as refused:
+        update_cmd._prepare_checkout_for_update(
+            ['git'], 'main', 'HEAD' if detached else 'main',
+            is_fork=False, assume_yes=True, gateway_mode=False, gw_input_fn=None,
+            switch_branch=False, target_ref=getattr(t, release), _windows_gateway_resume=None,
+        )
+    assert refused.value.code == 1
+    assert _state(t) == before
+    assert (t.clone / 'carried-1.txt').read_text() == 'carried 1\n'
 
 
 def _hand_off(t, monkeypatch):

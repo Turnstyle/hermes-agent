@@ -379,6 +379,7 @@ def test_deliver_into_a_busy_open_bot_chat_flags_reply_not_relayed_and_keeps_the
         assert elapsed < 5.0  # bounded by the (tiny, monkeypatched) budget, not the real 1200s default
         (queued,) = [
             r for p in (ops_home / "runtime" / mailbox.DELIVERY_DIR_NAME).glob("*.json")
+            if not p.name.endswith(mailbox.MAILBOX_META_SUFFIX)
             if (r := json.loads(p.read_text(encoding="utf-8")))]
         assert queued["status"] == "queued" and queued["message"] == "ping"
         assert queued["owner"]["lease_id"] == lease.lease_id
@@ -445,6 +446,9 @@ def test_deliver_live_owner_wait_budget_matches_the_cli_paths_worst_case(home, m
     monkeypatch.setattr(bot_relay, "TURN_MAX_ATTEMPTS", 2)
     monkeypatch.setattr("tools.bot_mode_dm._LIVE_WAIT_SECONDS", 0.05)  # RED-run safety: pre-fix code still reads this
 
+    from types import SimpleNamespace
+    ticks = iter((100.0, 101.0))
+    monkeypatch.setattr(srv, "time", SimpleNamespace(**{**vars(time), "monotonic": lambda: next(ticks, 101.0)}))
     captured = {}
     real_await_delivery = live.await_delivery
 
@@ -460,9 +464,8 @@ def test_deliver_live_owner_wait_budget_matches_the_cli_paths_worst_case(home, m
     finally:
         lease.release()
 
-    # TURN_ATTEMPT_TIMEOUT_SECONDS(3.0) * TURN_MAX_ATTEMPTS(2) = 6.0, minus negligible handler
-    # overhead before this call.
-    assert 5.9 < captured["timeout"] <= 6.0
+    # Six seconds total, less one second already spent in the handler.
+    assert captured["timeout"] == 5.0
 
 
 _REFUSAL_STDERR = "hermes-refusal-reason: SESSION_NOT_OWNED\nCe chat est occupé.\n"

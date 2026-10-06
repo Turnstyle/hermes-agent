@@ -110,16 +110,17 @@ def _print_carried_commits_refusal(
 
 def _refuse_update_over_carried_commits(
     git_cmd: list[str], branch: str, target_ref: str, *, windows_gateway_resume,
+    release_checkout: bool = False,
 ) -> None:
     """``sys.exit(1)`` before anything moves when landing on local *branch* would reset it to
     *target_ref* and drop commits carried on it, or ones Git cannot rule out. Only a readable
     ``updates.carried_commits_policy: reset`` lets the update proceed to that reset."""
     from hermes_cli.update_cmd import _m, _record_update_skip
     cwd = _m().PROJECT_ROOT
-    branch_ref = f"refs/heads/{branch}"
+    branch_ref = "HEAD" if release_checkout and branch == "HEAD" else f"refs/heads/{branch}"
     if _git(git_cmd, cwd, "rev-parse", "--verify", "--quiet", branch_ref).returncode == 1:
         return  # no local branch yet: the checkout creates it from the target
-    if _git(git_cmd, cwd, "merge-base", "--is-ancestor", target_ref, branch_ref).returncode == 0:
+    if not release_checkout and _git(git_cmd, cwd, "merge-base", "--is-ancestor", target_ref, branch_ref).returncode == 0:
         return  # the target adds nothing, so the update never moves the branch
     policy = _carried_commits_policy()
     if policy == "reset":
