@@ -276,6 +276,15 @@ class DispatchResult:
     """``(task_id, "claim: <fence message>")`` for each ready/review row whose
     CLAIM write a lifecycle-guard trigger refused this tick. The row stayed
     unclaimed and is not counted in ``spawned``; later rows still ran."""
+    foreign_claim_errors: list[tuple[str, str]] = field(default_factory=list)
+    """``(task_id, "claim: <fence message>")`` subset of ``claim_errors`` where
+    the task is a foreign Fleet mirror."""
+    eligible_claim_errors: list[tuple[str, str]] = field(default_factory=list)
+    """``(task_id, "claim: <fence message>")`` subset of ``claim_errors`` where
+    the task is node-owned and dispatch-enabled on this node."""
+    spawn_errors: list[tuple[str, str]] = field(default_factory=list)
+    """``(task_id, str(exc))`` for each eligible card whose worker spawn failed
+    with an exception this tick."""
     reaped_terminal_workers: list[str] = field(default_factory=list)
     """Task ids whose worker outlived its closed run and was terminated by
     :func:`reap_terminal_workers`."""
@@ -405,23 +414,39 @@ def eligible_work_stalled(
         if res is not None and isinstance(res, DispatchResult):
             res_list.append(res)
 
-    # 1. Explicit claim/lease refusal or auto-blocked failure on eligible cards.
-    # An explicit failure must NEVER be masked by worker spawns on other cards,
-    # capacity holds on other boards, or the card being removed to blocked status.
-    has_claim_or_spawn_errors = any(
-        bool(getattr(r, "claim_errors", None)) or bool(getattr(r, "auto_blocked", None))
+    # 1. Explicit auto-blocked failure or spawn exception on eligible cards.
+    # An explicit spawn failure or auto-block must NEVER be masked by worker spawns
+    # on other cards, capacity holds on other boards, or the card being removed to blocked status.
+    has_spawn_or_blocked_errors = any(
+        bool(getattr(r, "auto_blocked", None)) or bool(getattr(r, "spawn_errors", None))
         for r in res_list
     )
-    if has_claim_or_spawn_errors:
+    if has_spawn_or_blocked_errors:
         return True
 
+    # 2. If there are no eligible ready cards on this node, the dispatcher cannot be stalled.
+    # Foreign Fleet mirrors or placeholder cards may produce expected claim refusals,
+    # but they do not represent eligible work for this node.
     if ready_spawnable <= 0:
         return False
+
+    # 3. Explicit claim/lease refusal on node-owned, dispatch-enabled cards.
+    # Must never be masked by spawns on other cards or capacity holds on other boards.
+    def _has_eligible_claim_errors(r: Any) -> bool:
+        if getattr(r, "eligible_claim_errors", None):
+            return True
+        if getattr(r, "foreign_claim_errors", None):
+            foreign_ids = {tid for tid, _ in r.foreign_claim_errors}
+            return any(tid not in foreign_ids for tid, _ in (getattr(r, "claim_errors", None) or []))
+        return bool(getattr(r, "claim_errors", None))
+
+    if any(_has_eligible_claim_errors(r) for r in res_list):
+        return True
 
     if not res_list:
         return True
 
-    # 2. If any worker spawned this tick and no cards explicitly failed, the dispatcher made progress.
+    # 4. If any worker spawned this tick and no eligible cards explicitly failed, the dispatcher made progress.
     if any(bool(r.spawned) for r in res_list):
         return False
 
@@ -3339,6 +3364,11 @@ def _dispatch_lane_task(
         # lane (and later phases) still run this tick. Anything else aborts.
         if not _isolate_fenced_row(result.claim_errors, "claim", task_id, exc):
             raise
+        installed_node = _kb._fleet_adapter_installed_node_id(conn)
+        if _kb._is_foreign_fleet_mirror(conn, task_id, installed_node):
+            result.foreign_claim_errors.append((task_id, f"claim: {exc}"))
+        else:
+            result.eligible_claim_errors.append((task_id, f"claim: {exc}"))
         return False
     if claimed is None:
         return False
@@ -3354,6 +3384,7 @@ def _dispatch_lane_task(
             outcome="spawn_failed", failure_limit=failure_limit, release_claim=True, end_run=True,
         ):
             result.auto_blocked.append(claimed.id)
+        result.spawn_errors.append((claimed.id, f"workspace: {exc}"))
         return False
     _kbw.set_workspace_path(conn, claimed.id, str(workspace))
     if claimed.workspace_kind == "worktree":
@@ -3389,6 +3420,7 @@ def _dispatch_lane_task(
             infrastructure=infrastructure,
         ):
             result.auto_blocked.append(claimed.id)
+        result.spawn_errors.append((claimed.id, str(exc)))
         return False
 
 
