@@ -16,6 +16,12 @@ from tools.environments import local_pythonpath as pp
 from tools.environments.local_env_policy import _HERMES_PROVIDER_ENV_BLOCKLIST
 
 
+@pytest.fixture(autouse=True)
+def _isolate_source_launcher_lookup(tmp_path, monkeypatch):
+    """Keep the checkout's launcher out of tests that specify their own PATH."""
+    monkeypatch.setattr(local, "_hermes_repo_root", tmp_path)
+
+
 def _running_venv_site_packages() -> Path:
     """Independently construct the host-native venv site-packages path."""
     if sys.platform == "win32":
