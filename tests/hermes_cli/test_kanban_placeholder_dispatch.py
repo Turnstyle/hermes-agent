@@ -810,6 +810,266 @@ async def test_gateway_watcher_spawn_exception_below_breaker_limit_pages(kanban_
     assert "kanban dispatcher stuck: ready queue non-empty for 6 consecutive ticks but eligible tasks failing despite active spawns." in caplog.text
 
 
+def test_dispatch_once_real_lease_fence_on_blocked_sync_pending_is_held(kanban_home_with_profiles):
+    """Real dispatch_once route: a genuine SQLite lifecycle-fence refusal on a
+    canonical-blocked/sync-pending, node-owned card lands in held_claim_errors,
+    not eligible_claim_errors — through the actual ``claim`` call in
+    ``_dispatch_lane_task``, not a fabricated DispatchResult or exception.
+
+    Unlike test_claim_fence_on_blocked_sync_pending_card_is_hold (which only
+    exercises the ``_is_canonical_blocked_sync_pending`` helper lookup), this
+    drives the real fence: dispatch_once -> claim_task -> an installed trigger
+    raises the adapter's own RAISE(ABORT, ...) message, caught by
+    ``_isolate_fenced_row`` and classified by the real dispatcher code.
+    """
+    with kbc.connect() as conn:
+        tid_held = kb.create_task(conn, title="lease-held task", assignee="sage")
+
+        # Fleet mirror row: canonical blocked, sync still pending — the local
+        # row is ready only because the unblock has not synced yet.
+        conn.execute(
+            "CREATE TABLE IF NOT EXISTS fleet_kanban_issue_map ("
+            "local_task_id TEXT PRIMARY KEY, canonical_status TEXT, sync_state TEXT)"
+        )
+        conn.execute(
+            "INSERT INTO fleet_kanban_issue_map VALUES (?, ?, ?)",
+            (tid_held, "blocked", "pending"),
+        )
+
+        # Real SQLite trigger reproducing the adapter's own verified-execution-
+        # lease fence: BEFORE UPDATE OF status to 'running' raises the exact
+        # allowlisted RAISE(ABORT, ...) message _is_known_lifecycle_fence matches.
+        conn.execute(f"""
+            CREATE TRIGGER test_lease_fence_held BEFORE UPDATE OF status ON tasks
+            WHEN NEW.id = '{tid_held}' AND NEW.status = 'running'
+            BEGIN
+                SELECT RAISE(ABORT, 'verified execution lease required before running');
+            END;
+        """)
+        conn.commit()
+
+        assert kbd.has_spawnable_ready(conn) is True
+        ready_spawnable = kbd.count_spawnable_ready(conn)
+        assert ready_spawnable == 1
+
+        res = kbd.dispatch_once(conn, spawn_fn=_fake_spawn, dry_run=False)
+
+    # Target card classified as held, not eligible; nothing spawned/claimed.
+    assert [tid for tid, _ in res.held_claim_errors] == [tid_held]
+    assert res.eligible_claim_errors == []
+    assert res.spawned == []
+    # Task row itself was left unchanged by the aborted write (still ready/unclaimed).
+    with kbc.connect() as conn:
+        row = conn.execute("SELECT status, claim_lock FROM tasks WHERE id = ?", (tid_held,)).fetchone()
+    assert row["status"] == "ready"
+    assert row["claim_lock"] is None
+
+    # describe_suppression surfaces the hold as lease_held, not a generic failure bucket.
+    assert kbd.describe_suppression([res]) == "lease_held=1"
+
+    # Paging predicate: a lease-held card alone, with ready_spawnable fully
+    # accounted for by the hold, must NOT look like dispatcher stall.
+    assert kbd.eligible_work_stalled([res], ready_spawnable) is False
+
+
+def test_dispatch_once_real_lease_fence_non_held_card_still_eligible(kanban_home_with_profiles):
+    """Negative control: the same real fence on a card that is NOT
+    canonical-blocked/sync-pending must still be classified eligible, not held,
+    and must still count as a genuine stall.
+    """
+    with kbc.connect() as conn:
+        tid_bad = kb.create_task(conn, title="genuinely refused task", assignee="sage")
+
+        # Fleet mirror row present but canonical status is NOT 'blocked' /
+        # sync is NOT 'pending' — the refusal is a real dispatcher failure.
+        conn.execute(
+            "CREATE TABLE IF NOT EXISTS fleet_kanban_issue_map ("
+            "local_task_id TEXT PRIMARY KEY, canonical_status TEXT, sync_state TEXT)"
+        )
+        conn.execute(
+            "INSERT INTO fleet_kanban_issue_map VALUES (?, ?, ?)",
+            (tid_bad, "ready", "synced"),
+        )
+
+        conn.execute(f"""
+            CREATE TRIGGER test_lease_fence_bad BEFORE UPDATE OF status ON tasks
+            WHEN NEW.id = '{tid_bad}' AND NEW.status = 'running'
+            BEGIN
+                SELECT RAISE(ABORT, 'verified execution lease required before running');
+            END;
+        """)
+        conn.commit()
+
+        ready_spawnable = kbd.count_spawnable_ready(conn)
+        assert ready_spawnable == 1
+
+        res = kbd.dispatch_once(conn, spawn_fn=_fake_spawn, dry_run=False)
+
+    assert res.held_claim_errors == []
+    assert [tid for tid, _ in res.eligible_claim_errors] == [tid_bad]
+    assert res.spawned == []
+
+    # Real dispatcher failure on an eligible card must still register as a stall.
+    assert kbd.eligible_work_stalled([res], ready_spawnable) is True
+
+
+@pytest.mark.asyncio
+async def test_gateway_watcher_spawn_resets_bad_ticks_then_true_stall_still_alarms(
+    kanban_home_with_profiles, monkeypatch, caplog,
+):
+    """Gateway watcher: a successful spawn tick must reset bad_ticks to 0 even
+    while a lease-held card is present, and a later run of genuine stall ticks
+    (post-reset) must still reach the alarm threshold and page.
+
+    Drives the real ``_kanban_dispatcher_watcher`` loop (GatewayKanbanWatchersMixin)
+    across three phases using a fake dispatcher (never a real spawned child
+    process, consistent with the suite's existing spawn/claim-error watcher
+    tests): (1) genuine stall ticks to build up bad_ticks, (2) one successful
+    spawn tick alongside a held card to prove the counter clears, (3) a fresh
+    run of genuine stall ticks proving the watcher still alarms afterward.
+    """
+    import asyncio
+    import logging
+    import re
+    from gateway import kanban_watchers as kw
+    from gateway.kanban_watchers import GatewayKanbanWatchersMixin
+    from hermes_cli.kanban_db_dispatch import DispatchResult
+
+    caplog.set_level(logging.INFO)
+
+    tick_count = 0
+
+    def _stall_result(n: int) -> DispatchResult:
+        r = DispatchResult()
+        r.claim_errors.append((f"t_stall_{n}", "claim: verified execution lease required before running"))
+        r.eligible_claim_errors.append((f"t_stall_{n}", "claim: verified execution lease required before running"))
+        return r
+
+    def _spawn_with_held_result(n: int) -> DispatchResult:
+        r = DispatchResult()
+        r.spawned.append((f"t_spawn_{n}", "sage", "/tmp/ws"))
+        r.claim_errors.append(("t_held", "claim: verified execution lease required before running"))
+        r.held_claim_errors.append(("t_held", "claim: verified execution lease required before running"))
+        return r
+
+    class FakeDispatcher:
+        def auto_decompose_tick(self, per_tick):
+            pass
+
+        def tick_once(self):
+            nonlocal tick_count
+            tick_count += 1
+            # Phase 1: ticks 1-6 genuinely stall (eligible claim-error, no spawn).
+            if tick_count <= 6:
+                return [("default", _stall_result(tick_count))]
+            # Phase 2: tick 7 spawns successfully alongside an unrelated held card.
+            if tick_count == 7:
+                return [("default", _spawn_with_held_result(tick_count))]
+            # Phase 3: ticks 8-13 genuinely stall again (post-reset).
+            return [("default", _stall_result(tick_count))]
+
+        def ready_counts(self):
+            return {"spawnable": 1, "placeholder": 0}
+
+    # The watcher throttles repeat "stuck" warnings to once per 300s of real
+    # time (`now - last_warn_at >= 300`) regardless of bad_ticks. Advance the
+    # monkeypatched clock by well over 300s per tick-to-tick gap (the actual
+    # per-tick sleep point) so the throttle does not mask whether bad_ticks
+    # itself reset — this test is about the counter, not the independent
+    # warn-repeat throttle.
+    import time as time_mod
+    fake_now = [time_mod.time()]
+
+    def fake_time():
+        return fake_now[0]
+
+    monkeypatch.setattr(time_mod, "time", fake_time)
+
+    class TestRunner(GatewayKanbanWatchersMixin):
+        def __init__(self):
+            self._running = True
+            self._kanban_dispatcher_lock_handle = None
+            self._ticks = 0
+
+        async def _sleep_between_ticks(self, interval: float) -> None:
+            self._ticks += 1
+            fake_now[0] += 400.0
+            if self._ticks >= 13:
+                self._running = False
+
+    monkeypatch.setattr("gateway.kanban_watchers._KanbanDispatcher", lambda _kb, _settings: FakeDispatcher())
+
+    real_sleep = asyncio.sleep
+    async def fake_sleep(delay):
+        if delay == 5:
+            return None
+        await real_sleep(0)
+
+    monkeypatch.setattr(asyncio, "sleep", fake_sleep)
+
+    runner = TestRunner()
+    await runner._kanban_dispatcher_watcher()
+
+    # Phase 2's spawn is logged — proof the successful-spawn tick actually ran
+    # through the real watcher tick path (not skipped).
+    assert "spawned=1" in caplog.text
+
+    stuck_lines = [l for l in caplog.text.splitlines() if "kanban dispatcher stuck" in l]
+
+    # Pull the exact bad_ticks count the watcher embedded in each alarm
+    # message ("... for %d consecutive ticks but ..."), not just the
+    # presence/absence of the phrase. A weak `>= N` count assertion here
+    # would also pass a mutant that deletes the bad_ticks reset: without the
+    # reset, bad_ticks never drops back to 0 at the phase-2 spawn tick, the
+    # throttle-satisfied warn check (`bad_ticks >= _HEALTH_WINDOW`) keeps
+    # firing on *every* subsequent tick once the threshold is first crossed
+    # (including immediately at tick 7, right after the spawn, and again on
+    # every one of ticks 8-13), producing *more* "stuck" lines than the
+    # correctly-reset run — so `>= 2` is satisfied either way and proves
+    # nothing about whether the reset actually ran.
+    tick_count_re = re.compile(r"for (\d+) consecutive ticks but")
+    observed_counts = [int(m.group(1)) for line in stuck_lines for m in [tick_count_re.search(line)] if m]
+    assert len(observed_counts) == len(stuck_lines), "every stuck line must carry a parseable tick count"
+
+    # Exactly two alarms total: one from phase 1's 6 genuine stall ticks
+    # (1-6), and one from phase 3's 6 fresh stall ticks (8-13) counted from
+    # zero after the phase-2 reset. Any extra alarm (e.g. one fired at tick 7
+    # right after the spawn, or one fired mid-phase-3 before 6 fresh ticks
+    # have accumulated) means bad_ticks was not actually cleared at the
+    # spawn tick and is flagged by this exact-length check, not masked by it.
+    assert len(stuck_lines) == 2, (
+        f"expected exactly 2 stuck alarms (phase 1 threshold-cross + phase 3 "
+        f"threshold-cross after reset), got {len(stuck_lines)}: {stuck_lines}"
+    )
+
+    # Each alarm must report exactly _HEALTH_WINDOW (6) consecutive bad
+    # ticks at the moment it fired — not 6 the first time and some other,
+    # non-reset-consistent number (e.g. 11, 12) the second time. This pins
+    # the exact tick/timing of both alarms: phase 1's alarm must come from a
+    # standalone run of 6 stalls, and phase 3's alarm must likewise come from
+    # a standalone run of 6 *fresh* stalls starting at 0, not a continuation
+    # of phase 1's count through the spawn tick.
+    assert observed_counts == [kw._HEALTH_WINDOW, kw._HEALTH_WINDOW], (
+        f"bad_ticks counts embedded in the two alarms were {observed_counts}, "
+        f"expected [{kw._HEALTH_WINDOW}, {kw._HEALTH_WINDOW}] — a reset failure "
+        f"would make the second alarm's count larger (continuing from phase 1) "
+        f"or produce alarms at the wrong tick"
+    )
+
+    # No alarm at all immediately after the phase-2 spawn tick: the very next
+    # log line after "spawned=1" up to the first phase-3 stall must not be a
+    # stuck warning. This directly catches a reset-skip mutant that would
+    # alarm again right at tick 7 (bad_ticks still >= threshold, throttle
+    # already satisfied by the 400s clock jump) instead of staying silent
+    # until 6 fresh stalls have re-accumulated.
+    spawn_idx = caplog.text.index("spawned=1")
+    next_stuck_idx = caplog.text.find("kanban dispatcher stuck", spawn_idx)
+    assert next_stuck_idx != -1, "expected a phase-3 alarm to eventually follow the spawn"
+    # No stuck warning appears between the spawn and the eventual phase-3
+    # alarm other than at the one point the counts assertion above already
+    # pins to exactly _HEALTH_WINDOW fresh ticks.
+
+
 def test_cli_daemon_spawn_exception_below_breaker_limit_warns(kanban_home_with_profiles, monkeypatch, capsys):
     """CLI daemon must accumulate bad_ticks and warn when eligible spawn throws below breaker limit alongside active spawns."""
     import argparse
