@@ -513,6 +513,11 @@ def _queued_timeout_sender_notice(doc_id: str, recipient: Any, seconds: int) -> 
             f"for {duration} without an available Bot Chat turn.")
 
 
+def _reclaimed_sender_notice(doc_id: str, recipient: Any) -> str:
+    return (f"Queued message {doc_id} to @{recipient or 'recipient'} expired before completion; "
+            "a previously started turn may have received it.")
+
+
 def _notify_sender_of_expiry(store: Any, doc_id: str, fields: dict, now: datetime.datetime,
                              reason: str) -> None:
     """Push the expiry to the original sender as one ``notify_wake`` doc from ``fleet-system`` (the
@@ -528,12 +533,15 @@ def _notify_sender_of_expiry(store: Any, doc_id: str, fields: dict, now: datetim
     created = parse_ts(fields.get("created_at"))
     minutes = int((now - created).total_seconds() // 60) if created else 0
     now_s = rfc3339(now)
+    body = (_reclaimed_sender_notice(doc_id, fields.get("to"))
+            if fields.get("status") in ("delivered", "read") else
+            f"to @{fields.get('to') or 'recipient'}, message {doc_id} was NOT delivered: "
+            f"{reason}, queued {minutes} minutes")
     notice = {
         "from": SYSTEM_SENDER, "to": sender, "kind": "notify_wake", "status": "queued", "attempts": 0,
         "schema_version": 2, "created_at": now_s, "updated_at": now_s,
         "expires_at": rfc3339(now + datetime.timedelta(hours=24)),
-        "body": (f"to @{fields.get('to') or 'recipient'}, message {doc_id} was NOT delivered: "
-                 f"{reason}, queued {minutes} minutes"),
+        "body": body,
     }
     try:
         store.create(doc_id + EXPIRY_NOTICE_SUFFIX, notice)
@@ -962,7 +970,9 @@ def reclaim_stale(store: Any, *, older_than_seconds: int = 1800, max_attempts: i
                                       "(claimer died or store failed; a 'read' claim's turn may already have run)")}
             if expiry is not None and expiry <= now:
                 outcome = "expired"
-                changes.update(status=outcome, expired_at=now_s)
+                changes.update(status=outcome, expired_at=now_s,
+                               sender_notice=_reclaimed_sender_notice(row.doc_id, fields.get("to")),
+                               sender_notice_at=now_s)
             elif attempts >= max_attempts:
                 outcome = "failed"
                 changes.update(status=outcome, failed_at=now_s)

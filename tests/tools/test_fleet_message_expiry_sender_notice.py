@@ -108,3 +108,17 @@ def test_reclaim_stale_expiry_also_notifies_the_sender():
     counts = fmd.reclaim_stale(store, older_than_seconds=60, now=NOW)
     assert counts["expired"] == 1
     assert _notice(store, doc_id).fields["to"] == "tb-cndr"
+
+
+def test_stale_read_expiry_reports_possible_prior_delivery():
+    store = MemoryStore()
+    doc_id = uid("read-expired")
+    store.seed(doc_id, msg(30 * 60, status="read", sender="tb-cndr",
+                          updated_at=fmd.rfc3339(NOW - datetime.timedelta(hours=30))))
+    assert fmd.reclaim_stale(store, older_than_seconds=60, now=NOW)["expired"] == 1
+    status = fmd.sender_delivery_status(store, "tb-cndr", doc_id)
+    notice = _notice(store, doc_id).fields
+    assert status["notice"] == notice["body"]
+    assert "a previously started turn may have received it" in notice["body"]
+    assert "NOT delivered" not in notice["body"]
+    assert status["notice_at"] == fmd.rfc3339(NOW)
