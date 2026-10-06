@@ -1037,9 +1037,14 @@ def _cmd_block(args: argparse.Namespace) -> int:
                 return f"{tid} → triage (unblock loop detected — {verdict}){suffix}"
             return f"Blocked {tid}{suffix}"
 
-        op = _commented(conn, reason, author, "BLOCKED", lambda tid: kb.block_task(
-            conn, tid, reason=reason, kind=kind, expected_run_id=_worker_run_id_for(tid)))
-        return _bulk_apply(ids, op, ok_msg, lambda tid: f"cannot block {tid}")
+        def block_with_comment(tid: str) -> bool:
+            ok = kb.block_task(
+                conn, tid, reason=reason, kind=kind, expected_run_id=_worker_run_id_for(tid))
+            if ok and reason:
+                kb.add_comment(conn, tid, author, f"BLOCKED: {reason}")
+            return ok
+
+        return _bulk_apply(ids, block_with_comment, ok_msg, lambda tid: f"cannot block {tid}")
 
 
 def _cmd_schedule(args: argparse.Namespace) -> int:
