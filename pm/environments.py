@@ -11,7 +11,11 @@ import json
 import os
 from pathlib import Path
 
-from hermes_constants import get_default_hermes_root, project_venv_dir
+from hermes_constants import (
+    _get_platform_default_hermes_home,
+    get_default_hermes_root,
+    project_venv_dir,
+)
 
 
 def install_key(project_root: Path) -> str:
@@ -112,14 +116,34 @@ def base_venv(project_root: Path) -> Path:
     return payload_venv(project_root) or project_venv_dir(Path(project_root).resolve()) or Path(project_root).resolve() / "venv"
 
 
+def _native_hermes_homes() -> frozenset[Path]:
+    """The process user's hermes home, including when tests have patched ``Path.home``.
+
+    ``HOME`` stays the real account home in those tests. A checkout nested there
+    (``install.sh``'s ``$HERMES_HOME/hermes-agent``, or a worktree beside it) must
+    not treat that directory's ``manifest.json`` as a PM payload descriptor.
+    """
+    suffix = os.environ.get("HERMES_DATA_DIR_SUFFIX", "")
+    homes = {_get_platform_default_hermes_home()}
+    account = os.environ.get("HOME") or os.environ.get("USERPROFILE")
+    if account:
+        homes.add(Path(account) / (".hermes" + suffix))
+    return frozenset(homes)
+
+
+def _outside_native_home(path: Path, native_homes: frozenset[Path]) -> bool:
+    return path not in native_homes
+
+
 def store_root(project_root: Path) -> Path:
     """Resolve a payload-relative or stamped store before PM imports."""
     override = os.environ.get("HERMES_RUNTIME_DIR")
     if override:
         return Path(override).resolve()
     root = Path(project_root).resolve()
+    native_homes = _native_hermes_homes()
     manifest_path = root.parent / "manifest.json"
-    if manifest_path.is_file():
+    if _outside_native_home(root.parent, native_homes) and manifest_path.is_file():
         manifest = json.loads(manifest_path.read_text(encoding="utf-8-sig"))
         if (root.parent / manifest.get("repo", "")).resolve() == root:
             store = (root.parent / manifest["store"]).resolve()
@@ -129,6 +153,8 @@ def store_root(project_root: Path) -> Path:
     from pm.paths import install_stamp_path
 
     for directory in (root, *root.parents):
+        if not _outside_native_home(directory, native_homes):
+            continue
         stamp = install_stamp_path(directory)
         if stamp.is_file():
             try:
