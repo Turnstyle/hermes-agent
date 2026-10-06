@@ -428,7 +428,7 @@ def continue_quiet_notify_completions(
     budget handshake below).
     """
     from tools.process_registry import process_registry
-    from tools.async_delegation import claim_event_delivery, complete_event_delivery, release_event_delivery
+    from tools.async_delegation import claim_event_delivery, complete_event_delivery, defer_event_delivery, release_event_delivery
 
     last: Any = None
     key = session_id or ""
@@ -463,7 +463,7 @@ def continue_quiet_notify_completions(
                 raise
             if follow is FOLLOW_UP_NOT_ACCEPTED:
                 for event, claim in claimed:
-                    release_event_delivery(event, claim)
+                    defer_event_delivery(event, claim)
             else:
                 for event, claim in claimed:
                     complete_event_delivery(event, claim)
