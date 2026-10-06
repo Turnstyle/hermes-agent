@@ -648,7 +648,7 @@ def launchd_install(force: bool = False, *, start_now: bool = True):
                 print("✓ Service definition updated")
             else:
                 if not _preflight_launchd_plist_launchers(_gw().generate_launchd_plist(), report=False):
-                    return False
+                    sys.exit(1)
                 # The plist was rewritten but launchd never registered it (or the write was refused):
                 # a success line here would hide an unloaded service with no KeepAlive.
                 from hermes_constants import display_hermes_home
@@ -662,10 +662,10 @@ def launchd_install(force: bool = False, *, start_now: bool = True):
     plist_path.parent.mkdir(parents=True, exist_ok=True)
     new_plist = _gw().generate_launchd_plist()
     if _gw()._refuse_temp_home_service_write(new_plist, "launchd plist"):
-        return
+        sys.exit(1)
     _gw()._prepare_service_launcher()
     if not _preflight_launchd_plist_launchers(new_plist):
-        return False
+        sys.exit(1)
     print(f"Installing launchd service to: {plist_path}")
     plist_path.write_text(new_plist, encoding="utf-8")
 
@@ -724,16 +724,18 @@ def launchd_start():
         plist_path.parent.mkdir(parents=True, exist_ok=True)
         _gw()._prepare_service_launcher()
         if not _preflight_launchd_plist_launchers(new_plist):
-            return False
+            sys.exit(1)
         plist_path.write_text(new_plist, encoding="utf-8")
         if _launchd_bootstrap_and_kickstart(plist_path, label):
             _launchd_ok("✓ Service started")
         return
 
     refresh_ok = _gw().refresh_launchd_plist_if_needed()
-    if (not refresh_ok and not _gw().launchd_plist_is_current()
-            and not _preflight_launchd_plist_launchers(_gw().generate_launchd_plist(), report=False)):
-        return False
+    refused = (not refresh_ok and not _gw().launchd_plist_is_current()
+               and not _preflight_launchd_plist_launchers(_gw().generate_launchd_plist(), report=False))
+    if refused and not _preflight_launchd_plist_launchers(plist_path.read_text(encoding="utf-8-sig"), report=False):
+        print("✗ Installed gateway launchd plist also has a broken launcher; cannot start service")
+        sys.exit(1)
     try:
         _launchctl_kickstart_current(label)
     except subprocess.CalledProcessError as e:
@@ -819,10 +821,13 @@ def launchd_restart():
     # bootout/bootstrap-retry path, which is bounded and reports its own
     # failure instead of stalling the update for 90s.
     refresh_ok = _gw().refresh_launchd_plist_if_needed()
-    if (not refresh_ok and _gw().get_launchd_plist_path().exists()
-            and not _gw().launchd_plist_is_current()
-            and not _preflight_launchd_plist_launchers(_gw().generate_launchd_plist(), report=False)):
-        return False
+    plist_path = _gw().get_launchd_plist_path()
+    refused = (not refresh_ok and plist_path.exists()
+               and not _gw().launchd_plist_is_current()
+               and not _preflight_launchd_plist_launchers(_gw().generate_launchd_plist(), report=False))
+    if refused and not _preflight_launchd_plist_launchers(plist_path.read_text(encoding="utf-8-sig"), report=False):
+        print("✗ Installed gateway launchd plist also has a broken launcher; cannot restart service")
+        sys.exit(1)
     from gateway.status import get_running_pid
     try:
         pid = get_running_pid()
@@ -851,7 +856,7 @@ def launchd_restart():
                 print("⚠ launchd did not revive the gateway after its graceful exit — forcing restart")
             else:
                 print(f"⚠ Gateway drain timed out after {wait_budget:.0f}s — forcing launchd restart")
-        if not refresh_ok and _gw().get_launchd_plist_path().exists() and not _gw().launchd_plist_is_current():
+        if not refresh_ok and not refused and plist_path.exists() and not _gw().launchd_plist_is_current():
             # The refresh attempted a reload and launchd never re-registered
             # the (rewritten) job: kickstart would hang on the same wall. The
             # bootout already happened inside the refresh — bootstrap is the

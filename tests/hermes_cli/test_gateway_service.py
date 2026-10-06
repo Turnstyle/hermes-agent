@@ -6,6 +6,7 @@ import plistlib
 import re
 import shlex
 import subprocess
+import sys
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -37,6 +38,11 @@ def _osascript_exec_argv(program_args: list[str]) -> list[str]:
     exec_, *argv = shlex.split(shell)
     assert exec_ == "exec", shell
     return argv
+
+
+def _replacement_launchd_plist() -> str:
+    return plistlib.dumps({"Label": "--replace", "ProgramArguments": [sys.executable],
+                           "EnvironmentVariables": {"HERMES_HOME": "/Users/alice/.hermes"}}).decode()
 
 
 class TestUserSystemdPrivateSocketPreflight:
@@ -495,10 +501,7 @@ class TestLaunchdServiceRecovery:
         monkeypatch.setattr(
             gateway_cli,
             "generate_launchd_plist",
-            lambda: (
-                "<plist>--replace\n<key>HERMES_HOME</key>"
-                "<string>/Users/alice/.hermes</string></plist>"
-            ),
+            _replacement_launchd_plist,
         )
         # Pretend the gateway is running and that we ARE inside its tree.
         monkeypatch.setattr("gateway.status.get_running_pid", lambda *a, **k: 4242)
@@ -570,10 +573,7 @@ class TestLaunchdServiceRecovery:
         monkeypatch.setattr(
             gateway_cli,
             "generate_launchd_plist",
-            lambda: (
-                "<plist>--replace\n<key>HERMES_HOME</key>"
-                "<string>/Users/alice/.hermes</string></plist>"
-            ),
+            _replacement_launchd_plist,
         )
         # Gateway running, but we are NOT inside its tree.
         monkeypatch.setattr("gateway.status.get_running_pid", lambda *a, **k: 4242)
@@ -621,10 +621,7 @@ class TestLaunchdServiceRecovery:
         monkeypatch.setattr(
             gateway_cli,
             "generate_launchd_plist",
-            lambda: (
-                "<plist>--replace\n<key>HERMES_HOME</key>"
-                "<string>/Users/alice/.hermes</string></plist>"
-            ),
+            _replacement_launchd_plist,
         )
         monkeypatch.setattr("gateway.status.get_running_pid", lambda *a, **k: 4242)
         monkeypatch.setattr(
@@ -673,10 +670,7 @@ class TestLaunchdServiceRecovery:
         monkeypatch.setattr(
             gateway_cli,
             "generate_launchd_plist",
-            lambda: (
-                "<plist>--replace\n<key>HERMES_HOME</key>"
-                "<string>/Users/alice/.hermes</string></plist>"
-            ),
+            _replacement_launchd_plist,
         )
         monkeypatch.setattr("gateway.status.get_running_pid", lambda *a, **k: 4242)
 
