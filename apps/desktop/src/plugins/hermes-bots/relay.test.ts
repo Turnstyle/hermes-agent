@@ -77,6 +77,16 @@ const route = (id: string): ProfileRoute => ({
   targetProfile: 'default'
 })
 
+const opsRoute = (connectionId: string): ProfileRoute => ({
+  connectionId,
+  mode: 'remote',
+  profile: 'ops',
+  targetProfile: 'ops'
+})
+
+/** Default fixture: two connections plus an @ops dial on `b` (envelope targets use `ops` on `b`). */
+const standardRelayRoutes = (): ProfileRoute[] => [route('a'), route('b'), opsRoute('b')]
+
 /** Every RPC through one table, recording what each connection was asked. */
 interface RelayCall {
   connectionId: string
@@ -149,7 +159,7 @@ beforeEach(() => {
   vi.clearAllMocks()
   window.localStorage.removeItem(PLUGIN_DECISIONS_KEY)
   hostMock.onEvent = vi.fn(() => vi.fn())
-  hostMock.profileRoutes = vi.fn(async () => [route('a'), route('b')])
+  hostMock.profileRoutes = vi.fn(async () => standardRelayRoutes())
   hostMock.requestProfile = vi.fn(async () => ({}))
   hostMock.retainProfileSocket = vi.fn(() => vi.fn())
 })
@@ -622,14 +632,20 @@ describe('the drain loop wires drain → deliver → reply', () => {
     target_profile: 'ops'
   }
 
-  it('delivers on the target’s own socket and posts the reply to the sender', async () => {
+  it('labels a queued bot_relay.deliver result as queued for the target, not Reply from', async () => {
     const calls = respondWith(call => {
       if (call.method === 'bot_relay.outbox.drain') {
         return { envelopes: call.connectionId === 'a' ? [envelope] : [] }
       }
 
       if (call.method === 'bot_relay.deliver') {
-        return { reply: 'all green' }
+        return {
+          delivered_profile: 'ops',
+          message_id: 'fm-queued',
+          reply: 'queued (fm-queued)',
+          reply_relayed: false,
+          status: 'queued'
+        }
       }
 
       return {}
@@ -640,13 +656,49 @@ describe('the drain loop wires drain → deliver → reply', () => {
     startBotRelay()
     await pushAndSettle()
 
-    expect(calls.find(call => call.method === 'bot_relay.deliver')).toMatchObject({
+    const reply = calls.find(call => call.method === 'bot_relay.reply')
+
+    expect(reply?.params).toMatchObject({
+      id: 'env-1',
+      delivered_profile: 'ops',
+      message_id: 'fm-queued',
+      reply: 'Queued for @ops, not yet answered',
+      reply_relayed: false,
+      status: 'queued'
+    })
+    expect(JSON.stringify(reply?.params)).not.toMatch(/Reply from/)
+
+    stopBotRelay()
+  })
+
+  it('delivers on the target’s own socket and posts the reply to the sender', async () => {
+    const calls = respondWith(call => {
+      if (call.method === 'bot_relay.outbox.drain') {
+        return { envelopes: call.connectionId === 'a' ? [envelope] : [] }
+      }
+
+      if (call.method === 'bot_relay.deliver') {
+        return { delivered_profile: 'ops', reply: 'all green' }
+      }
+
+      return {}
+    })
+
+    const { startBotRelay, stopBotRelay } = await loadRelay()
+
+    startBotRelay()
+    await pushAndSettle()
+
+    const deliver = calls.find(call => call.method === 'bot_relay.deliver')
+
+    expect(deliver).toMatchObject({
       connectionId: 'b',
       params: { message: 'status?', profile: 'ops' }
     })
+    expect(deliver?.params).not.toHaveProperty('target_profile')
     expect(calls.find(call => call.method === 'bot_relay.reply')).toMatchObject({
       connectionId: 'a',
-      params: { id: 'env-1', reply: 'all green' }
+      params: { id: 'env-1', delivered_profile: 'ops', reply: 'all green' }
     })
     // A delivered background DM is this bot's "good turn".
     expect(clearBotAttentionMock).toHaveBeenCalledWith('b::ops')
@@ -662,7 +714,7 @@ describe('the drain loop wires drain → deliver → reply', () => {
         }
       }
 
-      return { reply: 'ok' }
+      return { delivered_profile: 'ops', reply: 'ok' }
     })
 
     const { startBotRelay, stopBotRelay } = await loadRelay()
@@ -823,11 +875,89 @@ describe('a misroute is never silent', () => {
     startBotRelay()
     await pushAndSettle()
 
-    expect(calls.find(call => call.method === 'bot_relay.reply')?.params).toMatchObject({
+    const deliver = calls.find(call => call.method === 'bot_relay.deliver')
+    const reply = calls.find(call => call.method === 'bot_relay.reply')
+
+    expect(deliver?.params).toMatchObject({ profile: 'ops', message: 'status?' })
+    expect(deliver?.params).not.toHaveProperty('target_profile')
+    expect(reply?.params).toMatchObject({
       id: 'env-1',
+      delivered_profile: 'ops',
       reply: 'all green'
     })
     expect(clearBotAttentionMock).toHaveBeenCalledWith('b::ops')
+
+    stopBotRelay()
+  })
+
+  it('does not deliver on the representative route when no per-target route exists', async () => {
+    const representative: ProfileRoute = {
+      connectionId: 'b',
+      mode: 'remote',
+      profile: 'default',
+      targetProfile: 'default'
+    }
+
+    hostMock.profileRoutes = vi.fn(async () => [route('a'), representative])
+
+    const calls = respondWith(call => {
+      if (call.method === 'bot_relay.outbox.drain') {
+        return { envelopes: call.connectionId === 'a' ? [envelope] : [] }
+      }
+
+      if (call.method === 'bot_relay.deliver') {
+        return { delivered_profile: 'default', reply: 'wrong bot' }
+      }
+
+      return {}
+    })
+
+    const { startBotRelay, stopBotRelay } = await loadRelay()
+
+    startBotRelay()
+    await pushAndSettle()
+
+    expect(calls.some(call => call.method === 'bot_relay.deliver')).toBe(false)
+
+    const reply = calls.find(call => call.method === 'bot_relay.reply')
+
+    expect(reply?.params.reply).toBeUndefined()
+    expect(reply?.params).toMatchObject({
+      id: 'env-1',
+      reason: 'target_scope_unresolved'
+    })
+    expect(String(reply?.params.error)).toMatch(/NOT delivered/)
+    expect(noteBotAttentionMock).toHaveBeenCalledWith('b::ops', 'target_scope_unresolved')
+
+    stopBotRelay()
+  })
+
+  it('still lands the reply on a sender backend that rejects the attestation keys as unknown params', async () => {
+    const calls = respondWith(call => {
+      if (call.method === 'bot_relay.outbox.drain') {
+        return { envelopes: call.connectionId === 'a' ? [envelope] : [] }
+      }
+
+      if (call.method === 'bot_relay.deliver') {
+        return { delivered_profile: 'ops', reason: 'reply_not_relayed', reply: 'all green', reply_relayed: false }
+      }
+
+      if (call.method === 'bot_relay.reply' && ('delivered_profile' in call.params || 'reply_relayed' in call.params)) {
+        throw Object.assign(new Error('invalid params for bot_relay.reply: delivered_profile'), { code: 4000 })
+      }
+
+      return {}
+    })
+
+    const { startBotRelay, stopBotRelay } = await loadRelay()
+
+    startBotRelay()
+    await pushAndSettle()
+
+    const replies = calls.filter(call => call.method === 'bot_relay.reply')
+
+    expect(replies).toHaveLength(2)
+    expect(replies[1]?.params).toEqual({ id: 'env-1', reason: 'reply_not_relayed', reply: 'all green' })
 
     stopBotRelay()
   })
@@ -859,7 +989,7 @@ describe('a misroute is never silent', () => {
     stopBotRelay()
   })
 
-  it('treats a response with no delivered_profile (older gateway) as a normal success — compat', async () => {
+  it('withholds the reply when the gateway omits delivered_profile (unverified attestation)', async () => {
     const calls = respondWith(call => {
       if (call.method === 'bot_relay.outbox.drain') {
         return { envelopes: call.connectionId === 'a' ? [envelope] : [] }
@@ -877,11 +1007,16 @@ describe('a misroute is never silent', () => {
     startBotRelay()
     await pushAndSettle()
 
-    expect(calls.find(call => call.method === 'bot_relay.reply')?.params).toMatchObject({
+    const reply = calls.find(call => call.method === 'bot_relay.reply')
+
+    expect(reply?.params.reply).toBeUndefined()
+    expect(reply?.params).toMatchObject({
       id: 'env-1',
-      reply: 'all green'
+      reason: 'target_scope_unresolved'
     })
-    expect(clearBotAttentionMock).toHaveBeenCalledWith('b::ops')
+    expect(String(reply?.params.error)).toMatch(/UNVERIFIED/)
+    expect(noteBotAttentionMock).toHaveBeenCalledWith('b::ops', 'target_scope_unresolved')
+    expect(clearBotAttentionMock).not.toHaveBeenCalled()
 
     stopBotRelay()
   })
@@ -987,7 +1122,7 @@ describe('a REPLY NOT RELAYED reason survives the Desktop hop', () => {
 
     const replyParams = calls.find(call => call.method === 'bot_relay.reply')?.params
 
-    expect(replyParams).toMatchObject({ id: 'env-1', reply: 'all green' })
+    expect(replyParams).toMatchObject({ id: 'env-1', delivered_profile: 'ops', reply: 'all green' })
     expect(replyParams).not.toHaveProperty('reply_relayed')
     expect(replyParams).not.toHaveProperty('reason')
 
@@ -1082,7 +1217,7 @@ describe('the roster loop forgets a machine that left', () => {
     expect(calls.filter(call => call.method === 'bot_relay.roster.sync')).toEqual([])
 
     // A returning peer starts the union pushes again.
-    hostMock.profileRoutes = vi.fn(async () => [route('a'), route('b')])
+    hostMock.profileRoutes = vi.fn(async () => standardRelayRoutes())
     await vi.advanceTimersByTimeAsync(60_000)
     expect(calls.filter(call => call.method === 'bot_relay.roster.sync').map(call => call.connectionId)).toEqual([
       'a',
@@ -1182,9 +1317,9 @@ describe('the drain loop does not let one delivery hold every other gateway’s 
   }
 
   it('claims every outbox first and delivers to different targets concurrently', async () => {
-    let releaseB!: (value: { reply: string }) => void
+    let releaseB!: (value: { delivered_profile: string; reply: string }) => void
 
-    const pendingB = new Promise<{ reply: string }>(resolve => {
+    const pendingB = new Promise<{ delivered_profile: string; reply: string }>(resolve => {
       releaseB = resolve
     })
 
@@ -1194,7 +1329,7 @@ describe('the drain loop does not let one delivery hold every other gateway’s 
       }
 
       if (call.method === 'bot_relay.deliver') {
-        return call.connectionId === 'b' ? pendingB : { reply: 'done' }
+        return call.connectionId === 'b' ? pendingB : { delivered_profile: 'default', reply: 'done' }
       }
 
       return {}
@@ -1216,7 +1351,7 @@ describe('the drain loop does not let one delivery hold every other gateway’s 
       params: { id: 'env-2', reply: 'done' }
     })
 
-    releaseB({ reply: 'finally' })
+    releaseB({ delivered_profile: 'ops', reply: 'finally' })
     await vi.advanceTimersByTimeAsync(10)
 
     expect(calls.filter(call => call.method === 'bot_relay.reply').map(call => call.params.id)).toEqual([
@@ -1232,9 +1367,9 @@ describe('the drain loop does not let one delivery hold every other gateway’s 
     // must not wait for that turn (the TTL clock is running on the gateway),
     // a different target is delivered immediately, and a second envelope for
     // the SAME target profile waits for the running turn, in order.
-    let releaseB!: (value: { reply: string }) => void
+    let releaseB!: (value: { delivered_profile: string; reply: string }) => void
 
-    const pendingB = new Promise<{ reply: string }>(resolve => {
+    const pendingB = new Promise<{ delivered_profile: string; reply: string }>(resolve => {
       releaseB = resolve
     })
 
@@ -1246,7 +1381,12 @@ describe('the drain loop does not let one delivery hold every other gateway’s 
       }
 
       if (call.method === 'bot_relay.deliver') {
-        return call.params.message === 'long job' ? pendingB : { reply: `${call.params.message} done` }
+        return call.params.message === 'long job'
+          ? pendingB
+          : {
+              delivered_profile: call.params.profile === 'ops' ? 'ops' : 'default',
+              reply: `${call.params.message} done`
+            }
       }
 
       return {}
@@ -1270,7 +1410,7 @@ describe('the drain loop does not let one delivery hold every other gateway’s 
       'quick one'
     ])
 
-    releaseB({ reply: 'long job done' })
+    releaseB({ delivered_profile: 'ops', reply: 'long job done' })
     await vi.advanceTimersByTimeAsync(10)
 
     expect(calls.filter(call => call.method === 'bot_relay.deliver').map(call => call.params.message)).toEqual([
