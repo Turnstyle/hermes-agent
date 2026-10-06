@@ -132,6 +132,33 @@ def _describe_http_failure(exc: BaseException, rejection: dict) -> str:
     return f"{text} ({detail})"
 
 
+_KEEPALIVE_PHASES = ("ping", "list_tools")
+
+
+def _plain_int(value: Any) -> Optional[int]:
+    """*value* when it is a real ``int`` (not ``bool``), else None — only numbers may reach a log line."""
+    return value if isinstance(value, int) and not isinstance(value, bool) else None
+
+
+def _keepalive_failure_fields(root: BaseException, phase: Optional[str], rejection: Optional[dict] = None) -> str:
+    """`` [phase=ping jsonrpc_code=-32603 http_status=401]``: the ONLY extra fields a keepalive failure log
+    may carry — a fixed phase name, the numeric JSON-RPC ``error.code`` and the numeric HTTP status. Never a
+    body, header, URL, session id or token. mcp >= 2.0 folds a non-2xx whose body is not a JSON-RPC error into
+    the opaque ``-32603 Server returned an error response``, so the status (from the raised ``HTTPStatusError``,
+    else the POST the response hook just saw) is what tells the real cause apart. *root* is already unwrapped.
+    Unavailable fields are omitted; the phase is always present."""
+    fields = [f"phase={phase if phase in _KEEPALIVE_PHASES else 'unknown'}"]
+    code = _plain_int(getattr(getattr(root, "error", None), "code", None))
+    if code is not None:
+        fields.append(f"jsonrpc_code={code}")
+    status = _plain_int(getattr(getattr(root, "response", None), "status_code", None))
+    if status is None and rejection and rejection.get("method") == "POST":  # keepalive RPCs are POSTs
+        status = _plain_int(rejection.get("status"))
+    if status is not None:
+        fields.append(f"http_status={status}")
+    return " [" + " ".join(fields) + "]"
+
+
 def _unwrap_exception_group(exc: BaseException) -> BaseException:
     """Root-cause leaf of anyio ``(Base)ExceptionGroup`` wrappers (group ``str()`` is opaque). A
     ``KeyboardInterrupt``/``SystemExit`` leaf anywhere is re-raised, never flattened into a loggable

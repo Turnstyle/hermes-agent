@@ -137,7 +137,8 @@ class MCPServerRunMixin:
                     except Exception as exc:
                         root = _errors._unwrap_exception_group(exc)
                         logger.warning("MCP server '%s' keepalive failed, triggering reconnect (state: connected → "
-                                       "degraded): %s: %s", self.name, type(root).__name__, root)
+                                       "degraded): %s: %s%s", self.name, type(root).__name__, root,
+                                       self._keepalive_failure_suffix(root))
                         self.mark_suspect(f"keepalive failed: {type(root).__name__}: {root}")
                         self._reconnect_event.set()
                         break

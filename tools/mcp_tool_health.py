@@ -7,7 +7,7 @@ import json
 import logging
 import time
 from typing import Iterable, Optional
-from tools.mcp_tool_errors import _is_method_not_found_error, _unwrap_exception_group
+from tools.mcp_tool_errors import _is_method_not_found_error, _keepalive_failure_fields, _unwrap_exception_group
 from tools.mcp_tool_schema import mcp_prefixed_tool_name
 from tools.mcp_tool_common import _core
 from tools import mcp_tool_registration as _registration
@@ -166,13 +166,21 @@ class MCPServerHealthMixin:
                 logger.info("MCP server '%s': dynamically refreshed %d tool(s) (no changes)",
                             self.name, len(self._registered_tool_names))
 
+    def _keepalive_failure_suffix(self, root: BaseException) -> str:
+        """Safe extra fields for a keepalive failure log: probe phase, numeric JSON-RPC code, numeric HTTP status."""
+        return _keepalive_failure_fields(root, self._keepalive_phase, self._http_rejection)
+
     async def _keepalive_probe(self) -> None:
         """Exercise the session; raise on a genuine connection failure. ``ping`` first (cheap,
         OPTIONAL); on -32601 latch ``_ping_unsupported`` (reset per transport connection) and fall
-        back to ``list_tools`` when the server advertises tools, else the -32601 propagates."""
+        back to ``list_tools`` when the server advertises tools, else the -32601 propagates.
+        ``_keepalive_phase`` names the RPC that failed, for :meth:`_keepalive_failure_suffix`."""
+        self._http_rejection.clear()  # a status seen from here on belongs to THIS probe, not an older request
         async def list_tools():
+            self._keepalive_phase = "list_tools"
             await asyncio.wait_for(self.session.list_tools(), timeout=_KEEPALIVE_RPC_TIMEOUT)
         if not self._ping_unsupported:
+            self._keepalive_phase = "ping"
             try:
                 await asyncio.wait_for(self.session.send_ping(), timeout=_KEEPALIVE_RPC_TIMEOUT)
                 return
@@ -189,6 +197,7 @@ class MCPServerHealthMixin:
                     try:
                         await list_tools()
                     except Exception:
+                        self._keepalive_phase = "ping"  # the original (ping) failure is what propagates
                         raise exc from None
                     self._ping_unsupported = True  # latch so later keepalives skip the 30s wait
                     logger.info("MCP server '%s': ping timed out but list_tools succeeded — server "
@@ -245,9 +254,9 @@ class MCPServerHealthMixin:
             await asyncio.wait_for(self._keepalive_probe(), timeout=timeout)
         except Exception as exc:
             root = _unwrap_exception_group(exc)
-            logger.warning("MCP server '%s': suspect connection (%s) failed health check (%s: %s) — "
+            logger.warning("MCP server '%s': suspect connection (%s) failed health check (%s: %s)%s — "
                            "requesting reconnect (state: suspect → degraded)",
-                           self.name, reason, type(root).__name__, root)
+                           self.name, reason, type(root).__name__, root, self._keepalive_failure_suffix(root))
             self._suspect_reason = None
             self.mark_suspect(f"health check failed after {reason}")
             self.session = None
