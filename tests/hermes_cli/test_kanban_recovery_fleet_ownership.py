@@ -393,3 +393,41 @@ def test_stale_host_local_claim_is_not_rejudged(fleet):
     tid = _task(fleet, source="max", tenant="max")  # even with a foreign map row
     _orphan(fleet, tid, claim_lock=f"{host}:dead", claim_expires=_PAST)
     assert kb.release_stale_claims(fleet) == 1
+
+
+@pytest.mark.parametrize("marker", ["ESTOP", ".drain_request.json"])
+def test_launch_pause_composes_with_foreign_orphan_recovery(fleet, kanban_home, monkeypatch, marker):
+    """C2-223/t_bc07bbf0: pause wins; after resume only local recovery runs."""
+    foreign = _task(fleet, source="sheldon", tenant="sheldon")
+    local = _task(fleet, source=NODE, tenant=NODE)
+    _orphan(fleet, foreign, worker_pid=654321)
+    _orphan(fleet, local)
+    foreign_before = dict(fleet.execute("SELECT * FROM tasks WHERE id=?", (foreign,)).fetchone())
+    probes = []
+    monkeypatch.setattr(kbd, "_worker_alive", lambda pid, *args: probes.append(pid) or False)
+    pause = kanban_home / marker
+    pause.write_text("null")
+    before = list(fleet.iterdump())
+    paused = kbd.dispatch_once(fleet, max_spawn=0)
+    assert paused.skipped_locked
+    assert list(fleet.iterdump()) == before
+    assert probes == []
+    pause.unlink()
+    resumed = kbd.dispatch_once(fleet, max_spawn=0)
+    assert resumed.reconciled_orphans == [local]
+    assert _status(fleet, local) == "ready"
+    assert dict(fleet.execute("SELECT * FROM tasks WHERE id=?", (foreign,)).fetchone()) == foreign_before
+    assert 654321 not in probes
+
+
+def test_guarded_dry_run_keeps_foreign_and_local_orphans_unchanged(fleet, kanban_home, monkeypatch):
+    """Diagnostic admission takes the lock without recovering or checkpointing rows."""
+    foreign = _task(fleet, source="sheldon", tenant="sheldon")
+    local = _task(fleet, source=NODE, tenant=NODE)
+    _orphan(fleet, foreign, worker_pid=654321)
+    _orphan(fleet, local)
+    before = list(fleet.iterdump())
+    monkeypatch.setattr(kbc, "_maybe_checkpoint_wal", lambda *a: pytest.fail("dry-run checkpoint"))
+    monkeypatch.setattr(kb, "_fire_dispatch_tick_hook", lambda *a, **k: pytest.fail("dry-run observer"))
+    kbd.dispatch_once(fleet, dry_run=True)
+    assert list(fleet.iterdump()) == before
