@@ -29,6 +29,7 @@ landed via #28754 / #28781 ahead of this fix.
 
 from __future__ import annotations
 
+import json
 import time
 from pathlib import Path
 
@@ -156,14 +157,21 @@ def test_protocol_violation_loop_is_broken(kanban_home: Path) -> None:
             assert kb.get_task(conn, tid).status == "blocked"
 
 
-def test_created_with_initial_status_blocked_is_not_promoted_by_recompute_ready(kanban_home: Path) -> None:
+@pytest.mark.parametrize('with_parent', [True, False])
+def test_created_with_initial_status_blocked_is_not_promoted_by_recompute_ready(kanban_home: Path, with_parent: bool) -> None:
     """Verify a task created with initial_status='blocked' remains blocked when parents complete."""
     with kbc.connect() as conn:
         parent_id = kb.create_task(conn, title="parent task")
         child_id = kb.create_task(
-            conn, title="gated child task", parents=[parent_id], initial_status="blocked"
+            conn, title="gated child task", parents=[parent_id] if with_parent else [], initial_status="blocked"
         )
         assert kb.get_task(conn, child_id).status == "blocked"
+
+        payload = conn.execute(
+            "SELECT payload FROM task_events WHERE task_id = ? AND kind = 'blocked' ORDER BY id DESC LIMIT 1",
+            (child_id,),
+        ).fetchone()['payload']
+        assert json.loads(payload)['bookkeeping'] is True
 
         # Complete parent task
         kb.claim_task(conn, parent_id)
@@ -171,7 +179,12 @@ def test_created_with_initial_status_blocked_is_not_promoted_by_recompute_ready(
         assert kb.get_task(conn, parent_id).status == "done"
 
         # recompute_ready must NOT promote the blocked child task
-        promoted = kb.recompute_ready(conn)
-        assert promoted == 0
-        assert kb.get_task(conn, child_id).status == "blocked"
-
+        for _ in range(3):
+            assert kb.recompute_ready(conn) == 0
+            assert kb.get_task(conn, child_id).status == "blocked"
+        kinds = [row['kind'] for row in conn.execute(
+            'SELECT kind FROM task_events WHERE task_id = ? ORDER BY id', (child_id,),
+        )]
+        assert 'promoted' not in kinds
+        assert kb.unblock_task(conn, child_id) is True
+        assert kb.get_task(conn, child_id).status == "ready"
