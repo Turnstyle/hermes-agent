@@ -22,13 +22,13 @@ export function profileScopeForSessionOwner(owner: SessionOwnerScope): ProfileSc
 
 /**
  * Transcript content a view actually authored. Backend-written notices
- * (`ChatMessage.systemNotice`) render on the timeline but belong to no view, so
+ * (`role: system`) render on the timeline but belong to no view, so
  * counting them reports a second window that does not exist: an in-place model
  * switch alone refused every send with "this window was behind another view of
  * the same chat".
  */
 function authoredMessageCount(messages: ChatMessage[]): number {
-  return messages.reduce((count, message) => (message.systemNotice ? count : count + 1), 0)
+  return messages.reduce((count, message) => (message.role === 'system' ? count : count + 1), 0)
 }
 
 /**

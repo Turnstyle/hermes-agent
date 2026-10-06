@@ -6083,6 +6083,7 @@ describe('human send behind a bot CLI lease', () => {
         onReady={h => (handle = h)}
         onSeedState={state => seeds.push(state)}
         requestGateway={requestGateway}
+        refreshSessions={vi.fn(async () => undefined)}
       />
     )
 

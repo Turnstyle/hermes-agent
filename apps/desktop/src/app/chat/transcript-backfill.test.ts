@@ -564,3 +564,10 @@ describe('backfillOlderTranscriptPage', () => {
     expect(transcriptBackfillAvailable('stored-1')).toBe(true)
   })
 })
+
+
+it('does not treat a backend system notice as another view authoring a turn', () => {
+  const local = [chat('user', 10)]
+  const notice: ChatMessage = { id: 'notice', rowId: 11, role: 'system', parts: [{ type: 'text', text: 'Model changed' }] }
+  expect(messagesIfTranscriptBehind(local, [...local, notice])).toBeNull()
+})
