@@ -113,6 +113,7 @@ class _Agent:
 
 @pytest.fixture()
 def _quiet_emit(monkeypatch):
+    te._ra()
     monkeypatch.setattr(te, "_SEQUENTIAL_INTERRUPT_POLL_SECONDS", 0.05)
     monkeypatch.setattr(te, "_emit_terminal_post_tool_call", lambda agent, **kw: None)
 

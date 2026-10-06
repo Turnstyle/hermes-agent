@@ -207,6 +207,19 @@ class TestCodeExecutionTZ:
         # Force local backend — other tests in the same process may leak
         # TERMINAL_ENV=modal/docker which causes modal.exception.AuthError.
         monkeypatch.setenv("TERMINAL_ENV", "local")
+        from tools import code_kernel
+        import socket
+
+        def bind_local_rpc(kernel):
+            listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            listener.bind(("127.0.0.1", 0))
+            listener.listen(1)
+            kernel.sock_path = None
+            kernel.server_sock = listener
+            host, port = listener.getsockname()[:2]
+            return f"tcp://{host}:{port}"
+
+        monkeypatch.setattr(code_kernel, "_bind_rpc_socket", bind_local_rpc)
         try:
             from tools.code_execution_tool import execute_code
             self._execute_code = execute_code

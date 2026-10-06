@@ -349,6 +349,10 @@ def _hermetic_environment(tmp_path, monkeypatch):
             hermes_state_mod, "DEFAULT_DB_PATH", fake_hermes_home / "state.db"
         )
 
+    run_agent_mod = sys.modules.get("run_agent")
+    if run_agent_mod is not None and hasattr(run_agent_mod, "_hermes_home"):
+        monkeypatch.setattr(run_agent_mod, "_hermes_home", fake_hermes_home)
+
     # 4. Deterministic locale / timezone / hashseed. CI runs in UTC with
     #    C.UTF-8 locale; local dev often doesn't. Pin everything.
     monkeypatch.setenv("TZ", "UTC")
