@@ -1,8 +1,8 @@
 """Sliding-window budget for bot-authored inbound messages.
 
 ``{PLATFORM}_ALLOW_BOTS`` only decides admission, so two Hermes profiles replying to each other never stop.
-The guard counts admitted bot messages per conversation and drops further ones for ``cooldown_seconds``
-once ``max_events`` land inside ``window_seconds``. Settings: config.yaml ``gateway.bot_loop_guard``.
+The guard counts admitted bot messages per conversation and warns once per ``cooldown_seconds``
+when ``max_events`` land inside ``window_seconds``; authorized messages continue. Settings: config.yaml ``gateway.bot_loop_guard``.
 """
 
 from __future__ import annotations
@@ -80,7 +80,7 @@ def load_settings() -> BotLoopGuardSettings:
 
 
 class BotLoopGuard:
-    """Per-conversation sliding window with a cooldown once the budget trips. Thread-safe.
+    """Per-conversation sliding window with a warning cooldown. Thread-safe.
     Settings are re-read on every call so a config.yaml edit takes effect without a restart."""
 
     def __init__(
@@ -100,13 +100,6 @@ class BotLoopGuard:
         with self._lock:
             return len(self._events)
 
-    def blocked(self, conversation: Hashable) -> bool:
-        """True while ``conversation`` is cooling down. Reads only, so callers may ask as often as they like."""
-        if not self._settings().enabled:
-            return False
-        with self._lock:
-            return self._cooldown_until.get(conversation, 0.0) > self._clock()
-
     def admit(self, conversation: Hashable) -> Tuple[bool, str]:
         """Count one admitted bot-authored message for ``conversation``.
         Returns ``(allowed, state)``; state is ``disabled``, ``ok``, ``tripped`` (this message started the cooldown) or ``cooldown``."""
@@ -117,7 +110,7 @@ class BotLoopGuard:
         with self._lock:
             self._sweep(now, settings)
             if self._cooldown_until.get(conversation, 0.0) > now:
-                return False, "cooldown"
+                return True, "cooldown"
             events = self._events.setdefault(conversation, deque())
             cutoff = now - settings.window_seconds
             while events and events[0] <= cutoff:
@@ -125,7 +118,7 @@ class BotLoopGuard:
             if len(events) >= settings.max_events:
                 self._cooldown_until[conversation] = now + settings.cooldown_seconds
                 events.clear()
-                return False, "tripped"
+                return True, "tripped"
             events.append(now)
             return True, "ok"
 
