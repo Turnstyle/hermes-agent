@@ -921,7 +921,18 @@ def connect(db_path: Optional[Path] = None, *, board: Optional[str] = None) -> s
             # Idempotent; runs under _INIT_LOCK so same-process dispatcher
             # threads can't race the ALTER TABLE pass with stale PRAGMA snapshots.
             if resolved not in _INITIALIZED_PATHS:
-                conn.executescript(_kb.SCHEMA_SQL)
+                # Plain SQLite importers do not take our init lock. Install the
+                # status triggers and seed boundaries under one SQLite write lock.
+                # executescript would commit write_txn before running the schema.
+                with write_txn(conn):
+                    statement = ""
+                    for line in _kb.SCHEMA_SQL.splitlines(keepends=True):
+                        statement += line
+                        if sqlite3.complete_statement(statement):
+                            conn.execute(statement)
+                            statement = ""
+                    if statement.strip():
+                        raise sqlite3.OperationalError("incomplete Kanban schema statement")
                 _migrate_add_optional_columns(conn)
                 _INITIALIZED_PATHS.add(resolved)
 

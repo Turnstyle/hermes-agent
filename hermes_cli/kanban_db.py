@@ -1009,9 +1009,6 @@ CREATE TABLE IF NOT EXISTS task_block_entries (
     task_id TEXT PRIMARY KEY,
     event_id INTEGER NOT NULL
 );
-INSERT OR IGNORE INTO task_block_entries (task_id, event_id)
-    SELECT t.id, COALESCE((SELECT MAX(e.id) FROM task_events e WHERE e.task_id = t.id), 0)
-    FROM tasks t WHERE t.status = 'blocked';
 CREATE TRIGGER IF NOT EXISTS task_block_entry_insert AFTER INSERT ON tasks
 WHEN NEW.status = 'blocked'
 BEGIN
@@ -1030,6 +1027,9 @@ CREATE TRIGGER IF NOT EXISTS task_block_entry_delete AFTER DELETE ON tasks
 BEGIN
     DELETE FROM task_block_entries WHERE task_id = OLD.id;
 END;
+INSERT OR IGNORE INTO task_block_entries (task_id, event_id)
+    SELECT t.id, COALESCE((SELECT MAX(e.id) FROM task_events e WHERE e.task_id = t.id), 0)
+    FROM tasks t WHERE t.status = 'blocked';
 
 -- Historical attempt record. Each time the dispatcher claims a task, a
 -- new row is created here; claim state, PID, heartbeat, runtime cap,
