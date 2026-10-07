@@ -1,10 +1,10 @@
 {
-  "time": "2026-10-06 23:29:42 CDT",
-  "source_commit": "4303dfa9c9c9067fc11a8c488444253fbd5a1cc4",
+  "time": "2026-10-07 03:30:40 CDT",
+  "source_commit": "1445dbbc65ad69a42bd7324a2917c11a1b4c5bf0",
   "source_base": "35ad70c035dec839846056073ad81a9bdceffca4",
   "upstream_tag": "v2026.9.24",
   "upstream_commit": "f97608f178d1ffeca59860195ab7da295f7c8e5f",
-  "carried_commits": 198,
+  "carried_commits": 201,
   "mode": "build",
   "publish": false,
   "switch_order": [
@@ -16,9 +16,10 @@
   ],
   "source_dirty": false,
   "source_contains_upstream": true,
-  "rebuilt_commit": "4303dfa9c9c9067fc11a8c488444253fbd5a1cc4",
-  "carried_list_sha256": "dd24397bdf8cbb7e765320b7d145f5bac79ed2fb7457d78e1cc4e5dd561ee25c",
+  "rebuilt_commit": "1445dbbc65ad69a42bd7324a2917c11a1b4c5bf0",
+  "carried_list_sha256": "6a2bb8df6b3e862ea50ddcdf1cbc07518a8c6ab78aaca03c9f74791243c82b39",
   "test_comparison_sha256": "2ef4d87618179a7e0819704d1e1dd8855f2eff62585080e0ab16b7bc7acbab0d",
-  "previous_b_candidate": "ed648e39ceb4d29aa57c5993e146de335c8dae88",
-  "classified_change_count": 263
+  "previous_b_candidate": "f182607ba75ccda4da42555e2e094d0d968a92c0",
+  "classified_change_count": 266,
+  "source_base_of_rc3": "f182607ba75ccda4da42555e2e094d0d968a92c0"
 }

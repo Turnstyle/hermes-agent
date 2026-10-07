@@ -12070,5 +12070,114 @@
         }
       }
     ]
+  },
+  {
+    "source_commit": "a4660913efa8097c0e045faa248c45c3b417e6f8",
+    "parent": "f182607ba75ccda4da42555e2e094d0d968a92c0",
+    "subject": "fix(cron): start restart-safe workers through the installation-bound runtime command",
+    "paths": [
+      "cron/scheduler.py",
+      "cron/scheduler_worker_env.py",
+      "tests/cron/test_restart_safe_worker.py",
+      "tests/cron/test_worker_bare_interpreter_argv.py"
+    ],
+    "patch_sha256": "cfef7e72bcae9dea9306019edbb6525e441df987b704df238148cf25614970f2",
+    "result_commit": "1445dbbc65ad69a42bd7324a2917c11a1b4c5bf0",
+    "outcome": "replayed",
+    "classified_rows": [
+      {
+        "row": {
+          "change_id": "RC3-001",
+          "machines": "TurnerBook;Sheldon;Snowdrop;Max;Rosie (rc3; tested on Max only)",
+          "subject": "fix(cron): start restart-safe workers through the installation-bound runtime command",
+          "files": "cron/scheduler.py;cron/scheduler_worker_env.py;tests/cron/test_restart_safe_worker.py;tests/cron/test_worker_bare_interpreter_argv.py",
+          "class": "KEEP-FIX",
+          "reason": "Restart-safe cron workers started through a bare interpreter instead of the installation-bound runtime command, so a worker could lose the live Hermes packages after a restart.",
+          "upstream_ref": "none; fleet-only code (bot relay and fleet messages are not upstream)",
+          "plugin_or_setting": "cron worker launch command; no new setting",
+          "risk_if_dropped": "Cron jobs started after a gateway restart can run without the live Hermes runtime and fail.",
+          "proof_test": "tests/cron/test_worker_bare_interpreter_argv.py; tests/cron/test_restart_safe_worker.py; exec/work/hermes-goal/ONE-0307/code-cron-patch.md"
+        },
+        "outcome": "replayed",
+        "required_source_commits": [
+          "a4660913efa8097c0e045faa248c45c3b417e6f8"
+        ],
+        "per_source_outcomes": {
+          "a4660913efa8097c0e045faa248c45c3b417e6f8": "replayed"
+        }
+      }
+    ]
+  },
+  {
+    "source_commit": "05c681478228fe9db1c4a007d72a8c3129687fbb",
+    "parent": "a4660913efa8097c0e045faa248c45c3b417e6f8",
+    "subject": "fix(fleet): mark a queued fleet message done when the bot answers it",
+    "paths": [
+      "hermes_cli/cli_single_query.py",
+      "tests/tools/test_fleet_message_drain.py",
+      "tools/bot_mode_dm.py",
+      "tools/fleet_message_drain.py"
+    ],
+    "patch_sha256": "ad9dff91e85799cd9d7e7c7e6be7235411c856fef77451f7062f45cef2c6f760",
+    "result_commit": "1445dbbc65ad69a42bd7324a2917c11a1b4c5bf0",
+    "outcome": "replayed",
+    "classified_rows": [
+      {
+        "row": {
+          "change_id": "RC3-002",
+          "machines": "TurnerBook;Sheldon;Snowdrop;Max;Rosie (rc3; tested on Max only)",
+          "subject": "fix(fleet): mark a queued fleet message done when the bot answers it",
+          "files": "hermes_cli/cli_single_query.py;tests/tools/test_fleet_message_drain.py;tools/bot_mode_dm.py;tools/fleet_message_drain.py",
+          "class": "KEEP-FIX",
+          "reason": "A queued fleet message stayed \"read\" when the bot answered it, so the reclaim job requeued it and the sender saw a false expired notice. The reply to the sender now marks the doc done.",
+          "upstream_ref": "none; fleet-only code (bot relay and fleet messages are not upstream)",
+          "plugin_or_setting": "fleet_messages_v1 doc status; HERMES_FLEET_CLAIM_DOC env marks the claimed doc; no new setting",
+          "risk_if_dropped": "Answered bot messages can be requeued and reported as expired.",
+          "proof_test": "tests/tools/test_fleet_message_drain.py; exec/work/hermes-goal/ONE-0307/code-mark-done.md"
+        },
+        "outcome": "replayed",
+        "required_source_commits": [
+          "05c681478228fe9db1c4a007d72a8c3129687fbb"
+        ],
+        "per_source_outcomes": {
+          "05c681478228fe9db1c4a007d72a8c3129687fbb": "replayed"
+        }
+      }
+    ]
+  },
+  {
+    "source_commit": "1445dbbc65ad69a42bd7324a2917c11a1b4c5bf0",
+    "parent": "05c681478228fe9db1c4a007d72a8c3129687fbb",
+    "subject": "fix(fleet): queued timeout counts from requeue and gateway restart",
+    "paths": [
+      "tests/tools/test_fleet_message_drain.py",
+      "tools/fleet_message_drain.py"
+    ],
+    "patch_sha256": "b1a99dfd6d8ca6bb1e2b24b2c88c1c13d6c6064135d560e88a49a9fcbc272b04",
+    "result_commit": "1445dbbc65ad69a42bd7324a2917c11a1b4c5bf0",
+    "outcome": "replayed",
+    "classified_rows": [
+      {
+        "row": {
+          "change_id": "RC3-003",
+          "machines": "TurnerBook;Sheldon;Snowdrop;Max;Rosie (rc3; tested on Max only)",
+          "subject": "fix(fleet): queued timeout counts from requeue and gateway restart",
+          "files": "tests/tools/test_fleet_message_drain.py;tools/fleet_message_drain.py",
+          "class": "KEEP-FIX",
+          "reason": "The 2 h queued timeout counted from created_at only, so a requeued doc or a doc delivered to a restarted receiver expired at once. It now counts from the latest of created_at, requeued_at and receiver start.",
+          "upstream_ref": "none; fleet-only code (bot relay and fleet messages are not upstream)",
+          "plugin_or_setting": "new fleet_messages_v1 field requeued_at; expires_at 24 h limit unchanged; no new setting",
+          "risk_if_dropped": "Fresh requeues and messages to a just-restarted gateway get false expired notices.",
+          "proof_test": "tests/tools/test_fleet_message_drain.py; exec/work/hermes-goal/ONE-0307/code-expiry-clock.md"
+        },
+        "outcome": "replayed",
+        "required_source_commits": [
+          "1445dbbc65ad69a42bd7324a2917c11a1b4c5bf0"
+        ],
+        "per_source_outcomes": {
+          "1445dbbc65ad69a42bd7324a2917c11a1b4c5bf0": "replayed"
+        }
+      }
+    ]
   }
 ]

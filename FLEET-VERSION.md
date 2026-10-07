@@ -15,3 +15,5 @@ Classified carried rows: 263. FLEET-CARRIED.json embeds every original row and i
 Product and test source is unchanged from tested commit 4303dfa9c9c9067fc11a8c488444253fbd5a1cc4. Only release metadata changed. The 72-file comparison and 17-file K2j full-run receipts are reused under the owner speed rule.
 
 Prepared for executor publication. This final candidate was not pushed by U5.
+
+rc3 (7 Oct 2026): built on rc2.2 (f182607ba75). Three fleet fixes are carried on top, rows RC3-001 to RC3-003 in FLEET-CARRIED.json: cron workers start through the installation-bound runtime command; a queued fleet message is marked done when the bot answers it; the queued timeout counts from requeue and from receiver restart. Classified carried rows: 266. Tests for the touched files were compared with rc2.2: the only failure (test_reported_linger_finishes_after_short_lived_drain_script_exits, no ruamel in the test runner) is the same on both.
