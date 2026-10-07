@@ -17,10 +17,6 @@ def clear_triage_hold(
     if kb._is_foreign_fleet_mirror(conn, task_id, installed_node_id):
         raise ValueError('foreign fleet mirror cannot be unblocked locally')
 
-    # Check the marker branch independently of needs_input, which operators can clear.
-    if kb._has_turner_hold(conn, task_id, None, row['title'], row['body']):
-        raise ValueError('triage HOLD FOR TURNER marker cannot be unblocked; only Turner/owner clears it')
-
     if row['block_kind'] == 'needs_input' and kb._has_turner_hold(
         conn, task_id, row['block_kind'], row['title'], row['body'],
     ):

@@ -19,7 +19,7 @@ from contextlib import contextmanager
 from pathlib import Path
 
 import pytest
-import yaml
+import hermes_yaml as yaml
 
 from agent.delegation_context import delegated_child_context
 from hermes_constants import reset_hermes_home_override, set_hermes_home_override
@@ -403,18 +403,20 @@ def test_keep_spec_dependency_refuses_without_substitution(lane):
     assert store.state_snapshot(lane[1], lane[3]) == before
 
 
-def test_public_cli_shared_request_tick_receipt(lane, tmp_path, capsys):
-    from hermes_cli.kanban import kanban_command
+def test_retired_public_cli_keeps_ordinary_kanban_parser(lane, capsys):
     from hermes_cli.kanban_parser import build_parser
-    root, conn, api, tid = lane
-    admit(lane)
-    file = tmp_path / "FIXTURE-request.json"
-    file.write_text(json.dumps(request(lane)), encoding="utf-8")
+
     parser = argparse.ArgumentParser()
     build_parser(parser.add_subparsers(dest="command"))
-    with profile(root, "ops"):
-        for argv in (["request", str(file)], ["tick"], ["receipt", "fixture-correlation"]):
-            args = parser.parse_args(["kanban", "--board", "fixture", "board-ops", *argv])
-            assert kanban_command(args) == 0
-            assert json.loads(capsys.readouterr().out)["ok"] is True
-    assert len(kb.list_comments(conn, tid)) == 1
+    with pytest.raises(SystemExit) as refusal:
+        parser.parse_args(["kanban", "--board", "fixture", "board-ops", "tick"])
+    assert refusal.value.code == 2
+    assert "board-ops" in capsys.readouterr().err
+    args = parser.parse_args(["kanban", "--board", "fixture", "unblock", lane[3]])
+    assert args.kanban_action == "unblock"
+    # The retired CLI's receipt/storage assertions remain at the retained API.
+    admit(lane)
+    submit(lane, request(lane))
+    receipt = run(lane)[0]
+    assert receipt["state"] == "applied"
+    assert len(kb.list_comments(lane[1], lane[3])) == 1

@@ -9,6 +9,9 @@ Covers the wrong-session-wake / silent-loss fixes:
 """
 
 import asyncio
+import logging
+
+import pytest
 
 from gateway.config import Platform
 from gateway.platforms.base import SendResult
@@ -219,3 +222,135 @@ def test_apiserver_wake_failure_rewinds_then_retries_destination(
     assert "worker-session" not in attempted_sessions
     assert _unseen_terminal_events(tid, "api_server", "origin-session") == []
 
+
+
+@pytest.mark.parametrize("busy", [True, False])
+def test_busy_wake_is_deferred_but_real_failures_are_bounded(tmp_path, monkeypatch, caplog, busy):
+    from gateway import kanban_watchers_notifier as notifier
+    from gateway.kanban_watchers_notifier import _KanbanNotification, _notifier_collect
+    from tools.bot_relay import TurnBusyError
+
+    monkeypatch.setenv("HERMES_KANBAN_DB", str(tmp_path / "busy-wake.db"))
+    monkeypatch.setattr(notifier, "WAKE_MAX_FAILURES", 3, raising=False)
+    getattr(notifier, "_BUSY_WAKE_LOGGED", set()).clear()
+    kb.init_db()
+    tid = _create_completed_subscription("api_server", "origin-session")
+    runner = _make_runner({Platform.API_SERVER: ApiServerLikeAdapter()})
+    caplog.set_level(logging.INFO, logger=notifier.logger.name)
+
+    async def failing_post(adapter, *, text, session_id):
+        if busy:
+            raise TurnBusyError("owner", 1)
+        raise RuntimeError("real transport failure")
+
+    monkeypatch.setattr("gateway.wake._self_post_chat_completion", failing_post)
+
+    async def tick():
+        deliveries = await asyncio.to_thread(_notifier_collect, runner, kb,
+            notifier_profile=None, gc_due=False, gc_retention_days=30)
+        for delivery in deliveries:
+            notification = _KanbanNotification(runner, delivery, platform_cls=Platform,
+                sub_fail_counts=runner._kanban_sub_fail_counts)
+            await notification.deliver()
+        return deliveries
+
+    try:
+        for attempt in range(13 if busy else 3):
+            deliveries = asyncio.run(tick())
+            assert len(deliveries) == 1
+            if busy:
+                assert runner._kanban_sub_fail_counts == {}
+            elif attempt < 2:
+                assert list(runner._kanban_sub_fail_counts.values()) == [attempt + 1]
+            if busy or attempt < 2:
+                assert _unseen_terminal_events(tid, "api_server", "origin-session")
+        with kbc.connect() as conn:
+            subs = conn.execute("SELECT * FROM kanban_notify_subs WHERE task_id = ?", (tid,)).fetchall()
+        if busy:
+            assert len(subs) == 1
+            assert sum("deferred: the bot is in a turn" in r.message for r in caplog.records) == 1
+            notification = _KanbanNotification(runner, deliveries[0], platform_cls=Platform,
+                sub_fail_counts=runner._kanban_sub_fail_counts)
+            notification.clear_failures()
+            asyncio.run(tick())
+            assert sum("deferred: the bot is in a turn" in r.message for r in caplog.records) == 2
+        else:
+            assert subs == []
+            assert runner._kanban_sub_fail_counts == {}
+            assert f"hermes kanban show {tid}" in caplog.text
+    finally:
+        getattr(notifier, "_BUSY_WAKE_LOGGED", set()).clear()
+
+
+@pytest.mark.parametrize("status, body, exception", [
+    (409, '{"code":"target_busy"}', "busy"),
+    (409, '{"code":"other_conflict"}', "failure"),
+    (403, '{"code":"target_busy"}', "failure"),
+])
+def test_http_self_post_defers_only_target_busy_409(monkeypatch, status, body, exception):
+    from gateway.wake import WakeNotAccepted, _self_post_chat_completion
+    from unittest.mock import AsyncMock, MagicMock
+    import aiohttp
+
+    response = MagicMock(status=status)
+    response.text = AsyncMock(return_value=body)
+    post_context = MagicMock()
+    post_context.__aenter__ = AsyncMock(return_value=response)
+    post_context.__aexit__ = AsyncMock(return_value=False)
+    session = MagicMock()
+    session.post.return_value = post_context
+    session_context = MagicMock()
+    session_context.__aenter__ = AsyncMock(return_value=session)
+    session_context.__aexit__ = AsyncMock(return_value=False)
+    monkeypatch.setattr(aiohttp, "ClientSession", lambda **kwargs: session_context)
+    expected = WakeNotAccepted if exception == "busy" else RuntimeError
+    with pytest.raises(expected, match="target_busy" if exception == "busy" else f"HTTP {status}"):
+        asyncio.run(_self_post_chat_completion(ApiServerLikeAdapter(), text="wake", session_id="origin"))
+    assert session.post.call_count == 1
+
+
+def test_real_wake_failures_warn_at_checkpoints_and_passive_limit_stays_short(tmp_path, monkeypatch, caplog):
+    import gateway.kanban_watchers_notifier as notifier
+    from gateway.kanban_watchers_notifier import _KanbanNotification, _notifier_collect
+
+    monkeypatch.setenv("HERMES_KANBAN_DB", str(tmp_path / "wake-warning.db"))
+    kb.init_db()
+    tid = _create_completed_subscription("api_server", "origin-session")
+    runner = _make_runner({Platform.API_SERVER: ApiServerLikeAdapter()})
+    caplog.set_level(logging.DEBUG, logger=notifier.logger.name)
+
+    async def fail(adapter, *, text, session_id):
+        raise RuntimeError("transport failure")
+    monkeypatch.setattr("gateway.wake._self_post_chat_completion", fail)
+
+    async def tick():
+        deliveries = await asyncio.to_thread(_notifier_collect, runner, kb,
+            notifier_profile=None, gc_due=False, gc_retention_days=30)
+        for delivery in deliveries:
+            await _KanbanNotification(runner, delivery, platform_cls=Platform,
+                sub_fail_counts=runner._kanban_sub_fail_counts).deliver()
+
+    key = (tid, "api_server", "origin-session", "")
+    for prior, level in [(3, logging.DEBUG), (59, logging.WARNING), (719, logging.WARNING)]:
+        runner._kanban_sub_fail_counts[key] = prior
+        caplog.clear()
+        asyncio.run(tick())
+        records = [r for r in caplog.records if "wake self-post failed" in r.message]
+        assert len(records) == 1
+        assert records[0].levelno == level
+    assert "owner not woken" in caplog.text
+    assert f"hermes kanban show {tid}" in caplog.text
+
+    # The passive delivery boundary retains the 12-failure policy.
+    notification = _KanbanNotification(runner, {
+        "sub": {"task_id": tid, "platform": "api_server", "chat_id": "origin-session"},
+        "task": None, "events": [], "cursor": 0,
+    }, platform_cls=Platform, sub_fail_counts={})
+    from unittest.mock import AsyncMock
+    notification.unsub = AsyncMock()
+    notification.rewind = AsyncMock()
+    notification.sub_fail_counts[notification.sub_key] = 11
+    asyncio.run(notification.delivery_failed("%s %d/%d %s", (tid,), "%s %s %d",
+        RuntimeError("ping failed"), False))
+    notification.unsub.assert_awaited_once()
+    notification.rewind.assert_not_awaited()

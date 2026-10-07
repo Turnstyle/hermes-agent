@@ -54,7 +54,7 @@ def startup_authority(board: str) -> dict:
     Reading the root file avoids accepting an operator's profile-local config
     as node authority. No configuration is created or repaired by this API.
     """
-    import yaml
+    import hermes_yaml as yaml
 
     path = kb.kanban_home() / "config.yaml"
     try:

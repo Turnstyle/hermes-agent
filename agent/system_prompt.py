@@ -363,9 +363,9 @@ def _bot_mode_parts(agent: Any) -> List[str]:
             # carry t_2e0ceb41: a gateway session (Slack, Meet bridge) whose profile opted its
             # platform into message_agent gets the same teammate roster so it can pick a recipient.
             # No epoch line / timeless flag: this is an ordinary dated chat, not the eternal Bot Chat.
-            from tools.bot_mode_dm import _surface_authorized
+            from tools.bot_mode_dm import message_agent_authorized
 
-            if _surface_authorized(agent):
+            if message_agent_authorized(agent):
                 _section = get_bot_mode_protocol_section(_agent_home(agent))
                 if _section:
                     parts.append(_section)

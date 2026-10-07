@@ -2158,7 +2158,7 @@ def _newest_event_kind(
 
 _HOLD_EVENT_KINDS = ("blocked", "block_loop_detected")
 _HOLD_RELEASE_EVENT_KINDS = ("unblocked", "promoted_manual")
-_TURNER_HOLD_MARKER = "hold for turner"
+NEEDS_INPUT_TODO_HOLD_SECONDS = 24 * 3600  # A hold may not wait forever on a person.
 
 
 def _has_unreleased_block_loop(conn: sqlite3.Connection, task_id: str) -> bool:
@@ -2168,21 +2168,25 @@ def _has_unreleased_block_loop(conn: sqlite3.Connection, task_id: str) -> bool:
     ) == "block_loop_detected"
 
 
+def _needs_input_hold_state(conn, task_id, block_kind):
+    """'active', 'expired' or None for a needs_input hold on a todo/triage card."""
+    if block_kind != "needs_input":
+        return None
+    row = conn.execute(
+        "SELECT kind, created_at FROM task_events WHERE task_id = ? AND kind IN (?, ?, ?, ?) "
+        "ORDER BY id DESC LIMIT 1", (task_id, *_HOLD_EVENT_KINDS, *_HOLD_RELEASE_EVENT_KINDS),
+    ).fetchone()
+    if row is None or row["kind"] not in _HOLD_EVENT_KINDS:
+        return None
+    return "expired" if int(time.time()) - int(row["created_at"] or 0) >= NEEDS_INPUT_TODO_HOLD_SECONDS else "active"
+
+
 def _has_turner_hold(
     conn: sqlite3.Connection, task_id: str, block_kind: Optional[str],
     title: str, body: Optional[str],
 ) -> bool:
-    """A todo hold lasts until unblock/promote after its latest hold event."""
-    if block_kind == "needs_input" and _newest_event_kind(
-        conn, task_id, _HOLD_EVENT_KINDS + _HOLD_RELEASE_EVENT_KINDS,
-    ) in _HOLD_EVENT_KINDS:
-        return True
-    if _TURNER_HOLD_MARKER in (title or "").lower() or _TURNER_HOLD_MARKER in (body or "").lower():
-        newest = _newest_event_kind(
-            conn, task_id, ("created", "edited") + _HOLD_RELEASE_EVENT_KINDS,
-        )
-        return newest is None or newest in ("created", "edited")
-    return False
+    """Only a needs_input hold younger than 24 hours pauses a todo/triage card."""
+    return _needs_input_hold_state(conn, task_id, block_kind) == "active"
 
 
 def _latest_event(
@@ -2403,8 +2407,8 @@ def recompute_ready(conn: sqlite3.Connection, failure_limit: int = None) -> int:
 
     1. The most recent block event was a worker-initiated ``kanban_block`` — those stay blocked until an
     explicit ``kanban_unblock`` (#28712).
-    2. ``todo`` is skipped while it has an unreleased ``needs_input`` or
-    ``HOLD FOR TURNER`` hold; only ``kanban unblock``/``promote`` release it.
+    2. ``todo`` is skipped while its ``needs_input`` hold is younger than 24 hours.
+    Older holds expire automatically; title/body text never holds a card.
 
     A Fleet-mirrored row owned by ANOTHER node is never promoted: this is
     automatic, node-local bookkeeping and has no authority over a remote node's
@@ -2440,7 +2444,7 @@ def recompute_ready(conn: sqlite3.Connection, failure_limit: int = None) -> int:
             if cur_status == "todo" and _has_turner_hold(
                 conn, task_id, row["block_kind"], row["title"], row["body"],
             ):
-                # Human hold parked in todo; only unblock/promote may release it.
+                # Fresh needs_input hold; unblock/promote can release it sooner.
                 continue
             parents = conn.execute(
                 "SELECT t.status FROM tasks t "
@@ -2482,6 +2486,14 @@ def recompute_ready(conn: sqlite3.Connection, failure_limit: int = None) -> int:
                         "UPDATE tasks SET status = ? WHERE id = ? AND status = 'todo'",
                         (resume_status, task_id),
                     )
+                    if _needs_input_hold_state(conn, task_id, row["block_kind"]) == "expired":
+                        _insert_comment(
+                            conn, task_id, "dispatcher",
+                            "NEEDS-INPUT HOLD EXPIRED: nobody answered in 24 hours, so this card moves on. "
+                            "The assignee takes the recommended option written in the card. "
+                            f'To hold it again run: hermes kanban block {task_id} "<reason>" --kind needs_input',
+                            int(time.time()),
+                        )
                 _append_event(
                     conn, task_id, "promoted",
                     {"status": resume_status} if resume_status != "ready" else None,
@@ -4046,8 +4058,8 @@ def unblock_task(
 ) -> bool:
     """``blocked``/``scheduled`` -> its resumable phase (parent re-gated; ``review``
     when that is where it left off), closing any leaked run first. A ``todo``
-    row holding an unreleased Turner hold is also accepted: the
-    ``unblocked`` event is what releases it for ``recompute_ready``.
+    row with a fresh ``needs_input`` hold is also accepted: the
+    ``unblocked`` event releases it immediately, before its 24-hour expiry.
     Triage holds require actor/reason and stay in triage for separate spec release."""
     now = int(time.time())
     with write_txn(conn):
@@ -4367,7 +4379,7 @@ def keep_spec_triage_task(
             return False, "foreign fleet mirror cannot be promoted locally", None, "triage", False, None
 
         if _has_turner_hold(conn, task_id, row["block_kind"], row["title"], row["body"]):
-            return False, "task has active hold (block_kind or HOLD FOR TURNER)", None, "triage", False, None
+            return False, "task has active hold (needs_input, younger than 24 h)", None, "triage", False, None
 
         if _has_unreleased_block_loop(conn, task_id):
             return False, "task has unreleased block loop hold", None, "triage", False, None

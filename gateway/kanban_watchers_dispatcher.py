@@ -358,17 +358,17 @@ def _log_spawn_results(results: Optional[list]) -> bool:
             continue
         claim_errors = getattr(res, "claim_errors", None) or []
         reclaim_errors = getattr(res, "reclaim_errors", None) or []
-        if claim_errors:
-            logger.warning(
-                "kanban dispatcher [%s]: %d claim refusal(s): %s",
-                slug, len(claim_errors),
-                "; ".join(f"{tid}: {err}" for tid, err in claim_errors),
-            )
-        if reclaim_errors:
-            logger.warning(
-                "kanban dispatcher [%s]: %d reclaim refusal(s): %s",
-                slug, len(reclaim_errors),
-                "; ".join(f"{tid}: {err}" for tid, err in reclaim_errors),
+        for step, errors in (("claim", claim_errors), ("reclaim", reclaim_errors)):
+            if not errors:
+                continue
+            due = [(tid, err) for tid, err in errors
+                   if _kbd()._fence_log_due(f"{step}-summary", tid, now)]
+            log = logger.warning if due else logger.debug
+            shown = due or errors
+            log(
+                "kanban dispatcher [%s]: %d %s refusal(s): %s",
+                slug, len(shown), step,
+                "; ".join(f"{tid}: {err}" for tid, err in shown),
             )
         skipped_placeholder = getattr(res, "skipped_placeholder", None) or []
         if getattr(res, "spawned", None):

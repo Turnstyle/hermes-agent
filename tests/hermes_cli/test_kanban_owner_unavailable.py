@@ -206,6 +206,7 @@ def test_dispatch_reports_claim_and_reclaim_refusals(kanban_home, monkeypatch, c
     from hermes_cli import kanban_ops
     from gateway.kanban_watchers_dispatcher import _log_spawn_results
 
+    kbd._fence_logged.clear()
     result = kbd.DispatchResult(
         claim_errors=[("t_claim", "claim: fixture fence")],
         reclaim_errors=[("t_reclaim", "reclaim: fixture fence")],
@@ -224,3 +225,97 @@ def test_dispatch_reports_claim_and_reclaim_refusals(kanban_home, monkeypatch, c
     assert _log_spawn_results([("fixture", result)]) is False
     assert "t_claim: claim: fixture fence" in caplog.text
     assert "t_reclaim: reclaim: fixture fence" in caplog.text
+
+
+_MAP_DDL = """CREATE TABLE IF NOT EXISTS fleet_kanban_issue_map (
+    local_task_id TEXT PRIMARY KEY,
+    issue_id TEXT,
+    raw_title TEXT,
+    canonical_body TEXT,
+    source_node TEXT,
+    current_node TEXT,
+    source_profile TEXT
+)"""
+
+_TRIGGER_DDL_SNOWDROP = """CREATE TRIGGER fleet_kanban_task_insert
+    AFTER INSERT ON tasks
+    BEGIN
+        INSERT INTO fleet_kanban_issue_map(
+            local_task_id,issue_id,raw_title,canonical_body,source_node,current_node,source_profile
+        ) VALUES(NEW.id,'fk_' || lower(hex(randomblob(4))),NEW.title,NEW.body,'snowdrop',NULL,'p');
+    END"""
+
+
+def test_fleet_foreign_assignee_homes_stays_quiet(kanban_home, only_worker_exists):
+    with kbc.connect() as conn:
+        conn.execute(_MAP_DDL)
+        conn.execute(_TRIGGER_DDL_SNOWDROP)
+        conn.execute(
+            "CREATE TABLE IF NOT EXISTS fleet_kanban_assignee_homes ("
+            "assignee TEXT PRIMARY KEY, home_node TEXT)"
+        )
+        conn.execute(
+            "INSERT INTO fleet_kanban_assignee_homes (assignee, home_node) VALUES (?, ?)",
+            ("max-lead", "max"),
+        )
+        conn.commit()
+
+        tid = kb.create_task(conn, title="foreign card", assignee="max-lead")
+        for _ in range(TICKS):
+            res = _tick(conn)
+            assert tid not in [t for t, _ in res.owner_unavailable]
+
+        ev = _events(conn, tid, "owner_unavailable")
+        assert ev == []
+        assert kbd._nonspawnable_kind("max-lead", conn) == "foreign"
+
+
+def test_fleet_foreign_issue_map_stays_quiet(kanban_home, only_worker_exists):
+    with kbc.connect() as conn:
+        conn.execute(_MAP_DDL)
+        conn.execute(_TRIGGER_DDL_SNOWDROP)
+        conn.commit()
+
+        tid = kb.create_task(conn, title="foreign mapped card", assignee="unregistered-bot")
+        conn.execute(
+            "UPDATE fleet_kanban_issue_map SET source_node = 'turnerbook', current_node = NULL "
+            "WHERE local_task_id = ?",
+            (tid,),
+        )
+        conn.commit()
+
+        for _ in range(TICKS):
+            res = _tick(conn)
+            assert tid not in [t for t, _ in res.owner_unavailable]
+
+        ev = _events(conn, tid, "owner_unavailable")
+        assert ev == []
+        assert kbd._nonspawnable_kind("unregistered-bot", conn, task_id=tid) == "foreign"
+
+
+def test_fleet_local_missing_profile_records_event_with_create_help(kanban_home, only_worker_exists):
+    with kbc.connect() as conn:
+        conn.execute(_MAP_DDL)
+        conn.execute(_TRIGGER_DDL_SNOWDROP)
+        conn.execute(
+            "CREATE TABLE IF NOT EXISTS fleet_kanban_assignee_homes ("
+            "assignee TEXT PRIMARY KEY, home_node TEXT)"
+        )
+        conn.execute(
+            "INSERT INTO fleet_kanban_assignee_homes (assignee, home_node) VALUES (?, ?)",
+            ("snow-writer", "snowdrop"),
+        )
+        conn.commit()
+
+        tid = kb.create_task(conn, title="local card missing profile", assignee="snow-writer")
+        res = _tick(conn)
+        assert res.owner_unavailable == [(tid, "snow-writer")]
+
+        ev = _events(conn, tid, "owner_unavailable")
+        assert len(ev) == 1
+        payload = ev[0][1]
+        assert payload["assignee"] == "snow-writer"
+        assert payload["reason"] == "profile_not_found"
+        assert "hermes profile create snow-writer" in payload["detail"]
+        assert "reassign_task" in payload["detail"]
+        assert kbd._nonspawnable_kind("snow-writer", conn) == "missing"

@@ -1561,12 +1561,43 @@ class APIServerAdapter(OpenAICompatRoutesMixin, BasePlatformAdapter):
                        "code": "gateway_auth_failed"}},
             status=401)
 
+    def _accept_host_key_for_profiles(self) -> bool:
+        """Use the host adapter's startup policy, never the request profile's config.
+
+        Only a literal YAML boolean true opts in; strings and numeric values
+        preserve profile isolation. PlatformConfig.extra holds the merged host
+        configuration and its explicit extra value takes precedence.
+        """
+        return self.config.extra.get("accept_host_key_for_profiles") is True
+
     def _check_auth(self, request: "web.Request") -> Optional["web.Response"]:
         """Validate the Bearer token; None when OK, else a 401. The no-key branch (connect()
         refuses to start without API_SERVER_KEY) exists for tests/manual wiring on the default
         listener only; named profiles fail closed rather than inherit the owner's key."""
         profile = _api_request_profile.get()
         expected_key = self._expected_api_key()
+        auth_header = request.headers.get("Authorization", "")
+        token = auth_header[7:].strip() if auth_header.startswith("Bearer ") else ""
+
+        # Preferred path: profile-scoped key (or host key for default listener)
+        if token and expected_key:
+            # Compare as bytes: compare_digest raises TypeError on non-ASCII str, and the
+            # token is raw client input — a stray byte must 401, not 500.
+            if hmac.compare_digest(token.encode(), expected_key.encode()):
+                return None
+
+        # Fleet fallback under explicit config switch only: accept host key for multiplexed profiles with loud warning
+        host_key = self._api_key or ""
+        if (self._accept_host_key_for_profiles() and token and host_key and profile and profile != "default"
+                and hmac.compare_digest(token.encode(), host_key.encode())):
+            logger.warning(
+                "API server accepted HOST key for profile %r (api_server.accept_host_key_for_profiles is enabled; "
+                "profile-scoped key %s). Next step: configure profile-scoped API_SERVER_KEY via Bot Maker or Keys Router; %s",
+                profile,
+                "differs" if expected_key else "missing",
+                self._request_audit_log_suffix(request))
+            return None
+
         if not expected_key:
             if not (profile and profile != "default"):
                 return None
@@ -1575,13 +1606,7 @@ class APIServerAdapter(OpenAICompatRoutesMixin, BasePlatformAdapter):
                 "API_SERVER_KEY is configured; %s",
                 profile, self._request_audit_log_suffix(request))
             return self._auth_failed_response()
-        auth_header = request.headers.get("Authorization", "")
-        if auth_header.startswith("Bearer "):
-            token = auth_header[7:].strip()
-            # Compare as bytes: compare_digest raises TypeError on non-ASCII str, and the
-            # token is raw client input — a stray byte must 401, not 500.
-            if hmac.compare_digest(token.encode(), expected_key.encode()):
-                return None
+
         logger.warning("API server rejected invalid API key: %s", self._request_audit_log_suffix(request))
         return self._auth_failed_response()
 

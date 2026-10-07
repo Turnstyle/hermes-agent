@@ -8,6 +8,7 @@ late-bound via ``_kb`` (import-cycle breaking) so monkeypatching
 from __future__ import annotations
 
 import contextlib
+import contextvars
 import os
 import re
 import signal
@@ -91,8 +92,8 @@ DEFAULT_PROFILE_BUSY_BACKOFF_MAX_SECONDS = 900
 # and the card's error line names the streak, so a long hold stays visible on the board.
 PROFILE_BUSY_LONG_STREAK = 6
 
-# Within this window a GitHub PR URL in a comment blocks re-spawn.
-_RESPAWN_GUARD_PR_WINDOW = 86400  # 24 hours
+# Bound the hold when the fleet PR-state cache is not refreshed.
+_RESPAWN_GUARD_PR_WINDOW = 7200  # 2 hours
 
 _RESPAWN_GUARD_PR_URL_RE = re.compile(
     r"https?://github\.com/[^/\s]+/[^/\s]+/pull/\d+",
@@ -110,6 +111,19 @@ _EXPLICIT_DO_NOT_DISPATCH_MARKERS = (
     "do not dispatch",
     "king seat is already doing this",
 )
+
+
+_GUARD_NEXT_STEP = {
+    "explicit_do_not_dispatch": (
+        'post a newer comment without a hold marker: '
+        'hermes kanban comment {task_id} "go ahead"'
+    ),
+    "active_pr": (
+        "this releases by itself 2 hours after the assignee's PR comment, "
+        "or when every PR in it is merged or closed. To release now, reassign "
+        "to a different profile: hermes kanban reassign {task_id} <different-profile>"
+    ),
+}
 
 
 def _active_pr_keys(conn: sqlite3.Connection, task_id: str, assignee: Optional[str],
@@ -173,6 +187,44 @@ _KNOWN_LIFECYCLE_FENCE_MESSAGES = frozenset({
 })
 
 
+_FENCE_LOG_EVERY_SECONDS = 3600.0
+_LEASE_WAIT_GRACE_SECONDS = 600.0  # Fleet sync normally records a new lease within minutes.
+_CLAIM_RETRY_AFTER = {"foreign": 600.0, "lease_late": 300.0}
+_fence_logged = {}  # (step, task_id) -> last WARNING epoch
+_claim_fence = {}  # task_id -> kind, since, last
+
+
+def _trim_fence_cache(cache, now, timestamp):
+    if len(cache) <= 4096:
+        return
+    for key in list(cache):
+        if now - timestamp(cache[key]) > 7200:
+            cache.pop(key, None)
+    # A burst of fresh cards must also stay bounded.
+    for key in sorted(cache, key=lambda key: timestamp(cache[key]))[:max(0, len(cache) - 4096)]:
+        cache.pop(key, None)
+
+
+def _fence_log_due(step, task_id, now=None):
+    """True once per hour per (step, task): the first refusal is loud."""
+    now = time.time() if now is None else now
+    key = (step, task_id)
+    last = _fence_logged.get(key)
+    if last is not None and now - last < _FENCE_LOG_EVERY_SECONDS:
+        return False
+    _fence_logged[key] = now
+    _trim_fence_cache(_fence_logged, now, lambda value: value)
+    return True
+
+
+def _claim_fence_errors(result, kind, since, now):
+    if kind == "foreign":
+        return result.foreign_claim_errors
+    if kind == "held" or now - since < _LEASE_WAIT_GRACE_SECONDS:
+        return result.held_claim_errors
+    return result.eligible_claim_errors
+
+
 def _is_known_lifecycle_fence(exc: BaseException) -> bool:
     """True iff ``exc`` is one of the adapter's own ``RAISE(ABORT, msg)`` refusals.
 
@@ -223,7 +275,7 @@ def _isolate_fenced_row(
 ) -> bool:
     """Per-row verdict on a database error raised by one reclaim/claim write.
 
-    A known lifecycle fence is expected authority: log a WARNING, append
+    A known lifecycle fence is expected authority: log at most hourly at WARNING, append
     ``(task_id, "<step>: <message>")`` to the caller-owned ``errors_out`` and
     return True so the caller skips only this row (its own transaction or
     savepoint already rolled back). Anything else returns False after an ERROR
@@ -233,8 +285,12 @@ def _isolate_fenced_row(
     write can no longer record it.
     """
     if _is_known_lifecycle_fence(exc):
-        _kb._log.warning(
-            "kanban %s: task %s left unchanged — lifecycle fence refused the write: %s",
+        log = _kb._log.warning if _fence_log_due(step, task_id) else _kb._log.debug
+        log(
+            "kanban %s: task %s left unchanged — lifecycle fence refused the write: %s; "
+            "this machine holds no verified lease for the card yet; the fleet sync pass "
+            "records it, normally within minutes. If this line comes again in an hour, "
+            "check the fleet-kanban-sync log on this machine.",
             step, task_id, exc,
         )
         if errors_out is not None:
@@ -286,9 +342,10 @@ def _recovery_owned_here(
             step, task_id, detail,
         )
         return False
-    _kb._log.warning(
+    log = _kb._log.warning if _fence_log_due("ownership", task_id) else _kb._log.debug
+    log(
         "kanban %s: task %s left unchanged — fleet ownership cannot be verified (%s); "
-        "protected until the mapping is repaired",
+        "check the fleet-kanban-sync log on this machine to repair the mapping",
         step, task_id, detail,
     )
     if errors_out is not None:
@@ -346,17 +403,15 @@ class DispatchResult:
     CLAIM write a lifecycle-guard trigger refused this tick. The row stayed
     unclaimed and is not counted in ``spawned``; later rows still ran."""
     foreign_claim_errors: list[tuple[str, str]] = field(default_factory=list)
-    """``(task_id, "claim: <fence message>")`` subset of ``claim_errors`` where
-    the task is a foreign Fleet mirror."""
+    """Refusals and retry-backoff skips for a foreign Fleet mirror."""
     held_claim_errors: list[tuple[str, str]] = field(default_factory=list)
-    """``(task_id, "claim: <fence message>")`` subset of ``claim_errors`` for a
-    node-owned card whose canonical Fleet status is ``blocked`` with sync still
-    ``pending``: the lease fence refusing it is the fence working as designed
-    (the owner-side unblock has not synced yet), so it is a hold, not a
-    dispatcher failure. Never counted in ``eligible_claim_errors``."""
+    """``(task_id, "claim: <fence message>")`` for a node-owned card whose
+    canonical Fleet status is ``blocked`` with sync still ``pending``, or in
+    the first 10 minutes of waiting for its lease. Includes backoff skips:
+    these are holds, not dispatcher failures."""
     eligible_claim_errors: list[tuple[str, str]] = field(default_factory=list)
-    """``(task_id, "claim: <fence message>")`` subset of ``claim_errors`` where
-    the task is node-owned and dispatch-enabled on this node."""
+    """Refusals and retry-backoff skips for a node-owned, dispatch-enabled
+    card whose lease wait has exceeded the grace period."""
     spawn_errors: list[tuple[str, str]] = field(default_factory=list)
     """``(task_id, str(exc))`` for each eligible card whose worker spawn failed
     with an exception this tick."""
@@ -2520,27 +2575,16 @@ def _unchanged_blocked_reason(conn: sqlite3.Connection, task_id: str) -> bool:
 
 
 def _explicit_do_not_dispatch_marked(conn: sqlite3.Connection, task_id: str) -> bool:
-    row = conn.execute(
-        "SELECT title, body FROM tasks WHERE id = ?",
-        (task_id,),
-    ).fetchone()
-    if row is None:
-        return False
-    texts = [_kb._lossy_text(row["title"]), _kb._lossy_text(row["body"])]
     comment = conn.execute(
         "SELECT body FROM task_comments WHERE task_id = ? "
         "ORDER BY created_at DESC, id DESC LIMIT 1",
         (task_id,),
     ).fetchone()
-    if comment is not None:
-        texts.append(_kb._lossy_text(comment["body"]))
-    for text in texts:
-        if not text:
-            continue
-        lowered = text.casefold()
-        if any(marker in lowered for marker in _EXPLICIT_DO_NOT_DISPATCH_MARKERS):
-            return True
-    return False
+    if comment is None:
+        return False
+    # Titles and bodies often describe dispatch rules for other cards/profiles.
+    text = (_kb._lossy_text(comment["body"]) or "").strip().casefold()
+    return text.startswith(_EXPLICIT_DO_NOT_DISPATCH_MARKERS)
 
 
 def _record_worker_handoff(conn: sqlite3.Connection, task_id: str, pid: int) -> None:
@@ -2578,8 +2622,8 @@ def check_respawn_guard(
     """Return a guard reason if ``task_id`` should NOT be re-spawned, else None.
 
     Called per ready/review row before any claim attempt. Priority order:
-    an explicit ``do not dispatch`` / ``king seat is already doing this`` marker,
-    then ``unchanged_block_reason`` (two newest blocked reasons match and no
+    an explicit ``do not dispatch`` / ``king seat is already doing this`` marker
+    at the start of the newest comment, then ``unchanged_block_reason`` (two newest blocked reasons match and no
     later ``unblocked`` event), then
     ``"infrastructure_cooldown"`` (latest run is a ``spawn_failed`` the host
     refused — no restart-safe scope — within the cooldown; never counted),
@@ -2888,17 +2932,131 @@ def _control_plane_lane_patterns() -> tuple[str, ...]:
     return tuple(n.strip().lower() for n in names if n and n.strip())
 
 
-def _nonspawnable_kind(assignee: str) -> str:
+_CURRENT_DISPATCH_TASK: contextvars.ContextVar[Optional[tuple[sqlite3.Connection, str]]] = (
+    contextvars.ContextVar("_CURRENT_DISPATCH_TASK", default=None)
+)
+
+
+def _check_fleet_nonspawnable(
+    conn: sqlite3.Connection,
+    name: str,
+    *,
+    task_id: Optional[str] = None,
+) -> Optional[str]:
+    """Check fleet ownership for a nonspawnable assignee on a Fleet board.
+    Returns 'foreign' if another node owns the assignee or card,
+    'placeholder' if it is a placeholder profile,
+    'missing' if this node is the verified owner,
+    or None if no fleet adapter is installed (fall back to non-fleet logic).
+    """
+    try:
+        installed_node_id = _kb._fleet_adapter_installed_node_id(conn)
+    except Exception:
+        return None
+
+    if not installed_node_id:
+        return None  # Non-fleet board: preserve legacy behavior
+
+    clean_installed = installed_node_id.strip().lower()
+
+    # 1. Check placeholder profiles first
+    try:
+        from hermes_cli.profiles import normalize_profile_name
+        canon = normalize_profile_name(name)
+    except Exception:
+        canon = name
+    if canon in PLACEHOLDER_PROFILES:
+        return "placeholder"
+
+    # 2. Check fleet_kanban_assignee_homes first
+    try:
+        has_homes = conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'fleet_kanban_assignee_homes'"
+        ).fetchone() is not None
+        if has_homes:
+            home_row = conn.execute(
+                "SELECT home_node FROM fleet_kanban_assignee_homes WHERE LOWER(assignee) = LOWER(?)",
+                (name,),
+            ).fetchone()
+            if home_row is not None and home_row[0]:
+                home_node = str(home_row[0]).strip().lower()
+                if home_node != clean_installed:
+                    return "foreign"
+                return "missing"
+    except Exception:
+        pass
+
+    # 3. Check fleet_kanban_issue_map
+    try:
+        has_map = conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'fleet_kanban_issue_map'"
+        ).fetchone() is not None
+        if has_map:
+            if task_id:
+                map_row = conn.execute(
+                    "SELECT current_node, source_node FROM fleet_kanban_issue_map WHERE local_task_id = ?",
+                    (task_id,),
+                ).fetchone()
+            else:
+                map_row = conn.execute(
+                    "SELECT m.current_node, m.source_node FROM fleet_kanban_issue_map m "
+                    "JOIN tasks t ON m.local_task_id = t.id WHERE LOWER(t.assignee) = LOWER(?) "
+                    "ORDER BY t.id DESC LIMIT 1",
+                    (name,),
+                ).fetchone()
+            if map_row is not None:
+                current_node, source_node = map_row[0], map_row[1]
+                owner = source_node if current_node is None else current_node
+                if isinstance(owner, str) and owner.strip():
+                    owner_clean = owner.strip().lower()
+                    if owner_clean != clean_installed:
+                        return "foreign"
+                    return "missing"
+                else:
+                    return "foreign"
+    except Exception:
+        pass
+
+    return None
+
+
+def _nonspawnable_kind(
+    assignee: str,
+    conn: Optional[sqlite3.Connection] = None,
+    task_id: Optional[str] = None,
+) -> str:
     """Why ``assignee`` failed the spawn gate: ``"lane"`` (configured
     control-plane lane), ``"placeholder"`` (placeholder pool profile with no
-    worker), ``"foreign"`` (this home's ``dispatch_profiles`` does not list it —
-    another home owns it) or ``"missing"`` (this home should run it but has no
-    such profile)."""
+    worker), ``"foreign"`` (this home's ``dispatch_profiles`` does not list it,
+    or a Fleet board where another node owns the card/assignee) or ``"missing"``
+    (this home should run it but has no such profile)."""
     import fnmatch
 
     name = (assignee or "").strip().lower()
     if any(fnmatch.fnmatchcase(name, pat) for pat in _control_plane_lane_patterns()):
         return "lane"
+
+    ctx = _CURRENT_DISPATCH_TASK.get()
+    if ctx is not None:
+        if conn is None:
+            conn = ctx[0]
+        if task_id is None:
+            task_id = ctx[1]
+
+    # Query fleet ownership / assignee homes BEFORE profile-missing branch
+    if conn is not None:
+        fleet_res = _check_fleet_nonspawnable(conn, name, task_id=task_id)
+        if fleet_res is not None:
+            return fleet_res
+    else:
+        try:
+            with _kbc.connect_readonly_closing() as ro_conn:
+                fleet_res = _check_fleet_nonspawnable(ro_conn, name, task_id=task_id)
+                if fleet_res is not None:
+                    return fleet_res
+        except Exception:
+            pass
+
     try:
         from hermes_cli.profiles import normalize_profile_name
     except Exception:
@@ -2971,8 +3129,8 @@ def _record_owner_unavailable(conn: sqlite3.Connection, task_id: str, assignee: 
                     "reason": "profile_not_found",
                     "node": _socket.gethostname(),
                     "detail": (
-                        f"assignee {assignee!r} is not a runnable profile on this home and "
-                        "is not a configured kanban.control_plane_lanes entry; recover with "
+                        f"assignee {assignee!r} is homed on this node but the profile does not exist; "
+                        f"create profile with 'hermes profile create {assignee}' or recover with "
                         "one explicit reassign_task(..., reason=...)"
                     ),
                 },
@@ -3448,22 +3606,25 @@ def _dispatch_lane_task(
         # owned by ``kanban.default_assignee``, not "unassigned but secretly routed".
         if not dry_run:
             skip_event = False
-            if guard_reason == "unchanged_block_reason":
-                last = conn.execute(
-                    "SELECT kind, payload FROM task_events WHERE task_id = ? "
-                    "ORDER BY id DESC LIMIT 1",
-                    (task_id,),
-                ).fetchone()
-                if last is not None and last["kind"] == "respawn_guarded":
-                    prev = _kb._json_or(last["payload"], {})
-                    skip_event = (
-                        isinstance(prev, dict)
-                        and prev.get("reason") == guard_reason
-                    )
+            last = conn.execute(
+                "SELECT kind, payload FROM task_events WHERE task_id = ? "
+                "ORDER BY id DESC LIMIT 1",
+                (task_id,),
+            ).fetchone()
+            if last is not None and last["kind"] == "respawn_guarded":
+                prev = _kb._json_or(last["payload"], {})
+                skip_event = (
+                    isinstance(prev, dict)
+                    and prev.get("reason") == guard_reason
+                )
             if not skip_event:
+                payload = {"reason": guard_reason}
+                next_step = _GUARD_NEXT_STEP.get(guard_reason)
+                if next_step:
+                    payload["next_step"] = next_step.format(task_id=task_id)
                 with _kb.write_txn(conn):
                     _kb._append_event(
-                        conn, task_id, "respawn_guarded", {"reason": guard_reason},
+                        conn, task_id, "respawn_guarded", payload,
                     )
         return False
 
@@ -3478,6 +3639,19 @@ def _dispatch_lane_task(
         _count_spawn(assignee)
         return True
     claim = _kb.claim_review_task if lane == "review" else _kb.claim_task
+    now = time.time()
+    fenced = _claim_fence.get(task_id)
+    if fenced is not None:
+        kind, since = fenced["kind"], fenced["since"]
+        retry_after = _CLAIM_RETRY_AFTER["foreign"] if kind == "foreign" else (
+            _CLAIM_RETRY_AFTER["lease_late"]
+            if kind == "lease_wait" and now - since >= _LEASE_WAIT_GRACE_SECONDS else 0
+        )
+        if now - fenced["last"] < retry_after:
+            _claim_fence_errors(result, kind, since, now).append(
+                (task_id, "claim: waiting to retry lifecycle fence")
+            )
+            return False
     try:
         claimed = claim(conn, task_id, ttl_seconds=ttl_seconds)
     except sqlite3.Error as exc:
@@ -3488,12 +3662,17 @@ def _dispatch_lane_task(
             raise
         installed_node = _kb._fleet_adapter_installed_node_id(conn)
         if _kb._is_foreign_fleet_mirror(conn, task_id, installed_node):
-            result.foreign_claim_errors.append((task_id, f"claim: {exc}"))
+            kind = "foreign"
         elif _is_canonical_blocked_sync_pending(conn, task_id):
-            result.held_claim_errors.append((task_id, f"claim: {exc}"))
+            kind = "held"
         else:
-            result.eligible_claim_errors.append((task_id, f"claim: {exc}"))
+            kind = "lease_wait"
+        since = fenced["since"] if fenced is not None and fenced["kind"] == kind else now
+        _claim_fence[task_id] = {"kind": kind, "since": since, "last": now}
+        _trim_fence_cache(_claim_fence, now, lambda value: value["last"])
+        _claim_fence_errors(result, kind, since, now).append((task_id, f"claim: {exc}"))
         return False
+    _claim_fence.pop(task_id, None)
     if claimed is None:
         return False
     try:
@@ -3865,8 +4044,12 @@ def _dispatch_once_locked(
                 continue
             row_assignee = default_assignee
             result.auto_assigned_default.append(row["id"])
-        if _dispatch_lane_task(conn, row, row_assignee, result, lane="ready", **lane_kwargs):
-            spawned += 1
+        tok = _CURRENT_DISPATCH_TASK.set((conn, row["id"]))
+        try:
+            if _dispatch_lane_task(conn, row, row_assignee, result, lane="ready", **lane_kwargs):
+                spawned += 1
+        finally:
+            _CURRENT_DISPATCH_TASK.reset(tok)
 
     # A review agent (sdlc-review) approves (→ done) or requests changes
     # (→ ready/todo). Review spawns share max_spawn with ready tasks. The loop
@@ -3878,8 +4061,12 @@ def _dispatch_once_locked(
         if not row["assignee"]:
             result.skipped_unassigned.append(row["id"])
             continue
-        if _dispatch_lane_task(conn, row, row["assignee"], result, lane="review", **lane_kwargs):
-            spawned += 1
+        tok = _CURRENT_DISPATCH_TASK.set((conn, row["id"]))
+        try:
+            if _dispatch_lane_task(conn, row, row["assignee"], result, lane="review", **lane_kwargs):
+                spawned += 1
+        finally:
+            _CURRENT_DISPATCH_TASK.reset(tok)
     return result
 
 

@@ -158,7 +158,18 @@ def is_canonical_bot_chat(agent: Any) -> bool:
 _SURFACE_CFG_KEY = "message_agent_platforms"
 # Never widened by config: the local CLI/TUI already has a Bot Chat, and these surfaces are
 # internal runners whose sender identity / reply routing is not a human-facing chat.
-_SURFACE_NEVER = frozenset({"", "cli", "tui", "cron", "subagent", "kanban", "batch"})
+# Kanban workers are authorized separately for one-way queued messaging with card reply routing.
+_SURFACE_NEVER = frozenset({"", "cli", "tui", "cron", "subagent", "batch"})
+
+
+def is_kanban_worker(agent: Any) -> bool:
+    """Require dispatcher provenance; an inherited card id alone is insufficient."""
+    platform = str(getattr(agent, "platform", "") or "").strip().lower()
+    if platform in {"cron", "subagent", "batch", "tui"}:
+        return False
+    source = str(getattr(agent, "_session_source", "") or
+                 os.environ.get("HERMES_SESSION_SOURCE", "")).strip().lower()
+    return platform == "kanban" or source == "kanban"
 
 
 def message_agent_surfaces(home: str | os.PathLike | None) -> frozenset[str]:
@@ -211,14 +222,15 @@ def _surface_authorized(agent: Any) -> bool:
 
 
 def message_agent_authorized(agent: Any) -> bool:
-    """The ``message_agent`` gate: the canonical Bot Chat (``is_canonical_bot_chat``), or a
-    gateway session whose platform the profile opted in via ``bot_mode.message_agent_platforms``.
+    """The ``message_agent`` gate: the canonical Bot Chat (``is_canonical_bot_chat``),
+    a kanban worker (``is_kanban_worker``), or a gateway session whose platform the profile
+    opted in via ``bot_mode.message_agent_platforms``.
     Session-stable, so it is prompt-cache safe to re-evaluate on every tool-snapshot rebuild.
     Never raises."""
     try:
         if not getattr(agent, "_bot_mode_protocol", True):
             return False
-        return is_canonical_bot_chat(agent) or _surface_authorized(agent)
+        return is_canonical_bot_chat(agent) or is_kanban_worker(agent) or _surface_authorized(agent)
     except Exception:  # pragma: no cover — must never break a turn
         logger.debug("message_agent_authorized failed", exc_info=True)
         return False
@@ -321,7 +333,8 @@ def _message_agent_tool(target: str = "", message: str = "", task_id: Optional[s
         )
         from tools.bot_relay import BOT_CHAT_TURN_ARGS, _hermes_cli
 
-        if _session_title(agent) != BOT_CHAT_TITLE and not _surface_authorized(agent):
+        is_worker = is_kanban_worker(agent)
+        if _session_title(agent) != BOT_CHAT_TITLE and not _surface_authorized(agent) and not is_worker:
             return _err("message_agent is only available in a Bot Mode 'Bot Chat' session "
                         "(or a gateway platform listed in this profile's bot_mode.message_agent_platforms). "
                         "This session is neither; do not retry.")
@@ -350,6 +363,68 @@ def _message_agent_tool(target: str = "", message: str = "", task_id: Optional[s
     raw_target = str(target or "").strip().lstrip("@")
     if not raw_target:
         return _roster_err("target is required.")
+
+    if is_worker:
+        card_id = (
+            getattr(agent, "task_id", None)
+            or getattr(agent, "_kanban_task_id", None)
+            or os.environ.get("HERMES_KANBAN_TASK")
+        )
+        if isinstance(card_id, str):
+            card_id = card_id.strip()
+        if not card_id:
+            return _err("Kanban worker lacks card id (HERMES_KANBAN_TASK not set in environment and no task_id on agent). "
+                        "Cannot establish provenance or reply route for one-way message.")
+
+        resolved = _resolve_local_name(raw_target, roster, root)
+        recipient = resolved or raw_target
+        if recipient == me:
+            return _err("You can't message yourself. Pick a teammate from the roster.")
+
+        origin_board = os.environ.get("HERMES_KANBAN_DB") or "profile default board"
+        content = (f"Message from 🤖 {_display_name(me, roster_homes.get(me, Path(home)))} (@{_handle(me)}) "
+                   f"[card {card_id}; board {origin_board}; profile home {home}]: {body}\n"
+                   f"One-way worker message. Reply route hint: card {card_id} on the named board; "
+                   "automated replies are not relayed to the worker.")
+        from tools.fleet_message_enqueue import enqueue_busy_dm, queued_ack
+        from tools.fleet_message_drain import recipient_drain_enabled
+        delivery_owner_verified = recipient_drain_enabled(
+            recipient, profile_home=roster_homes.get(recipient))
+        delivery_warning = None if delivery_owner_verified else (
+            "Queued storage is not confirmed delivery. No usable local recipient drain was verified. "
+            "Next step: the target machine's Bot Maker or Conductor checks fleet_messages.drain_on_turn_end "
+            "and its live target before relying on delivery.")
+        try:
+            msg_id = enqueue_busy_dm(sender=card_id, recipient=recipient, body=content)
+        except Exception as exc:
+            return _err(f"Failed to queue message to fleet_messages_v1 ({type(exc).__name__}). "
+                        "Next step: check the fleet message writer configuration and retry after repair.")
+
+        # Preserve worker own-card boundary: log comment only on originating card_id
+        try:
+            from tools.kanban_tools import _board
+            with _board(None, quiet_close=True) as (kb, conn):
+                comment_body = f"Sent one-way message to @{_handle(recipient)} (queued {msg_id}): {body}"
+                if delivery_warning:
+                    comment_body += "\n" + delivery_warning
+                author = me or "worker"
+                kb.add_comment(conn, card_id, author=author, body=comment_body)
+        except Exception as comment_exc:
+            logger.warning("Queued message %s has no origin-card comment (%s). "
+                           "Next step: post the queued message id on card %s.",
+                           msg_id, type(comment_exc).__name__, card_id)
+
+        return json.dumps({
+            "status": "queued",
+            "message_id": msg_id,
+            "to": f"@{_handle(recipient)}",
+            "reply_route": card_id,
+            "reply_relayed": False,
+            "delivery_owner_verified": delivery_owner_verified,
+            "warning": delivery_warning,
+            "reply": queued_ack(msg_id),
+        })
+
     # Sender signature: the friendly name when the bot has one (#89720); the @handle stays the routing alias.
     content = f"Message from 🤖 {_display_name(me, roster_homes.get(me, Path(home)))} (@{_handle(me)}): " + body
     delivery = dict(task_id=task_id, agent=agent)

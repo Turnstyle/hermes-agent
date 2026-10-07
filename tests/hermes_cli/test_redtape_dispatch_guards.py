@@ -115,6 +115,17 @@ def test_respawn_guard_fresh_distinct_block_not_unchanged(kanban_home):
         assert kbd.check_respawn_guard(conn, tid) is None
 
 
+def test_explicit_guard_next_step_names_release_command(kanban_home, all_assignees_spawnable):
+    with kbc.connect() as conn:
+        tid = kb.create_task(conn, title="intentional hold", assignee="a")
+        kb.add_comment(conn, tid, author="ops", body="Do not dispatch: archiving")
+        kbd.dispatch_once(conn, spawn_fn=lambda *a, **k: pytest.fail("held card spawned"))
+        events = [event for event in kb.list_events(conn, tid) if event.kind == "respawn_guarded"]
+        assert len(events) == 1
+        assert events[0].payload["reason"] == "explicit_do_not_dispatch"
+        assert f'hermes kanban comment {tid} "go ahead"' in events[0].payload["next_step"]
+
+
 def test_dispatch_skips_duplicate_respawn_guarded_for_unchanged_block(
     kanban_home, all_assignees_spawnable,
 ):
@@ -174,15 +185,11 @@ def test_explicit_do_not_dispatch_wins_over_elapsed_rate_limit_spawn_path(
 
         monkeypatch.setattr(_kb.time, "time", lambda: now + 400)
         assert kbd.check_respawn_guard(conn, tid) is None
-        conn.execute(
-            "UPDATE tasks SET body = ? WHERE id = ?",
-            ("do not dispatch — quota may be back", tid),
-        )
-        conn.commit()
+        kb.add_comment(conn, tid, author="ops", body="Do not dispatch: quota may be back")
         assert kbd.check_respawn_guard(conn, tid) == "explicit_do_not_dispatch"
 
 
-def test_respawn_guard_explicit_do_not_dispatch_marker_in_body(kanban_home):
+def test_respawn_guard_body_marker_does_not_hold(kanban_home):
     with kbc.connect() as conn:
         tid = kb.create_task(
             conn,
@@ -192,8 +199,8 @@ def test_respawn_guard_explicit_do_not_dispatch_marker_in_body(kanban_home):
         )
         conn.execute("UPDATE tasks SET status = 'ready' WHERE id = ?", (tid,))
         conn.commit()
-        assert kbd.check_respawn_guard(conn, tid) == "explicit_do_not_dispatch"
-        assert kbd.check_respawn_guard(conn, tid, lane="review") == "explicit_do_not_dispatch"
+        assert kbd.check_respawn_guard(conn, tid) is None
+        assert kbd.check_respawn_guard(conn, tid, lane="review") is None
 
 
 def test_respawn_guard_possible_duplicate_not_explicit_marker(kanban_home):
@@ -212,14 +219,14 @@ def test_respawn_guard_possible_duplicate_not_explicit_marker(kanban_home):
 def test_respawn_guard_explicit_marker_in_title_and_comment(kanban_home):
     with kbc.connect() as conn:
         title_tid = kb.create_task(
-            conn, title="Please DO NOT DISPATCH this card", assignee="a",
+            conn, title="DO NOT DISPATCH this card", assignee="a",
         )
         conn.execute("UPDATE tasks SET status = 'ready' WHERE id = ?", (title_tid,))
         comment_tid = kb.create_task(conn, title="c", assignee="a")
         conn.execute("UPDATE tasks SET status = 'ready' WHERE id = ?", (comment_tid,))
         kb.add_comment(conn, comment_tid, author="ops", body="king seat is already doing this")
         conn.commit()
-        assert kbd.check_respawn_guard(conn, title_tid) == "explicit_do_not_dispatch"
+        assert kbd.check_respawn_guard(conn, title_tid) is None
         assert kbd.check_respawn_guard(conn, comment_tid) == "explicit_do_not_dispatch"
 
 
@@ -267,3 +274,32 @@ def test_blocker_auth_still_skips_crashed_run_error(kanban_home):
         )
         conn.commit()
         assert kbd.check_respawn_guard(conn, tid) != "blocker_auth"
+
+
+@pytest.mark.parametrize("marker", [
+    "  Do NoT DisPatch: archiving  ",
+    "\n King SEAT is already doing this workstream ",
+])
+def test_respawn_guard_newest_comment_prefix_holds(kanban_home, marker):
+    with kbc.connect() as conn:
+        tid = kb.create_task(conn, title="deliberate hold", assignee="a")
+        kb.add_comment(conn, tid, author="ops", body=marker)
+        assert kbd.check_respawn_guard(conn, tid) == "explicit_do_not_dispatch"
+        assert kbd.check_respawn_guard(conn, tid, lane="review") == "explicit_do_not_dispatch"
+
+
+def test_respawn_guard_mid_sentence_marker_does_not_hold(kanban_home):
+    with kbc.connect() as conn:
+        tid = kb.create_task(conn, title="routing note", assignee="a")
+        kb.add_comment(conn, tid, author="ops",
+                       body="For that profile, do not dispatch a model task.")
+        assert kbd.check_respawn_guard(conn, tid) is None
+
+
+def test_respawn_guard_newer_comment_releases_marker(kanban_home):
+    with kbc.connect() as conn:
+        tid = kb.create_task(conn, title="released hold", assignee="a")
+        kb.add_comment(conn, tid, author="ops", body="Do not dispatch: archiving")
+        assert kbd.check_respawn_guard(conn, tid) == "explicit_do_not_dispatch"
+        kb.add_comment(conn, tid, author="ops", body="go ahead")
+        assert kbd.check_respawn_guard(conn, tid) is None

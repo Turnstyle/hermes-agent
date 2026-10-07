@@ -5918,6 +5918,7 @@ async def start_gateway(config: Optional[GatewayConfig] = None, replace: bool = 
         from gateway.shutdown_flush import (
             recover_gateway_draining_session_chats,
             recover_pending_to_db,
+            recover_served_profile_draining_chats,
         )
         recovered = recover_pending_to_db(
             session_resolver=runner.session_store.resolve_session_id_for_key,
@@ -5930,6 +5931,17 @@ async def start_gateway(config: Optional[GatewayConfig] = None, replace: bool = 
                 "Replayed %d gateway-draining session chat turn(s) from shutdown flush",
                 drain_replayed,
             )
+        if getattr(getattr(runner, "config", None), "multiplex_profiles", False):
+            async def _recover_served() -> None:
+                try:
+                    await recover_served_profile_draining_chats(runner)
+                except Exception:
+                    logger.warning("Served-profile pending message recovery failed", exc_info=True)
+
+            try:
+                runner._retain_background_task(asyncio.create_task(_recover_served()))
+            except Exception:
+                logger.warning("Could not start served-profile pending message recovery", exc_info=True)
 
     try:
         await _recover_pending()

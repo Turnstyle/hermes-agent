@@ -295,11 +295,6 @@ class GatewayKanbanWatchersMixin:
                 logger.exception("kanban dispatcher: zombie reaper failed")
 
             try:
-                # Board Ops consumes durable control requests without a chat
-                # turn. ESTOP is rechecked per action; exception notices still
-                # drain while dispatch is paused. Absent admission is inert.
-                from gateway.kanban_board_ops import tick as board_ops_tick
-                await board_ops_tick(self, _kb)
                 # Emergency stop (`hermes pause`): no auto-decompose or
                 # dispatch while paused; running workers finish naturally.
                 if not _kanban_dispatch_allowed():
