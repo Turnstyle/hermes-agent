@@ -247,7 +247,7 @@ class SignalAdapter(BasePlatformAdapter):
             if resp.status_code != 200:
                 logger.error("Signal: health check failed (status %d)", resp.status_code)
                 return False
-            self._running = True
+            self._mark_connected()
             self._last_sse_activity = time.time()
             self._sse_task = asyncio.create_task(self._sse_listener())
             self._health_monitor_task = asyncio.create_task(self._health_monitor())
@@ -268,7 +268,7 @@ class SignalAdapter(BasePlatformAdapter):
 
     async def disconnect(self) -> None:
         """Stop SSE listener and clean up."""
-        self._running = False
+        self._mark_disconnected()
         for task in (self._sse_task, self._health_monitor_task):
             await cancel_task(task)
         for task in self._typing_tasks.values():

@@ -139,7 +139,7 @@ class HomeAssistantAdapter(BasePlatformAdapter):
                     "your HA platform config to receive events.",
                     self.name)
             self._listen_task = asyncio.create_task(self._listen_loop())
-            self._running = True
+            self._mark_connected()
             logger.info("[%s] Connected to %s", self.name, self._hass_url)
             self._wire_plugin_handlers(None)
             return True
@@ -182,7 +182,7 @@ class HomeAssistantAdapter(BasePlatformAdapter):
         self._session = None
 
     async def disconnect(self) -> None:
-        self._running = False
+        self._mark_disconnected()
         if self._listen_task:
             self._listen_task.cancel()
             try:

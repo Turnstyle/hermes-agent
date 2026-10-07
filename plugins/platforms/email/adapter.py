@@ -485,7 +485,7 @@ class EmailAdapter(BasePlatformAdapter):
             return self._fail("[Email] %s", message, "email_missing_configuration", message, retryable=False)
         if not self._probe_imap(is_reconnect) or not self._probe_smtp():
             return False
-        self._running = True
+        self._mark_connected()
         self._poll_task = asyncio.create_task(self._poll_loop())
         print(f"[Email] Connected as {self._address}")
         self._wire_plugin_handlers(None)  # plugin-registered native handlers
@@ -493,7 +493,7 @@ class EmailAdapter(BasePlatformAdapter):
 
     async def disconnect(self) -> None:
         """Stop polling and disconnect."""
-        self._running = False
+        self._mark_disconnected()
         await cancel_task(self._poll_task)
         self._poll_task = None
         logger.info("[Email] Disconnected.")

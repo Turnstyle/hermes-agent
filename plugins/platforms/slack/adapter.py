@@ -1047,6 +1047,7 @@ class SlackAdapter(BasePlatformAdapter):
         self._app: Optional[Any] = None
         self._handler: Optional[Any] = None
         self._socket_mode_task: Optional[asyncio.Task] = None
+        self._socket_connected = False
         # Bot identity per workspace (team_id → WebClient / bot_user_id / display name), so the
         # agent never mistakes a human's mention for itself; primary workspace identity separate.
         self._bot_user_id: Optional[str] = None
@@ -1255,6 +1256,10 @@ class SlackAdapter(BasePlatformAdapter):
         self._trim_oldest_dict_entries(self._channel_team, self._CHANNEL_TEAM_MAX)
         self._trim_oldest_dict_entries(self._channel_teams, self._CHANNEL_TEAM_MAX)
 
+    @property
+    def send_path_degraded(self) -> bool:
+        return not self._socket_connected
+
     def _start_socket_mode_handler(self) -> None:
         """Start the Slack Socket Mode background task."""
         if not self._app or not self._app_token:
@@ -1332,6 +1337,9 @@ class SlackAdapter(BasePlatformAdapter):
         async with self._socket_reconnect_lock:
             if not self._running or not self._app or not self._app_token:
                 return
+            # Keep the watchdog running while reporting the lost receive path.
+            self._socket_connected = False
+            self._mark_degraded()
             logger.warning("[Slack] Socket Mode unhealthy (%s); reconnecting", reason)
             await self._stop_socket_mode_handler()
             try:
@@ -1360,6 +1368,9 @@ class SlackAdapter(BasePlatformAdapter):
                 elif self._socket_ping_pong_stale():
                     # is_connected() can lie on a closed session; staleness catches the zombie.
                     await self._restart_socket_mode("ping/pong stale")
+                elif connected is True and self._running and not self._socket_connected:
+                    self._socket_connected = True
+                    self._mark_connected()
             except asyncio.CancelledError:
                 raise
             except Exception:  # pragma: no cover - defensive logging
@@ -1823,7 +1834,8 @@ class SlackAdapter(BasePlatformAdapter):
             if not self._acquire_platform_lock("slack-app-token", app_token, "Slack app token"):
                 return False
             lock_acquired = True
-            self._running = False
+            self._socket_connected = False
+            self._mark_disconnected()
             # Cancel AND await the old watchdog so it can't see _running=False,
             # exit, and leave no monitor behind.
             await self._cancel_socket_watchdog("[Slack] Prior watchdog task failed while stopping")
@@ -1852,7 +1864,8 @@ class SlackAdapter(BasePlatformAdapter):
             # task); on failure keep it False so ``finally`` releases the lock.
             try:
                 self._start_socket_mode_handler()
-                self._running = True
+                self._socket_connected = await self._socket_transport_connected() is True
+                self._mark_connected()
                 self._ensure_socket_watchdog()
             except Exception:
                 self._running = False
@@ -1861,7 +1874,7 @@ class SlackAdapter(BasePlatformAdapter):
                 except Exception:  # pragma: no cover - defensive logging
                     logger.debug("[Slack] Cleanup after failed start raised", exc_info=True)
                 raise
-            logger.info("[Slack] Socket Mode connected (%d workspace(s))", len(self._team_clients))
+            logger.info("[Slack] Socket Mode started (%d workspace(s))", len(self._team_clients))
             self._hint_allow_bots()
             return True
         except Exception as e:  # pragma: no cover - defensive logging
@@ -1926,7 +1939,8 @@ class SlackAdapter(BasePlatformAdapter):
 
     async def disconnect(self) -> None:
         """Disconnect from Slack."""
-        self._running = False
+        self._socket_connected = False
+        self._mark_disconnected()
         # Seal dangling native streams so no live-typing indicator survives a restart.
         for key, stream in list(self._active_streams.items()):
             await self._seal_stream(key, stream)

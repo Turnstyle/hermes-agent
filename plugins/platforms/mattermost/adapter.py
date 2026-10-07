@@ -251,6 +251,7 @@ class MattermostAdapter(BasePlatformAdapter):
         return True
 
     async def disconnect(self) -> None:
+        self._mark_disconnected()
         self._closing = True
         await cancel_task(self._ws_task)
         if self._reconnect_task and not self._reconnect_task.done():

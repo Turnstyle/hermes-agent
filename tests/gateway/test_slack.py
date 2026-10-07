@@ -667,6 +667,120 @@ class TestSlackSocketWatchdog:
 
 
     @pytest.mark.asyncio
+    async def test_profile_runtime_state_tracks_connect_disconnect_reconnect(self, tmp_path):
+        from gateway import status
+        from hermes_constants import set_hermes_home_override, reset_hermes_home_override
+
+        @contextlib.contextmanager
+        def profile_scope(profile):
+            home = tmp_path / profile
+            home.mkdir(exist_ok=True)
+            home_token = set_hermes_home_override(home)
+            secret_token = secret_scope.set_secret_scope(
+                {"SLACK_APP_TOKEN": f"fixture-app-{profile}"}, profile_home=str(home))
+            try:
+                yield
+            finally:
+                secret_scope.reset_secret_scope(secret_token)
+                reset_hermes_home_override(home_token)
+
+        multiplex_was_active = secret_scope.is_multiplex_active()
+        secret_scope.set_multiplex_active(True)
+        factory, _ = self._make_fake_handler_factory()
+        adapters = []
+        with contextlib.ExitStack() as stack:
+            for p in self._patch_stack(factory):
+                stack.enter_context(p)
+            try:
+                for profile in ("alpha", "beta"):
+                    adapter = SlackAdapter(PlatformConfig(enabled=True, token="fixture-bot"))
+                    adapter._runtime_status_platform_key = f"{profile}:slack"
+                    adapters.append(adapter)
+                    with profile_scope(profile):
+                        assert await adapter.connect()
+                    assert await status.flush_runtime_status_async()
+                    payload = status.read_runtime_status() or {}
+                    assert payload.get("platforms", {}).get(f"{profile}:slack", {}).get("state") == "connected"
+
+                with profile_scope("alpha"):
+                    await adapters[0].disconnect()
+                assert await status.flush_runtime_status_async()
+                platforms = status.read_runtime_status()["platforms"]
+                assert platforms["alpha:slack"]["state"] == "disconnected"
+                assert platforms["beta:slack"]["state"] == "connected"
+
+                with profile_scope("alpha"):
+                    assert await adapters[0].connect(is_reconnect=True)
+                assert await status.flush_runtime_status_async()
+                platforms = status.read_runtime_status()["platforms"]
+                assert platforms["alpha:slack"]["state"] == "connected"
+                assert platforms["beta:slack"]["state"] == "connected"
+                assert "slack" not in platforms
+                assert not (tmp_path / "alpha" / "gateway_state.json").exists()
+                assert not (tmp_path / "beta" / "gateway_state.json").exists()
+            finally:
+                for adapter in adapters:
+                    await adapter.disconnect()
+                await status.flush_runtime_status_async()
+                secret_scope.set_multiplex_active(multiplex_was_active)
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("loss", ["transport", "task", "stale"])
+    async def test_profile_runtime_state_waits_for_transport_and_recovers(self, loss):
+        from gateway import status
+
+        base_factory, instances = self._make_fake_handler_factory()
+
+        def factory(*args, **kwargs):
+            handler = base_factory(*args, **kwargs)
+            handler.client.is_connected = lambda: False
+            return handler
+
+        async def wait_for(predicate):
+            async def poll():
+                while not predicate():
+                    await asyncio.sleep(0.01)
+            await asyncio.wait_for(poll(), timeout=3)
+
+        adapter = SlackAdapter(PlatformConfig(enabled=True, token="fixture-bot"))
+        adapter._runtime_status_platform_key = "alpha:slack"
+        adapter._socket_watchdog_interval_s = 0.01
+        with contextlib.ExitStack() as stack:
+            for p in self._patch_stack(factory):
+                stack.enter_context(p)
+            try:
+                assert await adapter.connect()
+                assert await status.flush_runtime_status_async()
+                payload = status.read_runtime_status() or {}
+                assert payload.get("platforms", {}).get("alpha:slack", {}).get("state") == "retrying"
+                assert adapter.send_path_degraded
+                instances[-1].client.is_connected = lambda: True
+                await wait_for(lambda: not adapter.send_path_degraded)
+                assert await status.flush_runtime_status_async()
+                assert status.read_runtime_status()["platforms"]["alpha:slack"]["state"] == "connected"
+
+                old = adapter._handler
+                if loss == "transport":
+                    old.client.is_connected = lambda: False
+                elif loss == "task":
+                    old._start_event.set()
+                else:
+                    old.client.ping_interval = 1
+                    old.client.last_ping_pong_time = time.time() - 60
+                await wait_for(lambda: adapter._handler is not old)
+                assert await status.flush_runtime_status_async()
+                assert status.read_runtime_status()["platforms"]["alpha:slack"]["state"] == "retrying"
+                assert adapter.is_connected  # The recovery loop remains alive.
+                adapter._handler.client.is_connected = lambda: True
+                await wait_for(lambda: not adapter.send_path_degraded)
+                assert await status.flush_runtime_status_async()
+                assert status.read_runtime_status()["platforms"]["alpha:slack"]["state"] == "connected"
+            finally:
+                await adapter.disconnect()
+                await status.flush_runtime_status_async()
+            assert status.read_runtime_status()["platforms"]["alpha:slack"]["state"] == "disconnected"
+
+    @pytest.mark.asyncio
     async def test_disconnect_stops_watchdog_and_does_not_reconnect(self):
         adapter = SlackAdapter(PlatformConfig(enabled=True, token="xoxb-fake"))
         adapter._socket_watchdog_interval_s = 0.01

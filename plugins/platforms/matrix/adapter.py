@@ -1368,6 +1368,7 @@ class MatrixAdapter(BasePlatformAdapter):
         return True
 
     async def disconnect(self) -> None:
+        self._mark_disconnected()
         self._closing = True
         if self._sync_task and not self._sync_task.done():
             self._sync_task.cancel()

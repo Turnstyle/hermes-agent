@@ -1941,7 +1941,7 @@ class DiscordAdapter(DiscordMediaMixin, BasePlatformAdapter):
                     await task
                 except asyncio.CancelledError:
                     pass
-        self._running = False
+        self._mark_disconnected()
         self._client = None
         self._ready_event.clear()
         self._post_connect_task = None

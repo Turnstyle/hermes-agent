@@ -136,7 +136,7 @@ class SmsAdapter(BasePlatformAdapter):
         from gateway.platforms.shared_ingress import bind_listener
         self._runner = await bind_listener(self, app, self._webhook_host, self._webhook_port, "/webhooks/twilio")
         self._http_session = _new_session(trust_env=gateway_trust_env())
-        self._running = True
+        self._mark_connected()
         if self._runner is not None:
             logger.info(
                 "[sms] Twilio webhook server listening on %s:%d, from: %s",
@@ -151,7 +151,7 @@ class SmsAdapter(BasePlatformAdapter):
         if self._runner:
             await self._runner.cleanup()
             self._runner = None
-        self._running = False
+        self._mark_disconnected()
         logger.info("[sms] Disconnected")
 
     # -- Outbound ------------------------------------------------------------
