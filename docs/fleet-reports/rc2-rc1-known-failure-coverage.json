@@ -1,0 +1,8 @@
+{
+  "checked_at": "2026-10-06 20:23:11 CDT",
+  "source": "/home/max/Scratchpad/5-Oct-2026_Mass-Review/work/hermes-union/C2/u2-evidence/attempt2-test-comparison-summary.json",
+  "previous_failed_cases": 42,
+  "previous_failing_files": 11,
+  "missing_from_full_manifest": [],
+  "method": "All files containing the prior 42 known failures are included. Fresh same-file rc1 controls determine new-failure status across the larger canonical scope."
+}

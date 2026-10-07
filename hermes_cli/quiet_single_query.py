@@ -280,12 +280,45 @@ def spawn_detached_reaper(pid: int, kill_at_monotonic: float, grace: float) -> b
     return True
 
 
+def _progress_deadline(progress: Callable[[], float | None] | None, stall_window: float,
+                       started_at: float, max_timeout: float | None) -> float | None:
+    """Monotonic deadline earned by fresh turn activity, or None (no probe, stale, or at the ceiling).
+
+    A probe failure counts as no activity: the cap then holds, as it did before the probe existed.
+    """
+    if progress is None or stall_window <= 0 or max_timeout is None:
+        return None
+    now = time.monotonic()
+    ceiling = started_at + max_timeout
+    if now >= ceiling:
+        return None
+    try:
+        last = progress()
+    except Exception:
+        logging.getLogger(__name__).warning("turn progress probe failed; holding the cap", exc_info=True)
+        return None
+    if last is None:
+        return None
+    idle = max(0.0, time.time() - float(last))
+    if idle >= stall_window:
+        return None
+    return min(now + (stall_window - idle), ceiling)
+
+
 def run_reported_turn(argv: list, *, env: MutableMapping[str, str], report_path: str, timeout: float | None,
                       exit_grace: float | None = REPORTED_TURN_EXIT_GRACE_SECONDS, cwd: str | None = None,
                       encoding: str | None = None, reported_linger: float | None = None,
                       exit_wait: float | None = None, term_grace: float | None = None,
-                      stdout: int = subprocess.PIPE, stderr: int = subprocess.PIPE) -> subprocess.CompletedProcess:
+                      stdout: int = subprocess.PIPE, stderr: int = subprocess.PIPE,
+                      progress: Callable[[], float | None] | None = None, stall_window: float = 0.0,
+                      max_timeout: float | None = None) -> subprocess.CompletedProcess:
     """Run one ``hermes chat -Q`` delivery child; *timeout* bounds the TURN, not the process.
+
+    *progress* makes the cap stall-aware: it returns the wall-clock epoch of the turn's latest
+    persisted activity (or None). When the *timeout* cap is hit with no report, a turn whose last
+    activity is under *stall_window* seconds old is still working, not stuck, so the cap moves to
+    that activity + *stall_window* — never past *max_timeout* from the start. A turn with no fresh
+    activity is killed at the cap exactly as before. Without *progress* nothing changes.
 
     The child records its turn at *report_path* (``write_turn_report``) the moment the turn ends,
     then runs the one-shot exit linger for nested ``notify_on_complete`` replies — bounded by
@@ -331,7 +364,8 @@ def run_reported_turn(argv: list, *, env: MutableMapping[str, str], report_path:
 
     drain = threading.Thread(target=_drain, name=f"quiet-turn-drain-{proc.pid}", daemon=True)
     drain.start()
-    deadline = time.monotonic() + timeout if timeout is not None else None
+    started_at = time.monotonic()
+    deadline = started_at + timeout if timeout is not None else None
     report = None
     reported_at = 0.0
     killed = False
@@ -362,6 +396,10 @@ def run_reported_turn(argv: list, *, env: MutableMapping[str, str], report_path:
             elif deadline is not None and now >= deadline:
                 break
         elif deadline is not None and time.monotonic() >= deadline:
+            extended = _progress_deadline(progress, stall_window, started_at, max_timeout)
+            if extended is not None and extended > deadline:
+                deadline = extended
+                continue
             killed = True
             proc.terminate()
             drain.join(timeout=term_grace)

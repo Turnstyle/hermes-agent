@@ -1,63 +1,35 @@
-# Fleet Hermes union rc1
+# Fleet Hermes union rc2
 
-Source release candidate. The specified regression gate and scratch smoke pass. Fleet rollout still has prerequisites listed below.
+Source release candidate built from rc1 plus U2c, the U2c2 double-launch fix, U2d and two explicitly required carry repairs. No fleet service or installed checkout was switched by this build.
 
-Branch: `fleet/0.21.5-union`. Tag: `fleet/0.21.5-union-rc1`.
-Fleet fork: `https://github.com/Turnstyle/hermes-agent.git`.
+Branch: `fleet/0.21.5-union`. Tag: `fleet/0.21.5-union-rc2`. Fork: `https://github.com/Turnstyle/hermes-agent.git`.
 
-The base is official `35ad70c035dec839846056073ad81a9bdceffca4`. It includes v0.21.5, tag `v2026.9.24`, commit `f97608f178d1ffeca59860195ab7da295f7c8e5f`. The starting fleet tree was Sheldon `786a302d54527d7010f12a8aa783efbc58cac034`. Official was merged in `010082027bb8477edfcc0424228afd3b575776fa`. This keeps the later base already used by TurnerBook. Source: those Git objects and the U2 release-check receipt.
+The rc1 parent is `5cd04a99de76bf42dc0bcdb17e11274ca1e1e8fa`. The upstream base remains `35ad70c035dec839846056073ad81a9bdceffca4`, including v0.21.5 release `v2026.9.24`. Resolve the rc2 tag to obtain the final merge commit. This report was built at 2026-10-06 23:17:15 CDT, from source commit `c78997cdb3b793d278f952c81b7cc7156ef5c315`.
 
-## What is in
+## Carried changes
 
-The final classification has 223 rows: 122 KEEP-FIX, 60 MOVE-OUT and 41 DROP. All 182 retained rows remain in this release. MOVE-OUT marks work to extract later; it does not mean the feature has already moved. The complete list, sources and reasons are in [FINAL-CHANGES.tsv](docs/fleet-reports/FINAL-CHANGES.tsv). The retained list is [CARRIED-STILL.md](CARRIED-STILL.md). Row-level coverage and tested blob identities are in [coverage.tsv](docs/fleet-reports/coverage.tsv) and [coverage-source.json](docs/fleet-reports/coverage-source.json).
+[FINAL-CHANGES-rc2.tsv](docs/fleet-reports/FINAL-CHANGES-rc2.tsv) has 261 classification rows: 130 KEEP-FIX, 65 MOVE-OUT and 66 DROP. Rows can describe overlapping source behavior or host-local preservation; they are not counts of unique code patches. Same-id corrections replace earlier rows. The original rc1 table remains historical.
 
-The carried behavior covers Bot Chat delivery and reply receipts, queue ownership, bounded tool waits, worker cleanup, Kanban ownership and lifecycle checks, restart accounting, source launchers, profile isolation, Desktop relay state and vault binding. Max, Snowdrop and TurnerBook changes supplement the Sheldon tree. The 6 October TurnerBook recovery patch checks canonical ownership before PID probes and recovery writes. Rosie contributed no additional retained source change. Sources: the classified list and its machine column.
+U2c adds shared launch admission and stall-aware delivery. U2c2 commits handoff intent before spawning, retains uncertain handoffs, and registers the default worker before PID persistence. U2d source-selection tests now run with the required credential modules present. Sheldon's initial profile credential claim is retained and tested.
 
-## What is out
+C2-143 is KEEP-FIX in rc2. B9 proves explicit queue on 80 of 84 profiles and does not prove effective launch settings on any machine. The restored bot-message protection prevents an inbound bot from interrupting standing work. The human-interrupt control is retained. Source: [B9 proof](docs/fleet-reports/rc2-b9-c143-proof.json).
 
-The 41 DROP replay units are listed with reasons in [DROP-LIST.md](docs/fleet-reports/DROP-LIST.md). The parent-completion exceptions and host-owner API-key fallback were removed. Completion with an open parent is refused. A profile no longer accepts another profile's API key through that fallback. Sources: commits `39398911ce33f2c7fa1ea5faad215c8b29de5bbf` and `48ea15361f1cf11f81bb8e741ccab4ce51d96e51`.
+C2-223 claims preserved behavior through 28 passing ownership tests on U2c2 commit `01f37c457964af97c80d2724680fc2e7c95550bd`. Both product modules changed; no whole-file byte-identity claim is made. All four U2c rebased patches match their originals. Source: [rebase proof](docs/fleet-reports/rc2-rebase-preservation.txt).
 
-Some DROP commits remain in Git ancestry because their later accepted replacements are kept. They are not independent replay units. Reversing those history steps would remove accepted behavior. The named cases and keeper tests are in [drop-kept.md](docs/fleet-reports/drop-kept.md).
+## Tests
 
-## Test results
+The canonical Python discovery scope is 5117 files. The same isolated runner executes every failing file against rc1 and compares exact failing test IDs. New failed cases: 0. Waived by the executor under the owner's speed rule (visible list, code-identity proof and Jev receipts in rc2-waivers.json): 1 failed cases and 2 files whose rc1 controls were cut short by host load. Missing files: 0. Pending controls: 0. Incomplete files: 0.
 
-Tested source: `9cfe45f5623b9f305a923ef4eecd5d195e07375c`. The release documentation commit does not change runtime or tests. Runtime source is unchanged from the full union run at `bf0bb184da125a6099a75c90418d4aeb4a72b1ec`; affected test fixtures were rerun after repair. Source: U2 candidate-ancestry receipt and [C2.20-fixes.md](docs/fleet-reports/C2.20-fixes.md).
+Files with no pytest cases collected on either ref: 2. Their source hashes match. Canonical runner semantics tolerate these files; they receive no passing-test credit. The exact files and both raw exit codes remain in the comparison receipt.
 
-| Check | Passed | Failed | Skipped | Result |
-|---|---:|---:|---:|---|
-| Sheldon baseline, 332 selected paths | 3,893 | 66 | 33 | 282 passing files, 16 failing files, 34 absent paths |
-| Union, latest result per selected path | 4,268 | 42 | 62 | 315 passing files, 11 failing files, 6 explained absent paths |
-| New failing cases versus baseline | — | 0 | — | PASS under C2.20 |
-| Supplemental log isolation | 2 | 0 | 0 | PASS |
-| Four focused Desktop test files | 227 | 0 | 0 | PASS |
-| Desktop TypeScript check | — | 0 | — | PASS |
-| Scratch gateway and /health | — | 0 | — | running at tested SHA; HTTP 200 |
-| Scratch Kanban create and dispatch --dry-run | — | 0 | — | both exit 0 |
-| Scratch Bot Chat | — | 0 | — | HTTP 200 with the local fixture answer |
+Final pytest totals are 52890 passed, 577 failed, 330 errors, 667 skipped, 1 expected failures and 0 unexpected passes. Separately, 39 subtests passed and 0 subtests failed. Event counts reconcile with pytest summaries; subtests and expected failures retain separate categories in the receipt. Totals include the two independent U2c2 handoff probes outside canonical discovery. These failures reproduce on rc1 under the same test constraints. They are not passes. ADC environment exports and real ADC discovery are refused by the test guard; affected behavior is not checked and its restriction receipts are listed separately. This larger scope discovers baseline failures outside rc1's earlier 332 selected files. See [comparison](docs/fleet-reports/rc2-test-comparison.json) for every exact failing test and the method.
 
-The suite is not all green: the 42 failed cases were already failing in the baseline. The full list and exact counts are in [test-totals.json](docs/fleet-reports/test-totals.json). Baseline and union logs remain under the build workspace `C2/u2-evidence`. Two class-renamed cases are matched only after identical method AST proof. No timeout or unexplained absent path remains. See [C2.20-fixes.md](docs/fleet-reports/C2.20-fixes.md).
+The 124 canonical exclusions are integration, e2e and Docker jobs requiring their own environments. They are not checked. Tests use nice 10, separate scratch homes, an empty inherited credential environment, and bounded load. The wrapper is adapted because the repository shell runner discards TMPDIR and uses unbounded precompilation. One bounded precompile process warmed valid caches without changing tracked source.
 
-Smoke ran from 2026-10-06 18:28:39 CDT to 18:29:03 CDT. Only the scratch gateway was started and stopped. Its SIGTERM exit 1 is the existing service-manager policy; the log records completed drain, disconnect and database close. Both scratch ports refused connections afterward. Commands and outputs: [smoke.md](docs/fleet-reports/smoke.md), [receipt](docs/fleet-reports/smoke-receipt.json).
+Scratch smoke checks health, scratch Kanban create and dry-run dispatch, and an actual Bot Chat reply from a deterministic local provider. It is not proof of a real provider or live fleet behavior. Final commit smoke and publication receipts are in the U2e result.
 
-The gate covers 332 selected Python test files, with one pytest process at a time, plus focused Desktop tests and type checking. It does not claim the full official upstream suite or a live test on all five machines. Six historical test paths were removed or replaced by the final classification; they are recorded as absent, not passed. Source: U2 test manifest and comparison receipts.
+## Rollout limits
 
-## Still carried and open risks
+This is a source release. Live update, rollback, macOS and aarch64 execution are not checked here. B9's other rollout conditions remain separate gates. Restoring C2-143 does not clear those gates. Preserve all dirty work and private runtime data before switching any machine.
 
-All 60 MOVE-OUT rows are still carried. Extraction and later official-main merges need their own validation. See [CARRIED-STILL.md](CARRIED-STILL.md).
-
-The live queue-setting prerequisite for C2-143 is not proven on every managed profile. Some profile files lack an explicit queue value, and Rosie root says interrupt. Resolve this before rollout. See [C2-143-config-risk.md](docs/fleet-reports/C2-143-config-risk.md). No live setting was changed by this build.
-
-Trusted Supermemory socket transport cannot be proved in this sandbox because its parent directories fail the production ownership check. Platform skips remain visible. Real provider calls, live vault access, macOS execution and Rosie aarch64 execution were not checked. The scratch smoke uses a local model fixture. The source review is by the builder, with no independent checker, because this task requires working alone. All 12 Jev calls were refused by the tool approval policy; no Jev approval is claimed. The exact questions, refusals and builder decisions are in [JEV-ANSWERS.md](docs/fleet-reports/JEV-ANSWERS.md). The bounded source review is in [codex-union.md](docs/fleet-reports/codex-union.md).
-
-## How a machine moves onto this branch
-
-These are rollout instructions for Lane C7. The U2 build does not execute them.
-
-1. Complete C7's process inventory. Identify every gateway, Desktop backend, dashboard, Web UI and worker that keeps loaded code. Save dirty work. Create a backup branch at the installed HEAD. Record both the checkout and running SHA if they differ.
-2. Fetch the rc1 tag from the Turnstyle fork. Verify it against the published FLEET-COMMIT. Stage the switch and the machine's verified dependency command. Use base `35ad70c035`, not the older release commit alone. TurnerBook Git commands require `GIT_NO_LAZY_FETCH=1`.
-3. Back up and validate each machine's settings. Keep `updates.parked_branch_strategy: update_in_place`, `updates.carried_commits_policy: refuse`, and update channel `main`. Complete the explicit queue settings and other C7 prerequisites before switching. Never authorize reset as a shortcut around the carried-commit refusal. Source: Lane C7.2 and `hermes_cli/update_cmd.py`.
-4. Use the coordinated restart procedure from C7.3 with the staged switch command. Do not perform an uncoordinated gateway restart. Respect the restart budget and the required drain. Restart other long-running clients only as specified in the process inventory.
-5. Verify checkout SHA and served `code_sha`, connected platforms, resumed work, a local Bot Chat DM and a cross-machine DM. Follow C7's observation window and hold the next machine until verification passes. Rosie needs its own aarch64 validation under the same procedure.
-6. Keep the backup branch and settings backups. If verification fails, use the coordinated rollback procedure and record the result.
-
-Future updates follow the fleet update wrapper and the scratch merge/test/tag process in C8. Do not run a bare update against an unreviewed official target. The carried-commit tests prove refusal before cleanup, including release checkouts; they do not prove that an arbitrary future upstream change will merge cleanly.
+The retained source and host-local preservation rows are in [CARRIED-STILL.md](CARRIED-STILL.md). MOVE-OUT does not authorize deleting a source or private artifact before its replacement or archive is verified. No SOUL file or session export is added by rc2.

@@ -2571,35 +2571,40 @@ def claim_task(
     Returns the claimed ``Task`` on success, ``None`` if the task was
     already claimed (or is not in ``ready`` status).
     """
-    now = int(time.time())
-    lock = claimer or _claimer_id()
-    expires = now + _resolve_claim_ttl_seconds(ttl_seconds)
-    with write_txn(conn):
-        # Single enforcement point: never ready -> running with an undone
-        # parent, whichever writer set 'ready'. Demote to 'todo';
-        # recompute_ready re-promotes when the parents finish.
-        if not _parents_satisfied(conn, task_id):
-            conn.execute(
-                "UPDATE tasks SET status = 'todo' "
-                "WHERE id = ? AND status = 'ready'", (task_id,),
+    from hermes_cli.kanban_launch import handoff_pending, launch_guard
+
+    with launch_guard(conn) as admitted:
+        if not admitted or handoff_pending(conn, task_id):
+            return None
+        now = int(time.time())
+        lock = claimer or _claimer_id()
+        expires = now + _resolve_claim_ttl_seconds(ttl_seconds)
+        with write_txn(conn):
+            # Single enforcement point: never ready -> running with an undone
+            # parent, whichever writer set 'ready'. Demote to 'todo';
+            # recompute_ready re-promotes when the parents finish.
+            if not _parents_satisfied(conn, task_id):
+                conn.execute(
+                    "UPDATE tasks SET status = 'todo' "
+                    "WHERE id = ? AND status = 'ready'", (task_id,),
+                )
+                _append_event(conn, task_id, "claim_rejected", {"reason": "parents_not_done"})
+                return None
+            # Workspace guard (H24): prevent multiple running tasks on the same worktree / dir workspace
+            busy_path = _is_workspace_busy(conn, task_id)
+            if busy_path:
+                _append_event(conn, task_id, "claim_rejected", {"reason": "workspace_busy", "workspace_path": busy_path})
+                return None
+            # Close a leaked prior run so the CAS below doesn't strand it.
+            _reclaim_dangling_run(
+                conn, task_id, statuses=("ready",), now=now, note="invariant recovery on re-claim",
             )
-            _append_event(conn, task_id, "claim_rejected", {"reason": "parents_not_done"})
-            return None
-        # Workspace guard (H24): prevent multiple running tasks on the same worktree / dir workspace
-        busy_path = _is_workspace_busy(conn, task_id)
-        if busy_path:
-            _append_event(conn, task_id, "claim_rejected", {"reason": "workspace_busy", "workspace_path": busy_path})
-            return None
-        # Close a leaked prior run so the CAS below doesn't strand it.
-        _reclaim_dangling_run(
-            conn, task_id, statuses=("ready",), now=now, note="invariant recovery on re-claim",
-        )
-        run_id = _claim_and_open_run(conn, task_id, "ready", lock, expires, now)
-        if run_id is None:
-            return None
-        claimed = get_task(conn, task_id)
-    _fire_task_hook("kanban_task_claimed", claimed, task_id, run_id)
-    return claimed
+            run_id = _claim_and_open_run(conn, task_id, "ready", lock, expires, now)
+            if run_id is None:
+                return None
+            claimed = get_task(conn, task_id)
+        _fire_task_hook("kanban_task_claimed", claimed, task_id, run_id)
+        return claimed
 
 
 def claim_review_task(
@@ -2609,31 +2614,36 @@ def claim_review_task(
     """Atomic ``review -> running`` (None when lost). Parents are re-checked
     (one may have reopened meanwhile) and a NEW run tracks the reviewer
     separately from the implementer."""
-    now = int(time.time())
-    lock = claimer or _claimer_id()
-    expires = now + _resolve_claim_ttl_seconds(ttl_seconds)
-    with write_txn(conn):
-        if not _parents_satisfied(conn, task_id):
-            demoted = conn.execute(
-                "UPDATE tasks SET status = 'todo' "
-                "WHERE id = ? AND status = 'review' AND claim_lock IS NULL", (task_id,),
-            )
-            if demoted.rowcount == 1:
-                _append_event(
-                    conn, task_id, "dependency_wait",
-                    {"reason": "parent_reopened", "source_status": "review"},
+    from hermes_cli.kanban_launch import handoff_pending, launch_guard
+
+    with launch_guard(conn) as admitted:
+        if not admitted or handoff_pending(conn, task_id):
+            return None
+        now = int(time.time())
+        lock = claimer or _claimer_id()
+        expires = now + _resolve_claim_ttl_seconds(ttl_seconds)
+        with write_txn(conn):
+            if not _parents_satisfied(conn, task_id):
+                demoted = conn.execute(
+                    "UPDATE tasks SET status = 'todo' "
+                    "WHERE id = ? AND status = 'review' AND claim_lock IS NULL", (task_id,),
                 )
-            return None
-        busy_path = _is_workspace_busy(conn, task_id)
-        if busy_path:
-            _append_event(conn, task_id, "claim_rejected", {"reason": "workspace_busy", "workspace_path": busy_path})
-            return None
-        run_id = _claim_and_open_run(
-            conn, task_id, "review", lock, expires, now, event_extra={"source_status": "review"},
-        )
-        if run_id is None:
-            return None
-        return get_task(conn, task_id)
+                if demoted.rowcount == 1:
+                    _append_event(
+                        conn, task_id, "dependency_wait",
+                        {"reason": "parent_reopened", "source_status": "review"},
+                    )
+                return None
+            busy_path = _is_workspace_busy(conn, task_id)
+            if busy_path:
+                _append_event(conn, task_id, "claim_rejected", {"reason": "workspace_busy", "workspace_path": busy_path})
+                return None
+            run_id = _claim_and_open_run(
+                conn, task_id, "review", lock, expires, now, event_extra={"source_status": "review"},
+            )
+            if run_id is None:
+                return None
+            return get_task(conn, task_id)
 
 
 def _retry_status_for_run(
@@ -2751,6 +2761,8 @@ def release_stale_claims(
     release UPDATE: a refused row is never killed and is recorded in ``errors_out`` (see
     ``_isolate_fenced_row``). A worker that survives termination rolls the release back and keeps its claim.
     """
+    from hermes_cli.kanban_launch import handoff_pending
+
     now = int(time.time())
     reclaimed = 0
     host_prefix = _host_prefix()
@@ -2775,6 +2787,8 @@ def release_stale_claims(
                 conn, errors_out, "release_stale_claims", row["id"], fleet_node_id,
             ):
                 continue
+        if handoff_pending(conn, row["id"], errors_out=errors_out, stage="release_stale_claims"):
+            continue
         hb = row["last_heartbeat_at"]
         # Backstop: a heartbeat older than the max-stale threshold means no
         # observable progress — reclaim even if the PID is alive (logic loop).
@@ -2788,6 +2802,8 @@ def release_stale_claims(
         termination: dict = {}
         try:
             with write_txn(conn):
+                if handoff_pending(conn, row["id"], errors_out=errors_out, stage="release_stale_claims"):
+                    continue
                 retry_status = _retry_status_for_run(conn, row["id"])
                 cur = conn.execute(
                     "UPDATE tasks SET status = ?, claim_lock = NULL, "
@@ -4787,7 +4803,7 @@ def _retention_seconds(older_than_seconds: int) -> int:
 
 
 def gc_events(conn: sqlite3.Connection, *, older_than_seconds: int = 30 * 24 * 3600) -> int:
-    """Prune old done/archived events, retaining decomposition identity until task deletion.
+    """Prune old done/archived events, retaining decomposition and handoff safety state.
 
     ``older_than_seconds=0`` means everything older than now; the CLI maps
     ``--event-retention-days 0`` to "disabled" before calling this.
@@ -4795,7 +4811,9 @@ def gc_events(conn: sqlite3.Connection, *, older_than_seconds: int = 30 * 24 * 3
     cutoff = int(time.time()) - _retention_seconds(older_than_seconds)
     with write_txn(conn):
         cur = conn.execute(
-            "DELETE FROM task_events WHERE created_at < ? AND kind != 'decomposed' AND task_id IN "
+            "DELETE FROM task_events WHERE created_at < ? "
+            "AND kind NOT IN ('decomposed', 'worker_handoff_pending', "
+            "'worker_handoff_cancelled', 'worker_handoff_resolved') AND task_id IN "
             "(SELECT id FROM tasks WHERE status IN ('done', 'archived'))", (cutoff,),
         )
     return int(cur.rowcount or 0)

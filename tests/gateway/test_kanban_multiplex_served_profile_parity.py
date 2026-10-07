@@ -50,7 +50,8 @@ def test_worker_for_served_profile_gets_its_own_env_and_toolset_pin(served, monk
     conn = kbc.connect()
     try:
         tid = kb.create_task(conn, title="t", assignee="alpha")
-        task = kb.get_task(conn, tid)
+        task = kb.claim_task(conn, tid)
+        assert task is not None
     finally:
         conn.close()
 

@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from tests.hermes_cli.kanban_spawn_helpers import claim_for_spawn
+
 import json
 import os
 import sqlite3
@@ -1149,7 +1151,7 @@ class TestSharedBoardPaths:
             tenant=None,
             branch_name="wt/t_dispatch_env",
         )
-        kbd._default_spawn(task, str(tmp_path / "ws"))
+        kbd._default_spawn(claim_for_spawn(task), str(tmp_path / "ws"))
 
         env = captured["env"]
         assert env["HERMES_KANBAN_DB"] == str(default_home / "kanban.db")

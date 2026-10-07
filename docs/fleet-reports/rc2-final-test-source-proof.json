@@ -1,0 +1,38 @@
+{
+  "checked_at": "2026-10-06 23:17:04 CDT",
+  "tested_product_commit": "b95b603af5999bccab6078f73602af7f0502ab6b",
+  "fixture_corrections": [
+    "tests/gateway/test_kanban_multiplex_served_profile_parity.py",
+    "tests/hermes_cli/test_kanban_review_lifecycle.py",
+    "tests/plugins/test_chronos_cron.py",
+    "tests/plugins/test_kanban_model_override.py",
+    "tests/tools/test_computer_use_cua_macos_identity.py",
+    "tests/tools/test_search_files_cpu_windows.py"
+  ],
+  "working_diff_sha256": "d11eb2556a5a9c4f911266bf3b54368bca91adcf095e4b65ceb5130a9110cc8e",
+  "latest_receipt_source_commits": {
+    "2a0f5a05b979c5add00a3d71ab341695f3d0c543": 41,
+    "b95b603af5999bccab6078f73602af7f0502ab6b": 4799,
+    "10aa3318967d14dda165661c4978c3c20a401748": 278
+  },
+  "test_source_hash_mismatches": [],
+  "test_source_files": 5118,
+  "ordered_test_source_hashes_sha256": "a72a1cfa2c77795cf5774c4ea8c66f8d666cbb1d74ae811cc4ad80e4f76bdc52",
+  "older_commit_receipts": {
+    "2a0f5a05b979c5add00a3d71ab341695f3d0c543": 41,
+    "10aa3318967d14dda165661c4978c3c20a401748": 278
+  },
+  "older_commit_product_diff": [
+    "gateway/run_busy.py (+10: inbound bot messages never hard-interrupt a running turn)",
+    "agent/credential_pool_admin.py add_entry (+8/-2)"
+  ],
+  "refreshed_on_final_commit": [
+    "tests/agent/test_aux_stream_host_deadline.py",
+    "tests/agent/test_aux_stream_host_deadline_sibling_wires.py",
+    "tests/agent/test_auxiliary_client.py",
+    "tests/agent/test_auxiliary_explicit_cancellation.py",
+    "tests/agent/test_credential_pool.py",
+    "tests/agent/test_credential_pool_profile_oauth_fork.py"
+  ],
+  "statement": "Every selected test source hash matches the current file. Receipts ran on the final product commit plus the listed fixture corrections, except older_commit_receipts: files run on two earlier candidate commits whose only product differences are listed in older_commit_product_diff; every file referencing that code was re-run on the final commit (refreshed_on_final_commit). The 334-file final-focused refresh was skipped under the owner speed rule (6 Oct 22:54). Commit those bytes unchanged before writing release documents."
+}

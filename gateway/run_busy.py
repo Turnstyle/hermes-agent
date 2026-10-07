@@ -833,11 +833,21 @@ class GatewayBusySessionMixin:
         is_queue_mode = effective_mode == "queue"
         is_steer_mode = effective_mode == "steer"
         is_redirect_mode = effective_mode == "interrupt" and redirected
+        bot_inbound = bool(getattr(event.source, "is_bot", False))
         if (
             effective_mode == "interrupt" and not redirected
             and running_agent and running_agent is not _AGENT_PENDING_SENTINEL
+            and not bot_inbound
         ):
             await self._interrupt_running_agent_for_busy_event(event, adapter, running_agent)
+        elif bot_inbound and effective_mode == "interrupt" and not redirected:
+            # A bot DM, broadcast, or nudge must not hard-stop standing work.
+            # The text is already in the pending FIFO and runs at the turn boundary.
+            logger.warning(
+                "Refusing to interrupt a running turn for an inbound bot message; "
+                "queued for the next turn boundary (session=%s)",
+                session_key,
+            )
 
         # Disabled ack: still process input. Checked before debounce so an undelivered ack never
         # stamps the "last ack" timestamp.

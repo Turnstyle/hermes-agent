@@ -1,0 +1,1688 @@
+{
+  "time": "2026-10-06 19:14:44 CDT",
+  "old_sha256": "6690f1454d700d23c17f6e527f54df8d041b4901f1cf4934ee27e66a13500ff6",
+  "new_sha256": "1186a2dfdd8eef84af145dfd0a13247e6834de7fd84633e70ce90bb4ee2d4c4b",
+  "source": "/home/max/Scratchpad/5-Oct-2026_Mass-Review/exec/work/hermes-goal/U2c2/test-support/sitecustomize.py",
+  "started_before": [
+    {
+      "label": "full",
+      "file": "tests/agent/test_compression_abort_state_reset.py"
+    },
+    {
+      "label": "full",
+      "file": "tests/hermes_cli/test_kanban_worker_spawn_toolsets.py"
+    },
+    {
+      "label": "full",
+      "file": "tests/cron/test_cron_thread_seed_dm_keying.py"
+    },
+    {
+      "label": "full",
+      "file": "tests/agent/test_compressed_summary_metadata.py"
+    },
+    {
+      "label": "full",
+      "file": "tests/agent/test_cascading_interrupt.py"
+    },
+    {
+      "label": "full",
+      "file": "tests/agent/test_context_compressor_reasoning_fallback.py"
+    },
+    {
+      "label": "full",
+      "file": "tests/agent/test_context_display_provenance.py"
+    },
+    {
+      "label": "full",
+      "file": "tests/tools/test_fleet_message_drain.py"
+    },
+    {
+      "label": "full",
+      "file": "tests/agent/test_auxiliary_fallback_multihop.py"
+    },
+    {
+      "label": "full",
+      "file": "tests/agent/test_codex_model_entitlement_rotation.py"
+    },
+    {
+      "label": "full",
+      "file": "tests/agent/test_account_policy_block.py"
+    },
+    {
+      "label": "full",
+      "file": "tests/agent/test_anthropic_mcp_prefix_strip.py"
+    },
+    {
+      "label": "full",
+      "file": "tests/cron/test_cron_mcp_toolset_empty_block.py"
+    },
+    {
+      "label": "full",
+      "file": "tests/agent/test_compaction_ops_notification_anchor.py"
+    },
+    {
+      "label": "full",
+      "file": "tests/cron/test_cron_failure_deliver.py"
+    },
+    {
+      "label": "full",
+      "file": "tests/agent/lsp/test_service.py"
+    },
+    {
+      "label": "full",
+      "file": "tests/agent/test_auxiliary_client_nous_401_cache_key.py"
+    },
+    {
+      "label": "full",
+      "file": "tests/agent/test_auxiliary_explicit_base_anthropic.py"
+    },
+    {
+      "label": "full",
+      "file": "tests/agent/test_anthropic_third_party_oauth_guard.py"
+    },
+    {
+      "label": "full",
+      "file": "tests/agent/test_auxiliary_client_azure_foundry.py"
+    },
+    {
+      "label": "full",
+      "file": "tests/agent/test_codex_stream_supersession.py"
+    },
+    {
+      "label": "full",
+      "file": "tests/hermes_cli/test_kanban_core_functionality.py"
+    },
+    {
+      "label": "full",
+      "file": "tests/agent/test_bitwarden_secrets.py"
+    },
+    {
+      "label": "full",
+      "file": "tests/agent/test_billing_unverified_carrythrough.py"
+    },
+    {
+      "label": "full",
+      "file": "tests/agent/test_context_compressor_cross_session_guard.py"
+    },
+    {
+      "label": "full",
+      "file": "tests/agent/test_compression_persistence.py"
+    },
+    {
+      "label": "full",
+      "file": "tests/agent/test_compression_feasibility.py"
+    },
+    {
+      "label": "full",
+      "file": "tests/agent/test_background_review_tool_call_guard.py"
+    },
+    {
+      "label": "full",
+      "file": "tests/cron/test_monitor_kind.py"
+    },
+    {
+      "label": "full",
+      "file": "tests/agent/test_anthropic_output_field_leak.py"
+    },
+    {
+      "label": "full",
+      "file": "tests/cron/test_cron_multiplex_shared_route_delivery.py"
+    },
+    {
+      "label": "full",
+      "file": "tests/cron/test_scheduler.py"
+    },
+    {
+      "label": "full",
+      "file": "tests/agent/test_anthropic_client_auth.py"
+    },
+    {
+      "label": "full",
+      "file": "tests/agent/test_credential_pool.py"
+    },
+    {
+      "label": "full",
+      "file": "tests/agent/test_compression_child_source.py"
+    },
+    {
+      "label": "full",
+      "file": "tests/agent/test_compression_count_warning.py"
+    },
+    {
+      "label": "full",
+      "file": "tests/agent/test_auxiliary_client_xai_oauth_recovery.py"
+    },
+    {
+      "label": "full",
+      "file": "tests/cron/test_scheduler_provider.py"
+    },
+    {
+      "label": "full",
+      "file": "tests/acp_adapter/test_permissions.py"
+    },
+    {
+      "label": "full",
+      "file": "tests/cron/test_script_claim_heartbeat.py"
+    },
+    {
+      "label": "full",
+      "file": "tests/agent/test_compression_attempt_telemetry.py"
+    },
+    {
+      "label": "full",
+      "file": "tests/agent/test_compressor_tail_cut_tool_pair_floor.py"
+    },
+    {
+      "label": "full",
+      "file": "tests/agent/test_command_token_source.py"
+    },
+    {
+      "label": "full",
+      "file": "tests/agent/test_credential_pool_anthropic_refresh_race.py"
+    },
+    {
+      "label": "full",
+      "file": "tests/agent/test_api_content_row_addressed_backfill.py"
+    },
+    {
+      "label": "full",
+      "file": "tests/agent/test_anthropic_dead_grant_hints.py"
+    },
+    {
+      "label": "full",
+      "file": "tests/acp_adapter/test_session_cwd_column.py"
+    },
+    {
+      "label": "full",
+      "file": "tests/agent/test_auxiliary_main_first.py"
+    },
+    {
+      "label": "full",
+      "file": "tests/acp_adapter/test_approval_isolation.py"
+    },
+    {
+      "label": "full",
+      "file": "tests/agent/test_codex_runtime_history_seed.py"
+    },
+    {
+      "label": "full",
+      "file": "tests/agent/test_auxiliary_client_resolve_dedup.py"
+    },
+    {
+      "label": "full",
+      "file": "tests/agent/test_context_compressor_custom_providers.py"
+    },
+    {
+      "label": "full",
+      "file": "tests/agent/test_anthropic_thinking_disable.py"
+    },
+    {
+      "label": "full",
+      "file": "tests/agent/test_bedrock_interrupt_post_worker.py"
+    },
+    {
+      "label": "full",
+      "file": "tests/agent/test_compression_anti_thrash_persistence.py"
+    },
+    {
+      "label": "full",
+      "file": "tests/agent/test_auxiliary_parameter_rung_chaining.py"
+    },
+    {
+      "label": "full",
+      "file": "tests/agent/test_auxiliary_client.py"
+    },
+    {
+      "label": "full",
+      "file": "tests/acp_adapter/test_acp_images.py"
+    },
+    {
+      "label": "full",
+      "file": "tests/agent/test_anthropic_adapter_extra_headers.py"
+    },
+    {
+      "label": "full",
+      "file": "tests/agent/test_codex_usage_attribution.py"
+    },
+    {
+      "label": "full",
+      "file": "tests/agent/test_codex_aux_no_progress_timeout.py"
+    },
+    {
+      "label": "full",
+      "file": "tests/agent/test_chat_completion_helpers_provider_sort.py"
+    },
+    {
+      "label": "full",
+      "file": "tests/agent/test_astra_oauth_native_compaction.py"
+    },
+    {
+      "label": "full",
+      "file": "tests/agent/test_auxiliary_auth_rung_fallthrough.py"
+    },
+    {
+      "label": "full",
+      "file": "tests/agent/test_compressor_image_tokens.py"
+    },
+    {
+      "label": "full",
+      "file": "tests/agent/test_auxiliary_openrouter_max_tokens.py"
+    },
+    {
+      "label": "full",
+      "file": "tests/agent/test_compressor_fallback_update.py"
+    },
+    {
+      "label": "full",
+      "file": "tests/agent/test_compression_budget_refund.py"
+    },
+    {
+      "label": "full",
+      "file": "tests/agent/test_acp_openai_bridge.py"
+    },
+    {
+      "label": "full",
+      "file": "tests/cron/test_cron_live_delivery_confirmation.py"
+    },
+    {
+      "label": "full",
+      "file": "tests/cron/test_bot_chat_timeout_marker.py"
+    },
+    {
+      "label": "full",
+      "file": "tests/agent/lsp/test_workspace_release.py"
+    },
+    {
+      "label": "full",
+      "file": "tests/agent/test_billing_links.py"
+    },
+    {
+      "label": "full",
+      "file": "tests/agent/test_compressor_historical_media.py"
+    },
+    {
+      "label": "full",
+      "file": "tests/agent/test_builtin_memory_disabled_surface.py"
+    },
+    {
+      "label": "full",
+      "file": "tests/agent/test_auxiliary_transient_retry.py"
+    },
+    {
+      "label": "full",
+      "file": "tests/agent/test_compressor_stale_tool_images.py"
+    },
+    {
+      "label": "full",
+      "file": "tests/agent/test_anthropic_keychain.py"
+    },
+    {
+      "label": "full",
+      "file": "tests/agent/test_context_engine_host_contract.py"
+    },
+    {
+      "label": "full",
+      "file": "tests/agent/test_anthropic_external_login_optout.py"
+    },
+    {
+      "label": "full",
+      "file": "tests/agent/lsp/test_manager_locking.py"
+    },
+    {
+      "label": "full",
+      "file": "tests/agent/test_create_openai_client_proxy_env.py"
+    },
+    {
+      "label": "full",
+      "file": "tests/agent/test_async_httpx_del_neuter.py"
+    },
+    {
+      "label": "full",
+      "file": "tests/agent/test_chat_sdk_transform_bypass.py"
+    },
+    {
+      "label": "full",
+      "file": "tests/agent/test_acp_provider_rails.py"
+    },
+    {
+      "label": "full",
+      "file": "tests/agent/test_background_review_routed_effort.py"
+    },
+    {
+      "label": "full",
+      "file": "tests/agent/test_copilot_acp_client.py"
+    },
+    {
+      "label": "full",
+      "file": "tests/agent/test_auxiliary_client_proxy_env.py"
+    },
+    {
+      "label": "full",
+      "file": "tests/agent/test_anthropic_stream_fallbacks.py"
+    },
+    {
+      "label": "full",
+      "file": "tests/agent/test_background_review_memory_scope.py"
+    },
+    {
+      "label": "full",
+      "file": "tests/agent/test_auxiliary_title_timeout_bound.py"
+    },
+    {
+      "label": "full",
+      "file": "tests/agent/test_bedrock_transport_replay.py"
+    },
+    {
+      "label": "full",
+      "file": "tests/agent/test_compression_auto_summary_fallback.py"
+    },
+    {
+      "label": "full",
+      "file": "tests/agent/test_compression_attempt_lifecycle.py"
+    },
+    {
+      "label": "full",
+      "file": "tests/agent/test_auxiliary_concurrency.py"
+    },
+    {
+      "label": "full",
+      "file": "tests/acp_adapter/test_finish_turn_finally.py"
+    },
+    {
+      "label": "full",
+      "file": "tests/agent/lsp/test_shell_linter_lsp_skip.py"
+    },
+    {
+      "label": "full",
+      "file": "tests/agent/test_compression_logging_session_context.py"
+    },
+    {
+      "label": "full",
+      "file": "tests/agent/test_auxiliary_named_custom_providers.py"
+    },
+    {
+      "label": "full",
+      "file": "tests/agent/test_api_content_sidecar.py"
+    },
+    {
+      "label": "full",
+      "file": "tests/agent/test_context_engine_on_turn_complete_usage.py"
+    },
+    {
+      "label": "full",
+      "file": "tests/agent/test_commit_memory_session_context_engine.py"
+    },
+    {
+      "label": "full",
+      "file": "tests/cron/test_cron_relay_delivery_guards.py"
+    },
+    {
+      "label": "full",
+      "file": "tests/hermes_cli/test_kanban_recovery_fleet_ownership.py"
+    },
+    {
+      "label": "full",
+      "file": "tests/agent/test_compression_lock_defer.py"
+    },
+    {
+      "label": "full",
+      "file": "tests/agent/test_billing_usage.py"
+    },
+    {
+      "label": "full",
+      "file": "tests/agent/test_corruption_recovery_guidance.py"
+    },
+    {
+      "label": "full",
+      "file": "tests/cron/test_media_send_timeout.py"
+    },
+    {
+      "label": "full",
+      "file": "tests/agent/test_auxiliary_runtime_cache_key.py"
+    },
+    {
+      "label": "full",
+      "file": "tests/agent/test_compression_rotation_state.py"
+    },
+    {
+      "label": "full",
+      "file": "tests/agent/test_compression_concurrent_fork.py"
+    },
+    {
+      "label": "full",
+      "file": "tests/agent/test_context_compressor_structural_backoff.py"
+    },
+    {
+      "label": "full",
+      "file": "tests/agent/test_context_compressor_temporal_anchoring.py"
+    },
+    {
+      "label": "full",
+      "file": "tests/cron/test_warning_transport_contract.py"
+    },
+    {
+      "label": "full",
+      "file": "tests/agent/test_codex_app_server_thread_resume.py"
+    },
+    {
+      "label": "full",
+      "file": "tests/agent/test_compress_context_progress_timeout.py"
+    },
+    {
+      "label": "full",
+      "file": "tests/agent/test_copilot_acp_deprecation.py"
+    },
+    {
+      "label": "full",
+      "file": "tests/hermes_cli/test_kanban_dispatch_tick_hook.py"
+    },
+    {
+      "label": "full",
+      "file": "tests/agent/lsp/test_eventlog.py"
+    },
+    {
+      "label": "full",
+      "file": "tests/agent/test_compaction_anti_thrash.py"
+    },
+    {
+      "label": "full",
+      "file": "tests/agent/test_codex_aux_timeout_fd_ownership.py"
+    },
+    {
+      "label": "full",
+      "file": "tests/agent/test_credential_pool_profile_oauth_fork.py"
+    },
+    {
+      "label": "full",
+      "file": "tests/agent/test_conversation_loop_interpreter_shutdown.py"
+    },
+    {
+      "label": "full",
+      "file": "tests/agent/test_context_estimator_multimodal.py"
+    },
+    {
+      "label": "full",
+      "file": "tests/agent/test_bedrock_integration.py"
+    },
+    {
+      "label": "full",
+      "file": "tests/cron/test_cron_delivery_redaction.py"
+    },
+    {
+      "label": "full",
+      "file": "tests/agent/test_auxiliary_reasoning_field_rejection_retry.py"
+    },
+    {
+      "label": "full",
+      "file": "tests/agent/lsp/test_versionless_push_during_send.py"
+    },
+    {
+      "label": "full",
+      "file": "tests/agent/test_anthropic_kimi_signed_thinking_replay.py"
+    },
+    {
+      "label": "full",
+      "file": "tests/hermes_cli/test_kanban_workspace_busy.py"
+    },
+    {
+      "label": "full",
+      "file": "tests/agent/test_azure_identity_adapter.py"
+    },
+    {
+      "label": "full",
+      "file": "tests/agent/test_budget_reasoning_details_exclusion.py"
+    },
+    {
+      "label": "full",
+      "file": "tests/agent/test_context_pin.py"
+    },
+    {
+      "label": "full",
+      "file": "tests/agent/test_compress_signal_leak.py"
+    },
+    {
+      "label": "full",
+      "file": "tests/agent/test_account_usage.py"
+    },
+    {
+      "label": "full",
+      "file": "tests/agent/test_bedrock_1m_context.py"
+    },
+    {
+      "label": "full",
+      "file": "tests/agent/test_compression_stall_interrupt.py"
+    },
+    {
+      "label": "full",
+      "file": "tests/cron/test_preflight_config.py"
+    },
+    {
+      "label": "full",
+      "file": "tests/agent/test_codex_app_server_lifecycle.py"
+    },
+    {
+      "label": "full",
+      "file": "tests/acp_adapter/test_session_provenance.py"
+    },
+    {
+      "label": "full",
+      "file": "tests/acp_adapter/test_acp_mcp_discovery.py"
+    },
+    {
+      "label": "full",
+      "file": "tests/cron/test_bot_chat_warning_replay.py"
+    },
+    {
+      "label": "full",
+      "file": "tests/agent/test_agent_guardrails.py"
+    },
+    {
+      "label": "full",
+      "file": "tests/agent/test_compression_orphan_recovery.py"
+    },
+    {
+      "label": "full",
+      "file": "tests/agent/test_auxiliary_explicit_cancellation.py"
+    },
+    {
+      "label": "full",
+      "file": "tests/agent/test_anthropic_mid_tool_call_drop.py"
+    },
+    {
+      "label": "full",
+      "file": "tests/agent/lsp/test_diagnostics_field.py"
+    },
+    {
+      "label": "full",
+      "file": "tests/cron/test_cron_pinned_job_fallback.py"
+    },
+    {
+      "label": "full",
+      "file": "tests/agent/test_auxiliary_client_base_url_host_validation.py"
+    },
+    {
+      "label": "full",
+      "file": "tests/cron/test_shutdown_interrupt.py"
+    },
+    {
+      "label": "full",
+      "file": "tests/agent/test_create_openai_client_ssl_verify.py"
+    },
+    {
+      "label": "full",
+      "file": "tests/agent/test_background_review_list_shapes.py"
+    },
+    {
+      "label": "full",
+      "file": "tests/agent/test_context_compressor.py"
+    },
+    {
+      "label": "full",
+      "file": "tests/agent/test_capability_probe_credentials.py"
+    },
+    {
+      "label": "full",
+      "file": "tests/agent/test_anthropic_oauth_ua_prefix.py"
+    },
+    {
+      "label": "full",
+      "file": "tests/agent/test_conversation_fallback_state.py"
+    },
+    {
+      "label": "full",
+      "file": "tests/agent/test_compression_supersession_split.py"
+    },
+    {
+      "label": "full",
+      "file": "tests/agent/test_anthropic_spent_rotation_verdict.py"
+    },
+    {
+      "label": "full",
+      "file": "tests/agent/test_battery.py"
+    },
+    {
+      "label": "full",
+      "file": "tests/cron/test_cron_pre_agent_fallback_notice.py"
+    },
+    {
+      "label": "full",
+      "file": "tests/agent/test_compression_interrupt_protection.py"
+    },
+    {
+      "label": "full",
+      "file": "tests/agent/test_background_review_usage.py"
+    },
+    {
+      "label": "full",
+      "file": "tests/agent/test_compression_stall_fallback.py"
+    },
+    {
+      "label": "full",
+      "file": "tests/agent/test_background_review_cache_parity.py"
+    },
+    {
+      "label": "full",
+      "file": "tests/hermes_cli/test_kanban_reclaim_claim_lock_guard.py"
+    },
+    {
+      "label": "full",
+      "file": "tests/agent/test_billing_view.py"
+    },
+    {
+      "label": "full",
+      "file": "tests/acp_adapter/test_auth.py"
+    },
+    {
+      "label": "full",
+      "file": "tests/agent/test_bedrock_context_cache.py"
+    },
+    {
+      "label": "full",
+      "file": "tests/agent/test_codex_responses_settle_pending_tool_calls.py"
+    },
+    {
+      "label": "full",
+      "file": "tests/agent/lsp/test_windows_binary_resolution.py"
+    },
+    {
+      "label": "full",
+      "file": "tests/hermes_cli/test_kanban_gateway_restart_handoff.py"
+    },
+    {
+      "label": "full",
+      "file": "tests/agent/test_context_breakdown.py"
+    },
+    {
+      "label": "full",
+      "file": "tests/agent/test_auxiliary_client_cache_eviction.py"
+    },
+    {
+      "label": "full",
+      "file": "tests/agent/test_canon_args_memo_parity.py"
+    },
+    {
+      "label": "full",
+      "file": "tests/agent/test_auxiliary_provider_supplied_client.py"
+    },
+    {
+      "label": "full",
+      "file": "tests/agent/lsp/test_delta_key.py"
+    },
+    {
+      "label": "full",
+      "file": "tests/agent/test_create_openai_client_kwargs_isolation.py"
+    },
+    {
+      "label": "full",
+      "file": "tests/agent/lsp/test_reporter.py"
+    },
+    {
+      "label": "full",
+      "file": "tests/agent/lsp/test_root_policy.py"
+    },
+    {
+      "label": "full",
+      "file": "tests/agent/test_anthropic_oauth_stress.py"
+    },
+    {
+      "label": "full",
+      "file": "tests/agent/test_bedrock_guardrail_claude_route.py"
+    },
+    {
+      "label": "full",
+      "file": "tests/agent/test_codex_gpt55_autoraise_notice.py"
+    },
+    {
+      "label": "full",
+      "file": "tests/cron/test_launch_guard.py"
+    },
+    {
+      "label": "full",
+      "file": "tests/agent/test_aux_stream_host_deadline_sibling_wires.py"
+    },
+    {
+      "label": "full",
+      "file": "tests/agent/lsp/test_workspace.py"
+    },
+    {
+      "label": "full",
+      "file": "tests/agent/test_compaction_prompt_rebuild.py"
+    },
+    {
+      "label": "full",
+      "file": "tests/acp_adapter/test_ping_suppression.py"
+    },
+    {
+      "label": "full",
+      "file": "tests/agent/test_compression_attempt_ownership.py"
+    },
+    {
+      "label": "full",
+      "file": "tests/cron/test_cron_multiplex_served_profile_parity.py"
+    },
+    {
+      "label": "full",
+      "file": "tests/agent/test_codex_first_event_timing.py"
+    },
+    {
+      "label": "full",
+      "file": "tests/acp_adapter/test_failed_turn_closure.py"
+    },
+    {
+      "label": "full",
+      "file": "tests/hermes_cli/test_quiet_single_query.py"
+    },
+    {
+      "label": "full",
+      "file": "tests/acp_adapter/test_mcp_e2e.py"
+    },
+    {
+      "label": "full",
+      "file": "tests/agent/test_compression_config_defaults.py"
+    },
+    {
+      "label": "full",
+      "file": "tests/acp_adapter/test_runtime_identity.py"
+    },
+    {
+      "label": "full",
+      "file": "tests/agent/test_bedrock_stream_completion.py"
+    },
+    {
+      "label": "full",
+      "file": "tests/agent/test_compressor_tail_cut_oob_fix.py"
+    },
+    {
+      "label": "full",
+      "file": "tests/acp_adapter/test_edit_approval.py"
+    },
+    {
+      "label": "full",
+      "file": "tests/cron/test_restart_safe_worker.py"
+    },
+    {
+      "label": "full",
+      "file": "tests/agent/test_compression_stall_deterministic_fallback.py"
+    },
+    {
+      "label": "full",
+      "file": "tests/agent/test_anthropic_request_client_reuse.py"
+    },
+    {
+      "label": "full",
+      "file": "tests/agent/test_auxiliary_compression_timeout_floor.py"
+    },
+    {
+      "label": "full",
+      "file": "tests/agent/test_anthropic_credential_persist_failure.py"
+    },
+    {
+      "label": "full",
+      "file": "tests/cron/test_bot_chat_delivery_child_env.py"
+    },
+    {
+      "label": "full",
+      "file": "tests/agent/test_compressor_media_stripping.py"
+    },
+    {
+      "label": "full",
+      "file": "tests/agent/test_bounded_response.py"
+    },
+    {
+      "label": "full",
+      "file": "tests/agent/test_codex_watchdog_reasoning_effort.py"
+    },
+    {
+      "label": "full",
+      "file": "tests/agent/lsp/test_compound_extensions.py"
+    },
+    {
+      "label": "full",
+      "file": "tests/hermes_cli/test_kanban_boards.py"
+    },
+    {
+      "label": "full",
+      "file": "tests/agent/test_astra_baseline_runtime.py"
+    },
+    {
+      "label": "full",
+      "file": "tests/acp_adapter/test_tools.py"
+    },
+    {
+      "label": "full",
+      "file": "tests/agent/test_coding_context.py"
+    },
+    {
+      "label": "full",
+      "file": "tests/cron/test_cron_incidents.py"
+    },
+    {
+      "label": "full",
+      "file": "tests/agent/test_codex_runtime_prompt_handoff.py"
+    },
+    {
+      "label": "full",
+      "file": "tests/cron/test_cron_bot_chat_delivery.py"
+    },
+    {
+      "label": "full",
+      "file": "tests/agent/test_compression_fallback_budget.py"
+    },
+    {
+      "label": "full",
+      "file": "tests/acp_adapter/test_acp_dashboard_model_switch_validation.py"
+    },
+    {
+      "label": "full",
+      "file": "tests/agent/test_compression_last_assistant_anchor.py"
+    },
+    {
+      "label": "full",
+      "file": "tests/agent/test_aux_stream_host_deadline.py"
+    },
+    {
+      "label": "full",
+      "file": "tests/agent/test_anthropic_billing_guidance.py"
+    },
+    {
+      "label": "full",
+      "file": "tests/agent/test_aux_session_endpoint_affinity.py"
+    },
+    {
+      "label": "full",
+      "file": "tests/agent/test_anthropic_oauth_pkce.py"
+    },
+    {
+      "label": "full",
+      "file": "tests/acp_adapter/test_events.py"
+    },
+    {
+      "label": "full",
+      "file": "tests/agent/test_auxiliary_unavailable_nous_reason.py"
+    },
+    {
+      "label": "full",
+      "file": "tests/agent/test_anthropic_token_scope_isolation.py"
+    },
+    {
+      "label": "full",
+      "file": "tests/cron/test_mirror_origin_fallback.py"
+    },
+    {
+      "label": "full",
+      "file": "tests/agent/test_backend_identity.py"
+    },
+    {
+      "label": "full",
+      "file": "tests/agent/test_codex_multimodal_tool_result.py"
+    },
+    {
+      "label": "full",
+      "file": "tests/hermes_cli/test_kanban_dispatch_dry_run.py"
+    },
+    {
+      "label": "full",
+      "file": "tests/acp_adapter/test_session_db_private_access.py"
+    },
+    {
+      "label": "full",
+      "file": "tests/agent/test_compression_commit_fence_race.py"
+    },
+    {
+      "label": "full",
+      "file": "tests/agent/lsp/test_stale_diagnostics.py"
+    },
+    {
+      "label": "full",
+      "file": "tests/agent/test_anthropic_truncation_continuation.py"
+    },
+    {
+      "label": "full",
+      "file": "tests/agent/test_auxiliary_client_bootstrap_skew.py"
+    },
+    {
+      "label": "full",
+      "file": "tests/agent/test_anthropic_owned_routing.py"
+    },
+    {
+      "label": "full",
+      "file": "tests/agent/test_bedrock_empty_text_blocks.py"
+    },
+    {
+      "label": "full",
+      "file": "tests/agent/test_context_route_mismatch.py"
+    },
+    {
+      "label": "full",
+      "file": "tests/tools/test_cronjob_run_immediate.py"
+    },
+    {
+      "label": "full",
+      "file": "tests/agent/test_compression_anti_thrash_recovery.py"
+    },
+    {
+      "label": "full",
+      "file": "tests/agent/test_compressor_zero_user_guard.py"
+    },
+    {
+      "label": "full",
+      "file": "tests/agent/test_continuation_repetition_guard.py"
+    },
+    {
+      "label": "full",
+      "file": "tests/agent/test_auxiliary_transport_autodetect.py"
+    },
+    {
+      "label": "full",
+      "file": "tests/agent/test_command_secret_source.py"
+    },
+    {
+      "label": "full",
+      "file": "tests/agent/test_background_review_summary.py"
+    },
+    {
+      "label": "full",
+      "file": "tests/agent/test_auxiliary_reasoning_floor.py"
+    },
+    {
+      "label": "full",
+      "file": "tests/agent/test_auxiliary_reasoning_catalog_floor.py"
+    },
+    {
+      "label": "full",
+      "file": "tests/agent/lsp/test_broken_set.py"
+    },
+    {
+      "label": "full",
+      "file": "tests/hermes_cli/test_single_query_hard_exit.py"
+    },
+    {
+      "label": "full",
+      "file": "tests/acp_adapter/test_empty_session_persistence.py"
+    },
+    {
+      "label": "full",
+      "file": "tests/agent/test_continuation_ceiling_wedge.py"
+    },
+    {
+      "label": "full",
+      "file": "tests/agent/test_anthropic_adapter.py"
+    },
+    {
+      "label": "full",
+      "file": "tests/agent/test_compressor_assistant_tail_anchor.py"
+    },
+    {
+      "label": "full",
+      "file": "tests/agent/test_context_compressor_zero_user_provenance.py"
+    },
+    {
+      "label": "full",
+      "file": "tests/hermes_cli/test_kanban_worker_session_source.py"
+    },
+    {
+      "label": "full",
+      "file": "tests/agent/test_copilot_native_vision_headers.py"
+    },
+    {
+      "label": "full",
+      "file": "tests/agent/test_context_engine_select_context.py"
+    },
+    {
+      "label": "full",
+      "file": "tests/agent/test_background_review_toolset_restriction.py"
+    },
+    {
+      "label": "full",
+      "file": "tests/agent/test_copilot_initiator.py"
+    },
+    {
+      "label": "full",
+      "file": "tests/agent/test_authorization_gate.py"
+    },
+    {
+      "label": "full",
+      "file": "tests/agent/test_background_review_cost_controls.py"
+    },
+    {
+      "label": "full",
+      "file": "tests/agent/lsp/test_multi_root.py"
+    },
+    {
+      "label": "full",
+      "file": "tests/agent/test_context_compressor_session_end_clears_state.py"
+    },
+    {
+      "label": "full",
+      "file": "tests/cron/test_bot_chat_cli_home.py"
+    },
+    {
+      "label": "full",
+      "file": "tests/cron/test_cleanup_timeout.py"
+    },
+    {
+      "label": "full",
+      "file": "tests/agent/lsp/test_lifecycle.py"
+    },
+    {
+      "label": "full",
+      "file": "tests/agent/test_compression_max_attempts_config.py"
+    },
+    {
+      "label": "full",
+      "file": "tests/agent/test_413_compression.py"
+    },
+    {
+      "label": "full",
+      "file": "tests/cron/test_cron_kanban_env_isolation.py"
+    },
+    {
+      "label": "full",
+      "file": "tests/agent/test_content_policy_blocked.py"
+    },
+    {
+      "label": "full",
+      "file": "tests/agent/test_compressor_tool_call_budget.py"
+    },
+    {
+      "label": "full",
+      "file": "tests/agent/lsp/test_powershell_server.py"
+    },
+    {
+      "label": "full",
+      "file": "tests/agent/lsp/test_custom_servers.py"
+    },
+    {
+      "label": "full",
+      "file": "tests/hermes_cli/test_kanban_dispatch_claim_allowlist.py"
+    },
+    {
+      "label": "full",
+      "file": "tests/agent/test_anthropic_borrowed_row_authority.py"
+    },
+    {
+      "label": "full",
+      "file": "tests/acp_adapter/test_named_provider_catalogs.py"
+    },
+    {
+      "label": "full",
+      "file": "tests/agent/test_compressor_actionable_tail_anchor.py"
+    },
+    {
+      "label": "full",
+      "file": "tests/agent/test_auxiliary_client_ssl_verify.py"
+    },
+    {
+      "label": "full",
+      "file": "tests/hermes_cli/test_kanban_dispatch_lock.py"
+    },
+    {
+      "label": "full",
+      "file": "tests/agent/test_compression_boundary_hook.py"
+    },
+    {
+      "label": "full",
+      "file": "tests/hermes_cli/test_kanban_worker_terminal_scope.py"
+    },
+    {
+      "label": "full",
+      "file": "tests/agent/test_async_token_accounting.py"
+    },
+    {
+      "label": "full",
+      "file": "tests/hermes_cli/test_kanban_db_init.py"
+    },
+    {
+      "label": "full",
+      "file": "tests/agent/lsp/test_nested_root_current_diagnostics.py"
+    },
+    {
+      "label": "full",
+      "file": "tests/agent/test_codex_soft_failure_pool_rotation.py"
+    },
+    {
+      "label": "full",
+      "file": "tests/agent/test_context_compressor_summary_hook_compat.py"
+    },
+    {
+      "label": "full",
+      "file": "tests/cron/test_cron_non_push_origin.py"
+    },
+    {
+      "label": "full",
+      "file": "tests/agent/test_compressor_truncated_summary_guard.py"
+    },
+    {
+      "label": "full",
+      "file": "tests/agent/test_arcee_trinity_overrides.py"
+    },
+    {
+      "label": "full",
+      "file": "tests/agent/test_codex_responses_adapter.py"
+    },
+    {
+      "label": "full",
+      "file": "tests/cron/test_warning_delivery_policy.py"
+    },
+    {
+      "label": "full",
+      "file": "tests/agent/test_compression_timeout_terminal.py"
+    },
+    {
+      "label": "full",
+      "file": "tests/agent/test_codex_app_server_persist.py"
+    },
+    {
+      "label": "full",
+      "file": "tests/cron/test_relay_fronted_delivery.py"
+    },
+    {
+      "label": "full",
+      "file": "tests/agent/test_codex_token_expired_replay_recovery.py"
+    },
+    {
+      "label": "full",
+      "file": "tests/agent/test_codex_app_server_event_bridge.py"
+    },
+    {
+      "label": "full",
+      "file": "tests/agent/test_codex_sdk_transform_bypass.py"
+    },
+    {
+      "label": "full",
+      "file": "tests/agent/test_codex_request_transport_diagnostics.py"
+    },
+    {
+      "label": "full",
+      "file": "tests/hermes_cli/test_kanban_db_repair.py"
+    },
+    {
+      "label": "full",
+      "file": "tests/acp_adapter/test_acp_commands.py"
+    },
+    {
+      "label": "full",
+      "file": "tests/agent/test_compression_worker_isolation.py"
+    },
+    {
+      "label": "full",
+      "file": "tests/agent/test_cjk_token_estimation.py"
+    },
+    {
+      "label": "full",
+      "file": "tests/agent/test_create_openai_client_disables_sdk_retries.py"
+    },
+    {
+      "label": "full",
+      "file": "tests/agent/test_anthropic_request_blank_block_guard.py"
+    },
+    {
+      "label": "full",
+      "file": "tests/agent/test_codex_echo_ownership.py"
+    },
+    {
+      "label": "full",
+      "file": "tests/agent/test_auxiliary_wire_messages.py"
+    },
+    {
+      "label": "full",
+      "file": "tests/agent/test_context_engine.py"
+    },
+    {
+      "label": "full",
+      "file": "tests/agent/lsp/test_client_e2e.py"
+    },
+    {
+      "label": "full",
+      "file": "tests/cron/test_parallel_pool.py"
+    },
+    {
+      "label": "full",
+      "file": "tests/hermes_cli/test_single_query_fleet_turn_end_drain.py"
+    },
+    {
+      "label": "full",
+      "file": "tests/agent/lsp/test_install_and_lint_fixes.py"
+    },
+    {
+      "label": "full",
+      "file": "tests/agent/test_aux_affordable_402_retry.py"
+    },
+    {
+      "label": "full",
+      "file": "tests/agent/test_codex_runtime_live_events.py"
+    },
+    {
+      "label": "full",
+      "file": "tests/agent/test_auxiliary_hooks.py"
+    },
+    {
+      "label": "full",
+      "file": "tests/acp_adapter/test_session.py"
+    },
+    {
+      "label": "full",
+      "file": "tests/agent/test_codex_cloudflare_headers.py"
+    },
+    {
+      "label": "full",
+      "file": "tests/agent/test_codex_ttfb_watchdog.py"
+    },
+    {
+      "label": "full",
+      "file": "tests/cron/test_bot_chat_pending_identity.py"
+    },
+    {
+      "label": "full",
+      "file": "tests/agent/test_compression_budget_rearm.py"
+    },
+    {
+      "label": "full",
+      "file": "tests/agent/test_auxiliary_user_default_headers.py"
+    },
+    {
+      "label": "full",
+      "file": "tests/agent/test_compression_busy_steer_anchor.py"
+    },
+    {
+      "label": "full",
+      "file": "tests/acp_adapter/test_detect_provider_entra.py"
+    },
+    {
+      "label": "full",
+      "file": "tests/agent/test_background_review.py"
+    },
+    {
+      "label": "full",
+      "file": "tests/agent/test_context_file_sources.py"
+    },
+    {
+      "label": "full",
+      "file": "tests/agent/test_background_review_input_budget.py"
+    },
+    {
+      "label": "full",
+      "file": "tests/agent/test_aux_progress_streaming.py"
+    },
+    {
+      "label": "full",
+      "file": "tests/agent/test_anthropic_route_oauth_identity.py"
+    },
+    {
+      "label": "full",
+      "file": "tests/agent/lsp/test_protocol.py"
+    },
+    {
+      "label": "full",
+      "file": "tests/agent/test_codex_app_server_integration.py"
+    },
+    {
+      "label": "full",
+      "file": "tests/cron/test_cron_memory_contract.py"
+    },
+    {
+      "label": "full",
+      "file": "tests/agent/test_compression_boundary.py"
+    },
+    {
+      "label": "full",
+      "file": "tests/acp_adapter/test_server.py"
+    },
+    {
+      "label": "full",
+      "file": "tests/agent/test_auxiliary_opencode_routing.py"
+    },
+    {
+      "label": "full",
+      "file": "tests/cron/test_sessiondb_init_hang.py"
+    },
+    {
+      "label": "full",
+      "file": "tests/agent/test_context_refs_concurrent.py"
+    },
+    {
+      "label": "full",
+      "file": "tests/agent/test_codex_happy_eyeballs.py"
+    },
+    {
+      "label": "full",
+      "file": "tests/agent/test_compression_adoption_preserves_live_tail.py"
+    },
+    {
+      "label": "full",
+      "file": "tests/agent/test_content_policy_refusal_stop_details.py"
+    },
+    {
+      "label": "full",
+      "file": "tests/agent/test_anthropic_kwargs_sanitize.py"
+    },
+    {
+      "label": "full",
+      "file": "tests/agent/test_create_openai_client_reuse.py"
+    },
+    {
+      "label": "full",
+      "file": "tests/agent/test_bot_profile_prompt_isolation.py"
+    },
+    {
+      "label": "full",
+      "file": "tests/hermes_cli/test_kanban_worker_terminal_cwd.py"
+    },
+    {
+      "label": "full",
+      "file": "tests/cron/test_cron_provider_pin.py"
+    },
+    {
+      "label": "full",
+      "file": "tests/agent/test_auxiliary_ollama_local_provider.py"
+    },
+    {
+      "label": "full",
+      "file": "tests/agent/test_compaction_redaction_boundaries.py"
+    },
+    {
+      "label": "full",
+      "file": "tests/agent/test_compress_focus.py"
+    },
+    {
+      "label": "full",
+      "file": "tests/cron/test_run_one_job.py"
+    },
+    {
+      "label": "full",
+      "file": "tests/hermes_cli/test_kanban_launch_guard.py"
+    },
+    {
+      "label": "full",
+      "file": "tests/hermes_cli/test_kanban_db.py"
+    },
+    {
+      "label": "full",
+      "file": "tests/agent/test_auxiliary_auto_route_xai_oauth_refresh.py"
+    },
+    {
+      "label": "full",
+      "file": "tests/agent/test_async_utils.py"
+    },
+    {
+      "label": "full",
+      "file": "tests/agent/test_callable_api_key.py"
+    },
+    {
+      "label": "full",
+      "file": "tests/cron/test_bot_chat_progress_deadline.py"
+    },
+    {
+      "label": "full",
+      "file": "tests/agent/test_anthropic_structured_output.py"
+    },
+    {
+      "label": "full",
+      "file": "tests/agent/test_account_usage_fetch.py"
+    },
+    {
+      "label": "full",
+      "file": "tests/agent/lsp/test_backend_gate.py"
+    },
+    {
+      "label": "full",
+      "file": "tests/agent/test_context_references.py"
+    },
+    {
+      "label": "full",
+      "file": "tests/hermes_cli/test_kanban_gc_retention.py"
+    },
+    {
+      "label": "full",
+      "file": "tests/agent/test_actual_auxiliary_routing.py"
+    },
+    {
+      "label": "full",
+      "file": "tests/agent/test_codex_app_server_compaction.py"
+    },
+    {
+      "label": "full",
+      "file": "tests/agent/test_credential_pool_auto_detect.py"
+    },
+    {
+      "label": "full",
+      "file": "tests/cron/test_quota_hold.py"
+    },
+    {
+      "label": "full",
+      "file": "tests/agent/test_api_max_retries_config.py"
+    },
+    {
+      "label": "full",
+      "file": "tests/agent/test_codex_no_tools_nonetype.py"
+    },
+    {
+      "label": "full",
+      "file": "tests/cron/test_bot_chat_pending.py"
+    },
+    {
+      "label": "full",
+      "file": "tests/agent/test_compression_small_ctx_threshold_floor.py"
+    },
+    {
+      "label": "full",
+      "file": "tests/cron/test_media_delivery_parity.py"
+    },
+    {
+      "label": "full",
+      "file": "tests/agent/test_context_compressor_summary_continuity.py"
+    },
+    {
+      "label": "full",
+      "file": "tests/agent/test_codex_incomplete_budget_escalation.py"
+    },
+    {
+      "label": "full",
+      "file": "tests/acp_adapter/test_session_construction_off_loop.py"
+    },
+    {
+      "label": "full",
+      "file": "tests/agent/test_auxiliary_anthropic_pool_fallback_regression.py"
+    },
+    {
+      "label": "full",
+      "file": "tests/acp_adapter/test_entry.py"
+    },
+    {
+      "label": "full",
+      "file": "tests/agent/test_413_image_payload_recovery.py"
+    },
+    {
+      "label": "full",
+      "file": "tests/agent/test_context_token_tracking.py"
+    },
+    {
+      "label": "full",
+      "file": "tests/agent/test_auxiliary_structured_output.py"
+    },
+    {
+      "label": "full",
+      "file": "tests/agent/lsp/test_python_discovery.py"
+    },
+    {
+      "label": "full",
+      "file": "tests/cron/test_bot_chat_own_profile_multiplex_home.py"
+    },
+    {
+      "label": "full",
+      "file": "tests/agent/lsp/test_vue_server.py"
+    },
+    {
+      "label": "full",
+      "file": "tests/agent/test_auxiliary_client_cache_follows_credential.py"
+    },
+    {
+      "label": "full",
+      "file": "tests/agent/test_auxiliary_relay.py"
+    },
+    {
+      "label": "full",
+      "file": "tests/hermes_cli/test_single_query_exit_contract.py"
+    },
+    {
+      "label": "full",
+      "file": "tests/acp_adapter/test_acp_logging_redaction.py"
+    },
+    {
+      "label": "full",
+      "file": "tests/agent/test_concurrent_interrupt.py"
+    },
+    {
+      "label": "full",
+      "file": "tests/agent/test_auxiliary_client_anthropic_custom.py"
+    },
+    {
+      "label": "full",
+      "file": "tests/agent/test_anthropic_whitespace_text_blocks.py"
+    },
+    {
+      "label": "full",
+      "file": "tests/agent/test_close_interrupted_tool_sequence.py"
+    },
+    {
+      "label": "full",
+      "file": "tests/agent/test_cache_disabled_on_stubs.py"
+    },
+    {
+      "label": "full",
+      "file": "tests/agent/test_anthropic_message_stop.py"
+    },
+    {
+      "label": "full",
+      "file": "tests/agent/test_compression_review.py"
+    },
+    {
+      "label": "full",
+      "file": "tests/agent/test_codex_xai_oauth_recovery.py"
+    },
+    {
+      "label": "full",
+      "file": "tests/agent/test_bedrock_adapter.py"
+    },
+    {
+      "label": "full",
+      "file": "tests/agent/test_conversation_compression_manual.py"
+    },
+    {
+      "label": "full",
+      "file": "tests/agent/test_auth_provider_failover.py"
+    },
+    {
+      "label": "full",
+      "file": "tests/agent/test_860_dedup.py"
+    },
+    {
+      "label": "full",
+      "file": "tests/agent/test_compression_progress.py"
+    },
+    {
+      "label": "full",
+      "file": "tests/agent/test_context_compressor_task_heading.py"
+    },
+    {
+      "label": "full",
+      "file": "tests/tools/test_cronjob_run_background.py"
+    },
+    {
+      "label": "full",
+      "file": "tests/cron/test_cron_live_bot_delivery.py"
+    },
+    {
+      "label": "full",
+      "file": "tests/cron/test_cron_workdir.py"
+    },
+    {
+      "label": "full",
+      "file": "tests/cron/test_execution_ledger.py"
+    },
+    {
+      "label": "full",
+      "file": "tests/agent/test_anthropic_thinking_block_order.py"
+    },
+    {
+      "label": "full",
+      "file": "tests/cron/test_fire_claim_lost_after_delivery.py"
+    },
+    {
+      "label": "full",
+      "file": "tests/agent/test_anthropic_model_cooldowns.py"
+    },
+    {
+      "label": "full",
+      "file": "tests/agent/test_auxiliary_auto_never_guesses_provider.py"
+    },
+    {
+      "label": "full",
+      "file": "tests/agent/test_compression_closed_adoption.py"
+    },
+    {
+      "label": "full",
+      "file": "tests/acp_adapter/test_session_reasoning_config.py"
+    },
+    {
+      "label": "full",
+      "file": "tests/agent/test_claude_code_version_path.py"
+    },
+    {
+      "label": "full",
+      "file": "tests/agent/lsp/test_incremental_unicode.py"
+    },
+    {
+      "label": "full",
+      "file": "tests/agent/test_aux_relay_progress_seam.py"
+    },
+    {
+      "label": "full",
+      "file": "tests/agent/test_auxiliary_error_classification.py"
+    },
+    {
+      "label": "full",
+      "file": "tests/agent/test_codex_reasoning_only_streak.py"
+    },
+    {
+      "label": "full",
+      "file": "tests/agent/test_anthropic_prompt_cache_policy.py"
+    },
+    {
+      "label": "full",
+      "file": "tests/cron/test_cron_home_target_profile_scope.py"
+    },
+    {
+      "label": "full-rc1",
+      "file": "tests/agent/test_codex_gpt55_autoraise_notice.py"
+    },
+    {
+      "label": "full-rc1",
+      "file": "tests/agent/lsp/test_workspace.py"
+    },
+    {
+      "label": "full-rc1",
+      "file": "tests/acp_adapter/test_edit_approval.py"
+    },
+    {
+      "label": "full-rc1",
+      "file": "tests/agent/test_coding_context.py"
+    },
+    {
+      "label": "full-rc1",
+      "file": "tests/agent/lsp/test_broken_set.py"
+    },
+    {
+      "label": "full-rc1",
+      "file": "tests/agent/lsp/test_install_and_lint_fixes.py"
+    },
+    {
+      "label": "full-rc1",
+      "file": "tests/agent/test_codex_app_server_integration.py"
+    },
+    {
+      "label": "full-rc1",
+      "file": "tests/cron/test_cron_live_bot_delivery.py"
+    }
+  ]
+}

@@ -1,0 +1,9 @@
+{
+  "fleet/0.21.5-union-rc1": "5cd04a99de76bf42dc0bcdb17e11274ca1e1e8fa",
+  "fleet/u2c-extras": "6af2d61a69fab6a98bac8423f79a6bae8803eded",
+  "fleet/u2d-extras": "10aa3318967d14dda165661c4978c3c20a401748",
+  "u2c_original": "01f37c457964af97c80d2724680fc2e7c95550bd",
+  "u2d_original": "b3e93de0e3d48017aedc229b37a50a49f533b021",
+  "conflicts": [],
+  "rebase_recipe": "U2c/rebase-after-u2b.sh rebase operation executed with rc1 pinned. Its tests were routed to U2e isolated parallel runner, not U2c output."
+}

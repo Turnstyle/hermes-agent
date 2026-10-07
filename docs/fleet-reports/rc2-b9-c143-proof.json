@@ -1,0 +1,75 @@
+{
+  "checked_at": "2026-10-06 19:09:37 CDT",
+  "source": "/home/max/Scratchpad/5-Oct-2026_Mass-Review/exec/work/hermes-goal/B9/rollout-preflight.json",
+  "source_sha256": "314f14077e03803a63845b7338787ed46167f741840c6bbaf9d0872b7665c5fe",
+  "generated_at": "2026-10-06 19:08:14 CDT",
+  "candidate_commit": "5cd04a99de76bf42dc0bcdb17e11274ca1e1e8fa",
+  "machines": {
+    "max": {
+      "profile_count": 10,
+      "explicit_queue_count": 6,
+      "explicit_queue_proven": false,
+      "effective_launch_queue_proven": false,
+      "missing_or_unreadable_profiles": [
+        "m-rescue-artist",
+        "max-arctic-embed",
+        "max-board-ops",
+        "max-keys-router"
+      ],
+      "nonqueue_profiles": [
+        {
+          "profile": "m-rescue-artist",
+          "value": null,
+          "source": "/home/max/.hermes/profiles/m-rescue-artist/config.yaml:1"
+        },
+        {
+          "profile": "max-arctic-embed",
+          "value": null,
+          "source": "/home/max/.hermes/profiles/max-arctic-embed/config.yaml:1"
+        },
+        {
+          "profile": "max-board-ops",
+          "value": null,
+          "source": "/home/max/.hermes/profiles/max-board-ops/config.yaml:1"
+        },
+        {
+          "profile": "max-keys-router",
+          "value": null,
+          "source": "/home/max/.hermes/profiles/max-keys-router/config.yaml:1"
+        }
+      ]
+    },
+    "sheldon": {
+      "profile_count": 46,
+      "explicit_queue_count": 46,
+      "explicit_queue_proven": true,
+      "effective_launch_queue_proven": false,
+      "missing_or_unreadable_profiles": [],
+      "nonqueue_profiles": []
+    },
+    "turnerbook": {
+      "profile_count": 16,
+      "explicit_queue_count": 16,
+      "explicit_queue_proven": true,
+      "effective_launch_queue_proven": false,
+      "missing_or_unreadable_profiles": [],
+      "nonqueue_profiles": []
+    },
+    "snowdrop": {
+      "profile_count": 10,
+      "explicit_queue_count": 10,
+      "explicit_queue_proven": true,
+      "effective_launch_queue_proven": false,
+      "missing_or_unreadable_profiles": [],
+      "nonqueue_profiles": []
+    },
+    "rosie": {
+      "profile_count": 2,
+      "explicit_queue_count": 2,
+      "explicit_queue_proven": true,
+      "effective_launch_queue_proven": false,
+      "missing_or_unreadable_profiles": [],
+      "nonqueue_profiles": []
+    }
+  }
+}

@@ -2487,6 +2487,20 @@ def run_job(
     ``extra_prompt``: optional per-run context from ``cronjob(action='run', prompt=...)`` (#57331). Appended
     to the stored prompt for this fire only — never persisted to the job definition.
     """
+    from cron.scheduler_admission import cron_launch_guard
+
+    with cron_launch_guard(job) as admitted:
+        if not admitted:
+            return (False, "", "", "Worker launch deferred: restart pause or board lock unavailable")
+        return _run_job_admitted(
+            job, defer_agent_teardown=defer_agent_teardown, extra_prompt=extra_prompt,
+            cancel_event=cancel_event, execution_id=execution_id)
+
+
+def _run_job_admitted(
+    job: dict, *, defer_agent_teardown: Optional[list] = None, extra_prompt: Optional[str] = None,
+    cancel_event: Optional[_CancelEventLike] = None, execution_id: Optional[str] = None,
+) -> tuple[bool, str, str, Optional[str]]:
     job_id = job["id"]
     job_name = str(job.get("name") or job.get("prompt") or job_id or "cron job")
 
@@ -2711,8 +2725,31 @@ def run_one_job(
     """Run ONE due job end-to-end: execute → save output → deliver → mark. Shared by the built-in
     ticker and external providers' ``fire_due``; does NOT decide due-ness or acquire the initial
     claim (callers use the store CAS) but keeps it alive. True if processed (a job failure is
-    recorded via ``mark_job_run``), False only if processing raised. ``cancel_event``: optional
+    recorded via ``mark_job_run``), False if admission was refused or processing raised. ``cancel_event``: optional
     transport-level cancel (dashboard drain)."""
+    from cron.scheduler_admission import cron_launch_guard
+
+    with cron_launch_guard(job) as admitted:
+        if not admitted:
+            error = "Cron launch admission refused; execution was not started."
+            claim = job.get("fire_claim")
+            owner = str(claim.get("by") or "") if isinstance(claim, dict) else ""
+            try:
+                if owner:
+                    mark_job_run(job["id"], False, error, expected_fire_owner=owner)
+            finally:
+                if job.get("execution_id"):
+                    finish_execution(job["execution_id"], success=False, error=error)
+            return False
+        return _run_one_job_admitted(
+            job, adapters=adapters, loop=loop, verbose=verbose,
+            extra_prompt=extra_prompt, cancel_event=cancel_event, execution_token=admitted)
+
+
+def _run_one_job_admitted(
+    job: dict, *, execution_token: object, adapters=None, loop=None, verbose: bool = False,
+    extra_prompt: Optional[str] = None, cancel_event: Optional[_CancelEventLike] = None,
+) -> bool:
     # Every gateway path (built-in scheduler, external providers, and direct
     # API fires) crosses this seam.  Ensure the detached worker has a durable
     # attempt to adopt before any launch can occur.
@@ -2748,34 +2785,18 @@ def run_one_job(
         _stamped = job.get("manual_run_prompt")
         if _stamped and job.get("manual_run_at"):
             extra_prompt = str(_stamped)
-    claim = job.get("fire_claim")
-    fire_owner = str(claim.get("by") or "") if isinstance(claim, dict) else ""
-    execution_token = object()
-    profile_home = _get_hermes_home().resolve()
-    _fire_key = _inflight_key(job["id"])
-    with _running_lock:
-        _running_fire_owners.setdefault(_fire_key, {})[execution_token] = (
-            fire_owner or None, profile_home)
-    try:
-        with self_removal_delivery_scope(job["id"]):
-            return _run_with_fire_claim_heartbeat(
+    with self_removal_delivery_scope(job["id"]):
+        return _run_with_fire_claim_heartbeat(
+            job,
+            lambda lost_ownership: _run_one_job_body(
                 job,
-                lambda lost_ownership: _run_one_job_body(
-                    job,
-                    adapters=adapters,
-                    loop=loop,
-                    verbose=verbose,
-                    extra_prompt=extra_prompt,
-                    claim_lost=lost_ownership,
-                    transport_cancel=cancel_event,
-                    execution_token=execution_token))
-    finally:
-        with _running_lock:
-            executions = _running_fire_owners.get(_fire_key)
-            if executions is not None:
-                executions.pop(execution_token, None)
-                if not executions:
-                    _running_fire_owners.pop(_fire_key, None)
+                adapters=adapters,
+                loop=loop,
+                verbose=verbose,
+                extra_prompt=extra_prompt,
+                claim_lost=lost_ownership,
+                transport_cancel=cancel_event,
+                execution_token=execution_token))
 
 
 _OWNERSHIP_LOST_INTERRUPTED = "Interrupted by shutdown before terminal completion."
@@ -3561,16 +3582,21 @@ def _launch_external_cron_worker(job: dict) -> bool:
     try:
         stderr_fd = os.open(stderr_path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
         try:
-            process = subprocess.Popen(
-                dispatch.argv,
-                cwd=str(repo_root),
-                env=worker_env,
-                stdin=subprocess.DEVNULL,
-                stdout=subprocess.DEVNULL,
-                stderr=stderr_fd,
-                start_new_session=True,
-                creationflags=windows_hide_flags(),
-            )
+            from hermes_cli.kanban_launch import require_launch
+
+            with require_launch(wait_seconds=1.0):
+                process = subprocess.Popen(
+                    dispatch.argv,
+                    cwd=str(repo_root),
+                    env=worker_env,
+                    stdin=subprocess.DEVNULL,
+                    stdout=subprocess.DEVNULL,
+                    stderr=stderr_fd,
+                    start_new_session=True,
+                    creationflags=windows_hide_flags(),
+                )
+                with _running_lock:
+                    _running_worker_pids[_inflight_key(job_id)] = process.pid
         finally:
             os.close(stderr_fd)
     except BaseException:
@@ -4035,18 +4061,34 @@ def _sweep_mcp_orphans() -> None:
 
 
 def _process_due_job(job: dict, adapters, loop, verbose: bool) -> bool:
-    """Run one due job via the shared ``run_one_job`` body."""
-    # Claim only when the worker actually starts, so a queued lease can't expire first.
-    claimed = claim_job_for_fire(job["id"], return_job=True)
-    if not claimed:
-        finish_execution(
-            job["execution_id"], success=False, error="Fire claim lost; execution was not started.")
-        return True
-    # CAS returns the persisted record; bool fallback only for older test doubles.
-    claimed_job = dict(claimed) if isinstance(claimed, dict) else dict(job)
-    claimed_job["execution_id"] = job["execution_id"]
-    claimed_job["_scheduled_instant"] = job.get("_scheduled_instant")
-    return run_one_job(claimed_job, adapters=adapters, loop=loop, verbose=verbose)
+    """Admit queued work before consuming its durable occurrence."""
+    from cron.scheduler_admission import cron_launch_guard
+
+    with cron_launch_guard(job) as admitted:
+        if not admitted:
+            finish_execution(
+                job["execution_id"], success=False,
+                error="Cron launch admission refused; fire was not claimed.")
+            return False
+        # Claim only after admission and when the queued worker actually starts.
+        claimed = claim_job_for_fire(job["id"], return_job=True)
+        if not claimed:
+            finish_execution(
+                job["execution_id"], success=False, error="Fire claim lost; execution was not started.")
+            return True
+        # CAS returns the persisted record; bool fallback only for older test doubles.
+        claimed_job = dict(claimed) if isinstance(claimed, dict) else dict(job)
+        claimed_job["execution_id"] = job["execution_id"]
+        claimed_job["_scheduled_instant"] = job.get("_scheduled_instant")
+        claim = claimed_job.get("fire_claim")
+        owner = str(claim.get("by") or "") if isinstance(claim, dict) else ""
+        # Admission preceded the claim; shutdown now needs its acquired owner.
+        with _running_lock:
+            _running_fire_owners[_inflight_key(job["id"])][admitted] = (
+                owner or None, _get_hermes_home().resolve())
+        return _run_one_job_admitted(
+            claimed_job, execution_token=admitted,
+            adapters=adapters, loop=loop, verbose=verbose)
 
 
 def _submit_with_guard(job: dict, pool: concurrent.futures.ThreadPoolExecutor, process_job):

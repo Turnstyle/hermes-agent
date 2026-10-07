@@ -1,0 +1,6 @@
+{
+  "changed_at": "2026-10-06 20:46:01 CDT",
+  "old_sha256": "cf8ba52320be576a3e2bd728bc28fc31ccda2bf21320a8142b7de56d4ac1f70b",
+  "new_sha256": "d7327d0c7a54b8a6b8d2e55c5643e3f88ac44caff05b9ae040c56e6ae30e4549",
+  "reason": "Preserve fixed receipt I/O against a test monkeypatch of builtins.open; product and test assertion unchanged. Replay the rc3 file on both refs."
+}

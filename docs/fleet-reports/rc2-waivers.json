@@ -1,0 +1,21 @@
+{
+  "written": "2026-10-06 23:13:38 CDT",
+  "by": "executor (Claude Opus 5.5 on Max)",
+  "rule": "Owner speed rule 6 Oct 22:54: fewer tests; only big defects block. Jev: big_defect 0.04; waive_now 0.77 (23:13 CDT).",
+  "proof": "Code identity: between rc1 5cd04a99de76 and product commit b95b603af599 the only non-test changes are agent/credential_pool_admin.py (auth add path), cron/scheduler*.py, gateway/run_busy.py, hermes_cli/kanban_db*.py, hermes_cli/kanban_launch.py, hermes_cli/quiet_single_query.py and docs; nothing on the conversation loop, fallback provider or update/finish paths; both test files are byte-identical on the two refs. Both files timed out on both refs in the full run. The rc1 controls were killed by host load spikes (1-minute load 14.8 at 23:09:45, then 25-31 from 23:11) and are re-running as retry03-rc1; their result will be added to the record.",
+  "waived_failures": [
+    {
+      "file": "tests/agent/test_run_agent.py",
+      "nodeid": "tests/agent/test_run_agent.py::TestRunConversation::test_empty_response_triggers_fallback_provider"
+    },
+    {
+      "file": "tests/agent/test_run_agent.py",
+      "nodeid": "tests/agent/test_run_agent.py::TestRunConversation::test_redirect_from_input_thread_cancels_live_model_request"
+    }
+  ],
+  "waived_incomplete_files": [
+    "tests/agent/test_run_agent.py",
+    "tests/hermes_cli/test_update_finish.py"
+  ],
+  "follow_up": "Run both files on rc1 and rc2 at low load; if any ID fails only on rc2, open a fix card for the Hermes upkeep owner."
+}

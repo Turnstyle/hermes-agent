@@ -13,6 +13,8 @@ Pinning ``TERMINAL_CWD`` to the workspace fixes both.
 
 from __future__ import annotations
 
+from tests.hermes_cli.kanban_spawn_helpers import claim_for_spawn
+
 import subprocess
 
 
@@ -54,7 +56,7 @@ def _capture_spawn_env(kb, monkeypatch, workspace: str) -> dict:
         return FakeProc()
 
     monkeypatch.setattr(subprocess, "Popen", fake_popen)
-    kbd._default_spawn(_make_task(kb), workspace)
+    kbd._default_spawn(claim_for_spawn(_make_task(kb)), workspace)
     return captured
 
 

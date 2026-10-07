@@ -245,12 +245,15 @@ def _stub_external_worker_launch(scheduler, monkeypatch):
     """
 
     class FakeProcess:
+        pid = 4321
         returncode = None
 
         def poll(self):
             return self.returncode
 
         def wait(self, timeout=None):
+            if timeout is None:
+                self.returncode = 0
             if self.returncode is None:
                 raise subprocess.TimeoutExpired(cmd="worker", timeout=timeout)
             return self.returncode
@@ -303,6 +306,7 @@ def test_scoped_wrapper_exit_without_user_bus_names_the_cause_and_invalidates_pr
                         lambda _eid: {"id": "exec-1", "handoff_pending": 1})
 
     class DeadWrapper:
+        pid = 4321
         returncode = 1
 
         def poll(self):

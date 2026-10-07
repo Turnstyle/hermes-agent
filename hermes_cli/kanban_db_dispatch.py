@@ -26,6 +26,7 @@ from typing import Mapping
 from typing import Optional
 from typing import TYPE_CHECKING
 
+from hermes_cli.kanban_launch import handoff_pending
 from hermes_cli.quiet_single_query import KANBAN_WORKER_BUSY_MARKER, KANBAN_WORKER_EXIT_TRAILER
 
 if TYPE_CHECKING:
@@ -329,8 +330,8 @@ class DispatchResult:
     """``running`` cards requeued by :func:`reconcile_orphaned_running` (broken
     claim bookkeeping, dead/gone worker)."""
     reclaim_errors: list[tuple[str, str]] = field(default_factory=list)
-    """``(task_id, "<step>: <fence message>")`` for each write an installed
-    lifecycle-guard trigger refused this tick; ``step`` names the sweep
+    """``(task_id, "<step>: <reason>")`` for a pending worker handoff or a write
+    an installed lifecycle-guard trigger refused this tick; ``step`` names the sweep
     (``release_stale_claims``, ``reconcile_orphaned_running``,
     ``detect_stale_running``, ``detect_crashed_workers``,
     ``enforce_max_runtime``). Each row is left completely
@@ -1578,6 +1579,9 @@ def detect_stale_running(
         if not lock.startswith(host_prefix):
             continue
 
+        if handoff_pending(conn, row["id"], errors_out=errors_out, stage="detect_stale_running"):
+            continue
+
         elapsed = now - int(row["active_started_at"])
         if elapsed < stale_timeout_seconds:
             continue
@@ -1595,6 +1599,8 @@ def detect_stale_running(
         termination: dict[str, Any] = {}
         try:
             with _kb.write_txn(conn):
+                if handoff_pending(conn, tid, errors_out=errors_out, stage="detect_stale_running"):
+                    continue
                 retry_status = _kb._retry_status_for_run(conn, tid)
                 cur = conn.execute(
                     "UPDATE tasks SET status = ?, claim_lock = NULL, "
@@ -1713,6 +1719,8 @@ def reconcile_orphaned_running(
         # node's mirrored running row is not ours to probe or requeue.
         if not _recovery_owned_here(conn, errors_out, "reconcile_orphaned_running", tid, node_id):
             continue
+        if handoff_pending(conn, tid, errors_out=errors_out, stage="reconcile_orphaned_running"):
+            continue
         if pid and _worker_alive(pid, _kb._row_get(row, "worker_started_at")):
             # Never requeue beside a live process. Retry next tick.
             _kb._log.debug(
@@ -1722,6 +1730,8 @@ def reconcile_orphaned_running(
             continue
         try:
             with _kb.write_txn(conn):
+                if handoff_pending(conn, tid, errors_out=errors_out, stage="reconcile_orphaned_running"):
+                    continue
                 cur = conn.execute(
                     "UPDATE tasks SET status = 'ready', claim_lock = NULL, "
                     "claim_expires = NULL, worker_pid = NULL, worker_started_at = NULL, "
@@ -2466,6 +2476,7 @@ def _set_worker_pid(conn: sqlite3.Connection, task_id: str, pid: int) -> None:
         if run_id is not None:
             conn.execute("UPDATE task_runs SET worker_pid = ?, worker_started_at = ? WHERE id = ?",
                          (int(pid), started_at, run_id))
+        _kb._append_event(conn, task_id, "worker_handoff_resolved", {"pid": int(pid)}, run_id=run_id)
         _kb._append_event(conn, task_id, "spawned", {"pid": int(pid), "started_at": started_at}, run_id=run_id)
 
 
@@ -2532,6 +2543,19 @@ def _explicit_do_not_dispatch_marked(conn: sqlite3.Connection, task_id: str) -> 
     return False
 
 
+def _record_worker_handoff(conn: sqlite3.Connection, task_id: str, pid: int) -> None:
+    from hermes_cli.kanban_launch import WorkerHandoffUncertain
+
+    try:
+        _set_worker_pid(conn, task_id, pid)
+    except Exception as exc:
+        # The pre-spawn intent remains durable even if all later writes fail.
+        raise WorkerHandoffUncertain(
+            f"Worker {pid} started for {task_id}; PID persistence failed. "
+            "Unresolved handoff retained for Decider verification."
+        ) from exc
+
+
 def _clear_failure_counter(conn: sqlite3.Connection, task_id: str) -> None:
     """Reset the unified consecutive-failures counter.
 
@@ -2572,6 +2596,9 @@ def check_respawn_guard(
     handoff. Stale / dead claim locks are NOT a guard reason — the reclaim
     passes own those.
     """
+    if handoff_pending(conn, task_id):
+        return "worker_handoff_uncertain"
+
     row = conn.execute(
         "SELECT last_failure_error, assignee, body FROM tasks WHERE id = ?",
         (task_id,),
@@ -3299,7 +3326,7 @@ def dispatch_once(
     max_in_progress_per_profile: Optional[int] = None,
     reconcile_orphans: bool = True,
 ) -> DispatchResult:
-    """Run one dispatcher tick (dry runs use a lock-free diagnostic path).
+    """Run one dispatcher tick under launch admission, including dry runs.
 
     Wraps :func:`_dispatch_once_locked` in the non-blocking :func:`_dispatch_tick_lock`
     so two dispatchers on one ``kanban.db`` never race a write tick on WAL
@@ -3323,34 +3350,34 @@ def dispatch_once(
             reconcile_orphans=reconcile_orphans,
         )
 
-    if dry_run:
-        # Diagnostics never take the file-backed dispatch lock, checkpoint WAL,
-        # or invoke observer hooks (which may write outside the board).
-        return _locked_tick()
+    from hermes_cli.kanban_launch import launch_guard
 
     try:
         db_path = _kb.kanban_db_path(board=board)
-    except Exception:
-        # Must not lose the tick — fall through to an unguarded dispatch.
-        result = _locked_tick()
-        _kb._fire_dispatch_tick_hook(result, board=board, dry_run=dry_run)
-        return result
-    with _kbc._dispatch_tick_lock(db_path) as held:
+    except Exception as exc:
+        _kb._log.warning("kanban dispatch skipped: board path unavailable (%s)", type(exc).__name__)
+        return DispatchResult(skipped_locked=True)
+    with launch_guard(conn, board=board, db_path=db_path) as held:
         if not held:
             result = DispatchResult(skipped_locked=True)
         else:
             result = _locked_tick()
             # Still under the dispatch lock: periodic PASSIVE WAL checkpoint.
-            _kbc._maybe_checkpoint_wal(conn, db_path)
+            if not dry_run:
+                _kbc._maybe_checkpoint_wal(conn, db_path)
     # Lock released. Fire the tick observer strictly OUTSIDE the critical
     # section: a slow subscriber must never stall a sibling dispatcher's tick.
-    _kb._fire_dispatch_tick_hook(result, board=board, dry_run=dry_run)
+    if not dry_run:
+        _kb._fire_dispatch_tick_hook(result, board=board, dry_run=dry_run)
     return result
 
 
 def _call_spawn_fn(spawn_fn, task: Task, workspace: str, board: Optional[str]) -> Optional[int]:
-    """Back-compat: older spawn_fn signatures (and test stubs) accept only
-    ``(task, workspace)``; pass ``board`` only when the callable supports it."""
+    """Pass ``board`` only when the callback supports it.
+
+    A callback must return its worker PID or raise before starting a worker.
+    If it cannot establish whether a worker started, raise WorkerHandoffUncertain.
+    """
     import inspect
     try:
         sig = inspect.signature(spawn_fn)
@@ -3492,9 +3519,26 @@ def _dispatch_lane_task(
         # worker's system prompt via KANBAN_GUIDANCE.
         claimed.skills = list(dict.fromkeys([*(claimed.skills or []), "sdlc-review"]))
     try:
-        pid = _call_spawn_fn(spawn_fn if spawn_fn is not None else _default_spawn, claimed, str(workspace), board)
-        if pid:
-            _set_worker_pid(conn, claimed.id, int(pid))
+        from hermes_cli.kanban_launch import (
+            HANDOFF_HOLD_REASON, WorkerHandoffUncertain, begin_worker_handoff,
+            cancel_worker_handoff, require_launch,
+        )
+
+        with require_launch(conn, board=board):
+            if spawn_fn is None:
+                pid = _call_spawn_fn(_default_spawn, claimed, str(workspace), board)
+            else:
+                begin_worker_handoff(conn, claimed)
+                try:
+                    pid = _call_spawn_fn(spawn_fn, claimed, str(workspace), board)
+                except WorkerHandoffUncertain:
+                    raise
+                except Exception:
+                    cancel_worker_handoff(conn, claimed)
+                    raise
+                if not pid:
+                    raise WorkerHandoffUncertain(HANDOFF_HOLD_REASON)
+                _record_worker_handoff(conn, claimed.id, int(pid))
         # Fires AFTER the PID (when reported) is durably persisted. Best-effort.
         _kb._fire_worker_spawned_hook(conn, claimed, str(workspace), pid, board=board)
         # consecutive_failures is deliberately NOT reset here: resetting on
@@ -3505,10 +3549,16 @@ def _dispatch_lane_task(
         return True
     except Exception as exc:
         from tools.process_registry import RestartSafeScopeUnavailable
+        from hermes_cli.kanban_launch import LaunchDeferred, WorkerHandoffUncertain
+
+        if isinstance(exc, WorkerHandoffUncertain):
+            _kb._log.error("kanban dispatcher: %s", exc)
+            result.spawn_errors.append((claimed.id, str(exc)))
+            return False
 
         # The host refused the spawn (no restart-safe scope): nothing about the
         # card ran, so it must not spend the card's retry budget (#114720).
-        infrastructure = isinstance(exc, RestartSafeScopeUnavailable)
+        infrastructure = isinstance(exc, (RestartSafeScopeUnavailable, LaunchDeferred))
         if infrastructure:
             _kb._log.warning("kanban dispatcher: spawn of %s deferred, host cannot place the worker: %s", claimed.id, exc)
         if _record_task_failure(
@@ -4346,25 +4396,40 @@ def _default_spawn(task: Task, workspace: str, *, board: Optional[str] = None) -
     env = systemd_user_bus_env(env)
     log_f = _open_worker_log(task, board)
     try:
-        proc = subprocess.Popen(  # noqa: S603 -- argv is a fixed list built above
-            cmd,
-            cwd=workspace if os.path.isdir(workspace) else None,
-            stdin=subprocess.DEVNULL,
-            stdout=log_f,
-            stderr=subprocess.STDOUT,
-            env=env,
-            start_new_session=True,
-            creationflags=subprocess.CREATE_NO_WINDOW if _kb._IS_WINDOWS else 0,
+        from hermes_cli.kanban_launch import (
+            begin_worker_handoff, cancel_worker_handoff, require_launch,
         )
+
+        with _kbc.connect_closing(board=board) as conn, require_launch(conn, board=board):
+            _kb._assert_not_delegated_child_mutation(_kbc._main_db_file(conn))
+            begin_worker_handoff(conn, task)
+            try:
+                proc = subprocess.Popen(  # noqa: S603 -- argv is a fixed list built above
+                    cmd,
+                    cwd=workspace if os.path.isdir(workspace) else None,
+                    stdin=subprocess.DEVNULL,
+                    stdout=log_f,
+                    stderr=subprocess.STDOUT,
+                    env=env,
+                    start_new_session=True,
+                    creationflags=subprocess.CREATE_NO_WINDOW if _kb._IS_WINDOWS else 0,
+                )
+            except Exception:
+                cancel_worker_handoff(conn, task)
+                raise
+            _track_worker_proc(proc)
+            _record_worker_handoff(conn, task.id, int(proc.pid))
     except FileNotFoundError:
         log_f.close()
         raise RuntimeError(
             "`hermes` executable not found on PATH. "
             "Install Hermes Agent or activate its venv before running the kanban dispatcher."
         )
+    except BaseException:
+        log_f.close()
+        raise
     # Intentionally NOT closing log_f: the child keeps writing after return;
     # the OS-level FD stays open in the child until it exits.
-    _track_worker_proc(proc)
     return proc.pid
 
 

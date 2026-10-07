@@ -299,12 +299,13 @@ def test_borrower_prune_never_deletes_root_singleton_grant(fleet, tmp_path):
     assert fleet["rows"](root)[0]["refresh_token"] == "sk-ant-ort-RT1"
 
 
-def test_profile_auth_add_owns_only_its_own_rows(fleet):
-    from agent.credential_pool import AUTH_TYPE_OAUTH, PooledCredential, load_pool
+@pytest.mark.parametrize("fresh_pool", [False, True])
+def test_profile_auth_add_owns_only_its_own_rows(fleet, fresh_pool):
+    from agent.credential_pool import AUTH_TYPE_OAUTH, CredentialPool, PooledCredential, load_pool
 
     kid = _profile(fleet, "kid")
     fleet["use"](kid)
-    pool = load_pool("anthropic")
+    pool = CredentialPool("anthropic", []) if fresh_pool else load_pool("anthropic")
     pool.add_entry(PooledCredential(
         provider="anthropic", id="own001", label="mine", auth_type=AUTH_TYPE_OAUTH,
         priority=0, source="manual:hermes_pkce", access_token="sk-ant-oat01-MINE",
