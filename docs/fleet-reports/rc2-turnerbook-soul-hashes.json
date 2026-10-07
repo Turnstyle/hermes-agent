@@ -1,0 +1,83 @@
+{
+  "checked_at": "2026-10-06 19:00:13 CDT",
+  "target": "/Users/turner/.hermes/hermes-agent/x/SOUL.md",
+  "size": 667,
+  "sha256": "36c1f5a2e92cd1d018311eaf4c8f1e8886672eae78212e033c681d0e3d5d506f",
+  "profiles": [
+    {
+      "profile": "tb-cndr",
+      "path": "/Users/turner/.hermes/profiles/tb-cndr/SOUL.md",
+      "sha256": "0da246451bb8cca236724c9ef837ac23bce25436ec31db2d46d9a402d1bb7f65"
+    },
+    {
+      "profile": "tb-core-advisor",
+      "path": "/Users/turner/.hermes/profiles/tb-core-advisor/SOUL.md",
+      "sha256": "3dc24d15b69f16c74e8802f72279d983511b3d2e9612fa7afd17d76471a65561"
+    },
+    {
+      "profile": "tb-core-cos",
+      "path": "/Users/turner/.hermes/profiles/tb-core-cos/SOUL.md",
+      "sha256": "e884ecade06e363c46619d0a89d6efc33606d35496e298a2f188c537853ea6de"
+    },
+    {
+      "profile": "tb-core-ea",
+      "path": "/Users/turner/.hermes/profiles/tb-core-ea/SOUL.md",
+      "sha256": "b75fad1a07c77bbf5d6155565e731938b0e760de74abc70964be6cca6b209581"
+    },
+    {
+      "profile": "tb-core-intern",
+      "path": "/Users/turner/.hermes/profiles/tb-core-intern/SOUL.md",
+      "sha256": "506673111974ff9b05aa19c6db473215a141e3ca6cdc82a6f19b3f6b1cb2cf96"
+    },
+    {
+      "profile": "tb-decider",
+      "path": "/Users/turner/.hermes/profiles/tb-decider/SOUL.md",
+      "sha256": "b909b60cdff3277bacff8739f7905ca8ac9d2a6953525c8fdfa0375961cc09d0"
+    },
+    {
+      "profile": "tb-doctrine-detailer",
+      "path": "/Users/turner/.hermes/profiles/tb-doctrine-detailer/SOUL.md",
+      "sha256": "faed080095a5961d5af0dc31e632aaff91e2b969d7a5d07f78876312b1dc7528"
+    },
+    {
+      "profile": "tb-keys-router",
+      "path": "/Users/turner/.hermes/profiles/tb-keys-router/SOUL.md",
+      "sha256": "9361cb857169870fc5ba572fd1c4ede85710e94bac52c380bea175a35892a2b7"
+    },
+    {
+      "profile": "tb-king",
+      "path": "/Users/turner/.hermes/profiles/tb-king/SOUL.md",
+      "sha256": "650681f43cfef9fcbd0c6819240eaa911023c968123899e950c7d1ef633ac8c2"
+    },
+    {
+      "profile": "tb-mc-firestore",
+      "path": "/Users/turner/.hermes/profiles/tb-mc-firestore/SOUL.md",
+      "sha256": "15cf0587927717a9d8b194abceaa3347937ae554af5b9e05b9869c7b5c809b54"
+    },
+    {
+      "profile": "tb-rescue-artist",
+      "path": "/Users/turner/.hermes/profiles/tb-rescue-artist/SOUL.md",
+      "sha256": "4e6aabe19770845039dfb1cd681216949a55dcb56f4c08cf82e11c866d19c63d"
+    },
+    {
+      "profile": "tb-task-breakdown",
+      "path": "/Users/turner/.hermes/profiles/tb-task-breakdown/SOUL.md",
+      "sha256": "e8fe32f43349d6ef5fa4dde89e71d5b710fa31336df4020bfea512832b24fb59"
+    },
+    {
+      "profile": "tb-telephony-guru",
+      "path": "/Users/turner/.hermes/profiles/tb-telephony-guru/SOUL.md",
+      "sha256": "4a6445e92b7b8e8b5a6efe75f4d25157374126f9cf4cf4c9eff2992475e76acf"
+    },
+    {
+      "profile": "turner-chat",
+      "path": "/Users/turner/.hermes/profiles/turner-chat/SOUL.md",
+      "sha256": "003f649af9a0d485344732da1f4da25bdf2a78170ee06152f0aea3a84e8af63e"
+    },
+    {
+      "profile": "turner-chat-2",
+      "path": "/Users/turner/.hermes/profiles/turner-chat-2/SOUL.md",
+      "sha256": "847c22ef32410b3a4fbad0829b2af297ed21e1dd95c56adbce77d252aa048efa"
+    }
+  ]
+}

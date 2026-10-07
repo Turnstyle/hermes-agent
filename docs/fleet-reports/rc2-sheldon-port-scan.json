@@ -1,0 +1,18 @@
+{
+  "command": [
+    "/home/max/.local/bin/gitleaks",
+    "stdin",
+    "--no-banner",
+    "--redact=100",
+    "--ignore-gitleaks-allow",
+    "--report-format=json",
+    "--report-path=-",
+    "--log-level=error"
+  ],
+  "rc": 0,
+  "finding_count": 0,
+  "rules": {},
+  "source_bytes": 2580,
+  "source_sha256": "2333880c6a9a4503f13c2a98850b78e5717cc6682b131952c56cf517a7d15ffd",
+  "checked_at": "2026-10-06 19:01:48 CDT"
+}

@@ -1,0 +1,31 @@
+{
+  "paths": [
+    {
+      "path": "/Users/turner/.hermes/SOUL.md",
+      "exists": true,
+      "sha256": "4f2337fa9b3b86105e74b4349c09cd024f788f6b12bb362f5c09fbc70cb214a9"
+    },
+    {
+      "path": "/Users/turner/.hermes/profiles/default/SOUL.md",
+      "exists": false,
+      "sha256": null
+    },
+    {
+      "path": "/Users/turner/.hermes/hermes-agent/SOUL.md",
+      "exists": true,
+      "sha256": "36c1f5a2e92cd1d018311eaf4c8f1e8886672eae78212e033c681d0e3d5d506f"
+    }
+  ],
+  "x_entries": [
+    "pairing",
+    "image_cache",
+    "sessions",
+    "logs",
+    "hooks",
+    "SOUL.md",
+    "skills",
+    "memories",
+    "audio_cache",
+    "cron"
+  ]
+}

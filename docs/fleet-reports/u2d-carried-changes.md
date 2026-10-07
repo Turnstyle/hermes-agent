@@ -1,7 +1,9 @@
-# U2d carry audit
+# U2d carry audit in rc2
 
-The adjacent table records 35 dirty/untracked paths and one post-census commit from five machines. No HEAD commit was outside the pinned union node refs. The inspected source changes already exist in base 3b132be0fd26a159fa9323ee1664e48fce663edc. This commit adds source-selection regression coverage and records the carry decision. It adds no product code.
+The adjacent table records 35 dirty or untracked paths and one post-census commit. U2e resolved the former Sheldon source hold after a clean scan, a failing first-profile regression, and a passing complete test file. The source carry is 10aa3318967d14dda165661c4978c3c20a401748.
 
-The five KEEP-FIX rows include one provisional hold: Sheldon's dirty agent/credential_pool_admin.py was not read under the brief's secret-name restriction. It was not ported. Sheldon must not switch until an authorized lane resolves preservation and review. MOVE-OUT retains behavior or private data until its replacement or local archive is verified. DROP excludes proven duplicate backup/build paths from the shared source, not from local preservation.
+Full drain, recovery and SessionDB-dependent tests run with credential source modules present. Their former filename exclusion was a briefing mistake, not a product fix.
 
-The complete evidence, hashes, Jev requests and answers, test scope and switch contract are in /home/max/Scratchpad/5-Oct-2026_Mass-Review/exec/work/hermes-goal/U2d/result.md. Evidence paths in the TSV are relative to that output folder. No session export, secret file or unread source patch is included here.
+TurnerBook x/SOUL.md is a generic template in an unregistered scratch home. Its intended later archive is /Users/turner/.hermes/archives/u2e-unregistered-x/SOUL.md. It is not installed into a profile or added to the shared source. Sheldon's private session export also remains host-local. Actual backup, archive, stash and switch actions are not checked here.
+
+The current release table is FINAL-CHANGES-rc2.tsv. The original U2d result remains a historical audit. U2e/result.md and the rc2 receipts document the corrections. Runtime data preservation is still required before a live switch.

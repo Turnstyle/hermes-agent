@@ -1,0 +1,2716 @@
+{
+  "checked_at": "2026-10-06 23:17:04 CDT",
+  "method": "Newest receipts; raw report outcomes include subtests and count expected failures as skipped. Exact pytest categories are in test-comparison.json.",
+  "groups": {
+    "required_changed_and_listed": {
+      "files": 82,
+      "outcome_counts": {
+        "passed": 1084,
+        "failed": 3,
+        "skipped": 17
+      },
+      "failing_files": [
+        "tests/cron/test_cron_live_bot_delivery.py",
+        "tests/plugins/test_kanban_model_override.py"
+      ],
+      "receipts": [
+        {
+          "file": "/home/max/Scratchpad/5-Oct-2026_Mass-Review/exec/work/hermes-goal/U2c2/test_checker_uncertain.py",
+          "finished": "2026-10-06 23:17:00 CDT",
+          "summary": "2 passed, 1 warning in 3.93s",
+          "log": "/home/max/Scratchpad/5-Oct-2026_Mass-Review/exec/work/hermes-goal/U2e/evidence/retry05/7d3d40ab38c6.log"
+        },
+        {
+          "file": "tests/agent/test_credential_pool_profile_oauth_fork.py",
+          "finished": "2026-10-06 23:15:18 CDT",
+          "summary": "32 passed, 1 warning in 24.17s",
+          "log": "/home/max/Scratchpad/5-Oct-2026_Mass-Review/exec/work/hermes-goal/U2e/evidence/retry04/bb62177b86fb.log"
+        },
+        {
+          "file": "tests/cron/test_bot_chat_cli_home.py",
+          "finished": "2026-10-06 19:00:40 CDT",
+          "summary": "5 passed in 12.79s",
+          "log": "/home/max/Scratchpad/5-Oct-2026_Mass-Review/exec/work/hermes-goal/U2e/evidence/full/78de2f87e66b.log"
+        },
+        {
+          "file": "tests/cron/test_bot_chat_delivery_child_env.py",
+          "finished": "2026-10-06 19:00:32 CDT",
+          "summary": "5 passed in 5.23s",
+          "log": "/home/max/Scratchpad/5-Oct-2026_Mass-Review/exec/work/hermes-goal/U2e/evidence/full/c84ff360cff1.log"
+        },
+        {
+          "file": "tests/cron/test_bot_chat_own_profile_multiplex_home.py",
+          "finished": "2026-10-06 19:00:32 CDT",
+          "summary": "2 passed in 5.15s",
+          "log": "/home/max/Scratchpad/5-Oct-2026_Mass-Review/exec/work/hermes-goal/U2e/evidence/full/bfddf34eb8e6.log"
+        },
+        {
+          "file": "tests/cron/test_bot_chat_pending.py",
+          "finished": "2026-10-06 19:00:40 CDT",
+          "summary": "10 passed in 13.03s",
+          "log": "/home/max/Scratchpad/5-Oct-2026_Mass-Review/exec/work/hermes-goal/U2e/evidence/full/c1e9a32cd4d3.log"
+        },
+        {
+          "file": "tests/cron/test_bot_chat_pending_identity.py",
+          "finished": "2026-10-06 19:00:43 CDT",
+          "summary": "4 passed in 9.61s",
+          "log": "/home/max/Scratchpad/5-Oct-2026_Mass-Review/exec/work/hermes-goal/U2e/evidence/full/68e0dcf886af.log"
+        },
+        {
+          "file": "tests/cron/test_bot_chat_progress_deadline.py",
+          "finished": "2026-10-06 19:00:42 CDT",
+          "summary": "8 passed in 8.58s",
+          "log": "/home/max/Scratchpad/5-Oct-2026_Mass-Review/exec/work/hermes-goal/U2e/evidence/full/92814fef9d92.log"
+        },
+        {
+          "file": "tests/cron/test_bot_chat_timeout_marker.py",
+          "finished": "2026-10-06 19:00:46 CDT",
+          "summary": "2 passed in 5.23s",
+          "log": "/home/max/Scratchpad/5-Oct-2026_Mass-Review/exec/work/hermes-goal/U2e/evidence/full/dee1bb4ac76b.log"
+        },
+        {
+          "file": "tests/cron/test_bot_chat_warning_replay.py",
+          "finished": "2026-10-06 19:00:58 CDT",
+          "summary": "12 passed in 17.25s",
+          "log": "/home/max/Scratchpad/5-Oct-2026_Mass-Review/exec/work/hermes-goal/U2e/evidence/full/19984cf920b3.log"
+        },
+        {
+          "file": "tests/cron/test_cleanup_timeout.py",
+          "finished": "2026-10-06 19:00:53 CDT",
+          "summary": "4 passed in 9.93s",
+          "log": "/home/max/Scratchpad/5-Oct-2026_Mass-Review/exec/work/hermes-goal/U2e/evidence/full/26329228f806.log"
+        },
+        {
+          "file": "tests/cron/test_cron_bot_chat_delivery.py",
+          "finished": "2026-10-06 19:01:00 CDT",
+          "summary": "20 passed, 1 skipped, 1 warning in 15.68s",
+          "log": "/home/max/Scratchpad/5-Oct-2026_Mass-Review/exec/work/hermes-goal/U2e/evidence/full/d80af1ac1e52.log"
+        },
+        {
+          "file": "tests/cron/test_cron_delivery_redaction.py",
+          "finished": "2026-10-06 19:00:52 CDT",
+          "summary": "5 passed in 5.11s",
+          "log": "/home/max/Scratchpad/5-Oct-2026_Mass-Review/exec/work/hermes-goal/U2e/evidence/full/f6b1271072e1.log"
+        },
+        {
+          "file": "tests/cron/test_cron_failure_deliver.py",
+          "finished": "2026-10-06 19:01:21 CDT",
+          "summary": "24 passed, 1 warning in 29.75s",
+          "log": "/home/max/Scratchpad/5-Oct-2026_Mass-Review/exec/work/hermes-goal/U2e/evidence/full/de52288be364.log"
+        },
+        {
+          "file": "tests/cron/test_cron_home_target_profile_scope.py",
+          "finished": "2026-10-06 19:00:56 CDT",
+          "summary": "3 passed in 3.07s",
+          "log": "/home/max/Scratchpad/5-Oct-2026_Mass-Review/exec/work/hermes-goal/U2e/evidence/full/1e2f535207ca.log"
+        },
+        {
+          "file": "tests/cron/test_cron_incidents.py",
+          "finished": "2026-10-06 19:01:14 CDT",
+          "summary": "15 passed in 20.23s",
+          "log": "/home/max/Scratchpad/5-Oct-2026_Mass-Review/exec/work/hermes-goal/U2e/evidence/full/3a8e982ed5ed.log"
+        },
+        {
+          "file": "tests/cron/test_cron_kanban_env_isolation.py",
+          "finished": "2026-10-06 19:01:19 CDT",
+          "summary": "15 passed in 21.23s",
+          "log": "/home/max/Scratchpad/5-Oct-2026_Mass-Review/exec/work/hermes-goal/U2e/evidence/full/ac3949d86387.log"
+        },
+        {
+          "file": "tests/cron/test_cron_live_bot_delivery.py",
+          "finished": "2026-10-06 19:01:04 CDT",
+          "summary": "1 failed, 1 passed in 5.01s",
+          "log": "/home/max/Scratchpad/5-Oct-2026_Mass-Review/exec/work/hermes-goal/U2e/evidence/full/143403746774.log"
+        },
+        {
+          "file": "tests/cron/test_cron_live_delivery_confirmation.py",
+          "finished": "2026-10-06 19:01:06 CDT",
+          "summary": "25 passed in 4.97s",
+          "log": "/home/max/Scratchpad/5-Oct-2026_Mass-Review/exec/work/hermes-goal/U2e/evidence/full/ca94adacea2f.log"
+        },
+        {
+          "file": "tests/cron/test_cron_mcp_toolset_empty_block.py",
+          "finished": "2026-10-06 19:01:17 CDT",
+          "summary": "5 passed in 13.19s",
+          "log": "/home/max/Scratchpad/5-Oct-2026_Mass-Review/exec/work/hermes-goal/U2e/evidence/full/509b983f50e6.log"
+        },
+        {
+          "file": "tests/cron/test_cron_memory_contract.py",
+          "finished": "2026-10-06 19:01:14 CDT",
+          "summary": "1 passed in 7.41s",
+          "log": "/home/max/Scratchpad/5-Oct-2026_Mass-Review/exec/work/hermes-goal/U2e/evidence/full/713e532d9d6b.log"
+        },
+        {
+          "file": "tests/cron/test_cron_multiplex_served_profile_parity.py",
+          "finished": "2026-10-06 19:01:14 CDT",
+          "summary": "2 passed in 3.06s",
+          "log": "/home/max/Scratchpad/5-Oct-2026_Mass-Review/exec/work/hermes-goal/U2e/evidence/full/686493f1bc71.log"
+        },
+        {
+          "file": "tests/cron/test_cron_multiplex_shared_route_delivery.py",
+          "finished": "2026-10-06 19:01:21 CDT",
+          "summary": "4 passed, 1 warning in 6.35s",
+          "log": "/home/max/Scratchpad/5-Oct-2026_Mass-Review/exec/work/hermes-goal/U2e/evidence/full/60a3787ce97e.log"
+        },
+        {
+          "file": "tests/cron/test_cron_non_push_origin.py",
+          "finished": "2026-10-06 19:01:26 CDT",
+          "summary": "4 passed, 1 warning in 10.61s",
+          "log": "/home/max/Scratchpad/5-Oct-2026_Mass-Review/exec/work/hermes-goal/U2e/evidence/full/fcab4bbbf133.log"
+        },
+        {
+          "file": "tests/cron/test_cron_pinned_job_fallback.py",
+          "finished": "2026-10-06 19:01:35 CDT",
+          "summary": "19 passed in 19.37s",
+          "log": "/home/max/Scratchpad/5-Oct-2026_Mass-Review/exec/work/hermes-goal/U2e/evidence/full/721919a86fec.log"
+        },
+        {
+          "file": "tests/cron/test_cron_pre_agent_fallback_notice.py",
+          "finished": "2026-10-06 19:01:27 CDT",
+          "summary": "2 passed in 8.83s",
+          "log": "/home/max/Scratchpad/5-Oct-2026_Mass-Review/exec/work/hermes-goal/U2e/evidence/full/053b562d539c.log"
+        },
+        {
+          "file": "tests/cron/test_cron_provider_pin.py",
+          "finished": "2026-10-06 19:01:30 CDT",
+          "summary": "6 passed in 10.39s",
+          "log": "/home/max/Scratchpad/5-Oct-2026_Mass-Review/exec/work/hermes-goal/U2e/evidence/full/ea9e80b33583.log"
+        },
+        {
+          "file": "tests/cron/test_cron_relay_delivery_guards.py",
+          "finished": "2026-10-06 19:01:25 CDT",
+          "summary": "10 passed in 2.95s",
+          "log": "/home/max/Scratchpad/5-Oct-2026_Mass-Review/exec/work/hermes-goal/U2e/evidence/full/7a3006d891e5.log"
+        },
+        {
+          "file": "tests/cron/test_cron_thread_seed_dm_keying.py",
+          "finished": "2026-10-06 19:01:25 CDT",
+          "summary": "9 passed in 2.94s",
+          "log": "/home/max/Scratchpad/5-Oct-2026_Mass-Review/exec/work/hermes-goal/U2e/evidence/full/155482ef17e6.log"
+        },
+        {
+          "file": "tests/cron/test_cron_workdir.py",
+          "finished": "2026-10-06 19:01:35 CDT",
+          "summary": "16 passed in 9.15s",
+          "log": "/home/max/Scratchpad/5-Oct-2026_Mass-Review/exec/work/hermes-goal/U2e/evidence/full/23f9738a7442.log"
+        },
+        {
+          "file": "tests/cron/test_execution_ledger.py",
+          "finished": "2026-10-06 19:01:40 CDT",
+          "summary": "23 passed in 14.54s",
+          "log": "/home/max/Scratchpad/5-Oct-2026_Mass-Review/exec/work/hermes-goal/U2e/evidence/full/5b4cea26c871.log"
+        },
+        {
+          "file": "tests/cron/test_fire_claim_lost_after_delivery.py",
+          "finished": "2026-10-06 19:01:42 CDT",
+          "summary": "6 passed in 15.33s",
+          "log": "/home/max/Scratchpad/5-Oct-2026_Mass-Review/exec/work/hermes-goal/U2e/evidence/full/1cb98a322cb2.log"
+        },
+        {
+          "file": "tests/cron/test_launch_guard.py",
+          "finished": "2026-10-06 19:01:40 CDT",
+          "summary": "18 passed in 12.55s",
+          "log": "/home/max/Scratchpad/5-Oct-2026_Mass-Review/exec/work/hermes-goal/U2e/evidence/full/378e199b82f9.log"
+        },
+        {
+          "file": "tests/cron/test_media_delivery_parity.py",
+          "finished": "2026-10-06 19:01:41 CDT",
+          "summary": "6 passed, 1 warning in 10.04s",
+          "log": "/home/max/Scratchpad/5-Oct-2026_Mass-Review/exec/work/hermes-goal/U2e/evidence/full/8a0bb23fc2a3.log"
+        },
+        {
+          "file": "tests/cron/test_media_send_timeout.py",
+          "finished": "2026-10-06 19:01:40 CDT",
+          "summary": "10 passed in 4.18s",
+          "log": "/home/max/Scratchpad/5-Oct-2026_Mass-Review/exec/work/hermes-goal/U2e/evidence/full/28791ad2e5a0.log"
+        },
+        {
+          "file": "tests/cron/test_mirror_origin_fallback.py",
+          "finished": "2026-10-06 19:02:11 CDT",
+          "summary": "19 passed, 1 warning in 34.64s",
+          "log": "/home/max/Scratchpad/5-Oct-2026_Mass-Review/exec/work/hermes-goal/U2e/evidence/full/1192490e643c.log"
+        },
+        {
+          "file": "tests/cron/test_monitor_kind.py",
+          "finished": "2026-10-06 19:02:02 CDT",
+          "summary": "17 passed in 21.47s",
+          "log": "/home/max/Scratchpad/5-Oct-2026_Mass-Review/exec/work/hermes-goal/U2e/evidence/full/7438ac32ca15.log"
+        },
+        {
+          "file": "tests/cron/test_parallel_pool.py",
+          "finished": "2026-10-06 19:01:48 CDT",
+          "summary": "5 passed in 6.89s",
+          "log": "/home/max/Scratchpad/5-Oct-2026_Mass-Review/exec/work/hermes-goal/U2e/evidence/full/9d657678c651.log"
+        },
+        {
+          "file": "tests/cron/test_preflight_config.py",
+          "finished": "2026-10-06 19:02:27 CDT",
+          "summary": "24 passed, 1 warning in 45.63s",
+          "log": "/home/max/Scratchpad/5-Oct-2026_Mass-Review/exec/work/hermes-goal/U2e/evidence/full/86c771368e26.log"
+        },
+        {
+          "file": "tests/cron/test_quota_hold.py",
+          "finished": "2026-10-06 19:01:52 CDT",
+          "summary": "4 passed in 9.74s",
+          "log": "/home/max/Scratchpad/5-Oct-2026_Mass-Review/exec/work/hermes-goal/U2e/evidence/full/87b6e4f0837a.log"
+        },
+        {
+          "file": "tests/cron/test_relay_fronted_delivery.py",
+          "finished": "2026-10-06 19:01:46 CDT",
+          "summary": "10 passed in 3.17s",
+          "log": "/home/max/Scratchpad/5-Oct-2026_Mass-Review/exec/work/hermes-goal/U2e/evidence/full/d5f7093b19e8.log"
+        },
+        {
+          "file": "tests/cron/test_restart_safe_worker.py",
+          "finished": "2026-10-06 19:01:59 CDT",
+          "summary": "25 passed, 1 skipped, 1 warning in 12.17s",
+          "log": "/home/max/Scratchpad/5-Oct-2026_Mass-Review/exec/work/hermes-goal/U2e/evidence/full/ad3234d9ace8.log"
+        },
+        {
+          "file": "tests/cron/test_run_one_job.py",
+          "finished": "2026-10-06 19:02:02 CDT",
+          "summary": "12 passed in 12.87s",
+          "log": "/home/max/Scratchpad/5-Oct-2026_Mass-Review/exec/work/hermes-goal/U2e/evidence/full/7280622deed3.log"
+        },
+        {
+          "file": "tests/cron/test_scheduler.py",
+          "finished": "2026-10-06 19:03:04 CDT",
+          "summary": "93 passed, 1 warning in 71.48s (0:01:11)",
+          "log": "/home/max/Scratchpad/5-Oct-2026_Mass-Review/exec/work/hermes-goal/U2e/evidence/full/3a3cb060cf73.log"
+        },
+        {
+          "file": "tests/cron/test_scheduler_provider.py",
+          "finished": "2026-10-06 19:02:16 CDT",
+          "summary": "32 passed in 16.40s",
+          "log": "/home/max/Scratchpad/5-Oct-2026_Mass-Review/exec/work/hermes-goal/U2e/evidence/full/6c045162ea17.log"
+        },
+        {
+          "file": "tests/cron/test_script_claim_heartbeat.py",
+          "finished": "2026-10-06 19:02:26 CDT",
+          "summary": "20 passed in 23.76s",
+          "log": "/home/max/Scratchpad/5-Oct-2026_Mass-Review/exec/work/hermes-goal/U2e/evidence/full/90332f3c4390.log"
+        },
+        {
+          "file": "tests/cron/test_sessiondb_init_hang.py",
+          "finished": "2026-10-06 19:02:18 CDT",
+          "summary": "6 passed in 14.39s",
+          "log": "/home/max/Scratchpad/5-Oct-2026_Mass-Review/exec/work/hermes-goal/U2e/evidence/full/eb4f34a05a20.log"
+        },
+        {
+          "file": "tests/cron/test_shutdown_interrupt.py",
+          "finished": "2026-10-06 19:02:24 CDT",
+          "summary": "25 passed in 12.28s",
+          "log": "/home/max/Scratchpad/5-Oct-2026_Mass-Review/exec/work/hermes-goal/U2e/evidence/full/237d7153fe9a.log"
+        },
+        {
+          "file": "tests/cron/test_warning_delivery_policy.py",
+          "finished": "2026-10-06 19:02:25 CDT",
+          "summary": "4 passed in 7.13s",
+          "log": "/home/max/Scratchpad/5-Oct-2026_Mass-Review/exec/work/hermes-goal/U2e/evidence/full/db593b04d632.log"
+        },
+        {
+          "file": "tests/cron/test_warning_transport_contract.py",
+          "finished": "2026-10-06 19:02:46 CDT",
+          "summary": "24 passed, 1 warning in 26.97s",
+          "log": "/home/max/Scratchpad/5-Oct-2026_Mass-Review/exec/work/hermes-goal/U2e/evidence/full/81d40aff1205.log"
+        },
+        {
+          "file": "tests/gateway/test_kanban_multiplex_served_profile_parity.py",
+          "finished": "2026-10-06 22:56:24 CDT",
+          "summary": "2 passed in 6.78s",
+          "log": "/home/max/Scratchpad/5-Oct-2026_Mass-Review/exec/work/hermes-goal/U2e/evidence/retry01/3e9acadad911.log"
+        },
+        {
+          "file": "tests/gateway/test_subagent_protection.py",
+          "finished": "2026-10-06 20:28:38 CDT",
+          "summary": "7 passed in 8.10s",
+          "log": "/home/max/Scratchpad/5-Oct-2026_Mass-Review/exec/work/hermes-goal/U2e/evidence/full/d38f1cc1ac42.log"
+        },
+        {
+          "file": "tests/hermes_cli/test_kanban_boards.py",
+          "finished": "2026-10-06 19:03:15 CDT",
+          "summary": "19 passed in 49.44s",
+          "log": "/home/max/Scratchpad/5-Oct-2026_Mass-Review/exec/work/hermes-goal/U2e/evidence/full/15aff2947578.log"
+        },
+        {
+          "file": "tests/hermes_cli/test_kanban_core_functionality.py",
+          "finished": "2026-10-06 19:02:59 CDT",
+          "summary": "24 passed in 32.96s",
+          "log": "/home/max/Scratchpad/5-Oct-2026_Mass-Review/exec/work/hermes-goal/U2e/evidence/full/06dbfe18fbdc.log"
+        },
+        {
+          "file": "tests/hermes_cli/test_kanban_db.py",
+          "finished": "2026-10-06 19:03:34 CDT",
+          "summary": "54 passed, 1 skipped in 67.34s (0:01:07)",
+          "log": "/home/max/Scratchpad/5-Oct-2026_Mass-Review/exec/work/hermes-goal/U2e/evidence/full/bf2cfbc1ccd8.log"
+        },
+        {
+          "file": "tests/hermes_cli/test_kanban_db_init.py",
+          "finished": "2026-10-06 19:02:36 CDT",
+          "summary": "5 passed in 7.33s",
+          "log": "/home/max/Scratchpad/5-Oct-2026_Mass-Review/exec/work/hermes-goal/U2e/evidence/full/7fca8d3e7f97.log"
+        },
+        {
+          "file": "tests/hermes_cli/test_kanban_db_repair.py",
+          "finished": "2026-10-06 19:02:44 CDT",
+          "summary": "4 passed in 7.35s",
+          "log": "/home/max/Scratchpad/5-Oct-2026_Mass-Review/exec/work/hermes-goal/U2e/evidence/full/a6ed3b67e033.log"
+        },
+        {
+          "file": "tests/hermes_cli/test_kanban_dispatch_claim_allowlist.py",
+          "finished": "2026-10-06 19:02:56 CDT",
+          "summary": "11 passed in 11.30s",
+          "log": "/home/max/Scratchpad/5-Oct-2026_Mass-Review/exec/work/hermes-goal/U2e/evidence/full/3875e720591d.log"
+        },
+        {
+          "file": "tests/hermes_cli/test_kanban_dispatch_dry_run.py",
+          "finished": "2026-10-06 19:03:06 CDT",
+          "summary": "3 passed in 18.80s",
+          "log": "/home/max/Scratchpad/5-Oct-2026_Mass-Review/exec/work/hermes-goal/U2e/evidence/full/181427758111.log"
+        },
+        {
+          "file": "tests/hermes_cli/test_kanban_dispatch_lock.py",
+          "finished": "2026-10-06 19:03:04 CDT",
+          "summary": "2 passed in 7.00s",
+          "log": "/home/max/Scratchpad/5-Oct-2026_Mass-Review/exec/work/hermes-goal/U2e/evidence/full/6065a28cb106.log"
+        },
+        {
+          "file": "tests/hermes_cli/test_kanban_dispatch_tick_hook.py",
+          "finished": "2026-10-06 19:03:09 CDT",
+          "summary": "3 passed in 9.50s",
+          "log": "/home/max/Scratchpad/5-Oct-2026_Mass-Review/exec/work/hermes-goal/U2e/evidence/full/8ba1db0bb938.log"
+        },
+        {
+          "file": "tests/hermes_cli/test_kanban_gateway_restart_handoff.py",
+          "finished": "2026-10-06 19:03:25 CDT",
+          "summary": "5 passed, 1 skipped in 19.79s",
+          "log": "/home/max/Scratchpad/5-Oct-2026_Mass-Review/exec/work/hermes-goal/U2e/evidence/full/93d2c265a573.log"
+        },
+        {
+          "file": "tests/hermes_cli/test_kanban_launch_guard.py",
+          "finished": "2026-10-06 19:05:23 CDT",
+          "summary": "40 passed in 136.06s (0:02:16)",
+          "log": "/home/max/Scratchpad/5-Oct-2026_Mass-Review/exec/work/hermes-goal/U2e/evidence/full/961ffccf7eb5.log"
+        },
+        {
+          "file": "tests/hermes_cli/test_kanban_reclaim_claim_lock_guard.py",
+          "finished": "2026-10-06 19:03:18 CDT",
+          "summary": "2 passed in 7.60s",
+          "log": "/home/max/Scratchpad/5-Oct-2026_Mass-Review/exec/work/hermes-goal/U2e/evidence/full/e2786e1880de.log"
+        },
+        {
+          "file": "tests/hermes_cli/test_kanban_recovery_fleet_ownership.py",
+          "finished": "2026-10-06 19:03:36 CDT",
+          "summary": "28 passed in 23.17s",
+          "log": "/home/max/Scratchpad/5-Oct-2026_Mass-Review/exec/work/hermes-goal/U2e/evidence/full/06cbcd6fd0a8.log"
+        },
+        {
+          "file": "tests/hermes_cli/test_kanban_review_lifecycle.py",
+          "finished": "2026-10-06 22:59:09 CDT",
+          "summary": "31 passed in 25.34s",
+          "log": "/home/max/Scratchpad/5-Oct-2026_Mass-Review/exec/work/hermes-goal/U2e/evidence/retry01/0b3be09668d4.log"
+        },
+        {
+          "file": "tests/hermes_cli/test_kanban_worker_session_source.py",
+          "finished": "2026-10-06 19:03:25 CDT",
+          "summary": "5 passed in 9.42s",
+          "log": "/home/max/Scratchpad/5-Oct-2026_Mass-Review/exec/work/hermes-goal/U2e/evidence/full/dc494bb106c1.log"
+        },
+        {
+          "file": "tests/hermes_cli/test_kanban_worker_spawn_toolsets.py",
+          "finished": "2026-10-06 19:03:35 CDT",
+          "summary": "4 passed in 16.43s",
+          "log": "/home/max/Scratchpad/5-Oct-2026_Mass-Review/exec/work/hermes-goal/U2e/evidence/full/b09487dcf66f.log"
+        },
+        {
+          "file": "tests/hermes_cli/test_kanban_worker_terminal_cwd.py",
+          "finished": "2026-10-06 19:03:33 CDT",
+          "summary": "1 passed in 7.34s",
+          "log": "/home/max/Scratchpad/5-Oct-2026_Mass-Review/exec/work/hermes-goal/U2e/evidence/full/2ba6c86b23da.log"
+        },
+        {
+          "file": "tests/hermes_cli/test_kanban_worker_terminal_scope.py",
+          "finished": "2026-10-06 19:03:36 CDT",
+          "summary": "3 passed in 10.02s",
+          "log": "/home/max/Scratchpad/5-Oct-2026_Mass-Review/exec/work/hermes-goal/U2e/evidence/full/466aa2162267.log"
+        },
+        {
+          "file": "tests/hermes_cli/test_kanban_workspace_busy.py",
+          "finished": "2026-10-06 19:03:44 CDT",
+          "summary": "3 passed in 9.68s",
+          "log": "/home/max/Scratchpad/5-Oct-2026_Mass-Review/exec/work/hermes-goal/U2e/evidence/full/887ff6b42090.log"
+        },
+        {
+          "file": "tests/hermes_cli/test_quiet_single_query.py",
+          "finished": "2026-10-06 19:03:41 CDT",
+          "summary": "11 passed, 1 warning in 6.32s",
+          "log": "/home/max/Scratchpad/5-Oct-2026_Mass-Review/exec/work/hermes-goal/U2e/evidence/full/9b7120687758.log"
+        },
+        {
+          "file": "tests/hermes_cli/test_single_query_exit_contract.py",
+          "finished": "2026-10-06 19:03:41 CDT",
+          "summary": "23 passed in 4.93s",
+          "log": "/home/max/Scratchpad/5-Oct-2026_Mass-Review/exec/work/hermes-goal/U2e/evidence/full/d746bea41833.log"
+        },
+        {
+          "file": "tests/hermes_cli/test_single_query_fleet_turn_end_drain.py",
+          "finished": "2026-10-06 19:03:43 CDT",
+          "summary": "2 passed in 5.60s",
+          "log": "/home/max/Scratchpad/5-Oct-2026_Mass-Review/exec/work/hermes-goal/U2e/evidence/full/d04d9e041224.log"
+        },
+        {
+          "file": "tests/hermes_cli/test_single_query_hard_exit.py",
+          "finished": "2026-10-06 19:03:55 CDT",
+          "summary": "16 passed in 17.57s",
+          "log": "/home/max/Scratchpad/5-Oct-2026_Mass-Review/exec/work/hermes-goal/U2e/evidence/full/c6e9fb0ad4c5.log"
+        },
+        {
+          "file": "tests/plugins/test_chronos_cron.py",
+          "finished": "2026-10-06 22:59:30 CDT",
+          "summary": "15 passed in 5.43s",
+          "log": "/home/max/Scratchpad/5-Oct-2026_Mass-Review/exec/work/hermes-goal/U2e/evidence/retry01/eac0877c9676.log"
+        },
+        {
+          "file": "tests/plugins/test_kanban_model_override.py",
+          "finished": "2026-10-06 23:07:08 CDT",
+          "summary": "2 failed, 14 passed in 19.67s",
+          "log": "/home/max/Scratchpad/5-Oct-2026_Mass-Review/exec/work/hermes-goal/U2e/evidence/retry02/0692d7ef6848.log"
+        },
+        {
+          "file": "tests/tools/test_computer_use_cua_macos_identity.py",
+          "finished": "2026-10-06 23:06:52 CDT",
+          "summary": "13 passed in 3.58s",
+          "log": "/home/max/Scratchpad/5-Oct-2026_Mass-Review/exec/work/hermes-goal/U2e/evidence/retry02/47a7c1e29ac2.log"
+        },
+        {
+          "file": "tests/tools/test_cronjob_run_background.py",
+          "finished": "2026-10-06 19:03:52 CDT",
+          "summary": "12 passed in 9.51s",
+          "log": "/home/max/Scratchpad/5-Oct-2026_Mass-Review/exec/work/hermes-goal/U2e/evidence/full/84344a923e0f.log"
+        },
+        {
+          "file": "tests/tools/test_cronjob_run_immediate.py",
+          "finished": "2026-10-06 19:03:51 CDT",
+          "summary": "12 passed in 8.36s",
+          "log": "/home/max/Scratchpad/5-Oct-2026_Mass-Review/exec/work/hermes-goal/U2e/evidence/full/4103e21ff92c.log"
+        },
+        {
+          "file": "tests/tools/test_fleet_message_drain.py",
+          "finished": "2026-10-06 19:03:59 CDT",
+          "summary": "43 passed, 12 skipped in 15.18s",
+          "log": "/home/max/Scratchpad/5-Oct-2026_Mass-Review/exec/work/hermes-goal/U2e/evidence/full/616afc5ad28c.log"
+        },
+        {
+          "file": "tests/tools/test_search_files_cpu_windows.py",
+          "finished": "2026-10-06 23:00:20 CDT",
+          "summary": "12 passed, 1 skipped in 2.69s",
+          "log": "/home/max/Scratchpad/5-Oct-2026_Mass-Review/exec/work/hermes-goal/U2e/evidence/retry01/92366786af53.log"
+        }
+      ]
+    },
+    "G3d": {
+      "files": 28,
+      "outcome_counts": {
+        "passed": 480,
+        "failed": 0,
+        "skipped": 3
+      },
+      "failing_files": [],
+      "receipts": [
+        {
+          "file": "tests/cron/test_cron_kanban_env_isolation.py",
+          "finished": "2026-10-06 19:01:19 CDT",
+          "summary": "15 passed in 21.23s",
+          "log": "/home/max/Scratchpad/5-Oct-2026_Mass-Review/exec/work/hermes-goal/U2e/evidence/full/ac3949d86387.log"
+        },
+        {
+          "file": "tests/cron/test_cron_multiplex_served_profile_parity.py",
+          "finished": "2026-10-06 19:01:14 CDT",
+          "summary": "2 passed in 3.06s",
+          "log": "/home/max/Scratchpad/5-Oct-2026_Mass-Review/exec/work/hermes-goal/U2e/evidence/full/686493f1bc71.log"
+        },
+        {
+          "file": "tests/cron/test_execution_ledger.py",
+          "finished": "2026-10-06 19:01:40 CDT",
+          "summary": "23 passed in 14.54s",
+          "log": "/home/max/Scratchpad/5-Oct-2026_Mass-Review/exec/work/hermes-goal/U2e/evidence/full/5b4cea26c871.log"
+        },
+        {
+          "file": "tests/cron/test_fire_claim_lost_after_delivery.py",
+          "finished": "2026-10-06 19:01:42 CDT",
+          "summary": "6 passed in 15.33s",
+          "log": "/home/max/Scratchpad/5-Oct-2026_Mass-Review/exec/work/hermes-goal/U2e/evidence/full/1cb98a322cb2.log"
+        },
+        {
+          "file": "tests/cron/test_launch_guard.py",
+          "finished": "2026-10-06 19:01:40 CDT",
+          "summary": "18 passed in 12.55s",
+          "log": "/home/max/Scratchpad/5-Oct-2026_Mass-Review/exec/work/hermes-goal/U2e/evidence/full/378e199b82f9.log"
+        },
+        {
+          "file": "tests/cron/test_parallel_pool.py",
+          "finished": "2026-10-06 19:01:48 CDT",
+          "summary": "5 passed in 6.89s",
+          "log": "/home/max/Scratchpad/5-Oct-2026_Mass-Review/exec/work/hermes-goal/U2e/evidence/full/9d657678c651.log"
+        },
+        {
+          "file": "tests/cron/test_restart_safe_worker.py",
+          "finished": "2026-10-06 19:01:59 CDT",
+          "summary": "25 passed, 1 skipped, 1 warning in 12.17s",
+          "log": "/home/max/Scratchpad/5-Oct-2026_Mass-Review/exec/work/hermes-goal/U2e/evidence/full/ad3234d9ace8.log"
+        },
+        {
+          "file": "tests/cron/test_run_one_job.py",
+          "finished": "2026-10-06 19:02:02 CDT",
+          "summary": "12 passed in 12.87s",
+          "log": "/home/max/Scratchpad/5-Oct-2026_Mass-Review/exec/work/hermes-goal/U2e/evidence/full/7280622deed3.log"
+        },
+        {
+          "file": "tests/cron/test_scheduler.py",
+          "finished": "2026-10-06 19:03:04 CDT",
+          "summary": "93 passed, 1 warning in 71.48s (0:01:11)",
+          "log": "/home/max/Scratchpad/5-Oct-2026_Mass-Review/exec/work/hermes-goal/U2e/evidence/full/3a3cb060cf73.log"
+        },
+        {
+          "file": "tests/cron/test_scheduler_provider.py",
+          "finished": "2026-10-06 19:02:16 CDT",
+          "summary": "32 passed in 16.40s",
+          "log": "/home/max/Scratchpad/5-Oct-2026_Mass-Review/exec/work/hermes-goal/U2e/evidence/full/6c045162ea17.log"
+        },
+        {
+          "file": "tests/cron/test_script_claim_heartbeat.py",
+          "finished": "2026-10-06 19:02:26 CDT",
+          "summary": "20 passed in 23.76s",
+          "log": "/home/max/Scratchpad/5-Oct-2026_Mass-Review/exec/work/hermes-goal/U2e/evidence/full/90332f3c4390.log"
+        },
+        {
+          "file": "tests/cron/test_shutdown_interrupt.py",
+          "finished": "2026-10-06 19:02:24 CDT",
+          "summary": "25 passed in 12.28s",
+          "log": "/home/max/Scratchpad/5-Oct-2026_Mass-Review/exec/work/hermes-goal/U2e/evidence/full/237d7153fe9a.log"
+        },
+        {
+          "file": "tests/hermes_cli/test_kanban_boards.py",
+          "finished": "2026-10-06 19:03:15 CDT",
+          "summary": "19 passed in 49.44s",
+          "log": "/home/max/Scratchpad/5-Oct-2026_Mass-Review/exec/work/hermes-goal/U2e/evidence/full/15aff2947578.log"
+        },
+        {
+          "file": "tests/hermes_cli/test_kanban_core_functionality.py",
+          "finished": "2026-10-06 19:02:59 CDT",
+          "summary": "24 passed in 32.96s",
+          "log": "/home/max/Scratchpad/5-Oct-2026_Mass-Review/exec/work/hermes-goal/U2e/evidence/full/06dbfe18fbdc.log"
+        },
+        {
+          "file": "tests/hermes_cli/test_kanban_db.py",
+          "finished": "2026-10-06 19:03:34 CDT",
+          "summary": "54 passed, 1 skipped in 67.34s (0:01:07)",
+          "log": "/home/max/Scratchpad/5-Oct-2026_Mass-Review/exec/work/hermes-goal/U2e/evidence/full/bf2cfbc1ccd8.log"
+        },
+        {
+          "file": "tests/hermes_cli/test_kanban_db_init.py",
+          "finished": "2026-10-06 19:02:36 CDT",
+          "summary": "5 passed in 7.33s",
+          "log": "/home/max/Scratchpad/5-Oct-2026_Mass-Review/exec/work/hermes-goal/U2e/evidence/full/7fca8d3e7f97.log"
+        },
+        {
+          "file": "tests/hermes_cli/test_kanban_db_repair.py",
+          "finished": "2026-10-06 19:02:44 CDT",
+          "summary": "4 passed in 7.35s",
+          "log": "/home/max/Scratchpad/5-Oct-2026_Mass-Review/exec/work/hermes-goal/U2e/evidence/full/a6ed3b67e033.log"
+        },
+        {
+          "file": "tests/hermes_cli/test_kanban_dispatch_claim_allowlist.py",
+          "finished": "2026-10-06 19:02:56 CDT",
+          "summary": "11 passed in 11.30s",
+          "log": "/home/max/Scratchpad/5-Oct-2026_Mass-Review/exec/work/hermes-goal/U2e/evidence/full/3875e720591d.log"
+        },
+        {
+          "file": "tests/hermes_cli/test_kanban_dispatch_lock.py",
+          "finished": "2026-10-06 19:03:04 CDT",
+          "summary": "2 passed in 7.00s",
+          "log": "/home/max/Scratchpad/5-Oct-2026_Mass-Review/exec/work/hermes-goal/U2e/evidence/full/6065a28cb106.log"
+        },
+        {
+          "file": "tests/hermes_cli/test_kanban_dispatch_tick_hook.py",
+          "finished": "2026-10-06 19:03:09 CDT",
+          "summary": "3 passed in 9.50s",
+          "log": "/home/max/Scratchpad/5-Oct-2026_Mass-Review/exec/work/hermes-goal/U2e/evidence/full/8ba1db0bb938.log"
+        },
+        {
+          "file": "tests/hermes_cli/test_kanban_gateway_restart_handoff.py",
+          "finished": "2026-10-06 19:03:25 CDT",
+          "summary": "5 passed, 1 skipped in 19.79s",
+          "log": "/home/max/Scratchpad/5-Oct-2026_Mass-Review/exec/work/hermes-goal/U2e/evidence/full/93d2c265a573.log"
+        },
+        {
+          "file": "tests/hermes_cli/test_kanban_launch_guard.py",
+          "finished": "2026-10-06 19:05:23 CDT",
+          "summary": "40 passed in 136.06s (0:02:16)",
+          "log": "/home/max/Scratchpad/5-Oct-2026_Mass-Review/exec/work/hermes-goal/U2e/evidence/full/961ffccf7eb5.log"
+        },
+        {
+          "file": "tests/hermes_cli/test_kanban_worker_session_source.py",
+          "finished": "2026-10-06 19:03:25 CDT",
+          "summary": "5 passed in 9.42s",
+          "log": "/home/max/Scratchpad/5-Oct-2026_Mass-Review/exec/work/hermes-goal/U2e/evidence/full/dc494bb106c1.log"
+        },
+        {
+          "file": "tests/hermes_cli/test_kanban_worker_spawn_toolsets.py",
+          "finished": "2026-10-06 19:03:35 CDT",
+          "summary": "4 passed in 16.43s",
+          "log": "/home/max/Scratchpad/5-Oct-2026_Mass-Review/exec/work/hermes-goal/U2e/evidence/full/b09487dcf66f.log"
+        },
+        {
+          "file": "tests/hermes_cli/test_kanban_worker_terminal_cwd.py",
+          "finished": "2026-10-06 19:03:33 CDT",
+          "summary": "1 passed in 7.34s",
+          "log": "/home/max/Scratchpad/5-Oct-2026_Mass-Review/exec/work/hermes-goal/U2e/evidence/full/2ba6c86b23da.log"
+        },
+        {
+          "file": "tests/hermes_cli/test_kanban_worker_terminal_scope.py",
+          "finished": "2026-10-06 19:03:36 CDT",
+          "summary": "3 passed in 10.02s",
+          "log": "/home/max/Scratchpad/5-Oct-2026_Mass-Review/exec/work/hermes-goal/U2e/evidence/full/466aa2162267.log"
+        },
+        {
+          "file": "tests/tools/test_cronjob_run_background.py",
+          "finished": "2026-10-06 19:03:52 CDT",
+          "summary": "12 passed in 9.51s",
+          "log": "/home/max/Scratchpad/5-Oct-2026_Mass-Review/exec/work/hermes-goal/U2e/evidence/full/84344a923e0f.log"
+        },
+        {
+          "file": "tests/tools/test_cronjob_run_immediate.py",
+          "finished": "2026-10-06 19:03:51 CDT",
+          "summary": "12 passed in 8.36s",
+          "log": "/home/max/Scratchpad/5-Oct-2026_Mass-Review/exec/work/hermes-goal/U2e/evidence/full/4103e21ff92c.log"
+        }
+      ]
+    },
+    "final_source_refresh": {
+      "files": 334,
+      "outcome_counts": {
+        "passed": 3508,
+        "failed": 12,
+        "skipped": 32
+      },
+      "failing_files": [
+        "tests/acp_adapter/test_edit_approval.py",
+        "tests/agent/lsp/test_broken_set.py",
+        "tests/agent/lsp/test_install_and_lint_fixes.py",
+        "tests/agent/lsp/test_workspace.py",
+        "tests/agent/test_codex_app_server_integration.py",
+        "tests/agent/test_codex_gpt55_autoraise_notice.py",
+        "tests/agent/test_coding_context.py",
+        "tests/cron/test_cron_live_bot_delivery.py",
+        "tests/plugins/test_kanban_model_override.py"
+      ],
+      "receipts": [
+        {
+          "file": "/home/max/Scratchpad/5-Oct-2026_Mass-Review/exec/work/hermes-goal/U2c2/test_checker_uncertain.py",
+          "finished": "2026-10-06 23:17:00 CDT",
+          "summary": "2 passed, 1 warning in 3.93s",
+          "log": "/home/max/Scratchpad/5-Oct-2026_Mass-Review/exec/work/hermes-goal/U2e/evidence/retry05/7d3d40ab38c6.log"
+        },
+        {
+          "file": "tests/acp_adapter/test_acp_commands.py",
+          "finished": "2026-10-06 19:03:51 CDT",
+          "summary": "6 passed in 6.44s",
+          "log": "/home/max/Scratchpad/5-Oct-2026_Mass-Review/exec/work/hermes-goal/U2e/evidence/full/86652a57c3fa.log"
+        },
+        {
+          "file": "tests/acp_adapter/test_acp_dashboard_model_switch_validation.py",
+          "finished": "2026-10-06 19:03:58 CDT",
+          "summary": "7 passed in 5.72s",
+          "log": "/home/max/Scratchpad/5-Oct-2026_Mass-Review/exec/work/hermes-goal/U2e/evidence/full/c1e2723b686c.log"
+        },
+        {
+          "file": "tests/acp_adapter/test_acp_images.py",
+          "finished": "2026-10-06 19:03:57 CDT",
+          "summary": "4 passed, 1 skipped in 4.46s",
+          "log": "/home/max/Scratchpad/5-Oct-2026_Mass-Review/exec/work/hermes-goal/U2e/evidence/full/e81fe9edd692.log"
+        },
+        {
+          "file": "tests/acp_adapter/test_acp_logging_redaction.py",
+          "finished": "2026-10-06 19:03:55 CDT",
+          "summary": "1 passed in 2.58s",
+          "log": "/home/max/Scratchpad/5-Oct-2026_Mass-Review/exec/work/hermes-goal/U2e/evidence/full/79531e8a1c84.log"
+        },
+        {
+          "file": "tests/acp_adapter/test_acp_mcp_discovery.py",
+          "finished": "2026-10-06 19:04:00 CDT",
+          "summary": "4 passed in 4.23s",
+          "log": "/home/max/Scratchpad/5-Oct-2026_Mass-Review/exec/work/hermes-goal/U2e/evidence/full/da220c8aacab.log"
+        },
+        {
+          "file": "tests/acp_adapter/test_approval_isolation.py",
+          "finished": "2026-10-06 19:04:01 CDT",
+          "summary": "4 passed in 4.35s",
+          "log": "/home/max/Scratchpad/5-Oct-2026_Mass-Review/exec/work/hermes-goal/U2e/evidence/full/6ea162b26d22.log"
+        },
+        {
+          "file": "tests/acp_adapter/test_auth.py",
+          "finished": "2026-10-06 19:04:00 CDT",
+          "summary": "2 passed in 2.20s",
+          "log": "/home/max/Scratchpad/5-Oct-2026_Mass-Review/exec/work/hermes-goal/U2e/evidence/full/ab23f674a17a.log"
+        },
+        {
+          "file": "tests/acp_adapter/test_detect_provider_entra.py",
+          "finished": "2026-10-06 19:04:01 CDT",
+          "summary": "1 passed in 2.05s",
+          "log": "/home/max/Scratchpad/5-Oct-2026_Mass-Review/exec/work/hermes-goal/U2e/evidence/full/e09d83109525.log"
+        },
+        {
+          "file": "tests/acp_adapter/test_edit_approval.py",
+          "finished": "2026-10-06 19:04:58 CDT",
+          "summary": "1 failed, 5 passed in 58.23s",
+          "log": "/home/max/Scratchpad/5-Oct-2026_Mass-Review/exec/work/hermes-goal/U2e/evidence/full/98c5ec0618c6.log"
+        },
+        {
+          "file": "tests/acp_adapter/test_empty_session_persistence.py",
+          "finished": "2026-10-06 19:04:54 CDT",
+          "summary": "2 passed in 53.74s",
+          "log": "/home/max/Scratchpad/5-Oct-2026_Mass-Review/exec/work/hermes-goal/U2e/evidence/full/72bae72d6bd1.log"
+        },
+        {
+          "file": "tests/acp_adapter/test_entry.py",
+          "finished": "2026-10-06 19:04:54 CDT",
+          "summary": "5 passed in 52.40s",
+          "log": "/home/max/Scratchpad/5-Oct-2026_Mass-Review/exec/work/hermes-goal/U2e/evidence/full/28d5b1302592.log"
+        },
+        {
+          "file": "tests/acp_adapter/test_events.py",
+          "finished": "2026-10-06 19:04:54 CDT",
+          "summary": "13 passed, 1 warning in 52.72s",
+          "log": "/home/max/Scratchpad/5-Oct-2026_Mass-Review/exec/work/hermes-goal/U2e/evidence/full/660183f32ece.log"
+        },
+        {
+          "file": "tests/acp_adapter/test_failed_turn_closure.py",
+          "finished": "2026-10-06 19:05:01 CDT",
+          "summary": "2 passed in 59.30s",
+          "log": "/home/max/Scratchpad/5-Oct-2026_Mass-Review/exec/work/hermes-goal/U2e/evidence/full/e12870208eb2.log"
+        },
+        {
+          "file": "tests/acp_adapter/test_finish_turn_finally.py",
+          "finished": "2026-10-06 19:04:57 CDT",
+          "summary": "1 passed in 2.28s",
+          "log": "/home/max/Scratchpad/5-Oct-2026_Mass-Review/exec/work/hermes-goal/U2e/evidence/full/d2bb4e49df98.log"
+        },
+        {
+          "file": "tests/acp_adapter/test_mcp_e2e.py",
+          "finished": "2026-10-06 19:05:04 CDT",
+          "summary": "6 passed in 8.49s",
+          "log": "/home/max/Scratchpad/5-Oct-2026_Mass-Review/exec/work/hermes-goal/U2e/evidence/full/fb2886acd5db.log"
+        },
+        {
+          "file": "tests/acp_adapter/test_named_provider_catalogs.py",
+          "finished": "2026-10-06 19:05:00 CDT",
+          "summary": "13 passed in 4.86s",
+          "log": "/home/max/Scratchpad/5-Oct-2026_Mass-Review/exec/work/hermes-goal/U2e/evidence/full/d4076d92159a.log"
+        },
+        {
+          "file": "tests/acp_adapter/test_permissions.py",
+          "finished": "2026-10-06 19:05:01 CDT",
+          "summary": "11 passed in 3.53s",
+          "log": "/home/max/Scratchpad/5-Oct-2026_Mass-Review/exec/work/hermes-goal/U2e/evidence/full/d5be8760c0f3.log"
+        },
+        {
+          "file": "tests/acp_adapter/test_ping_suppression.py",
+          "finished": "2026-10-06 19:05:03 CDT",
+          "summary": "5 passed in 2.68s",
+          "log": "/home/max/Scratchpad/5-Oct-2026_Mass-Review/exec/work/hermes-goal/U2e/evidence/full/a8ee836fcfa3.log"
+        },
+        {
+          "file": "tests/acp_adapter/test_runtime_identity.py",
+          "finished": "2026-10-06 19:05:06 CDT",
+          "summary": "3 passed in 3.40s",
+          "log": "/home/max/Scratchpad/5-Oct-2026_Mass-Review/exec/work/hermes-goal/U2e/evidence/full/6bdbc2a56701.log"
+        },
+        {
+          "file": "tests/acp_adapter/test_server.py",
+          "finished": "2026-10-06 19:05:24 CDT",
+          "summary": "31 passed in 21.82s",
+          "log": "/home/max/Scratchpad/5-Oct-2026_Mass-Review/exec/work/hermes-goal/U2e/evidence/full/74e7fa55c495.log"
+        },
+        {
+          "file": "tests/acp_adapter/test_session.py",
+          "finished": "2026-10-06 19:05:29 CDT",
+          "summary": "25 passed in 24.63s",
+          "log": "/home/max/Scratchpad/5-Oct-2026_Mass-Review/exec/work/hermes-goal/U2e/evidence/full/fcbec70d73ff.log"
+        },
+        {
+          "file": "tests/acp_adapter/test_session_construction_off_loop.py",
+          "finished": "2026-10-06 19:05:12 CDT",
+          "summary": "8 passed in 7.17s",
+          "log": "/home/max/Scratchpad/5-Oct-2026_Mass-Review/exec/work/hermes-goal/U2e/evidence/full/12ab02810604.log"
+        },
+        {
+          "file": "tests/acp_adapter/test_session_cwd_column.py",
+          "finished": "2026-10-06 19:05:11 CDT",
+          "summary": "4 passed in 4.25s",
+          "log": "/home/max/Scratchpad/5-Oct-2026_Mass-Review/exec/work/hermes-goal/U2e/evidence/full/0baaa7acb1f5.log"
+        },
+        {
+          "file": "tests/acp_adapter/test_session_db_private_access.py",
+          "finished": "2026-10-06 19:05:15 CDT",
+          "summary": "4 passed in 4.79s",
+          "log": "/home/max/Scratchpad/5-Oct-2026_Mass-Review/exec/work/hermes-goal/U2e/evidence/full/273889a688e3.log"
+        },
+        {
+          "file": "tests/acp_adapter/test_session_provenance.py",
+          "finished": "2026-10-06 19:05:15 CDT",
+          "summary": "4 passed in 3.87s",
+          "log": "/home/max/Scratchpad/5-Oct-2026_Mass-Review/exec/work/hermes-goal/U2e/evidence/full/5f85df829cc3.log"
+        },
+        {
+          "file": "tests/acp_adapter/test_session_reasoning_config.py",
+          "finished": "2026-10-06 19:05:18 CDT",
+          "summary": "1 passed in 5.18s",
+          "log": "/home/max/Scratchpad/5-Oct-2026_Mass-Review/exec/work/hermes-goal/U2e/evidence/full/9dff11d23cee.log"
+        },
+        {
+          "file": "tests/acp_adapter/test_tools.py",
+          "finished": "2026-10-06 19:05:19 CDT",
+          "summary": "19 passed in 2.81s",
+          "log": "/home/max/Scratchpad/5-Oct-2026_Mass-Review/exec/work/hermes-goal/U2e/evidence/full/f3bea70b4e60.log"
+        },
+        {
+          "file": "tests/agent/lsp/test_backend_gate.py",
+          "finished": "2026-10-06 19:05:18 CDT",
+          "summary": "2 passed, 1 warning in 2.49s",
+          "log": "/home/max/Scratchpad/5-Oct-2026_Mass-Review/exec/work/hermes-goal/U2e/evidence/full/761ea2dba03a.log"
+        },
+        {
+          "file": "tests/agent/lsp/test_broken_set.py",
+          "finished": "2026-10-06 19:05:22 CDT",
+          "summary": "1 failed, 4 passed in 3.44s",
+          "log": "/home/max/Scratchpad/5-Oct-2026_Mass-Review/exec/work/hermes-goal/U2e/evidence/full/c426fab096b2.log"
+        },
+        {
+          "file": "tests/agent/lsp/test_client_e2e.py",
+          "finished": "2026-10-06 19:05:25 CDT",
+          "summary": "13 passed in 6.23s",
+          "log": "/home/max/Scratchpad/5-Oct-2026_Mass-Review/exec/work/hermes-goal/U2e/evidence/full/6a1d88611304.log"
+        },
+        {
+          "file": "tests/agent/lsp/test_compound_extensions.py",
+          "finished": "2026-10-06 19:05:22 CDT",
+          "summary": "1 passed in 2.10s",
+          "log": "/home/max/Scratchpad/5-Oct-2026_Mass-Review/exec/work/hermes-goal/U2e/evidence/full/5c57a011d2b1.log"
+        },
+        {
+          "file": "tests/agent/lsp/test_custom_servers.py",
+          "finished": "2026-10-06 19:05:25 CDT",
+          "summary": "2 passed, 2 warnings in 2.35s",
+          "log": "/home/max/Scratchpad/5-Oct-2026_Mass-Review/exec/work/hermes-goal/U2e/evidence/full/3b2e285397d2.log"
+        },
+        {
+          "file": "tests/agent/lsp/test_delta_key.py",
+          "finished": "2026-10-06 19:05:26 CDT",
+          "summary": "6 passed in 1.76s",
+          "log": "/home/max/Scratchpad/5-Oct-2026_Mass-Review/exec/work/hermes-goal/U2e/evidence/full/34baea0e1a6b.log"
+        },
+        {
+          "file": "tests/agent/lsp/test_diagnostics_field.py",
+          "finished": "2026-10-06 19:05:28 CDT",
+          "summary": "3 passed, 1 warning in 3.66s",
+          "log": "/home/max/Scratchpad/5-Oct-2026_Mass-Review/exec/work/hermes-goal/U2e/evidence/full/26f18d8dc89e.log"
+        },
+        {
+          "file": "tests/agent/lsp/test_eventlog.py",
+          "finished": "2026-10-06 19:05:27 CDT",
+          "summary": "5 passed in 1.87s",
+          "log": "/home/max/Scratchpad/5-Oct-2026_Mass-Review/exec/work/hermes-goal/U2e/evidence/full/a34ca47cdd76.log"
+        },
+        {
+          "file": "tests/agent/lsp/test_incremental_unicode.py",
+          "finished": "2026-10-06 19:05:28 CDT",
+          "summary": "5 passed in 2.09s",
+          "log": "/home/max/Scratchpad/5-Oct-2026_Mass-Review/exec/work/hermes-goal/U2e/evidence/full/e0e2494d8a97.log"
+        },
+        {
+          "file": "tests/agent/lsp/test_install_and_lint_fixes.py",
+          "finished": "2026-10-06 19:05:30 CDT",
+          "summary": "1 failed, 2 passed, 1 warning in 3.19s",
+          "log": "/home/max/Scratchpad/5-Oct-2026_Mass-Review/exec/work/hermes-goal/U2e/evidence/full/9e14c57c2ca5.log"
+        },
+        {
+          "file": "tests/agent/lsp/test_lifecycle.py",
+          "finished": "2026-10-06 19:05:28 CDT",
+          "summary": "3 passed in 1.98s",
+          "log": "/home/max/Scratchpad/5-Oct-2026_Mass-Review/exec/work/hermes-goal/U2e/evidence/full/7f0218e77d85.log"
+        },
+        {
+          "file": "tests/agent/lsp/test_manager_locking.py",
+          "finished": "2026-10-06 19:05:30 CDT",
+          "summary": "2 passed in 1.96s",
+          "log": "/home/max/Scratchpad/5-Oct-2026_Mass-Review/exec/work/hermes-goal/U2e/evidence/full/a55ead772a6b.log"
+        },
+        {
+          "file": "tests/agent/lsp/test_multi_root.py",
+          "finished": "2026-10-06 19:05:30 CDT",
+          "summary": "2 passed in 2.05s",
+          "log": "/home/max/Scratchpad/5-Oct-2026_Mass-Review/exec/work/hermes-goal/U2e/evidence/full/980bb15902d1.log"
+        },
+        {
+          "file": "tests/agent/lsp/test_nested_root_current_diagnostics.py",
+          "finished": "2026-10-06 19:05:31 CDT",
+          "summary": "1 passed in 1.93s",
+          "log": "/home/max/Scratchpad/5-Oct-2026_Mass-Review/exec/work/hermes-goal/U2e/evidence/full/9bdff0a950c1.log"
+        },
+        {
+          "file": "tests/agent/lsp/test_powershell_server.py",
+          "finished": "2026-10-06 19:05:31 CDT",
+          "summary": "3 passed in 2.10s",
+          "log": "/home/max/Scratchpad/5-Oct-2026_Mass-Review/exec/work/hermes-goal/U2e/evidence/full/e38bfa1fad28.log"
+        },
+        {
+          "file": "tests/agent/lsp/test_protocol.py",
+          "finished": "2026-10-06 19:05:32 CDT",
+          "summary": "4 passed in 2.26s",
+          "log": "/home/max/Scratchpad/5-Oct-2026_Mass-Review/exec/work/hermes-goal/U2e/evidence/full/f5e2bc4e9d05.log"
+        },
+        {
+          "file": "tests/agent/lsp/test_python_discovery.py",
+          "finished": "2026-10-06 19:05:33 CDT",
+          "summary": "1 passed in 2.44s",
+          "log": "/home/max/Scratchpad/5-Oct-2026_Mass-Review/exec/work/hermes-goal/U2e/evidence/full/9a173f438eb1.log"
+        },
+        {
+          "file": "tests/agent/lsp/test_reporter.py",
+          "finished": "2026-10-06 19:05:33 CDT",
+          "summary": "5 passed in 2.28s",
+          "log": "/home/max/Scratchpad/5-Oct-2026_Mass-Review/exec/work/hermes-goal/U2e/evidence/full/839d715ef81a.log"
+        },
+        {
+          "file": "tests/agent/lsp/test_root_policy.py",
+          "finished": "2026-10-06 19:05:34 CDT",
+          "summary": "2 passed in 2.12s",
+          "log": "/home/max/Scratchpad/5-Oct-2026_Mass-Review/exec/work/hermes-goal/U2e/evidence/full/16fe0f63113e.log"
+        },
+        {
+          "file": "tests/agent/lsp/test_service.py",
+          "finished": "2026-10-06 19:05:36 CDT",
+          "summary": "6 passed in 4.73s",
+          "log": "/home/max/Scratchpad/5-Oct-2026_Mass-Review/exec/work/hermes-goal/U2e/evidence/full/9cc794642243.log"
+        },
+        {
+          "file": "tests/agent/lsp/test_shell_linter_lsp_skip.py",
+          "finished": "2026-10-06 19:05:37 CDT",
+          "summary": "6 passed, 1 warning in 4.77s",
+          "log": "/home/max/Scratchpad/5-Oct-2026_Mass-Review/exec/work/hermes-goal/U2e/evidence/full/448e45176b7c.log"
+        },
+        {
+          "file": "tests/agent/lsp/test_stale_diagnostics.py",
+          "finished": "2026-10-06 19:05:38 CDT",
+          "summary": "2 passed in 4.31s",
+          "log": "/home/max/Scratchpad/5-Oct-2026_Mass-Review/exec/work/hermes-goal/U2e/evidence/full/5822f1fb79c5.log"
+        },
+        {
+          "file": "tests/agent/lsp/test_versionless_push_during_send.py",
+          "finished": "2026-10-06 19:05:36 CDT",
+          "summary": "1 passed in 2.37s",
+          "log": "/home/max/Scratchpad/5-Oct-2026_Mass-Review/exec/work/hermes-goal/U2e/evidence/full/0ee69d0df7b3.log"
+        },
+        {
+          "file": "tests/agent/lsp/test_vue_server.py",
+          "finished": "2026-10-06 19:05:37 CDT",
+          "summary": "4 passed in 2.56s",
+          "log": "/home/max/Scratchpad/5-Oct-2026_Mass-Review/exec/work/hermes-goal/U2e/evidence/full/34d3c2b2cc63.log"
+        },
+        {
+          "file": "tests/agent/lsp/test_windows_binary_resolution.py",
+          "finished": "2026-10-06 19:05:38 CDT",
+          "summary": "1 passed, 1 skipped in 1.86s",
+          "log": "/home/max/Scratchpad/5-Oct-2026_Mass-Review/exec/work/hermes-goal/U2e/evidence/full/f9895826a132.log"
+        },
+        {
+          "file": "tests/agent/lsp/test_workspace.py",
+          "finished": "2026-10-06 19:05:40 CDT",
+          "summary": "1 failed, 6 passed in 2.75s",
+          "log": "/home/max/Scratchpad/5-Oct-2026_Mass-Review/exec/work/hermes-goal/U2e/evidence/full/738b5724125a.log"
+        },
+        {
+          "file": "tests/agent/lsp/test_workspace_release.py",
+          "finished": "2026-10-06 19:05:46 CDT",
+          "summary": "9 passed in 9.22s",
+          "log": "/home/max/Scratchpad/5-Oct-2026_Mass-Review/exec/work/hermes-goal/U2e/evidence/full/a64ec8a468fb.log"
+        },
+        {
+          "file": "tests/agent/test_413_compression.py",
+          "finished": "2026-10-06 19:07:23 CDT",
+          "summary": "33 passed in 104.19s (0:01:44)",
+          "log": "/home/max/Scratchpad/5-Oct-2026_Mass-Review/exec/work/hermes-goal/U2e/evidence/full/23be7946a1b8.log"
+        },
+        {
+          "file": "tests/agent/test_413_image_payload_recovery.py",
+          "finished": "2026-10-06 19:05:40 CDT",
+          "summary": "4 passed in 2.43s",
+          "log": "/home/max/Scratchpad/5-Oct-2026_Mass-Review/exec/work/hermes-goal/U2e/evidence/full/f3d7d2565729.log"
+        },
+        {
+          "file": "tests/agent/test_860_dedup.py",
+          "finished": "2026-10-06 19:05:53 CDT",
+          "summary": "2 passed in 14.46s",
+          "log": "/home/max/Scratchpad/5-Oct-2026_Mass-Review/exec/work/hermes-goal/U2e/evidence/full/4d55d822925b.log"
+        },
+        {
+          "file": "tests/agent/test_account_policy_block.py",
+          "finished": "2026-10-06 19:05:54 CDT",
+          "summary": "3 passed in 14.42s",
+          "log": "/home/max/Scratchpad/5-Oct-2026_Mass-Review/exec/work/hermes-goal/U2e/evidence/full/b6faf06536db.log"
+        },
+        {
+          "file": "tests/agent/test_account_usage.py",
+          "finished": "2026-10-06 19:05:44 CDT",
+          "summary": "11 passed in 3.28s",
+          "log": "/home/max/Scratchpad/5-Oct-2026_Mass-Review/exec/work/hermes-goal/U2e/evidence/full/38694c76ebb0.log"
+        },
+        {
+          "file": "tests/agent/test_account_usage_fetch.py",
+          "finished": "2026-10-06 19:05:53 CDT",
+          "summary": "18 passed in 8.21s",
+          "log": "/home/max/Scratchpad/5-Oct-2026_Mass-Review/exec/work/hermes-goal/U2e/evidence/full/10e0dc878393.log"
+        },
+        {
+          "file": "tests/agent/test_acp_openai_bridge.py",
+          "finished": "2026-10-06 19:05:50 CDT",
+          "summary": "13 passed in 5.02s",
+          "log": "/home/max/Scratchpad/5-Oct-2026_Mass-Review/exec/work/hermes-goal/U2e/evidence/full/f2a494505c04.log"
+        },
+        {
+          "file": "tests/agent/test_acp_provider_rails.py",
+          "finished": "2026-10-06 19:06:01 CDT",
+          "summary": "3 passed in 13.19s",
+          "log": "/home/max/Scratchpad/5-Oct-2026_Mass-Review/exec/work/hermes-goal/U2e/evidence/full/5447b5433199.log"
+        },
+        {
+          "file": "tests/agent/test_actual_auxiliary_routing.py",
+          "finished": "2026-10-06 19:07:35 CDT",
+          "summary": "87 passed in 102.50s (0:01:42)",
+          "log": "/home/max/Scratchpad/5-Oct-2026_Mass-Review/exec/work/hermes-goal/U2e/evidence/full/2f885c6ff74c.log"
+        },
+        {
+          "file": "tests/agent/test_agent_guardrails.py",
+          "finished": "2026-10-06 19:06:02 CDT",
+          "summary": "26 passed in 7.29s",
+          "log": "/home/max/Scratchpad/5-Oct-2026_Mass-Review/exec/work/hermes-goal/U2e/evidence/full/909b2c2f7281.log"
+        },
+        {
+          "file": "tests/agent/test_anthropic_adapter.py",
+          "finished": "2026-10-06 19:06:04 CDT",
+          "summary": "94 passed in 9.63s",
+          "log": "/home/max/Scratchpad/5-Oct-2026_Mass-Review/exec/work/hermes-goal/U2e/evidence/full/d188e4981045.log"
+        },
+        {
+          "file": "tests/agent/test_anthropic_adapter_extra_headers.py",
+          "finished": "2026-10-06 19:05:57 CDT",
+          "summary": "2 passed in 2.68s",
+          "log": "/home/max/Scratchpad/5-Oct-2026_Mass-Review/exec/work/hermes-goal/U2e/evidence/full/789ccb9c3438.log"
+        },
+        {
+          "file": "tests/agent/test_anthropic_billing_guidance.py",
+          "finished": "2026-10-06 19:06:00 CDT",
+          "summary": "5 passed in 2.38s",
+          "log": "/home/max/Scratchpad/5-Oct-2026_Mass-Review/exec/work/hermes-goal/U2e/evidence/full/fc954164a6d4.log"
+        },
+        {
+          "file": "tests/agent/test_anthropic_borrowed_row_authority.py",
+          "finished": "2026-10-06 19:06:06 CDT",
+          "summary": "7 passed in 5.12s",
+          "log": "/home/max/Scratchpad/5-Oct-2026_Mass-Review/exec/work/hermes-goal/U2e/evidence/full/d919a29d7c7e.log"
+        },
+        {
+          "file": "tests/agent/test_anthropic_client_auth.py",
+          "finished": "2026-10-06 19:06:05 CDT",
+          "summary": "1 passed in 3.66s",
+          "log": "/home/max/Scratchpad/5-Oct-2026_Mass-Review/exec/work/hermes-goal/U2e/evidence/full/4aa715776aa7.log"
+        },
+        {
+          "file": "tests/agent/test_anthropic_credential_persist_failure.py",
+          "finished": "2026-10-06 19:06:07 CDT",
+          "summary": "8 passed in 4.37s",
+          "log": "/home/max/Scratchpad/5-Oct-2026_Mass-Review/exec/work/hermes-goal/U2e/evidence/full/32abe6b66cf1.log"
+        },
+        {
+          "file": "tests/agent/test_anthropic_dead_grant_hints.py",
+          "finished": "2026-10-06 19:06:07 CDT",
+          "summary": "3 passed in 2.46s",
+          "log": "/home/max/Scratchpad/5-Oct-2026_Mass-Review/exec/work/hermes-goal/U2e/evidence/full/8dbd9d1719ce.log"
+        },
+        {
+          "file": "tests/agent/test_anthropic_external_login_optout.py",
+          "finished": "2026-10-06 19:06:16 CDT",
+          "summary": "1 passed in 10.14s",
+          "log": "/home/max/Scratchpad/5-Oct-2026_Mass-Review/exec/work/hermes-goal/U2e/evidence/full/e412b8c2caf0.log"
+        },
+        {
+          "file": "tests/agent/test_anthropic_keychain.py",
+          "finished": "2026-10-06 19:06:10 CDT",
+          "summary": "5 passed, 12 skipped in 2.76s",
+          "log": "/home/max/Scratchpad/5-Oct-2026_Mass-Review/exec/work/hermes-goal/U2e/evidence/full/da3772060808.log"
+        },
+        {
+          "file": "tests/agent/test_anthropic_kimi_signed_thinking_replay.py",
+          "finished": "2026-10-06 19:06:10 CDT",
+          "summary": "3 passed in 2.52s",
+          "log": "/home/max/Scratchpad/5-Oct-2026_Mass-Review/exec/work/hermes-goal/U2e/evidence/full/a62c02cd2ced.log"
+        },
+        {
+          "file": "tests/agent/test_anthropic_kwargs_sanitize.py",
+          "finished": "2026-10-06 19:06:10 CDT",
+          "summary": "1 passed in 2.23s",
+          "log": "/home/max/Scratchpad/5-Oct-2026_Mass-Review/exec/work/hermes-goal/U2e/evidence/full/b1f37e51ccc3.log"
+        },
+        {
+          "file": "tests/agent/test_anthropic_mcp_prefix_strip.py",
+          "finished": "2026-10-06 19:06:13 CDT",
+          "summary": "14 passed in 2.63s",
+          "log": "/home/max/Scratchpad/5-Oct-2026_Mass-Review/exec/work/hermes-goal/U2e/evidence/full/d9e95530a664.log"
+        },
+        {
+          "file": "tests/agent/test_anthropic_message_stop.py",
+          "finished": "2026-10-06 19:06:24 CDT",
+          "summary": "3 passed in 12.79s",
+          "log": "/home/max/Scratchpad/5-Oct-2026_Mass-Review/exec/work/hermes-goal/U2e/evidence/full/545296495c70.log"
+        },
+        {
+          "file": "tests/agent/test_anthropic_mid_tool_call_drop.py",
+          "finished": "2026-10-06 19:06:25 CDT",
+          "summary": "3 passed in 13.87s",
+          "log": "/home/max/Scratchpad/5-Oct-2026_Mass-Review/exec/work/hermes-goal/U2e/evidence/full/0ba7a8330181.log"
+        },
+        {
+          "file": "tests/agent/test_anthropic_model_cooldowns.py",
+          "finished": "2026-10-06 19:06:18 CDT",
+          "summary": "4 passed in 3.89s",
+          "log": "/home/max/Scratchpad/5-Oct-2026_Mass-Review/exec/work/hermes-goal/U2e/evidence/full/d2855aba7e1c.log"
+        },
+        {
+          "file": "tests/agent/test_anthropic_oauth_pkce.py",
+          "finished": "2026-10-06 19:06:19 CDT",
+          "summary": "2 passed in 2.09s",
+          "log": "/home/max/Scratchpad/5-Oct-2026_Mass-Review/exec/work/hermes-goal/U2e/evidence/full/40aef691280f.log"
+        },
+        {
+          "file": "tests/agent/test_anthropic_oauth_stress.py",
+          "finished": "2026-10-06 19:06:22 CDT",
+          "summary": "1 passed, 1 skipped in 3.09s",
+          "log": "/home/max/Scratchpad/5-Oct-2026_Mass-Review/exec/work/hermes-goal/U2e/evidence/full/719122608bc3.log"
+        },
+        {
+          "file": "tests/agent/test_anthropic_oauth_ua_prefix.py",
+          "finished": "2026-10-06 19:06:22 CDT",
+          "summary": "1 passed in 2.15s",
+          "log": "/home/max/Scratchpad/5-Oct-2026_Mass-Review/exec/work/hermes-goal/U2e/evidence/full/80fe71412cd7.log"
+        },
+        {
+          "file": "tests/agent/test_anthropic_output_field_leak.py",
+          "finished": "2026-10-06 19:06:24 CDT",
+          "summary": "4 passed in 1.99s",
+          "log": "/home/max/Scratchpad/5-Oct-2026_Mass-Review/exec/work/hermes-goal/U2e/evidence/full/a7ca8e7c70ba.log"
+        },
+        {
+          "file": "tests/agent/test_anthropic_owned_routing.py",
+          "finished": "2026-10-06 19:06:26 CDT",
+          "summary": "2 passed in 3.21s",
+          "log": "/home/max/Scratchpad/5-Oct-2026_Mass-Review/exec/work/hermes-goal/U2e/evidence/full/52fb57d924f3.log"
+        },
+        {
+          "file": "tests/agent/test_anthropic_prompt_cache_policy.py",
+          "finished": "2026-10-06 19:06:34 CDT",
+          "summary": "78 passed in 8.70s",
+          "log": "/home/max/Scratchpad/5-Oct-2026_Mass-Review/exec/work/hermes-goal/U2e/evidence/full/dc940d722187.log"
+        },
+        {
+          "file": "tests/agent/test_anthropic_request_blank_block_guard.py",
+          "finished": "2026-10-06 19:06:27 CDT",
+          "summary": "5 passed in 1.98s",
+          "log": "/home/max/Scratchpad/5-Oct-2026_Mass-Review/exec/work/hermes-goal/U2e/evidence/full/92ab54f80fa9.log"
+        },
+        {
+          "file": "tests/agent/test_anthropic_request_client_reuse.py",
+          "finished": "2026-10-06 19:06:32 CDT",
+          "summary": "6 passed in 6.16s",
+          "log": "/home/max/Scratchpad/5-Oct-2026_Mass-Review/exec/work/hermes-goal/U2e/evidence/full/a12dbe29564b.log"
+        },
+        {
+          "file": "tests/agent/test_anthropic_route_oauth_identity.py",
+          "finished": "2026-10-06 19:06:30 CDT",
+          "summary": "2 passed in 3.24s",
+          "log": "/home/max/Scratchpad/5-Oct-2026_Mass-Review/exec/work/hermes-goal/U2e/evidence/full/bee6a2c08bd6.log"
+        },
+        {
+          "file": "tests/agent/test_anthropic_spent_rotation_verdict.py",
+          "finished": "2026-10-06 19:06:33 CDT",
+          "summary": "9 passed in 5.78s",
+          "log": "/home/max/Scratchpad/5-Oct-2026_Mass-Review/exec/work/hermes-goal/U2e/evidence/full/909def6bd141.log"
+        },
+        {
+          "file": "tests/agent/test_anthropic_stream_fallbacks.py",
+          "finished": "2026-10-06 19:06:47 CDT",
+          "summary": "8 passed in 15.32s",
+          "log": "/home/max/Scratchpad/5-Oct-2026_Mass-Review/exec/work/hermes-goal/U2e/evidence/full/bd23158c97a9.log"
+        },
+        {
+          "file": "tests/agent/test_anthropic_structured_output.py",
+          "finished": "2026-10-06 19:06:35 CDT",
+          "summary": "7 passed in 2.25s",
+          "log": "/home/max/Scratchpad/5-Oct-2026_Mass-Review/exec/work/hermes-goal/U2e/evidence/full/c012a20f6891.log"
+        },
+        {
+          "file": "tests/agent/test_anthropic_thinking_block_order.py",
+          "finished": "2026-10-06 19:06:36 CDT",
+          "summary": "3 passed in 2.35s",
+          "log": "/home/max/Scratchpad/5-Oct-2026_Mass-Review/exec/work/hermes-goal/U2e/evidence/full/4e75ae137d80.log"
+        },
+        {
+          "file": "tests/agent/test_anthropic_thinking_disable.py",
+          "finished": "2026-10-06 19:06:37 CDT",
+          "summary": "15 passed in 2.76s",
+          "log": "/home/max/Scratchpad/5-Oct-2026_Mass-Review/exec/work/hermes-goal/U2e/evidence/full/dfa73d6c7817.log"
+        },
+        {
+          "file": "tests/agent/test_anthropic_third_party_oauth_guard.py",
+          "finished": "2026-10-06 19:06:53 CDT",
+          "summary": "8 passed in 17.05s",
+          "log": "/home/max/Scratchpad/5-Oct-2026_Mass-Review/exec/work/hermes-goal/U2e/evidence/full/ae6aef3c739e.log"
+        },
+        {
+          "file": "tests/agent/test_anthropic_token_scope_isolation.py",
+          "finished": "2026-10-06 19:06:39 CDT",
+          "summary": "6 passed in 2.34s",
+          "log": "/home/max/Scratchpad/5-Oct-2026_Mass-Review/exec/work/hermes-goal/U2e/evidence/full/d01ed10889d2.log"
+        },
+        {
+          "file": "tests/agent/test_anthropic_truncation_continuation.py",
+          "finished": "2026-10-06 19:06:41 CDT",
+          "summary": "2 passed in 2.45s",
+          "log": "/home/max/Scratchpad/5-Oct-2026_Mass-Review/exec/work/hermes-goal/U2e/evidence/full/36db3a1945c0.log"
+        },
+        {
+          "file": "tests/agent/test_anthropic_whitespace_text_blocks.py",
+          "finished": "2026-10-06 19:06:43 CDT",
+          "summary": "10 passed in 2.53s",
+          "log": "/home/max/Scratchpad/5-Oct-2026_Mass-Review/exec/work/hermes-goal/U2e/evidence/full/91eb62ea0def.log"
+        },
+        {
+          "file": "tests/agent/test_api_content_row_addressed_backfill.py",
+          "finished": "2026-10-06 19:06:54 CDT",
+          "summary": "6 passed in 12.12s",
+          "log": "/home/max/Scratchpad/5-Oct-2026_Mass-Review/exec/work/hermes-goal/U2e/evidence/full/337a25708029.log"
+        },
+        {
+          "file": "tests/agent/test_api_content_sidecar.py",
+          "finished": "2026-10-06 19:08:59 CDT",
+          "summary": "28 passed, 1 warning in 134.05s (0:02:14)",
+          "log": "/home/max/Scratchpad/5-Oct-2026_Mass-Review/exec/work/hermes-goal/U2e/evidence/full/4448e490cce6.log"
+        },
+        {
+          "file": "tests/agent/test_api_max_retries_config.py",
+          "finished": "2026-10-06 19:06:57 CDT",
+          "summary": "1 passed in 8.98s",
+          "log": "/home/max/Scratchpad/5-Oct-2026_Mass-Review/exec/work/hermes-goal/U2e/evidence/full/db9179d09db4.log"
+        },
+        {
+          "file": "tests/agent/test_arcee_trinity_overrides.py",
+          "finished": "2026-10-06 19:06:57 CDT",
+          "summary": "28 passed in 3.05s",
+          "log": "/home/max/Scratchpad/5-Oct-2026_Mass-Review/exec/work/hermes-goal/U2e/evidence/full/3d7faefc4906.log"
+        },
+        {
+          "file": "tests/agent/test_astra_baseline_runtime.py",
+          "finished": "2026-10-06 19:07:02 CDT",
+          "summary": "8 passed in 7.06s",
+          "log": "/home/max/Scratchpad/5-Oct-2026_Mass-Review/exec/work/hermes-goal/U2e/evidence/full/acc491b1e2f0.log"
+        },
+        {
+          "file": "tests/agent/test_astra_oauth_native_compaction.py",
+          "finished": "2026-10-06 19:07:00 CDT",
+          "summary": "12 passed in 2.46s",
+          "log": "/home/max/Scratchpad/5-Oct-2026_Mass-Review/exec/work/hermes-goal/U2e/evidence/full/2047c601d4fd.log"
+        },
+        {
+          "file": "tests/agent/test_async_httpx_del_neuter.py",
+          "finished": "2026-10-06 19:07:03 CDT",
+          "summary": "8 passed in 4.46s",
+          "log": "/home/max/Scratchpad/5-Oct-2026_Mass-Review/exec/work/hermes-goal/U2e/evidence/full/aee316aee72e.log"
+        },
+        {
+          "file": "tests/agent/test_async_token_accounting.py",
+          "finished": "2026-10-06 19:07:22 CDT",
+          "summary": "15 passed in 20.64s",
+          "log": "/home/max/Scratchpad/5-Oct-2026_Mass-Review/exec/work/hermes-goal/U2e/evidence/full/e37718d55951.log"
+        },
+        {
+          "file": "tests/agent/test_async_utils.py",
+          "finished": "2026-10-06 19:07:05 CDT",
+          "summary": "2 passed in 2.12s",
+          "log": "/home/max/Scratchpad/5-Oct-2026_Mass-Review/exec/work/hermes-goal/U2e/evidence/full/2da1a846d597.log"
+        },
+        {
+          "file": "tests/agent/test_auth_provider_failover.py",
+          "finished": "2026-10-06 19:07:12 CDT",
+          "summary": "3 passed in 8.10s",
+          "log": "/home/max/Scratchpad/5-Oct-2026_Mass-Review/exec/work/hermes-goal/U2e/evidence/full/2de14c2d04c7.log"
+        },
+        {
+          "file": "tests/agent/test_authorization_gate.py",
+          "finished": "2026-10-06 19:07:14 CDT",
+          "summary": "15 passed in 8.96s",
+          "log": "/home/max/Scratchpad/5-Oct-2026_Mass-Review/exec/work/hermes-goal/U2e/evidence/full/6b69c4639570.log"
+        },
+        {
+          "file": "tests/agent/test_aux_affordable_402_retry.py",
+          "finished": "2026-10-06 19:07:17 CDT",
+          "summary": "13 passed in 3.96s",
+          "log": "/home/max/Scratchpad/5-Oct-2026_Mass-Review/exec/work/hermes-goal/U2e/evidence/full/4637a5c0ea49.log"
+        },
+        {
+          "file": "tests/agent/test_aux_progress_streaming.py",
+          "finished": "2026-10-06 19:07:21 CDT",
+          "summary": "50 passed in 5.53s",
+          "log": "/home/max/Scratchpad/5-Oct-2026_Mass-Review/exec/work/hermes-goal/U2e/evidence/full/8953f96e4b6b.log"
+        },
+        {
+          "file": "tests/agent/test_aux_relay_progress_seam.py",
+          "finished": "2026-10-06 19:07:21 CDT",
+          "summary": "3 passed in 3.13s",
+          "log": "/home/max/Scratchpad/5-Oct-2026_Mass-Review/exec/work/hermes-goal/U2e/evidence/full/1175a55567fa.log"
+        },
+        {
+          "file": "tests/agent/test_aux_session_endpoint_affinity.py",
+          "finished": "2026-10-06 19:07:26 CDT",
+          "summary": "6 passed in 3.86s",
+          "log": "/home/max/Scratchpad/5-Oct-2026_Mass-Review/exec/work/hermes-goal/U2e/evidence/full/c7a10927ce3c.log"
+        },
+        {
+          "file": "tests/agent/test_aux_stream_host_deadline.py",
+          "finished": "2026-10-06 23:14:48 CDT",
+          "summary": "9 passed in 2.66s",
+          "log": "/home/max/Scratchpad/5-Oct-2026_Mass-Review/exec/work/hermes-goal/U2e/evidence/retry04/40777a3d8749.log"
+        },
+        {
+          "file": "tests/agent/test_aux_stream_host_deadline_sibling_wires.py",
+          "finished": "2026-10-06 23:14:48 CDT",
+          "summary": "5 passed in 3.16s",
+          "log": "/home/max/Scratchpad/5-Oct-2026_Mass-Review/exec/work/hermes-goal/U2e/evidence/retry04/74a481e0350b.log"
+        },
+        {
+          "file": "tests/agent/test_auxiliary_anthropic_pool_fallback_regression.py",
+          "finished": "2026-10-06 19:07:26 CDT",
+          "summary": "3 passed in 2.66s",
+          "log": "/home/max/Scratchpad/5-Oct-2026_Mass-Review/exec/work/hermes-goal/U2e/evidence/full/a3057934005b.log"
+        },
+        {
+          "file": "tests/agent/test_auxiliary_auth_rung_fallthrough.py",
+          "finished": "2026-10-06 19:07:30 CDT",
+          "summary": "8 passed in 4.79s",
+          "log": "/home/max/Scratchpad/5-Oct-2026_Mass-Review/exec/work/hermes-goal/U2e/evidence/full/840d8522a291.log"
+        },
+        {
+          "file": "tests/agent/test_auxiliary_auto_never_guesses_provider.py",
+          "finished": "2026-10-06 19:07:29 CDT",
+          "summary": "4 passed in 2.47s",
+          "log": "/home/max/Scratchpad/5-Oct-2026_Mass-Review/exec/work/hermes-goal/U2e/evidence/full/42786d7885bd.log"
+        },
+        {
+          "file": "tests/agent/test_auxiliary_auto_route_xai_oauth_refresh.py",
+          "finished": "2026-10-06 19:07:29 CDT",
+          "summary": "5 passed in 2.25s",
+          "log": "/home/max/Scratchpad/5-Oct-2026_Mass-Review/exec/work/hermes-goal/U2e/evidence/full/9d5a938bf43e.log"
+        },
+        {
+          "file": "tests/agent/test_auxiliary_client.py",
+          "finished": "2026-10-06 23:16:36 CDT",
+          "summary": "219 passed in 110.26s (0:01:50)",
+          "log": "/home/max/Scratchpad/5-Oct-2026_Mass-Review/exec/work/hermes-goal/U2e/evidence/retry04/8db1aedfcd7a.log"
+        },
+        {
+          "file": "tests/agent/test_auxiliary_client_anthropic_custom.py",
+          "finished": "2026-10-06 19:07:34 CDT",
+          "summary": "3 passed in 3.73s",
+          "log": "/home/max/Scratchpad/5-Oct-2026_Mass-Review/exec/work/hermes-goal/U2e/evidence/full/ec4c2ed52019.log"
+        },
+        {
+          "file": "tests/agent/test_auxiliary_client_azure_foundry.py",
+          "finished": "2026-10-06 19:07:34 CDT",
+          "summary": "10 passed in 4.14s",
+          "log": "/home/max/Scratchpad/5-Oct-2026_Mass-Review/exec/work/hermes-goal/U2e/evidence/full/2d2040aee1c7.log"
+        },
+        {
+          "file": "tests/agent/test_auxiliary_client_base_url_host_validation.py",
+          "finished": "2026-10-06 19:07:34 CDT",
+          "summary": "7 passed in 3.15s",
+          "log": "/home/max/Scratchpad/5-Oct-2026_Mass-Review/exec/work/hermes-goal/U2e/evidence/full/af654ebe4cf7.log"
+        },
+        {
+          "file": "tests/agent/test_auxiliary_client_bootstrap_skew.py",
+          "finished": "2026-10-06 19:07:36 CDT",
+          "summary": "2 passed in 1.97s",
+          "log": "/home/max/Scratchpad/5-Oct-2026_Mass-Review/exec/work/hermes-goal/U2e/evidence/full/3bd4c8564e96.log"
+        },
+        {
+          "file": "tests/agent/test_auxiliary_client_cache_eviction.py",
+          "finished": "2026-10-06 19:07:39 CDT",
+          "summary": "4 passed in 3.76s",
+          "log": "/home/max/Scratchpad/5-Oct-2026_Mass-Review/exec/work/hermes-goal/U2e/evidence/full/262d1796c080.log"
+        },
+        {
+          "file": "tests/agent/test_auxiliary_client_cache_follows_credential.py",
+          "finished": "2026-10-06 19:07:40 CDT",
+          "summary": "4 passed in 5.02s",
+          "log": "/home/max/Scratchpad/5-Oct-2026_Mass-Review/exec/work/hermes-goal/U2e/evidence/full/67e900149057.log"
+        },
+        {
+          "file": "tests/agent/test_auxiliary_client_nous_401_cache_key.py",
+          "finished": "2026-10-06 19:07:41 CDT",
+          "summary": "2 passed in 5.44s",
+          "log": "/home/max/Scratchpad/5-Oct-2026_Mass-Review/exec/work/hermes-goal/U2e/evidence/full/8f5c2064b423.log"
+        },
+        {
+          "file": "tests/agent/test_auxiliary_client_proxy_env.py",
+          "finished": "2026-10-06 19:07:40 CDT",
+          "summary": "2 passed in 2.51s",
+          "log": "/home/max/Scratchpad/5-Oct-2026_Mass-Review/exec/work/hermes-goal/U2e/evidence/full/2010b07445d0.log"
+        },
+        {
+          "file": "tests/agent/test_auxiliary_client_resolve_dedup.py",
+          "finished": "2026-10-06 19:07:43 CDT",
+          "summary": "3 passed in 3.08s",
+          "log": "/home/max/Scratchpad/5-Oct-2026_Mass-Review/exec/work/hermes-goal/U2e/evidence/full/dd9751e5a3f4.log"
+        },
+        {
+          "file": "tests/agent/test_auxiliary_client_ssl_verify.py",
+          "finished": "2026-10-06 19:07:43 CDT",
+          "summary": "2 passed in 2.51s",
+          "log": "/home/max/Scratchpad/5-Oct-2026_Mass-Review/exec/work/hermes-goal/U2e/evidence/full/59dd86ead61b.log"
+        },
+        {
+          "file": "tests/agent/test_auxiliary_client_xai_oauth_recovery.py",
+          "finished": "2026-10-06 19:07:43 CDT",
+          "summary": "8 passed in 2.54s",
+          "log": "/home/max/Scratchpad/5-Oct-2026_Mass-Review/exec/work/hermes-goal/U2e/evidence/full/3a5ffefd6d52.log"
+        },
+        {
+          "file": "tests/agent/test_auxiliary_compression_timeout_floor.py",
+          "finished": "2026-10-06 19:07:50 CDT",
+          "summary": "5 passed in 7.58s",
+          "log": "/home/max/Scratchpad/5-Oct-2026_Mass-Review/exec/work/hermes-goal/U2e/evidence/full/0700bcfaa377.log"
+        },
+        {
+          "file": "tests/agent/test_auxiliary_concurrency.py",
+          "finished": "2026-10-06 19:07:51 CDT",
+          "summary": "11 passed in 7.84s",
+          "log": "/home/max/Scratchpad/5-Oct-2026_Mass-Review/exec/work/hermes-goal/U2e/evidence/full/aa76d85b174f.log"
+        },
+        {
+          "file": "tests/agent/test_auxiliary_error_classification.py",
+          "finished": "2026-10-06 19:07:49 CDT",
+          "summary": "6 passed in 5.73s",
+          "log": "/home/max/Scratchpad/5-Oct-2026_Mass-Review/exec/work/hermes-goal/U2e/evidence/full/e9b7c8221019.log"
+        },
+        {
+          "file": "tests/agent/test_auxiliary_explicit_base_anthropic.py",
+          "finished": "2026-10-06 19:07:48 CDT",
+          "summary": "4 passed in 3.49s",
+          "log": "/home/max/Scratchpad/5-Oct-2026_Mass-Review/exec/work/hermes-goal/U2e/evidence/full/96731196acd2.log"
+        },
+        {
+          "file": "tests/agent/test_auxiliary_explicit_cancellation.py",
+          "finished": "2026-10-06 23:14:53 CDT",
+          "summary": "13 passed in 4.14s",
+          "log": "/home/max/Scratchpad/5-Oct-2026_Mass-Review/exec/work/hermes-goal/U2e/evidence/retry04/bbc2b7a5216f.log"
+        },
+        {
+          "file": "tests/agent/test_auxiliary_fallback_multihop.py",
+          "finished": "2026-10-06 19:07:57 CDT",
+          "summary": "3 passed in 6.85s",
+          "log": "/home/max/Scratchpad/5-Oct-2026_Mass-Review/exec/work/hermes-goal/U2e/evidence/full/e91756029b2e.log"
+        },
+        {
+          "file": "tests/agent/test_auxiliary_hooks.py",
+          "finished": "2026-10-06 19:07:55 CDT",
+          "summary": "2 passed in 4.71s",
+          "log": "/home/max/Scratchpad/5-Oct-2026_Mass-Review/exec/work/hermes-goal/U2e/evidence/full/6a35718bdd4d.log"
+        },
+        {
+          "file": "tests/agent/test_auxiliary_main_first.py",
+          "finished": "2026-10-06 19:08:00 CDT",
+          "summary": "16 passed in 7.33s",
+          "log": "/home/max/Scratchpad/5-Oct-2026_Mass-Review/exec/work/hermes-goal/U2e/evidence/full/be5748e04f48.log"
+        },
+        {
+          "file": "tests/agent/test_auxiliary_named_custom_providers.py",
+          "finished": "2026-10-06 19:09:02 CDT",
+          "summary": "25 passed in 69.51s (0:01:09)",
+          "log": "/home/max/Scratchpad/5-Oct-2026_Mass-Review/exec/work/hermes-goal/U2e/evidence/full/6339e19abb0f.log"
+        },
+        {
+          "file": "tests/agent/test_auxiliary_ollama_local_provider.py",
+          "finished": "2026-10-06 19:08:00 CDT",
+          "summary": "4 passed in 3.52s",
+          "log": "/home/max/Scratchpad/5-Oct-2026_Mass-Review/exec/work/hermes-goal/U2e/evidence/full/707f215ee7c4.log"
+        },
+        {
+          "file": "tests/agent/test_auxiliary_opencode_routing.py",
+          "finished": "2026-10-06 19:08:58 CDT",
+          "summary": "10 passed in 60.10s (0:01:00)",
+          "log": "/home/max/Scratchpad/5-Oct-2026_Mass-Review/exec/work/hermes-goal/U2e/evidence/full/d69b9ea696a9.log"
+        },
+        {
+          "file": "tests/agent/test_auxiliary_openrouter_max_tokens.py",
+          "finished": "2026-10-06 19:08:58 CDT",
+          "summary": "5 passed in 56.85s",
+          "log": "/home/max/Scratchpad/5-Oct-2026_Mass-Review/exec/work/hermes-goal/U2e/evidence/full/a8dbc2f78a1f.log"
+        },
+        {
+          "file": "tests/agent/test_auxiliary_parameter_rung_chaining.py",
+          "finished": "2026-10-06 19:09:00 CDT",
+          "summary": "5 passed in 59.38s",
+          "log": "/home/max/Scratchpad/5-Oct-2026_Mass-Review/exec/work/hermes-goal/U2e/evidence/full/5967d661a0fb.log"
+        },
+        {
+          "file": "tests/agent/test_auxiliary_provider_supplied_client.py",
+          "finished": "2026-10-06 19:09:03 CDT",
+          "summary": "4 passed in 4.58s",
+          "log": "/home/max/Scratchpad/5-Oct-2026_Mass-Review/exec/work/hermes-goal/U2e/evidence/full/73928c1d6916.log"
+        },
+        {
+          "file": "tests/agent/test_auxiliary_reasoning_catalog_floor.py",
+          "finished": "2026-10-06 19:09:05 CDT",
+          "summary": "2 passed in 6.25s",
+          "log": "/home/max/Scratchpad/5-Oct-2026_Mass-Review/exec/work/hermes-goal/U2e/evidence/full/aa52b6f18b06.log"
+        },
+        {
+          "file": "tests/agent/test_auxiliary_reasoning_field_rejection_retry.py",
+          "finished": "2026-10-06 19:09:09 CDT",
+          "summary": "4 passed in 8.94s",
+          "log": "/home/max/Scratchpad/5-Oct-2026_Mass-Review/exec/work/hermes-goal/U2e/evidence/full/0df1fd7cc087.log"
+        },
+        {
+          "file": "tests/agent/test_auxiliary_reasoning_floor.py",
+          "finished": "2026-10-06 19:09:07 CDT",
+          "summary": "2 passed in 5.90s",
+          "log": "/home/max/Scratchpad/5-Oct-2026_Mass-Review/exec/work/hermes-goal/U2e/evidence/full/2ff1ba4c2120.log"
+        },
+        {
+          "file": "tests/agent/test_auxiliary_relay.py",
+          "finished": "2026-10-06 19:09:16 CDT",
+          "summary": "7 passed in 12.65s",
+          "log": "/home/max/Scratchpad/5-Oct-2026_Mass-Review/exec/work/hermes-goal/U2e/evidence/full/eca30d6faf66.log"
+        },
+        {
+          "file": "tests/agent/test_auxiliary_runtime_cache_key.py",
+          "finished": "2026-10-06 19:09:08 CDT",
+          "summary": "5 passed in 4.17s",
+          "log": "/home/max/Scratchpad/5-Oct-2026_Mass-Review/exec/work/hermes-goal/U2e/evidence/full/cf7b12a62a2a.log"
+        },
+        {
+          "file": "tests/agent/test_auxiliary_structured_output.py",
+          "finished": "2026-10-06 19:09:13 CDT",
+          "summary": "4 passed in 6.81s",
+          "log": "/home/max/Scratchpad/5-Oct-2026_Mass-Review/exec/work/hermes-goal/U2e/evidence/full/41a71bff43a6.log"
+        },
+        {
+          "file": "tests/agent/test_auxiliary_title_timeout_bound.py",
+          "finished": "2026-10-06 19:09:13 CDT",
+          "summary": "1 passed in 4.74s",
+          "log": "/home/max/Scratchpad/5-Oct-2026_Mass-Review/exec/work/hermes-goal/U2e/evidence/full/712a4128f405.log"
+        },
+        {
+          "file": "tests/agent/test_auxiliary_transient_retry.py",
+          "finished": "2026-10-06 19:09:12 CDT",
+          "summary": "1 passed in 2.98s",
+          "log": "/home/max/Scratchpad/5-Oct-2026_Mass-Review/exec/work/hermes-goal/U2e/evidence/full/df3e17b1eadf.log"
+        },
+        {
+          "file": "tests/agent/test_auxiliary_transport_autodetect.py",
+          "finished": "2026-10-06 19:09:15 CDT",
+          "summary": "15 passed in 4.68s",
+          "log": "/home/max/Scratchpad/5-Oct-2026_Mass-Review/exec/work/hermes-goal/U2e/evidence/full/4b688fe62ed8.log"
+        },
+        {
+          "file": "tests/agent/test_auxiliary_unavailable_nous_reason.py",
+          "finished": "2026-10-06 19:09:16 CDT",
+          "summary": "3 passed in 3.34s",
+          "log": "/home/max/Scratchpad/5-Oct-2026_Mass-Review/exec/work/hermes-goal/U2e/evidence/full/ae030400799b.log"
+        },
+        {
+          "file": "tests/agent/test_auxiliary_user_default_headers.py",
+          "finished": "2026-10-06 19:09:18 CDT",
+          "summary": "4 passed in 3.51s",
+          "log": "/home/max/Scratchpad/5-Oct-2026_Mass-Review/exec/work/hermes-goal/U2e/evidence/full/77f6c000172d.log"
+        },
+        {
+          "file": "tests/agent/test_auxiliary_wire_messages.py",
+          "finished": "2026-10-06 19:09:18 CDT",
+          "summary": "4 passed in 3.31s",
+          "log": "/home/max/Scratchpad/5-Oct-2026_Mass-Review/exec/work/hermes-goal/U2e/evidence/full/f0e45d45707b.log"
+        },
+        {
+          "file": "tests/agent/test_azure_identity_adapter.py",
+          "finished": "2026-10-06 19:09:19 CDT",
+          "summary": "13 passed in 2.85s",
+          "log": "/home/max/Scratchpad/5-Oct-2026_Mass-Review/exec/work/hermes-goal/U2e/evidence/full/1a045e277faa.log"
+        },
+        {
+          "file": "tests/agent/test_backend_identity.py",
+          "finished": "2026-10-06 19:09:19 CDT",
+          "summary": "13 passed in 2.84s",
+          "log": "/home/max/Scratchpad/5-Oct-2026_Mass-Review/exec/work/hermes-goal/U2e/evidence/full/0d17f654aea0.log"
+        },
+        {
+          "file": "tests/agent/test_background_review.py",
+          "finished": "2026-10-06 19:09:24 CDT",
+          "summary": "15 passed in 6.50s",
+          "log": "/home/max/Scratchpad/5-Oct-2026_Mass-Review/exec/work/hermes-goal/U2e/evidence/full/a67232c1137f.log"
+        },
+        {
+          "file": "tests/agent/test_background_review_cache_parity.py",
+          "finished": "2026-10-06 19:09:32 CDT",
+          "summary": "12 passed in 12.79s",
+          "log": "/home/max/Scratchpad/5-Oct-2026_Mass-Review/exec/work/hermes-goal/U2e/evidence/full/a1bfc881752c.log"
+        },
+        {
+          "file": "tests/agent/test_background_review_cost_controls.py",
+          "finished": "2026-10-06 19:09:21 CDT",
+          "summary": "10 passed in 2.54s",
+          "log": "/home/max/Scratchpad/5-Oct-2026_Mass-Review/exec/work/hermes-goal/U2e/evidence/full/a24e55b92350.log"
+        },
+        {
+          "file": "tests/agent/test_background_review_input_budget.py",
+          "finished": "2026-10-06 19:09:29 CDT",
+          "summary": "9 passed in 8.74s",
+          "log": "/home/max/Scratchpad/5-Oct-2026_Mass-Review/exec/work/hermes-goal/U2e/evidence/full/c140e2029bb1.log"
+        },
+        {
+          "file": "tests/agent/test_background_review_list_shapes.py",
+          "finished": "2026-10-06 19:09:22 CDT",
+          "summary": "3 passed in 2.32s",
+          "log": "/home/max/Scratchpad/5-Oct-2026_Mass-Review/exec/work/hermes-goal/U2e/evidence/full/8e493bb626b1.log"
+        },
+        {
+          "file": "tests/agent/test_background_review_memory_scope.py",
+          "finished": "2026-10-06 19:09:29 CDT",
+          "summary": "10 passed in 7.21s",
+          "log": "/home/max/Scratchpad/5-Oct-2026_Mass-Review/exec/work/hermes-goal/U2e/evidence/full/fbc7d136fa18.log"
+        },
+        {
+          "file": "tests/agent/test_background_review_routed_effort.py",
+          "finished": "2026-10-06 19:09:27 CDT",
+          "summary": "2 passed in 4.23s",
+          "log": "/home/max/Scratchpad/5-Oct-2026_Mass-Review/exec/work/hermes-goal/U2e/evidence/full/8111b32a8e43.log"
+        },
+        {
+          "file": "tests/agent/test_background_review_summary.py",
+          "finished": "2026-10-06 19:09:29 CDT",
+          "summary": "5 passed in 4.32s",
+          "log": "/home/max/Scratchpad/5-Oct-2026_Mass-Review/exec/work/hermes-goal/U2e/evidence/full/eefd84293116.log"
+        },
+        {
+          "file": "tests/agent/test_background_review_tool_call_guard.py",
+          "finished": "2026-10-06 19:09:33 CDT",
+          "summary": "4 passed in 4.72s",
+          "log": "/home/max/Scratchpad/5-Oct-2026_Mass-Review/exec/work/hermes-goal/U2e/evidence/full/b5f8dfc2c9b0.log"
+        },
+        {
+          "file": "tests/agent/test_background_review_toolset_restriction.py",
+          "finished": "2026-10-06 19:09:35 CDT",
+          "summary": "5 passed in 5.31s",
+          "log": "/home/max/Scratchpad/5-Oct-2026_Mass-Review/exec/work/hermes-goal/U2e/evidence/full/e6f24f201be5.log"
+        },
+        {
+          "file": "tests/agent/test_background_review_usage.py",
+          "finished": "2026-10-06 19:09:33 CDT",
+          "summary": "8 passed in 3.57s",
+          "log": "/home/max/Scratchpad/5-Oct-2026_Mass-Review/exec/work/hermes-goal/U2e/evidence/full/1fc728b0a33d.log"
+        },
+        {
+          "file": "tests/agent/test_battery.py",
+          "finished": "2026-10-06 19:09:32 CDT",
+          "summary": "10 passed in 1.97s",
+          "log": "/home/max/Scratchpad/5-Oct-2026_Mass-Review/exec/work/hermes-goal/U2e/evidence/full/47f95740c44b.log"
+        },
+        {
+          "file": "tests/agent/test_bedrock_1m_context.py",
+          "finished": "2026-10-06 19:09:34 CDT",
+          "summary": "2 passed in 2.03s",
+          "log": "/home/max/Scratchpad/5-Oct-2026_Mass-Review/exec/work/hermes-goal/U2e/evidence/full/18e59d665c67.log"
+        },
+        {
+          "file": "tests/agent/test_bedrock_adapter.py",
+          "finished": "2026-10-06 19:09:39 CDT",
+          "summary": "81 passed in 5.92s",
+          "log": "/home/max/Scratchpad/5-Oct-2026_Mass-Review/exec/work/hermes-goal/U2e/evidence/full/4d86eae03e44.log"
+        },
+        {
+          "file": "tests/agent/test_bedrock_context_cache.py",
+          "finished": "2026-10-06 19:10:25 CDT",
+          "summary": "51 passed in 51.46s",
+          "log": "/home/max/Scratchpad/5-Oct-2026_Mass-Review/exec/work/hermes-goal/U2e/evidence/full/1f3a90db0dd0.log"
+        },
+        {
+          "file": "tests/agent/test_bedrock_empty_text_blocks.py",
+          "finished": "2026-10-06 19:09:36 CDT",
+          "summary": "3 passed in 1.77s",
+          "log": "/home/max/Scratchpad/5-Oct-2026_Mass-Review/exec/work/hermes-goal/U2e/evidence/full/1f1f34f5dcb8.log"
+        },
+        {
+          "file": "tests/agent/test_bedrock_guardrail_claude_route.py",
+          "finished": "2026-10-06 19:09:37 CDT",
+          "summary": "2 passed in 2.52s",
+          "log": "/home/max/Scratchpad/5-Oct-2026_Mass-Review/exec/work/hermes-goal/U2e/evidence/full/2936a5a0c81b.log"
+        },
+        {
+          "file": "tests/agent/test_bedrock_integration.py",
+          "finished": "2026-10-06 19:09:46 CDT",
+          "summary": "23 passed in 10.09s",
+          "log": "/home/max/Scratchpad/5-Oct-2026_Mass-Review/exec/work/hermes-goal/U2e/evidence/full/c80ed3febf7a.log"
+        },
+        {
+          "file": "tests/agent/test_bedrock_interrupt_post_worker.py",
+          "finished": "2026-10-06 19:09:39 CDT",
+          "summary": "2 passed in 2.42s",
+          "log": "/home/max/Scratchpad/5-Oct-2026_Mass-Review/exec/work/hermes-goal/U2e/evidence/full/ae0c80aaf639.log"
+        },
+        {
+          "file": "tests/agent/test_bedrock_stream_completion.py",
+          "finished": "2026-10-06 19:09:41 CDT",
+          "summary": "3 passed in 3.23s",
+          "log": "/home/max/Scratchpad/5-Oct-2026_Mass-Review/exec/work/hermes-goal/U2e/evidence/full/d8b3ceb9226b.log"
+        },
+        {
+          "file": "tests/agent/test_bedrock_transport_replay.py",
+          "finished": "2026-10-06 19:09:40 CDT",
+          "summary": "2 passed in 2.08s",
+          "log": "/home/max/Scratchpad/5-Oct-2026_Mass-Review/exec/work/hermes-goal/U2e/evidence/full/1b933c390526.log"
+        },
+        {
+          "file": "tests/agent/test_billing_links.py",
+          "finished": "2026-10-06 19:09:41 CDT",
+          "summary": "2 passed in 1.86s",
+          "log": "/home/max/Scratchpad/5-Oct-2026_Mass-Review/exec/work/hermes-goal/U2e/evidence/full/11ae4a4bb9fc.log"
+        },
+        {
+          "file": "tests/agent/test_billing_unverified_carrythrough.py",
+          "finished": "2026-10-06 19:09:49 CDT",
+          "summary": "5 passed in 8.62s",
+          "log": "/home/max/Scratchpad/5-Oct-2026_Mass-Review/exec/work/hermes-goal/U2e/evidence/full/dbc0f81b8186.log"
+        },
+        {
+          "file": "tests/agent/test_billing_usage.py",
+          "finished": "2026-10-06 19:09:43 CDT",
+          "summary": "8 passed in 2.53s",
+          "log": "/home/max/Scratchpad/5-Oct-2026_Mass-Review/exec/work/hermes-goal/U2e/evidence/full/411b54d9bea3.log"
+        },
+        {
+          "file": "tests/agent/test_billing_view.py",
+          "finished": "2026-10-06 19:09:46 CDT",
+          "summary": "26 passed in 3.69s",
+          "log": "/home/max/Scratchpad/5-Oct-2026_Mass-Review/exec/work/hermes-goal/U2e/evidence/full/a75834c21097.log"
+        },
+        {
+          "file": "tests/agent/test_bitwarden_secrets.py",
+          "finished": "2026-10-06 19:09:45 CDT",
+          "summary": "7 passed in 3.34s",
+          "log": "/home/max/Scratchpad/5-Oct-2026_Mass-Review/exec/work/hermes-goal/U2e/evidence/full/6f3e01fc2ae7.log"
+        },
+        {
+          "file": "tests/agent/test_bot_profile_prompt_isolation.py",
+          "finished": "2026-10-06 19:09:46 CDT",
+          "summary": "6 passed in 2.32s",
+          "log": "/home/max/Scratchpad/5-Oct-2026_Mass-Review/exec/work/hermes-goal/U2e/evidence/full/f16bbcabc3a2.log"
+        },
+        {
+          "file": "tests/agent/test_bounded_response.py",
+          "finished": "2026-10-06 19:09:49 CDT",
+          "summary": "1 passed in 2.84s",
+          "log": "/home/max/Scratchpad/5-Oct-2026_Mass-Review/exec/work/hermes-goal/U2e/evidence/full/807528a67f4a.log"
+        },
+        {
+          "file": "tests/agent/test_budget_reasoning_details_exclusion.py",
+          "finished": "2026-10-06 19:09:49 CDT",
+          "summary": "8 passed in 2.29s",
+          "log": "/home/max/Scratchpad/5-Oct-2026_Mass-Review/exec/work/hermes-goal/U2e/evidence/full/dae2074ef88b.log"
+        },
+        {
+          "file": "tests/agent/test_builtin_memory_disabled_surface.py",
+          "finished": "2026-10-06 19:09:54 CDT",
+          "summary": "19 passed in 6.53s",
+          "log": "/home/max/Scratchpad/5-Oct-2026_Mass-Review/exec/work/hermes-goal/U2e/evidence/full/35dcad44714f.log"
+        },
+        {
+          "file": "tests/agent/test_cache_disabled_on_stubs.py",
+          "finished": "2026-10-06 19:09:49 CDT",
+          "summary": "9 passed in 2.21s",
+          "log": "/home/max/Scratchpad/5-Oct-2026_Mass-Review/exec/work/hermes-goal/U2e/evidence/full/da6e5d2ae02b.log"
+        },
+        {
+          "file": "tests/agent/test_callable_api_key.py",
+          "finished": "2026-10-06 19:09:55 CDT",
+          "summary": "6 passed in 5.25s",
+          "log": "/home/max/Scratchpad/5-Oct-2026_Mass-Review/exec/work/hermes-goal/U2e/evidence/full/1322c553f5b1.log"
+        },
+        {
+          "file": "tests/agent/test_canon_args_memo_parity.py",
+          "finished": "2026-10-06 19:09:55 CDT",
+          "summary": "12 passed in 5.47s",
+          "log": "/home/max/Scratchpad/5-Oct-2026_Mass-Review/exec/work/hermes-goal/U2e/evidence/full/81739a5f1522.log"
+        },
+        {
+          "file": "tests/agent/test_capability_probe_credentials.py",
+          "finished": "2026-10-06 19:09:52 CDT",
+          "summary": "3 passed in 2.27s",
+          "log": "/home/max/Scratchpad/5-Oct-2026_Mass-Review/exec/work/hermes-goal/U2e/evidence/full/7d8b8fbc1382.log"
+        },
+        {
+          "file": "tests/agent/test_cascading_interrupt.py",
+          "finished": "2026-10-06 19:09:55 CDT",
+          "summary": "2 passed in 4.96s",
+          "log": "/home/max/Scratchpad/5-Oct-2026_Mass-Review/exec/work/hermes-goal/U2e/evidence/full/fdf7d8357a4b.log"
+        },
+        {
+          "file": "tests/agent/test_chat_completion_helpers_provider_sort.py",
+          "finished": "2026-10-06 19:09:55 CDT",
+          "summary": "2 passed in 1.96s",
+          "log": "/home/max/Scratchpad/5-Oct-2026_Mass-Review/exec/work/hermes-goal/U2e/evidence/full/ca2ad1c6e029.log"
+        },
+        {
+          "file": "tests/agent/test_chat_sdk_transform_bypass.py",
+          "finished": "2026-10-06 19:09:59 CDT",
+          "summary": "5 passed in 4.14s",
+          "log": "/home/max/Scratchpad/5-Oct-2026_Mass-Review/exec/work/hermes-goal/U2e/evidence/full/78ca0c14d6b0.log"
+        },
+        {
+          "file": "tests/agent/test_cjk_token_estimation.py",
+          "finished": "2026-10-06 19:09:58 CDT",
+          "summary": "7 passed in 2.24s",
+          "log": "/home/max/Scratchpad/5-Oct-2026_Mass-Review/exec/work/hermes-goal/U2e/evidence/full/142f9f1b8c7a.log"
+        },
+        {
+          "file": "tests/agent/test_claude_code_version_path.py",
+          "finished": "2026-10-06 19:09:57 CDT",
+          "summary": "2 passed in 2.04s",
+          "log": "/home/max/Scratchpad/5-Oct-2026_Mass-Review/exec/work/hermes-goal/U2e/evidence/full/17d56e30fbcd.log"
+        },
+        {
+          "file": "tests/agent/test_close_interrupted_tool_sequence.py",
+          "finished": "2026-10-06 19:09:57 CDT",
+          "summary": "3 passed in 1.97s",
+          "log": "/home/max/Scratchpad/5-Oct-2026_Mass-Review/exec/work/hermes-goal/U2e/evidence/full/b9dac057fc2b.log"
+        },
+        {
+          "file": "tests/agent/test_codex_app_server_compaction.py",
+          "finished": "2026-10-06 19:09:59 CDT",
+          "summary": "9 passed in 2.69s",
+          "log": "/home/max/Scratchpad/5-Oct-2026_Mass-Review/exec/work/hermes-goal/U2e/evidence/full/a59712a3cc3c.log"
+        },
+        {
+          "file": "tests/agent/test_codex_app_server_event_bridge.py",
+          "finished": "2026-10-06 19:10:01 CDT",
+          "summary": "34 passed in 3.48s",
+          "log": "/home/max/Scratchpad/5-Oct-2026_Mass-Review/exec/work/hermes-goal/U2e/evidence/full/7cff2e281574.log"
+        },
+        {
+          "file": "tests/agent/test_codex_app_server_integration.py",
+          "finished": "2026-10-06 19:11:03 CDT",
+          "summary": "1 failed, 25 passed in 63.95s (0:01:03)",
+          "log": "/home/max/Scratchpad/5-Oct-2026_Mass-Review/exec/work/hermes-goal/U2e/evidence/full/d16598f7b873.log"
+        },
+        {
+          "file": "tests/agent/test_codex_app_server_lifecycle.py",
+          "finished": "2026-10-06 19:10:03 CDT",
+          "summary": "4 passed in 4.80s",
+          "log": "/home/max/Scratchpad/5-Oct-2026_Mass-Review/exec/work/hermes-goal/U2e/evidence/full/8bfbd0e6290f.log"
+        },
+        {
+          "file": "tests/agent/test_codex_app_server_persist.py",
+          "finished": "2026-10-06 19:10:09 CDT",
+          "summary": "3 passed in 9.41s",
+          "log": "/home/max/Scratchpad/5-Oct-2026_Mass-Review/exec/work/hermes-goal/U2e/evidence/full/c33772cd95c3.log"
+        },
+        {
+          "file": "tests/agent/test_codex_app_server_thread_resume.py",
+          "finished": "2026-10-06 19:10:12 CDT",
+          "summary": "1 passed in 11.81s",
+          "log": "/home/max/Scratchpad/5-Oct-2026_Mass-Review/exec/work/hermes-goal/U2e/evidence/full/fb30fa314f28.log"
+        },
+        {
+          "file": "tests/agent/test_codex_aux_no_progress_timeout.py",
+          "finished": "2026-10-06 19:10:12 CDT",
+          "summary": "8 passed in 9.46s",
+          "log": "/home/max/Scratchpad/5-Oct-2026_Mass-Review/exec/work/hermes-goal/U2e/evidence/full/a6c3f3c4789e.log"
+        },
+        {
+          "file": "tests/agent/test_codex_aux_timeout_fd_ownership.py",
+          "finished": "2026-10-06 19:10:07 CDT",
+          "summary": "2 passed in 3.44s",
+          "log": "/home/max/Scratchpad/5-Oct-2026_Mass-Review/exec/work/hermes-goal/U2e/evidence/full/2d782d851697.log"
+        },
+        {
+          "file": "tests/agent/test_codex_cloudflare_headers.py",
+          "finished": "2026-10-06 19:10:25 CDT",
+          "summary": "8 passed in 16.66s",
+          "log": "/home/max/Scratchpad/5-Oct-2026_Mass-Review/exec/work/hermes-goal/U2e/evidence/full/0c1aae5c063a.log"
+        },
+        {
+          "file": "tests/agent/test_codex_echo_ownership.py",
+          "finished": "2026-10-06 19:10:20 CDT",
+          "summary": "8 passed in 10.26s",
+          "log": "/home/max/Scratchpad/5-Oct-2026_Mass-Review/exec/work/hermes-goal/U2e/evidence/full/63a4aa47b4b2.log"
+        },
+        {
+          "file": "tests/agent/test_codex_first_event_timing.py",
+          "finished": "2026-10-06 19:10:16 CDT",
+          "summary": "3 passed in 3.54s",
+          "log": "/home/max/Scratchpad/5-Oct-2026_Mass-Review/exec/work/hermes-goal/U2e/evidence/full/21bd14f14f40.log"
+        },
+        {
+          "file": "tests/agent/test_codex_gpt55_autoraise_notice.py",
+          "finished": "2026-10-06 19:10:27 CDT",
+          "summary": "1 failed, 2 passed in 13.89s",
+          "log": "/home/max/Scratchpad/5-Oct-2026_Mass-Review/exec/work/hermes-goal/U2e/evidence/full/7de1cc1ff07b.log"
+        },
+        {
+          "file": "tests/agent/test_codex_happy_eyeballs.py",
+          "finished": "2026-10-06 19:10:26 CDT",
+          "summary": "7 passed in 8.37s",
+          "log": "/home/max/Scratchpad/5-Oct-2026_Mass-Review/exec/work/hermes-goal/U2e/evidence/full/34340aeaeb3c.log"
+        },
+        {
+          "file": "tests/agent/test_codex_incomplete_budget_escalation.py",
+          "finished": "2026-10-06 19:10:25 CDT",
+          "summary": "2 passed in 3.23s",
+          "log": "/home/max/Scratchpad/5-Oct-2026_Mass-Review/exec/work/hermes-goal/U2e/evidence/full/61fb2ecb0203.log"
+        },
+        {
+          "file": "tests/agent/test_codex_model_entitlement_rotation.py",
+          "finished": "2026-10-06 19:10:31 CDT",
+          "summary": "2 passed in 5.65s",
+          "log": "/home/max/Scratchpad/5-Oct-2026_Mass-Review/exec/work/hermes-goal/U2e/evidence/full/6d002aee9ed0.log"
+        },
+        {
+          "file": "tests/agent/test_codex_multimodal_tool_result.py",
+          "finished": "2026-10-06 19:10:28 CDT",
+          "summary": "5 passed in 2.36s",
+          "log": "/home/max/Scratchpad/5-Oct-2026_Mass-Review/exec/work/hermes-goal/U2e/evidence/full/46789b6b443d.log"
+        },
+        {
+          "file": "tests/agent/test_codex_no_tools_nonetype.py",
+          "finished": "2026-10-06 19:10:28 CDT",
+          "summary": "2 passed in 2.13s",
+          "log": "/home/max/Scratchpad/5-Oct-2026_Mass-Review/exec/work/hermes-goal/U2e/evidence/full/709a452daceb.log"
+        },
+        {
+          "file": "tests/agent/test_codex_reasoning_only_streak.py",
+          "finished": "2026-10-06 19:10:38 CDT",
+          "summary": "3 passed in 11.08s",
+          "log": "/home/max/Scratchpad/5-Oct-2026_Mass-Review/exec/work/hermes-goal/U2e/evidence/full/53c4385b00a7.log"
+        },
+        {
+          "file": "tests/agent/test_codex_request_transport_diagnostics.py",
+          "finished": "2026-10-06 19:10:37 CDT",
+          "summary": "4 passed in 8.21s",
+          "log": "/home/max/Scratchpad/5-Oct-2026_Mass-Review/exec/work/hermes-goal/U2e/evidence/full/e9316accbb03.log"
+        },
+        {
+          "file": "tests/agent/test_codex_responses_adapter.py",
+          "finished": "2026-10-06 19:10:33 CDT",
+          "summary": "49 passed in 3.57s",
+          "log": "/home/max/Scratchpad/5-Oct-2026_Mass-Review/exec/work/hermes-goal/U2e/evidence/full/ff93ae73d2a2.log"
+        },
+        {
+          "file": "tests/agent/test_codex_responses_settle_pending_tool_calls.py",
+          "finished": "2026-10-06 19:10:34 CDT",
+          "summary": "8 passed in 2.18s",
+          "log": "/home/max/Scratchpad/5-Oct-2026_Mass-Review/exec/work/hermes-goal/U2e/evidence/full/748375df536e.log"
+        },
+        {
+          "file": "tests/agent/test_codex_runtime_history_seed.py",
+          "finished": "2026-10-06 19:10:36 CDT",
+          "summary": "2 passed in 2.42s",
+          "log": "/home/max/Scratchpad/5-Oct-2026_Mass-Review/exec/work/hermes-goal/U2e/evidence/full/53b8f5922dc9.log"
+        },
+        {
+          "file": "tests/agent/test_codex_runtime_live_events.py",
+          "finished": "2026-10-06 19:10:37 CDT",
+          "summary": "2 passed in 1.78s",
+          "log": "/home/max/Scratchpad/5-Oct-2026_Mass-Review/exec/work/hermes-goal/U2e/evidence/full/7bdc066735ec.log"
+        },
+        {
+          "file": "tests/agent/test_codex_runtime_prompt_handoff.py",
+          "finished": "2026-10-06 19:10:39 CDT",
+          "summary": "3 passed in 2.21s",
+          "log": "/home/max/Scratchpad/5-Oct-2026_Mass-Review/exec/work/hermes-goal/U2e/evidence/full/34999382a743.log"
+        },
+        {
+          "file": "tests/agent/test_codex_sdk_transform_bypass.py",
+          "finished": "2026-10-06 19:10:46 CDT",
+          "summary": "8 passed in 8.01s",
+          "log": "/home/max/Scratchpad/5-Oct-2026_Mass-Review/exec/work/hermes-goal/U2e/evidence/full/563a45efe9e6.log"
+        },
+        {
+          "file": "tests/agent/test_codex_soft_failure_pool_rotation.py",
+          "finished": "2026-10-06 19:10:43 CDT",
+          "summary": "2 passed in 5.62s",
+          "log": "/home/max/Scratchpad/5-Oct-2026_Mass-Review/exec/work/hermes-goal/U2e/evidence/full/46efa8f63e08.log"
+        },
+        {
+          "file": "tests/agent/test_codex_stream_supersession.py",
+          "finished": "2026-10-06 19:10:40 CDT",
+          "summary": "2 passed in 2.72s",
+          "log": "/home/max/Scratchpad/5-Oct-2026_Mass-Review/exec/work/hermes-goal/U2e/evidence/full/af3fcf8be64d.log"
+        },
+        {
+          "file": "tests/agent/test_codex_token_expired_replay_recovery.py",
+          "finished": "2026-10-06 19:10:46 CDT",
+          "summary": "4 passed in 7.26s",
+          "log": "/home/max/Scratchpad/5-Oct-2026_Mass-Review/exec/work/hermes-goal/U2e/evidence/full/1fef9f3ae86b.log"
+        },
+        {
+          "file": "tests/agent/test_codex_ttfb_watchdog.py",
+          "finished": "2026-10-06 19:11:32 CDT",
+          "summary": "26 passed in 51.74s",
+          "log": "/home/max/Scratchpad/5-Oct-2026_Mass-Review/exec/work/hermes-goal/U2e/evidence/full/16301a701b36.log"
+        },
+        {
+          "file": "tests/agent/test_codex_usage_attribution.py",
+          "finished": "2026-10-06 19:10:53 CDT",
+          "summary": "18 passed in 11.73s",
+          "log": "/home/max/Scratchpad/5-Oct-2026_Mass-Review/exec/work/hermes-goal/U2e/evidence/full/246ab54e03e4.log"
+        },
+        {
+          "file": "tests/agent/test_codex_watchdog_reasoning_effort.py",
+          "finished": "2026-10-06 19:10:54 CDT",
+          "summary": "4 passed in 10.01s",
+          "log": "/home/max/Scratchpad/5-Oct-2026_Mass-Review/exec/work/hermes-goal/U2e/evidence/full/49c927417aca.log"
+        },
+        {
+          "file": "tests/agent/test_codex_xai_oauth_recovery.py",
+          "finished": "2026-10-06 19:11:01 CDT",
+          "summary": "14 passed in 14.54s",
+          "log": "/home/max/Scratchpad/5-Oct-2026_Mass-Review/exec/work/hermes-goal/U2e/evidence/full/3cd4a61adc45.log"
+        },
+        {
+          "file": "tests/agent/test_coding_context.py",
+          "finished": "2026-10-06 19:10:52 CDT",
+          "summary": "3 failed, 21 passed in 4.81s",
+          "log": "/home/max/Scratchpad/5-Oct-2026_Mass-Review/exec/work/hermes-goal/U2e/evidence/full/69fcabe3f06f.log"
+        },
+        {
+          "file": "tests/agent/test_command_secret_source.py",
+          "finished": "2026-10-06 19:10:58 CDT",
+          "summary": "10 passed in 4.55s",
+          "log": "/home/max/Scratchpad/5-Oct-2026_Mass-Review/exec/work/hermes-goal/U2e/evidence/full/61451a5eeb57.log"
+        },
+        {
+          "file": "tests/agent/test_command_token_source.py",
+          "finished": "2026-10-06 19:11:02 CDT",
+          "summary": "38 passed in 6.66s",
+          "log": "/home/max/Scratchpad/5-Oct-2026_Mass-Review/exec/work/hermes-goal/U2e/evidence/full/4902177ee21a.log"
+        },
+        {
+          "file": "tests/agent/test_commit_memory_session_context_engine.py",
+          "finished": "2026-10-06 19:11:03 CDT",
+          "summary": "1 passed in 4.81s",
+          "log": "/home/max/Scratchpad/5-Oct-2026_Mass-Review/exec/work/hermes-goal/U2e/evidence/full/29a4a42c1f97.log"
+        },
+        {
+          "file": "tests/agent/test_compaction_anti_thrash.py",
+          "finished": "2026-10-06 19:11:02 CDT",
+          "summary": "9 passed in 3.74s",
+          "log": "/home/max/Scratchpad/5-Oct-2026_Mass-Review/exec/work/hermes-goal/U2e/evidence/full/00c69b69a22a.log"
+        },
+        {
+          "file": "tests/agent/test_compaction_ops_notification_anchor.py",
+          "finished": "2026-10-06 19:11:04 CDT",
+          "summary": "3 passed in 2.02s",
+          "log": "/home/max/Scratchpad/5-Oct-2026_Mass-Review/exec/work/hermes-goal/U2e/evidence/full/9630fd90b29e.log"
+        },
+        {
+          "file": "tests/agent/test_compaction_prompt_rebuild.py",
+          "finished": "2026-10-06 19:11:11 CDT",
+          "summary": "9 passed in 8.32s",
+          "log": "/home/max/Scratchpad/5-Oct-2026_Mass-Review/exec/work/hermes-goal/U2e/evidence/full/c665bc49d4a0.log"
+        },
+        {
+          "file": "tests/agent/test_compaction_redaction_boundaries.py",
+          "finished": "2026-10-06 19:11:05 CDT",
+          "summary": "8 passed in 2.38s",
+          "log": "/home/max/Scratchpad/5-Oct-2026_Mass-Review/exec/work/hermes-goal/U2e/evidence/full/1d3603b7d545.log"
+        },
+        {
+          "file": "tests/agent/test_compress_context_progress_timeout.py",
+          "finished": "2026-10-06 19:11:13 CDT",
+          "summary": "18 passed in 9.36s",
+          "log": "/home/max/Scratchpad/5-Oct-2026_Mass-Review/exec/work/hermes-goal/U2e/evidence/full/635273c8cf1c.log"
+        },
+        {
+          "file": "tests/agent/test_compress_focus.py",
+          "finished": "2026-10-06 19:11:06 CDT",
+          "summary": "2 passed in 1.77s",
+          "log": "/home/max/Scratchpad/5-Oct-2026_Mass-Review/exec/work/hermes-goal/U2e/evidence/full/9935f183c973.log"
+        },
+        {
+          "file": "tests/agent/test_compress_signal_leak.py",
+          "finished": "2026-10-06 19:11:08 CDT",
+          "summary": "1 passed in 2.32s",
+          "log": "/home/max/Scratchpad/5-Oct-2026_Mass-Review/exec/work/hermes-goal/U2e/evidence/full/fac303f1facc.log"
+        },
+        {
+          "file": "tests/agent/test_compressed_summary_metadata.py",
+          "finished": "2026-10-06 19:11:09 CDT",
+          "summary": "5 passed in 2.29s",
+          "log": "/home/max/Scratchpad/5-Oct-2026_Mass-Review/exec/work/hermes-goal/U2e/evidence/full/02c22c2764ad.log"
+        },
+        {
+          "file": "tests/agent/test_compression_abort_state_reset.py",
+          "finished": "2026-10-06 19:11:21 CDT",
+          "summary": "1 passed in 11.76s",
+          "log": "/home/max/Scratchpad/5-Oct-2026_Mass-Review/exec/work/hermes-goal/U2e/evidence/full/0542c33f3f4d.log"
+        },
+        {
+          "file": "tests/agent/test_compression_adoption_preserves_live_tail.py",
+          "finished": "2026-10-06 19:11:30 CDT",
+          "summary": "4 passed in 19.91s",
+          "log": "/home/max/Scratchpad/5-Oct-2026_Mass-Review/exec/work/hermes-goal/U2e/evidence/full/45e2853d2f9e.log"
+        },
+        {
+          "file": "tests/agent/test_compression_anti_thrash_persistence.py",
+          "finished": "2026-10-06 19:11:18 CDT",
+          "summary": "8 passed in 6.58s",
+          "log": "/home/max/Scratchpad/5-Oct-2026_Mass-Review/exec/work/hermes-goal/U2e/evidence/full/a08881b3cf5c.log"
+        },
+        {
+          "file": "tests/agent/test_compression_anti_thrash_recovery.py",
+          "finished": "2026-10-06 19:11:20 CDT",
+          "summary": "9 passed in 6.19s",
+          "log": "/home/max/Scratchpad/5-Oct-2026_Mass-Review/exec/work/hermes-goal/U2e/evidence/full/c211f9569f37.log"
+        },
+        {
+          "file": "tests/agent/test_compression_attempt_lifecycle.py",
+          "finished": "2026-10-06 19:12:03 CDT",
+          "summary": "11 passed in 43.66s",
+          "log": "/home/max/Scratchpad/5-Oct-2026_Mass-Review/exec/work/hermes-goal/U2e/evidence/full/1c18629a28a1.log"
+        },
+        {
+          "file": "tests/agent/test_compression_attempt_ownership.py",
+          "finished": "2026-10-06 19:11:26 CDT",
+          "summary": "16 passed in 5.45s",
+          "log": "/home/max/Scratchpad/5-Oct-2026_Mass-Review/exec/work/hermes-goal/U2e/evidence/full/ac67baf18525.log"
+        },
+        {
+          "file": "tests/agent/test_compression_attempt_telemetry.py",
+          "finished": "2026-10-06 19:11:30 CDT",
+          "summary": "3 passed in 8.28s",
+          "log": "/home/max/Scratchpad/5-Oct-2026_Mass-Review/exec/work/hermes-goal/U2e/evidence/full/f08d713cd7c8.log"
+        },
+        {
+          "file": "tests/agent/test_credential_pool.py",
+          "finished": "2026-10-06 23:15:07 CDT",
+          "summary": "54 passed in 17.80s",
+          "log": "/home/max/Scratchpad/5-Oct-2026_Mass-Review/exec/work/hermes-goal/U2e/evidence/retry04/c256b27d286f.log"
+        },
+        {
+          "file": "tests/agent/test_credential_pool_profile_oauth_fork.py",
+          "finished": "2026-10-06 23:15:18 CDT",
+          "summary": "32 passed, 1 warning in 24.17s",
+          "log": "/home/max/Scratchpad/5-Oct-2026_Mass-Review/exec/work/hermes-goal/U2e/evidence/retry04/bb62177b86fb.log"
+        },
+        {
+          "file": "tests/cron/test_bot_chat_cli_home.py",
+          "finished": "2026-10-06 19:00:40 CDT",
+          "summary": "5 passed in 12.79s",
+          "log": "/home/max/Scratchpad/5-Oct-2026_Mass-Review/exec/work/hermes-goal/U2e/evidence/full/78de2f87e66b.log"
+        },
+        {
+          "file": "tests/cron/test_bot_chat_delivery_child_env.py",
+          "finished": "2026-10-06 19:00:32 CDT",
+          "summary": "5 passed in 5.23s",
+          "log": "/home/max/Scratchpad/5-Oct-2026_Mass-Review/exec/work/hermes-goal/U2e/evidence/full/c84ff360cff1.log"
+        },
+        {
+          "file": "tests/cron/test_bot_chat_own_profile_multiplex_home.py",
+          "finished": "2026-10-06 19:00:32 CDT",
+          "summary": "2 passed in 5.15s",
+          "log": "/home/max/Scratchpad/5-Oct-2026_Mass-Review/exec/work/hermes-goal/U2e/evidence/full/bfddf34eb8e6.log"
+        },
+        {
+          "file": "tests/cron/test_bot_chat_pending.py",
+          "finished": "2026-10-06 19:00:40 CDT",
+          "summary": "10 passed in 13.03s",
+          "log": "/home/max/Scratchpad/5-Oct-2026_Mass-Review/exec/work/hermes-goal/U2e/evidence/full/c1e9a32cd4d3.log"
+        },
+        {
+          "file": "tests/cron/test_bot_chat_pending_identity.py",
+          "finished": "2026-10-06 19:00:43 CDT",
+          "summary": "4 passed in 9.61s",
+          "log": "/home/max/Scratchpad/5-Oct-2026_Mass-Review/exec/work/hermes-goal/U2e/evidence/full/68e0dcf886af.log"
+        },
+        {
+          "file": "tests/cron/test_bot_chat_progress_deadline.py",
+          "finished": "2026-10-06 19:00:42 CDT",
+          "summary": "8 passed in 8.58s",
+          "log": "/home/max/Scratchpad/5-Oct-2026_Mass-Review/exec/work/hermes-goal/U2e/evidence/full/92814fef9d92.log"
+        },
+        {
+          "file": "tests/cron/test_bot_chat_timeout_marker.py",
+          "finished": "2026-10-06 19:00:46 CDT",
+          "summary": "2 passed in 5.23s",
+          "log": "/home/max/Scratchpad/5-Oct-2026_Mass-Review/exec/work/hermes-goal/U2e/evidence/full/dee1bb4ac76b.log"
+        },
+        {
+          "file": "tests/cron/test_bot_chat_warning_replay.py",
+          "finished": "2026-10-06 19:00:58 CDT",
+          "summary": "12 passed in 17.25s",
+          "log": "/home/max/Scratchpad/5-Oct-2026_Mass-Review/exec/work/hermes-goal/U2e/evidence/full/19984cf920b3.log"
+        },
+        {
+          "file": "tests/cron/test_cleanup_timeout.py",
+          "finished": "2026-10-06 19:00:53 CDT",
+          "summary": "4 passed in 9.93s",
+          "log": "/home/max/Scratchpad/5-Oct-2026_Mass-Review/exec/work/hermes-goal/U2e/evidence/full/26329228f806.log"
+        },
+        {
+          "file": "tests/cron/test_cron_bot_chat_delivery.py",
+          "finished": "2026-10-06 19:01:00 CDT",
+          "summary": "20 passed, 1 skipped, 1 warning in 15.68s",
+          "log": "/home/max/Scratchpad/5-Oct-2026_Mass-Review/exec/work/hermes-goal/U2e/evidence/full/d80af1ac1e52.log"
+        },
+        {
+          "file": "tests/cron/test_cron_delivery_redaction.py",
+          "finished": "2026-10-06 19:00:52 CDT",
+          "summary": "5 passed in 5.11s",
+          "log": "/home/max/Scratchpad/5-Oct-2026_Mass-Review/exec/work/hermes-goal/U2e/evidence/full/f6b1271072e1.log"
+        },
+        {
+          "file": "tests/cron/test_cron_failure_deliver.py",
+          "finished": "2026-10-06 19:01:21 CDT",
+          "summary": "24 passed, 1 warning in 29.75s",
+          "log": "/home/max/Scratchpad/5-Oct-2026_Mass-Review/exec/work/hermes-goal/U2e/evidence/full/de52288be364.log"
+        },
+        {
+          "file": "tests/cron/test_cron_home_target_profile_scope.py",
+          "finished": "2026-10-06 19:00:56 CDT",
+          "summary": "3 passed in 3.07s",
+          "log": "/home/max/Scratchpad/5-Oct-2026_Mass-Review/exec/work/hermes-goal/U2e/evidence/full/1e2f535207ca.log"
+        },
+        {
+          "file": "tests/cron/test_cron_incidents.py",
+          "finished": "2026-10-06 19:01:14 CDT",
+          "summary": "15 passed in 20.23s",
+          "log": "/home/max/Scratchpad/5-Oct-2026_Mass-Review/exec/work/hermes-goal/U2e/evidence/full/3a8e982ed5ed.log"
+        },
+        {
+          "file": "tests/cron/test_cron_kanban_env_isolation.py",
+          "finished": "2026-10-06 19:01:19 CDT",
+          "summary": "15 passed in 21.23s",
+          "log": "/home/max/Scratchpad/5-Oct-2026_Mass-Review/exec/work/hermes-goal/U2e/evidence/full/ac3949d86387.log"
+        },
+        {
+          "file": "tests/cron/test_cron_live_bot_delivery.py",
+          "finished": "2026-10-06 19:01:04 CDT",
+          "summary": "1 failed, 1 passed in 5.01s",
+          "log": "/home/max/Scratchpad/5-Oct-2026_Mass-Review/exec/work/hermes-goal/U2e/evidence/full/143403746774.log"
+        },
+        {
+          "file": "tests/cron/test_cron_live_delivery_confirmation.py",
+          "finished": "2026-10-06 19:01:06 CDT",
+          "summary": "25 passed in 4.97s",
+          "log": "/home/max/Scratchpad/5-Oct-2026_Mass-Review/exec/work/hermes-goal/U2e/evidence/full/ca94adacea2f.log"
+        },
+        {
+          "file": "tests/cron/test_cron_mcp_toolset_empty_block.py",
+          "finished": "2026-10-06 19:01:17 CDT",
+          "summary": "5 passed in 13.19s",
+          "log": "/home/max/Scratchpad/5-Oct-2026_Mass-Review/exec/work/hermes-goal/U2e/evidence/full/509b983f50e6.log"
+        },
+        {
+          "file": "tests/cron/test_cron_memory_contract.py",
+          "finished": "2026-10-06 19:01:14 CDT",
+          "summary": "1 passed in 7.41s",
+          "log": "/home/max/Scratchpad/5-Oct-2026_Mass-Review/exec/work/hermes-goal/U2e/evidence/full/713e532d9d6b.log"
+        },
+        {
+          "file": "tests/cron/test_cron_multiplex_served_profile_parity.py",
+          "finished": "2026-10-06 19:01:14 CDT",
+          "summary": "2 passed in 3.06s",
+          "log": "/home/max/Scratchpad/5-Oct-2026_Mass-Review/exec/work/hermes-goal/U2e/evidence/full/686493f1bc71.log"
+        },
+        {
+          "file": "tests/cron/test_cron_multiplex_shared_route_delivery.py",
+          "finished": "2026-10-06 19:01:21 CDT",
+          "summary": "4 passed, 1 warning in 6.35s",
+          "log": "/home/max/Scratchpad/5-Oct-2026_Mass-Review/exec/work/hermes-goal/U2e/evidence/full/60a3787ce97e.log"
+        },
+        {
+          "file": "tests/cron/test_cron_non_push_origin.py",
+          "finished": "2026-10-06 19:01:26 CDT",
+          "summary": "4 passed, 1 warning in 10.61s",
+          "log": "/home/max/Scratchpad/5-Oct-2026_Mass-Review/exec/work/hermes-goal/U2e/evidence/full/fcab4bbbf133.log"
+        },
+        {
+          "file": "tests/cron/test_cron_pinned_job_fallback.py",
+          "finished": "2026-10-06 19:01:35 CDT",
+          "summary": "19 passed in 19.37s",
+          "log": "/home/max/Scratchpad/5-Oct-2026_Mass-Review/exec/work/hermes-goal/U2e/evidence/full/721919a86fec.log"
+        },
+        {
+          "file": "tests/cron/test_cron_pre_agent_fallback_notice.py",
+          "finished": "2026-10-06 19:01:27 CDT",
+          "summary": "2 passed in 8.83s",
+          "log": "/home/max/Scratchpad/5-Oct-2026_Mass-Review/exec/work/hermes-goal/U2e/evidence/full/053b562d539c.log"
+        },
+        {
+          "file": "tests/cron/test_cron_provider_pin.py",
+          "finished": "2026-10-06 19:01:30 CDT",
+          "summary": "6 passed in 10.39s",
+          "log": "/home/max/Scratchpad/5-Oct-2026_Mass-Review/exec/work/hermes-goal/U2e/evidence/full/ea9e80b33583.log"
+        },
+        {
+          "file": "tests/cron/test_cron_relay_delivery_guards.py",
+          "finished": "2026-10-06 19:01:25 CDT",
+          "summary": "10 passed in 2.95s",
+          "log": "/home/max/Scratchpad/5-Oct-2026_Mass-Review/exec/work/hermes-goal/U2e/evidence/full/7a3006d891e5.log"
+        },
+        {
+          "file": "tests/cron/test_cron_thread_seed_dm_keying.py",
+          "finished": "2026-10-06 19:01:25 CDT",
+          "summary": "9 passed in 2.94s",
+          "log": "/home/max/Scratchpad/5-Oct-2026_Mass-Review/exec/work/hermes-goal/U2e/evidence/full/155482ef17e6.log"
+        },
+        {
+          "file": "tests/cron/test_cron_workdir.py",
+          "finished": "2026-10-06 19:01:35 CDT",
+          "summary": "16 passed in 9.15s",
+          "log": "/home/max/Scratchpad/5-Oct-2026_Mass-Review/exec/work/hermes-goal/U2e/evidence/full/23f9738a7442.log"
+        },
+        {
+          "file": "tests/cron/test_execution_ledger.py",
+          "finished": "2026-10-06 19:01:40 CDT",
+          "summary": "23 passed in 14.54s",
+          "log": "/home/max/Scratchpad/5-Oct-2026_Mass-Review/exec/work/hermes-goal/U2e/evidence/full/5b4cea26c871.log"
+        },
+        {
+          "file": "tests/cron/test_fire_claim_lost_after_delivery.py",
+          "finished": "2026-10-06 19:01:42 CDT",
+          "summary": "6 passed in 15.33s",
+          "log": "/home/max/Scratchpad/5-Oct-2026_Mass-Review/exec/work/hermes-goal/U2e/evidence/full/1cb98a322cb2.log"
+        },
+        {
+          "file": "tests/cron/test_launch_guard.py",
+          "finished": "2026-10-06 19:01:40 CDT",
+          "summary": "18 passed in 12.55s",
+          "log": "/home/max/Scratchpad/5-Oct-2026_Mass-Review/exec/work/hermes-goal/U2e/evidence/full/378e199b82f9.log"
+        },
+        {
+          "file": "tests/cron/test_media_delivery_parity.py",
+          "finished": "2026-10-06 19:01:41 CDT",
+          "summary": "6 passed, 1 warning in 10.04s",
+          "log": "/home/max/Scratchpad/5-Oct-2026_Mass-Review/exec/work/hermes-goal/U2e/evidence/full/8a0bb23fc2a3.log"
+        },
+        {
+          "file": "tests/cron/test_media_send_timeout.py",
+          "finished": "2026-10-06 19:01:40 CDT",
+          "summary": "10 passed in 4.18s",
+          "log": "/home/max/Scratchpad/5-Oct-2026_Mass-Review/exec/work/hermes-goal/U2e/evidence/full/28791ad2e5a0.log"
+        },
+        {
+          "file": "tests/cron/test_mirror_origin_fallback.py",
+          "finished": "2026-10-06 19:02:11 CDT",
+          "summary": "19 passed, 1 warning in 34.64s",
+          "log": "/home/max/Scratchpad/5-Oct-2026_Mass-Review/exec/work/hermes-goal/U2e/evidence/full/1192490e643c.log"
+        },
+        {
+          "file": "tests/cron/test_monitor_kind.py",
+          "finished": "2026-10-06 19:02:02 CDT",
+          "summary": "17 passed in 21.47s",
+          "log": "/home/max/Scratchpad/5-Oct-2026_Mass-Review/exec/work/hermes-goal/U2e/evidence/full/7438ac32ca15.log"
+        },
+        {
+          "file": "tests/cron/test_parallel_pool.py",
+          "finished": "2026-10-06 19:01:48 CDT",
+          "summary": "5 passed in 6.89s",
+          "log": "/home/max/Scratchpad/5-Oct-2026_Mass-Review/exec/work/hermes-goal/U2e/evidence/full/9d657678c651.log"
+        },
+        {
+          "file": "tests/cron/test_preflight_config.py",
+          "finished": "2026-10-06 19:02:27 CDT",
+          "summary": "24 passed, 1 warning in 45.63s",
+          "log": "/home/max/Scratchpad/5-Oct-2026_Mass-Review/exec/work/hermes-goal/U2e/evidence/full/86c771368e26.log"
+        },
+        {
+          "file": "tests/cron/test_quota_hold.py",
+          "finished": "2026-10-06 19:01:52 CDT",
+          "summary": "4 passed in 9.74s",
+          "log": "/home/max/Scratchpad/5-Oct-2026_Mass-Review/exec/work/hermes-goal/U2e/evidence/full/87b6e4f0837a.log"
+        },
+        {
+          "file": "tests/cron/test_relay_fronted_delivery.py",
+          "finished": "2026-10-06 19:01:46 CDT",
+          "summary": "10 passed in 3.17s",
+          "log": "/home/max/Scratchpad/5-Oct-2026_Mass-Review/exec/work/hermes-goal/U2e/evidence/full/d5f7093b19e8.log"
+        },
+        {
+          "file": "tests/cron/test_restart_safe_worker.py",
+          "finished": "2026-10-06 19:01:59 CDT",
+          "summary": "25 passed, 1 skipped, 1 warning in 12.17s",
+          "log": "/home/max/Scratchpad/5-Oct-2026_Mass-Review/exec/work/hermes-goal/U2e/evidence/full/ad3234d9ace8.log"
+        },
+        {
+          "file": "tests/cron/test_run_one_job.py",
+          "finished": "2026-10-06 19:02:02 CDT",
+          "summary": "12 passed in 12.87s",
+          "log": "/home/max/Scratchpad/5-Oct-2026_Mass-Review/exec/work/hermes-goal/U2e/evidence/full/7280622deed3.log"
+        },
+        {
+          "file": "tests/cron/test_scheduler.py",
+          "finished": "2026-10-06 19:03:04 CDT",
+          "summary": "93 passed, 1 warning in 71.48s (0:01:11)",
+          "log": "/home/max/Scratchpad/5-Oct-2026_Mass-Review/exec/work/hermes-goal/U2e/evidence/full/3a3cb060cf73.log"
+        },
+        {
+          "file": "tests/cron/test_scheduler_provider.py",
+          "finished": "2026-10-06 19:02:16 CDT",
+          "summary": "32 passed in 16.40s",
+          "log": "/home/max/Scratchpad/5-Oct-2026_Mass-Review/exec/work/hermes-goal/U2e/evidence/full/6c045162ea17.log"
+        },
+        {
+          "file": "tests/cron/test_script_claim_heartbeat.py",
+          "finished": "2026-10-06 19:02:26 CDT",
+          "summary": "20 passed in 23.76s",
+          "log": "/home/max/Scratchpad/5-Oct-2026_Mass-Review/exec/work/hermes-goal/U2e/evidence/full/90332f3c4390.log"
+        },
+        {
+          "file": "tests/cron/test_sessiondb_init_hang.py",
+          "finished": "2026-10-06 19:02:18 CDT",
+          "summary": "6 passed in 14.39s",
+          "log": "/home/max/Scratchpad/5-Oct-2026_Mass-Review/exec/work/hermes-goal/U2e/evidence/full/eb4f34a05a20.log"
+        },
+        {
+          "file": "tests/cron/test_shutdown_interrupt.py",
+          "finished": "2026-10-06 19:02:24 CDT",
+          "summary": "25 passed in 12.28s",
+          "log": "/home/max/Scratchpad/5-Oct-2026_Mass-Review/exec/work/hermes-goal/U2e/evidence/full/237d7153fe9a.log"
+        },
+        {
+          "file": "tests/cron/test_warning_delivery_policy.py",
+          "finished": "2026-10-06 19:02:25 CDT",
+          "summary": "4 passed in 7.13s",
+          "log": "/home/max/Scratchpad/5-Oct-2026_Mass-Review/exec/work/hermes-goal/U2e/evidence/full/db593b04d632.log"
+        },
+        {
+          "file": "tests/cron/test_warning_transport_contract.py",
+          "finished": "2026-10-06 19:02:46 CDT",
+          "summary": "24 passed, 1 warning in 26.97s",
+          "log": "/home/max/Scratchpad/5-Oct-2026_Mass-Review/exec/work/hermes-goal/U2e/evidence/full/81d40aff1205.log"
+        },
+        {
+          "file": "tests/gateway/test_busy_session_ack.py",
+          "finished": "2026-10-06 19:53:03 CDT",
+          "summary": "13 passed in 8.35s",
+          "log": "/home/max/Scratchpad/5-Oct-2026_Mass-Review/exec/work/hermes-goal/U2e/evidence/full/9f377cc1ad4a.log"
+        },
+        {
+          "file": "tests/gateway/test_kanban_multiplex_served_profile_parity.py",
+          "finished": "2026-10-06 22:56:24 CDT",
+          "summary": "2 passed in 6.78s",
+          "log": "/home/max/Scratchpad/5-Oct-2026_Mass-Review/exec/work/hermes-goal/U2e/evidence/retry01/3e9acadad911.log"
+        },
+        {
+          "file": "tests/gateway/test_subagent_protection.py",
+          "finished": "2026-10-06 20:28:38 CDT",
+          "summary": "7 passed in 8.10s",
+          "log": "/home/max/Scratchpad/5-Oct-2026_Mass-Review/exec/work/hermes-goal/U2e/evidence/full/d38f1cc1ac42.log"
+        },
+        {
+          "file": "tests/hermes_cli/test_kanban_boards.py",
+          "finished": "2026-10-06 19:03:15 CDT",
+          "summary": "19 passed in 49.44s",
+          "log": "/home/max/Scratchpad/5-Oct-2026_Mass-Review/exec/work/hermes-goal/U2e/evidence/full/15aff2947578.log"
+        },
+        {
+          "file": "tests/hermes_cli/test_kanban_core_functionality.py",
+          "finished": "2026-10-06 19:02:59 CDT",
+          "summary": "24 passed in 32.96s",
+          "log": "/home/max/Scratchpad/5-Oct-2026_Mass-Review/exec/work/hermes-goal/U2e/evidence/full/06dbfe18fbdc.log"
+        },
+        {
+          "file": "tests/hermes_cli/test_kanban_db.py",
+          "finished": "2026-10-06 19:03:34 CDT",
+          "summary": "54 passed, 1 skipped in 67.34s (0:01:07)",
+          "log": "/home/max/Scratchpad/5-Oct-2026_Mass-Review/exec/work/hermes-goal/U2e/evidence/full/bf2cfbc1ccd8.log"
+        },
+        {
+          "file": "tests/hermes_cli/test_kanban_db_init.py",
+          "finished": "2026-10-06 19:02:36 CDT",
+          "summary": "5 passed in 7.33s",
+          "log": "/home/max/Scratchpad/5-Oct-2026_Mass-Review/exec/work/hermes-goal/U2e/evidence/full/7fca8d3e7f97.log"
+        },
+        {
+          "file": "tests/hermes_cli/test_kanban_db_repair.py",
+          "finished": "2026-10-06 19:02:44 CDT",
+          "summary": "4 passed in 7.35s",
+          "log": "/home/max/Scratchpad/5-Oct-2026_Mass-Review/exec/work/hermes-goal/U2e/evidence/full/a6ed3b67e033.log"
+        },
+        {
+          "file": "tests/hermes_cli/test_kanban_dispatch_claim_allowlist.py",
+          "finished": "2026-10-06 19:02:56 CDT",
+          "summary": "11 passed in 11.30s",
+          "log": "/home/max/Scratchpad/5-Oct-2026_Mass-Review/exec/work/hermes-goal/U2e/evidence/full/3875e720591d.log"
+        },
+        {
+          "file": "tests/hermes_cli/test_kanban_dispatch_dry_run.py",
+          "finished": "2026-10-06 19:03:06 CDT",
+          "summary": "3 passed in 18.80s",
+          "log": "/home/max/Scratchpad/5-Oct-2026_Mass-Review/exec/work/hermes-goal/U2e/evidence/full/181427758111.log"
+        },
+        {
+          "file": "tests/hermes_cli/test_kanban_dispatch_lock.py",
+          "finished": "2026-10-06 19:03:04 CDT",
+          "summary": "2 passed in 7.00s",
+          "log": "/home/max/Scratchpad/5-Oct-2026_Mass-Review/exec/work/hermes-goal/U2e/evidence/full/6065a28cb106.log"
+        },
+        {
+          "file": "tests/hermes_cli/test_kanban_dispatch_tick_hook.py",
+          "finished": "2026-10-06 19:03:09 CDT",
+          "summary": "3 passed in 9.50s",
+          "log": "/home/max/Scratchpad/5-Oct-2026_Mass-Review/exec/work/hermes-goal/U2e/evidence/full/8ba1db0bb938.log"
+        },
+        {
+          "file": "tests/hermes_cli/test_kanban_gateway_restart_handoff.py",
+          "finished": "2026-10-06 19:03:25 CDT",
+          "summary": "5 passed, 1 skipped in 19.79s",
+          "log": "/home/max/Scratchpad/5-Oct-2026_Mass-Review/exec/work/hermes-goal/U2e/evidence/full/93d2c265a573.log"
+        },
+        {
+          "file": "tests/hermes_cli/test_kanban_gc_retention.py",
+          "finished": "2026-10-06 19:03:12 CDT",
+          "summary": "7 passed in 7.27s",
+          "log": "/home/max/Scratchpad/5-Oct-2026_Mass-Review/exec/work/hermes-goal/U2e/evidence/full/044178ed11b5.log"
+        },
+        {
+          "file": "tests/hermes_cli/test_kanban_launch_guard.py",
+          "finished": "2026-10-06 19:05:23 CDT",
+          "summary": "40 passed in 136.06s (0:02:16)",
+          "log": "/home/max/Scratchpad/5-Oct-2026_Mass-Review/exec/work/hermes-goal/U2e/evidence/full/961ffccf7eb5.log"
+        },
+        {
+          "file": "tests/hermes_cli/test_kanban_reclaim_claim_lock_guard.py",
+          "finished": "2026-10-06 19:03:18 CDT",
+          "summary": "2 passed in 7.60s",
+          "log": "/home/max/Scratchpad/5-Oct-2026_Mass-Review/exec/work/hermes-goal/U2e/evidence/full/e2786e1880de.log"
+        },
+        {
+          "file": "tests/hermes_cli/test_kanban_recovery_fleet_ownership.py",
+          "finished": "2026-10-06 19:03:36 CDT",
+          "summary": "28 passed in 23.17s",
+          "log": "/home/max/Scratchpad/5-Oct-2026_Mass-Review/exec/work/hermes-goal/U2e/evidence/full/06cbcd6fd0a8.log"
+        },
+        {
+          "file": "tests/hermes_cli/test_kanban_review_lifecycle.py",
+          "finished": "2026-10-06 22:59:09 CDT",
+          "summary": "31 passed in 25.34s",
+          "log": "/home/max/Scratchpad/5-Oct-2026_Mass-Review/exec/work/hermes-goal/U2e/evidence/retry01/0b3be09668d4.log"
+        },
+        {
+          "file": "tests/hermes_cli/test_kanban_worker_session_source.py",
+          "finished": "2026-10-06 19:03:25 CDT",
+          "summary": "5 passed in 9.42s",
+          "log": "/home/max/Scratchpad/5-Oct-2026_Mass-Review/exec/work/hermes-goal/U2e/evidence/full/dc494bb106c1.log"
+        },
+        {
+          "file": "tests/hermes_cli/test_kanban_worker_spawn_toolsets.py",
+          "finished": "2026-10-06 19:03:35 CDT",
+          "summary": "4 passed in 16.43s",
+          "log": "/home/max/Scratchpad/5-Oct-2026_Mass-Review/exec/work/hermes-goal/U2e/evidence/full/b09487dcf66f.log"
+        },
+        {
+          "file": "tests/hermes_cli/test_kanban_worker_terminal_cwd.py",
+          "finished": "2026-10-06 19:03:33 CDT",
+          "summary": "1 passed in 7.34s",
+          "log": "/home/max/Scratchpad/5-Oct-2026_Mass-Review/exec/work/hermes-goal/U2e/evidence/full/2ba6c86b23da.log"
+        },
+        {
+          "file": "tests/hermes_cli/test_kanban_worker_terminal_scope.py",
+          "finished": "2026-10-06 19:03:36 CDT",
+          "summary": "3 passed in 10.02s",
+          "log": "/home/max/Scratchpad/5-Oct-2026_Mass-Review/exec/work/hermes-goal/U2e/evidence/full/466aa2162267.log"
+        },
+        {
+          "file": "tests/hermes_cli/test_kanban_workspace_busy.py",
+          "finished": "2026-10-06 19:03:44 CDT",
+          "summary": "3 passed in 9.68s",
+          "log": "/home/max/Scratchpad/5-Oct-2026_Mass-Review/exec/work/hermes-goal/U2e/evidence/full/887ff6b42090.log"
+        },
+        {
+          "file": "tests/hermes_cli/test_quiet_single_query.py",
+          "finished": "2026-10-06 19:03:41 CDT",
+          "summary": "11 passed, 1 warning in 6.32s",
+          "log": "/home/max/Scratchpad/5-Oct-2026_Mass-Review/exec/work/hermes-goal/U2e/evidence/full/9b7120687758.log"
+        },
+        {
+          "file": "tests/hermes_cli/test_single_query_exit_contract.py",
+          "finished": "2026-10-06 19:03:41 CDT",
+          "summary": "23 passed in 4.93s",
+          "log": "/home/max/Scratchpad/5-Oct-2026_Mass-Review/exec/work/hermes-goal/U2e/evidence/full/d746bea41833.log"
+        },
+        {
+          "file": "tests/hermes_cli/test_single_query_fleet_turn_end_drain.py",
+          "finished": "2026-10-06 19:03:43 CDT",
+          "summary": "2 passed in 5.60s",
+          "log": "/home/max/Scratchpad/5-Oct-2026_Mass-Review/exec/work/hermes-goal/U2e/evidence/full/d04d9e041224.log"
+        },
+        {
+          "file": "tests/hermes_cli/test_single_query_hard_exit.py",
+          "finished": "2026-10-06 19:03:55 CDT",
+          "summary": "16 passed in 17.57s",
+          "log": "/home/max/Scratchpad/5-Oct-2026_Mass-Review/exec/work/hermes-goal/U2e/evidence/full/c6e9fb0ad4c5.log"
+        },
+        {
+          "file": "tests/plugins/test_chronos_cron.py",
+          "finished": "2026-10-06 22:59:30 CDT",
+          "summary": "15 passed in 5.43s",
+          "log": "/home/max/Scratchpad/5-Oct-2026_Mass-Review/exec/work/hermes-goal/U2e/evidence/retry01/eac0877c9676.log"
+        },
+        {
+          "file": "tests/plugins/test_kanban_model_override.py",
+          "finished": "2026-10-06 23:07:08 CDT",
+          "summary": "2 failed, 14 passed in 19.67s",
+          "log": "/home/max/Scratchpad/5-Oct-2026_Mass-Review/exec/work/hermes-goal/U2e/evidence/retry02/0692d7ef6848.log"
+        },
+        {
+          "file": "tests/tools/test_computer_use_cua_macos_identity.py",
+          "finished": "2026-10-06 23:06:52 CDT",
+          "summary": "13 passed in 3.58s",
+          "log": "/home/max/Scratchpad/5-Oct-2026_Mass-Review/exec/work/hermes-goal/U2e/evidence/retry02/47a7c1e29ac2.log"
+        },
+        {
+          "file": "tests/tools/test_cronjob_run_background.py",
+          "finished": "2026-10-06 19:03:52 CDT",
+          "summary": "12 passed in 9.51s",
+          "log": "/home/max/Scratchpad/5-Oct-2026_Mass-Review/exec/work/hermes-goal/U2e/evidence/full/84344a923e0f.log"
+        },
+        {
+          "file": "tests/tools/test_cronjob_run_immediate.py",
+          "finished": "2026-10-06 19:03:51 CDT",
+          "summary": "12 passed in 8.36s",
+          "log": "/home/max/Scratchpad/5-Oct-2026_Mass-Review/exec/work/hermes-goal/U2e/evidence/full/4103e21ff92c.log"
+        },
+        {
+          "file": "tests/tools/test_fleet_message_drain.py",
+          "finished": "2026-10-06 19:03:59 CDT",
+          "summary": "43 passed, 12 skipped in 15.18s",
+          "log": "/home/max/Scratchpad/5-Oct-2026_Mass-Review/exec/work/hermes-goal/U2e/evidence/full/616afc5ad28c.log"
+        },
+        {
+          "file": "tests/tools/test_search_files_cpu_windows.py",
+          "finished": "2026-10-06 23:00:20 CDT",
+          "summary": "12 passed, 1 skipped in 2.69s",
+          "log": "/home/max/Scratchpad/5-Oct-2026_Mass-Review/exec/work/hermes-goal/U2e/evidence/retry01/92366786af53.log"
+        }
+      ]
+    }
+  }
+}

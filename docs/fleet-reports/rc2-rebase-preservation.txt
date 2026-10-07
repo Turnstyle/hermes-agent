@@ -1,0 +1,4 @@
+1:  d804ae873f = 1:  641027219d G3d (t_083a1576): compose launch admission with fleet union
+2:  c3c272bfce = 2:  fc2e3fad9b U2c-SHELDON (t_d0edbb6e): retain active Bot Chat turns within bounded cap
+3:  3b132be0fd = 3:  2386f2dc2f C2-223 (t_bc07bbf0): verify foreign-home recovery with launch guard
+4:  01f37c4579 = 4:  6af2d61a69 fix(kanban): retain unresolved worker handoffs beyond claim expiry

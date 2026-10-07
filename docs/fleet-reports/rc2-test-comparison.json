@@ -1,0 +1,3741 @@
+{
+  "checked_at": "2026-10-06 23:17:04 CDT",
+  "required_files": 5117,
+  "completed_files": 5117,
+  "missing_files": [],
+  "pending_controls": [],
+  "new_failures": [],
+  "inherited_failures": [
+    {
+      "file": "tests/cron/test_cron_live_bot_delivery.py",
+      "nodeid": "tests/cron/test_cron_live_bot_delivery.py::test_live_delivery_retry_keeps_receipt_across_owner_loss"
+    },
+    {
+      "file": "tests/acp_adapter/test_edit_approval.py",
+      "nodeid": "tests/acp_adapter/test_edit_approval.py::test_multifile_v4a_patch_checks_every_real_path_not_the_joined_display_string"
+    },
+    {
+      "file": "tests/agent/lsp/test_broken_set.py",
+      "nodeid": "tests/agent/lsp/test_broken_set.py::test_mark_broken_handles_no_workspace_silently"
+    },
+    {
+      "file": "tests/agent/lsp/test_install_and_lint_fixes.py",
+      "nodeid": "tests/agent/lsp/test_install_and_lint_fixes.py::test_check_lint_returns_error_for_real_ts_type_errors"
+    },
+    {
+      "file": "tests/agent/lsp/test_workspace.py",
+      "nodeid": "tests/agent/lsp/test_workspace.py::test_find_git_worktree_cache_is_capped"
+    },
+    {
+      "file": "tests/agent/test_codex_gpt55_autoraise_notice.py",
+      "nodeid": "tests/agent/test_codex_gpt55_autoraise_notice.py::test_codex_gpt55_autoraise_notice_deduped_across_agent_inits"
+    },
+    {
+      "file": "tests/agent/test_coding_context.py",
+      "nodeid": "tests/agent/test_coding_context.py::TestDetection::test_bare_dir_is_not_coding"
+    },
+    {
+      "file": "tests/agent/test_coding_context.py",
+      "nodeid": "tests/agent/test_coding_context.py::TestRuntimeMode::test_resolves_general_outside_workspace"
+    },
+    {
+      "file": "tests/agent/test_coding_context.py",
+      "nodeid": "tests/agent/test_coding_context.py::TestWorkspaceBlock::test_empty_outside_repo"
+    },
+    {
+      "file": "tests/agent/test_codex_app_server_integration.py",
+      "nodeid": "tests/agent/test_codex_app_server_integration.py::TestQuotaFailureFallsOverToConfiguredFallback::test_usage_limit_turn_completes_on_fallback_provider"
+    },
+    {
+      "file": "tests/agent/test_fallback_429_after_timeout.py",
+      "nodeid": "tests/agent/test_fallback_429_after_timeout.py::TestFallbackChainResetOnTransportRecovery::test_run_conversation_fallbacks_on_429_after_timeout_recovery"
+    },
+    {
+      "file": "tests/agent/test_partial_stream_finish_reason.py",
+      "nodeid": "tests/agent/test_partial_stream_finish_reason.py::TestContentFilterStallActivatesFallback::test_tagged_stub_activates_fallback_first_pass"
+    },
+    {
+      "file": "tests/agent/test_project_skills.py",
+      "nodeid": "tests/agent/test_project_skills.py::TestFindProjectRoot::test_no_git_returns_none"
+    },
+    {
+      "file": "tests/agent/test_prompt_builder.py",
+      "nodeid": "tests/agent/test_prompt_builder.py::TestBuildContextFilesPrompt::test_agents_md_no_git_root_stays_cwd_only"
+    },
+    {
+      "file": "tests/agent/test_prompt_builder.py",
+      "nodeid": "tests/agent/test_prompt_builder.py::TestFindHermesMd::test_unreadable_parent_is_treated_as_no_git_root"
+    },
+    {
+      "file": "tests/agent/test_same_account_pool_eager_fallback.py",
+      "nodeid": "tests/agent/test_same_account_pool_eager_fallback.py::test_account_limit_after_one_rotation_skips_second_rotation"
+    },
+    {
+      "file": "tests/agent/test_same_account_pool_eager_fallback.py",
+      "nodeid": "tests/agent/test_same_account_pool_eager_fallback.py::test_distinct_entries_rotation_succeeds_no_fallback"
+    },
+    {
+      "file": "tests/agent/test_same_account_pool_eager_fallback.py",
+      "nodeid": "tests/agent/test_same_account_pool_eager_fallback.py::test_same_account_pool_both_429_falls_back_without_long_sleep"
+    },
+    {
+      "file": "tests/agent/test_run_agent.py",
+      "nodeid": "tests/agent/test_run_agent.py::TestRunConversation::test_empty_response_triggers_fallback_provider"
+    },
+    {
+      "file": "tests/agent/test_subprocess_env_guard.py",
+      "nodeid": "tests/agent/test_subprocess_env_guard.py::test_no_new_raw_environ_copy_spawn_sites"
+    },
+    {
+      "file": "tests/agent/test_verification_evidence_disabled.py",
+      "nodeid": "tests/agent/test_verification_evidence_disabled.py::test_enabled_guard_records_into_the_ledger"
+    },
+    {
+      "file": "tests/agent/test_verification_evidence.py",
+      "nodeid": "tests/agent/test_verification_evidence.py::test_file_tool_stales_evidence_by_session_id_for_absolute_edit"
+    },
+    {
+      "file": "tests/agent/test_verification_evidence.py",
+      "nodeid": "tests/agent/test_verification_evidence.py::test_final_verifier_after_sequence_owns_shell_exit_status[0-passed]"
+    },
+    {
+      "file": "tests/agent/test_verification_evidence.py",
+      "nodeid": "tests/agent/test_verification_evidence.py::test_final_verifier_after_sequence_owns_shell_exit_status[1-failed]"
+    },
+    {
+      "file": "tests/agent/test_verification_evidence.py",
+      "nodeid": "tests/agent/test_verification_evidence.py::test_lint_and_typecheck_are_not_reported_as_full_tests"
+    },
+    {
+      "file": "tests/agent/test_verification_evidence.py",
+      "nodeid": "tests/agent/test_verification_evidence.py::test_masked_verifier_does_not_clear_edited_ledger_state"
+    },
+    {
+      "file": "tests/agent/test_verification_evidence.py",
+      "nodeid": "tests/agent/test_verification_evidence.py::test_quoted_shell_operator_remains_a_verifier_argument"
+    },
+    {
+      "file": "tests/agent/test_verification_evidence.py",
+      "nodeid": "tests/agent/test_verification_evidence.py::test_recording_expires_old_edit_only_state"
+    },
+    {
+      "file": "tests/agent/test_verification_evidence.py",
+      "nodeid": "tests/agent/test_verification_evidence.py::test_shell_redirection_does_not_hide_simple_verifier[&> test.log]"
+    },
+    {
+      "file": "tests/agent/test_verification_evidence.py",
+      "nodeid": "tests/agent/test_verification_evidence.py::test_shell_redirection_does_not_hide_simple_verifier[2>&1]"
+    },
+    {
+      "file": "tests/agent/test_verification_evidence.py",
+      "nodeid": "tests/agent/test_verification_evidence.py::test_shell_wrappers_match_but_echo_does_not"
+    },
+    {
+      "file": "tests/agent/test_verification_evidence.py",
+      "nodeid": "tests/agent/test_verification_evidence.py::test_successful_and_chain_preserves_passing_evidence[prepare && pytest]"
+    },
+    {
+      "file": "tests/agent/test_verification_evidence.py",
+      "nodeid": "tests/agent/test_verification_evidence.py::test_successful_and_chain_preserves_passing_evidence[pytest && report]"
+    },
+    {
+      "file": "tests/agent/test_verification_evidence.py",
+      "nodeid": "tests/agent/test_verification_evidence.py::test_temp_script_records_ad_hoc_evidence_without_canonical_suite"
+    },
+    {
+      "file": "tests/agent/test_verification_evidence.py",
+      "nodeid": "tests/agent/test_verification_evidence.py::test_versioned_or_absolute_interpreter_records_ad_hoc_evidence[/usr/bin/env python3 {script}]"
+    },
+    {
+      "file": "tests/agent/test_verification_evidence.py",
+      "nodeid": "tests/agent/test_verification_evidence.py::test_versioned_or_absolute_interpreter_records_ad_hoc_evidence[/usr/bin/python3 {script}]"
+    },
+    {
+      "file": "tests/agent/test_verification_evidence.py",
+      "nodeid": "tests/agent/test_verification_evidence.py::test_versioned_or_absolute_interpreter_records_ad_hoc_evidence[/usr/bin/python3.12 {script}]"
+    },
+    {
+      "file": "tests/agent/test_verification_evidence.py",
+      "nodeid": "tests/agent/test_verification_evidence.py::test_versioned_or_absolute_interpreter_records_ad_hoc_evidence[python3 -u {script}]"
+    },
+    {
+      "file": "tests/agent/test_verification_evidence.py",
+      "nodeid": "tests/agent/test_verification_evidence.py::test_versioned_or_absolute_interpreter_records_ad_hoc_evidence[python3.12 {script}]"
+    },
+    {
+      "file": "tests/agent/test_verification_stop.py",
+      "nodeid": "tests/agent/test_verification_stop.py::test_ad_hoc_pass_satisfies_no_suite_stop_loop"
+    },
+    {
+      "file": "tests/agent/test_vertex_adapter.py",
+      "nodeid": "tests/agent/test_vertex_adapter.py::test_adc_refuses_foreign_profile_google_application_credentials"
+    },
+    {
+      "file": "tests/ci/test_channel_build_publication.py",
+      "nodeid": "tests/ci/test_channel_build_publication.py::test_receiver_allocation_uses_official_identity_only_inside_scope"
+    },
+    {
+      "file": "tests/ci/test_channel_build_publication.py",
+      "nodeid": "tests/ci/test_channel_build_publication.py::test_scoped_receiver_publication_preserves_existing_head_and_requires_smoke[receiver]"
+    },
+    {
+      "file": "tests/ci/test_protected_canary_publication.py",
+      "nodeid": "tests/ci/test_protected_canary_publication.py::test_canary_metadata_is_recorded_and_receipt_bound[bundled--False-darwin]"
+    },
+    {
+      "file": "tests/ci/test_protected_canary_publication.py",
+      "nodeid": "tests/ci/test_protected_canary_publication.py::test_canary_metadata_is_recorded_and_receipt_bound[bundled--False-win32]"
+    },
+    {
+      "file": "tests/ci/test_protected_canary_publication.py",
+      "nodeid": "tests/ci/test_protected_canary_publication.py::test_canary_metadata_is_recorded_and_receipt_bound[bundled--True-darwin]"
+    },
+    {
+      "file": "tests/ci/test_protected_canary_publication.py",
+      "nodeid": "tests/ci/test_protected_canary_publication.py::test_canary_metadata_is_recorded_and_receipt_bound[bundled--True-win32]"
+    },
+    {
+      "file": "tests/ci/test_protected_canary_publication.py",
+      "nodeid": "tests/ci/test_protected_canary_publication.py::test_canary_metadata_is_recorded_and_receipt_bound[bundled-candidate-False-darwin]"
+    },
+    {
+      "file": "tests/ci/test_protected_canary_publication.py",
+      "nodeid": "tests/ci/test_protected_canary_publication.py::test_canary_metadata_is_recorded_and_receipt_bound[bundled-candidate-False-win32]"
+    },
+    {
+      "file": "tests/ci/test_protected_canary_publication.py",
+      "nodeid": "tests/ci/test_protected_canary_publication.py::test_canary_metadata_is_recorded_and_receipt_bound[light--False-darwin]"
+    },
+    {
+      "file": "tests/ci/test_protected_canary_publication.py",
+      "nodeid": "tests/ci/test_protected_canary_publication.py::test_canary_metadata_is_recorded_and_receipt_bound[light--False-win32]"
+    },
+    {
+      "file": "tests/ci/test_protected_canary_publication.py",
+      "nodeid": "tests/ci/test_protected_canary_publication.py::test_published_canary_workflow_advances_only_after_every_gate"
+    },
+    {
+      "file": "tests/ci/test_desktop_bundle_smoke.py",
+      "nodeid": "tests/ci/test_desktop_bundle_smoke.py::test_canary_publisher_consumes_staged_bytes_and_writes_pointer_last"
+    },
+    {
+      "file": "tests/gateway/test_adapter_connect_classification.py",
+      "nodeid": "tests/gateway/test_adapter_connect_classification.py::TestPhotonSidecarStartupClassification::test_deps_install_failure_raises_typed_nonretryable"
+    },
+    {
+      "file": "tests/gateway/test_api_server_active_work_drain.py",
+      "nodeid": "tests/gateway/test_api_server_active_work_drain.py::TestShutdownSettleWindow::test_settle_window_waits_for_interrupted_api_work"
+    },
+    {
+      "file": "tests/gateway/test_api_server_media_data_urls.py",
+      "nodeid": "tests/gateway/test_api_server_media_data_urls.py::TestResolveMediaToDataUrls::test_backtick_wrapped_tag"
+    },
+    {
+      "file": "tests/gateway/test_api_server_media_data_urls.py",
+      "nodeid": "tests/gateway/test_api_server_media_data_urls.py::TestResolveMediaToDataUrls::test_media_tag_inlined"
+    },
+    {
+      "file": "tests/gateway/test_api_server_media_data_urls.py",
+      "nodeid": "tests/gateway/test_api_server_media_data_urls.py::TestResolveMediaToDataUrls::test_terminal_eos_sentinel_does_not_block_inlining"
+    },
+    {
+      "file": "tests/gateway/test_base_warning_owner_scope.py",
+      "nodeid": "tests/gateway/test_base_warning_owner_scope.py::test_recursive_three_turn_chain_then_human[None-False]"
+    },
+    {
+      "file": "tests/gateway/test_base_warning_owner_scope.py",
+      "nodeid": "tests/gateway/test_base_warning_owner_scope.py::test_recursive_three_turn_chain_then_human[None-True]"
+    },
+    {
+      "file": "tests/gateway/test_base_warning_owner_scope.py",
+      "nodeid": "tests/gateway/test_base_warning_owner_scope.py::test_recursive_three_turn_chain_then_human[True-False]"
+    },
+    {
+      "file": "tests/gateway/test_base_warning_owner_scope.py",
+      "nodeid": "tests/gateway/test_base_warning_owner_scope.py::test_recursive_three_turn_chain_then_human[True-True]"
+    },
+    {
+      "file": "tests/gateway/test_background_process_notifications.py",
+      "nodeid": "tests/gateway/test_background_process_notifications.py::test_agent_notify_receipt_only_while_launching_turn_is_busy[False]"
+    },
+    {
+      "file": "tests/gateway/test_background_process_notifications.py",
+      "nodeid": "tests/gateway/test_background_process_notifications.py::test_agent_notify_receipt_only_while_launching_turn_is_busy[True]"
+    },
+    {
+      "file": "tests/gateway/test_background_process_notifications.py",
+      "nodeid": "tests/gateway/test_background_process_notifications.py::test_arm_process_watcher_schedules_on_live_loop_only"
+    },
+    {
+      "file": "tests/gateway/test_background_process_notifications.py",
+      "nodeid": "tests/gateway/test_background_process_notifications.py::test_async_delegation_apiserver_persist_failure_is_retryable"
+    },
+    {
+      "file": "tests/gateway/test_background_process_notifications.py",
+      "nodeid": "tests/gateway/test_background_process_notifications.py::test_async_delegation_apiserver_persists_delivery_not_self_post"
+    },
+    {
+      "file": "tests/gateway/test_background_process_notifications.py",
+      "nodeid": "tests/gateway/test_background_process_notifications.py::test_build_process_event_source_named_profile_key"
+    },
+    {
+      "file": "tests/gateway/test_background_process_notifications.py",
+      "nodeid": "tests/gateway/test_background_process_notifications.py::test_concise_mode_no_interim_output_updates"
+    },
+    {
+      "file": "tests/gateway/test_background_process_notifications.py",
+      "nodeid": "tests/gateway/test_background_process_notifications.py::test_consumed_completion_skips_raw_notification"
+    },
+    {
+      "file": "tests/gateway/test_background_process_notifications.py",
+      "nodeid": "tests/gateway/test_background_process_notifications.py::test_consumed_completion_skips_raw_notification_without_agent_notify"
+    },
+    {
+      "file": "tests/gateway/test_background_process_notifications.py",
+      "nodeid": "tests/gateway/test_background_process_notifications.py::test_inject_watch_notification_carries_message_id_reply_anchor"
+    },
+    {
+      "file": "tests/gateway/test_background_process_notifications.py",
+      "nodeid": "tests/gateway/test_background_process_notifications.py::test_inject_watch_notification_ignores_foreground_event_source"
+    },
+    {
+      "file": "tests/gateway/test_background_process_notifications.py",
+      "nodeid": "tests/gateway/test_background_process_notifications.py::test_inject_watch_notification_loads_session_store_off_loop"
+    },
+    {
+      "file": "tests/gateway/test_background_process_notifications.py",
+      "nodeid": "tests/gateway/test_background_process_notifications.py::test_inject_watch_notification_origin_session_id_wins"
+    },
+    {
+      "file": "tests/gateway/test_background_process_notifications.py",
+      "nodeid": "tests/gateway/test_background_process_notifications.py::test_inject_watch_notification_raw_session_key_self_posts"
+    },
+    {
+      "file": "tests/gateway/test_background_process_notifications.py",
+      "nodeid": "tests/gateway/test_background_process_notifications.py::test_inject_watch_notification_routes_from_session_store_origin"
+    },
+    {
+      "file": "tests/gateway/test_background_process_notifications.py",
+      "nodeid": "tests/gateway/test_background_process_notifications.py::test_post_turn_watch_drain_all_injects_from_queued_event_origin"
+    },
+    {
+      "file": "tests/gateway/test_background_process_notifications.py",
+      "nodeid": "tests/gateway/test_background_process_notifications.py::test_post_turn_watch_drain_off_consumes_without_injecting"
+    },
+    {
+      "file": "tests/gateway/test_background_process_notifications.py",
+      "nodeid": "tests/gateway/test_background_process_notifications.py::test_raw_output_modes_are_human_facing"
+    },
+    {
+      "file": "tests/gateway/test_busy_redirect_anchor.py",
+      "nodeid": "tests/gateway/test_busy_redirect_anchor.py::test_refused_or_foreign_redirect_leaves_the_anchor_on_the_opening_message"
+    },
+    {
+      "file": "tests/gateway/test_busy_redirect_anchor.py",
+      "nodeid": "tests/gateway/test_busy_redirect_anchor.py::test_successful_redirect_moves_the_turn_reply_anchor_to_the_redirecting_message[busy_interrupt]"
+    },
+    {
+      "file": "tests/gateway/test_busy_redirect_anchor.py",
+      "nodeid": "tests/gateway/test_busy_redirect_anchor.py::test_successful_redirect_moves_the_turn_reply_anchor_to_the_redirecting_message[priority]"
+    },
+    {
+      "file": "tests/gateway/test_busy_steer_subagent_fanout.py",
+      "nodeid": "tests/gateway/test_busy_steer_subagent_fanout.py::test_busy_steer_fans_out_to_active_subagents[busy_steer_mode]"
+    },
+    {
+      "file": "tests/gateway/test_busy_steer_subagent_fanout.py",
+      "nodeid": "tests/gateway/test_busy_steer_subagent_fanout.py::test_busy_steer_fans_out_to_active_subagents[explicit_command]"
+    },
+    {
+      "file": "tests/gateway/test_busy_steer_subagent_fanout.py",
+      "nodeid": "tests/gateway/test_busy_steer_subagent_fanout.py::test_busy_steer_fans_out_to_active_subagents[priority]"
+    },
+    {
+      "file": "tests/gateway/test_busy_steer_origin.py",
+      "nodeid": "tests/gateway/test_busy_steer_origin.py::test_busy_injection_preserves_original_routing_fields[False-Platform.DISCORD-explicit]"
+    },
+    {
+      "file": "tests/gateway/test_busy_steer_origin.py",
+      "nodeid": "tests/gateway/test_busy_steer_origin.py::test_busy_injection_preserves_original_routing_fields[False-Platform.DISCORD-normal]"
+    },
+    {
+      "file": "tests/gateway/test_busy_steer_origin.py",
+      "nodeid": "tests/gateway/test_busy_steer_origin.py::test_busy_injection_preserves_original_routing_fields[False-Platform.DISCORD-priority]"
+    },
+    {
+      "file": "tests/gateway/test_busy_steer_origin.py",
+      "nodeid": "tests/gateway/test_busy_steer_origin.py::test_busy_injection_preserves_original_routing_fields[False-Platform.DISCORD-priority_redirect]"
+    },
+    {
+      "file": "tests/gateway/test_busy_steer_origin.py",
+      "nodeid": "tests/gateway/test_busy_steer_origin.py::test_busy_injection_preserves_original_routing_fields[False-Platform.DISCORD-redirect]"
+    },
+    {
+      "file": "tests/gateway/test_busy_steer_origin.py",
+      "nodeid": "tests/gateway/test_busy_steer_origin.py::test_busy_injection_preserves_original_routing_fields[False-Platform.TELEGRAM-explicit]"
+    },
+    {
+      "file": "tests/gateway/test_busy_steer_origin.py",
+      "nodeid": "tests/gateway/test_busy_steer_origin.py::test_busy_injection_preserves_original_routing_fields[False-Platform.TELEGRAM-normal]"
+    },
+    {
+      "file": "tests/gateway/test_busy_steer_origin.py",
+      "nodeid": "tests/gateway/test_busy_steer_origin.py::test_busy_injection_preserves_original_routing_fields[False-Platform.TELEGRAM-priority]"
+    },
+    {
+      "file": "tests/gateway/test_busy_steer_origin.py",
+      "nodeid": "tests/gateway/test_busy_steer_origin.py::test_busy_injection_preserves_original_routing_fields[False-Platform.TELEGRAM-priority_redirect]"
+    },
+    {
+      "file": "tests/gateway/test_busy_steer_origin.py",
+      "nodeid": "tests/gateway/test_busy_steer_origin.py::test_busy_injection_preserves_original_routing_fields[False-Platform.TELEGRAM-redirect]"
+    },
+    {
+      "file": "tests/gateway/test_busy_steer_origin.py",
+      "nodeid": "tests/gateway/test_busy_steer_origin.py::test_busy_injection_preserves_original_routing_fields[True-Platform.DISCORD-explicit]"
+    },
+    {
+      "file": "tests/gateway/test_busy_steer_origin.py",
+      "nodeid": "tests/gateway/test_busy_steer_origin.py::test_busy_injection_preserves_original_routing_fields[True-Platform.DISCORD-normal]"
+    },
+    {
+      "file": "tests/gateway/test_busy_steer_origin.py",
+      "nodeid": "tests/gateway/test_busy_steer_origin.py::test_busy_injection_preserves_original_routing_fields[True-Platform.DISCORD-priority]"
+    },
+    {
+      "file": "tests/gateway/test_busy_steer_origin.py",
+      "nodeid": "tests/gateway/test_busy_steer_origin.py::test_busy_injection_preserves_original_routing_fields[True-Platform.DISCORD-priority_redirect]"
+    },
+    {
+      "file": "tests/gateway/test_busy_steer_origin.py",
+      "nodeid": "tests/gateway/test_busy_steer_origin.py::test_busy_injection_preserves_original_routing_fields[True-Platform.DISCORD-redirect]"
+    },
+    {
+      "file": "tests/gateway/test_busy_steer_origin.py",
+      "nodeid": "tests/gateway/test_busy_steer_origin.py::test_busy_injection_preserves_original_routing_fields[True-Platform.TELEGRAM-explicit]"
+    },
+    {
+      "file": "tests/gateway/test_busy_steer_origin.py",
+      "nodeid": "tests/gateway/test_busy_steer_origin.py::test_busy_injection_preserves_original_routing_fields[True-Platform.TELEGRAM-normal]"
+    },
+    {
+      "file": "tests/gateway/test_busy_steer_origin.py",
+      "nodeid": "tests/gateway/test_busy_steer_origin.py::test_busy_injection_preserves_original_routing_fields[True-Platform.TELEGRAM-priority]"
+    },
+    {
+      "file": "tests/gateway/test_busy_steer_origin.py",
+      "nodeid": "tests/gateway/test_busy_steer_origin.py::test_busy_injection_preserves_original_routing_fields[True-Platform.TELEGRAM-priority_redirect]"
+    },
+    {
+      "file": "tests/gateway/test_busy_steer_origin.py",
+      "nodeid": "tests/gateway/test_busy_steer_origin.py::test_busy_injection_preserves_original_routing_fields[True-Platform.TELEGRAM-redirect]"
+    },
+    {
+      "file": "tests/gateway/test_busy_steer_origin.py",
+      "nodeid": "tests/gateway/test_busy_steer_origin.py::test_origin_is_lossless_data_not_new_prompt_lines_or_a_guessed_target"
+    },
+    {
+      "file": "tests/gateway/test_completion_admission.py",
+      "nodeid": "tests/gateway/test_completion_admission.py::test_completion_ack_requires_admission_and_replay_never_repeats"
+    },
+    {
+      "file": "tests/gateway/test_completion_admission.py",
+      "nodeid": "tests/gateway/test_completion_admission.py::test_unavailable_raw_route_is_quiet_without_hiding_invalid_routes"
+    },
+    {
+      "file": "tests/gateway/test_compression_failure_session_sync.py",
+      "nodeid": "tests/gateway/test_compression_failure_session_sync.py::test_empty_rate_limit_response_preserves_failure_metadata"
+    },
+    {
+      "file": "tests/gateway/test_compression_failure_session_sync.py",
+      "nodeid": "tests/gateway/test_compression_failure_session_sync.py::test_failed_turn_still_syncs_compression_session_split"
+    },
+    {
+      "file": "tests/gateway/test_control_socket.py",
+      "nodeid": "tests/gateway/test_control_socket.py::test_default_identify_payload_shape"
+    },
+    {
+      "file": "tests/gateway/test_control_socket.py",
+      "nodeid": "tests/gateway/test_control_socket.py::test_long_home_end_to_end_via_pointer"
+    },
+    {
+      "file": "tests/gateway/test_control_socket.py",
+      "nodeid": "tests/gateway/test_control_socket.py::test_server_answers_identify_and_status"
+    },
+    {
+      "file": "tests/gateway/test_control_socket.py",
+      "nodeid": "tests/gateway/test_control_socket.py::test_short_home_binds_in_home"
+    },
+    {
+      "file": "tests/gateway/test_control_socket.py",
+      "nodeid": "tests/gateway/test_control_socket.py::test_stale_socket_file_is_replaced_on_bind"
+    },
+    {
+      "file": "tests/gateway/test_control_socket.py",
+      "nodeid": "tests/gateway/test_control_socket.py::test_stop_removes_socket_and_pointer"
+    },
+    {
+      "file": "tests/gateway/test_control_socket.py",
+      "nodeid": "tests/gateway/test_control_socket.py::test_unknown_verb_and_malformed_request"
+    },
+    {
+      "file": "tests/gateway/test_control_socket.py",
+      "nodeid": "tests/gateway/test_control_socket.py::test_verb_handler_receives_params"
+    },
+    {
+      "file": "tests/gateway/test_control_socket_pause.py",
+      "nodeid": "tests/gateway/test_control_socket_pause.py::test_pause_client_none_when_gateway_lacks_verb"
+    },
+    {
+      "file": "tests/gateway/test_control_socket_pause.py",
+      "nodeid": "tests/gateway/test_control_socket_pause.py::test_pause_client_roundtrip_over_real_socket"
+    },
+    {
+      "file": "tests/gateway/test_custom_provider_request_overrides.py",
+      "nodeid": "tests/gateway/test_custom_provider_request_overrides.py::test_reused_agent_turn_merges_request_overrides_not_overwrite"
+    },
+    {
+      "file": "tests/gateway/test_custom_provider_request_overrides.py",
+      "nodeid": "tests/gateway/test_custom_provider_request_overrides.py::test_run_agent_preserves_provider_request_overrides_on_gateway_path"
+    },
+    {
+      "file": "tests/gateway/test_duplicate_user_message.py",
+      "nodeid": "tests/gateway/test_duplicate_user_message.py::test_agent_failed_early_skip_db_when_agent_has_session_db"
+    },
+    {
+      "file": "tests/gateway/test_duplicate_user_message.py",
+      "nodeid": "tests/gateway/test_duplicate_user_message.py::test_boundary_keyed_on_durable_tail_when_user_row_is_deduped[agent-flushed-user-row-still-closed]"
+    },
+    {
+      "file": "tests/gateway/test_duplicate_user_message.py",
+      "nodeid": "tests/gateway/test_duplicate_user_message.py::test_boundary_keyed_on_durable_tail_when_user_row_is_deduped[redelivery-of-closed-turn-adds-nothing]"
+    },
+    {
+      "file": "tests/gateway/test_duplicate_user_message.py",
+      "nodeid": "tests/gateway/test_duplicate_user_message.py::test_failed_turn_with_tool_activity_does_not_recommend_blind_retry"
+    },
+    {
+      "file": "tests/gateway/test_duplicate_user_message.py",
+      "nodeid": "tests/gateway/test_duplicate_user_message.py::test_not_new_messages_skip_db_when_agent_has_session_db"
+    },
+    {
+      "file": "tests/gateway/test_duplicate_user_message.py",
+      "nodeid": "tests/gateway/test_duplicate_user_message.py::test_transcript_read_failure_stops_turn_before_agent_or_append"
+    },
+    {
+      "file": "tests/gateway/test_first_turn_session_meta_rebaseline.py",
+      "nodeid": "tests/gateway/test_first_turn_session_meta_rebaseline.py::test_first_turn_session_meta_is_captured_by_rebaseline"
+    },
+    {
+      "file": "tests/gateway/test_free_tier_gateway_boot.py",
+      "nodeid": "tests/gateway/test_free_tier_gateway_boot.py::test_gateway_boot_runs_the_free_tier_bootstrap_before_any_adapter_connects"
+    },
+    {
+      "file": "tests/gateway/test_gateway_silence_tokens.py",
+      "nodeid": "tests/gateway/test_gateway_silence_tokens.py::test_agent_end_hook_includes_model_and_provider"
+    },
+    {
+      "file": "tests/gateway/test_gateway_silence_tokens.py",
+      "nodeid": "tests/gateway/test_gateway_silence_tokens.py::test_empty_success_still_gets_empty_response_warning"
+    },
+    {
+      "file": "tests/gateway/test_gateway_silence_tokens.py",
+      "nodeid": "tests/gateway/test_gateway_silence_tokens.py::test_human_turn_gets_a_visible_fallback_for_a_silence_marker"
+    },
+    {
+      "file": "tests/gateway/test_gateway_silence_tokens.py",
+      "nodeid": "tests/gateway/test_gateway_silence_tokens.py::test_internal_silence_token_suppresses_delivery_but_preserves_transcript"
+    },
+    {
+      "file": "tests/gateway/test_gateway_silence_tokens.py",
+      "nodeid": "tests/gateway/test_gateway_silence_tokens.py::test_prose_mentioning_silence_token_is_delivered"
+    },
+    {
+      "file": "tests/gateway/test_gateway_silence_tokens.py",
+      "nodeid": "tests/gateway/test_gateway_silence_tokens.py::test_queued_human_turn_also_gets_the_visible_fallback"
+    },
+    {
+      "file": "tests/gateway/test_gateway_silence_tokens.py",
+      "nodeid": "tests/gateway/test_gateway_silence_tokens.py::test_queued_terminal_turn_owns_the_silence_verdict"
+    },
+    {
+      "file": "tests/gateway/test_gateway_silence_tokens.py",
+      "nodeid": "tests/gateway/test_gateway_silence_tokens.py::test_scheduled_heartbeat_silence_suppresses_delivery"
+    },
+    {
+      "file": "tests/gateway/test_grid_sweep_gateway_diagnostics.py",
+      "nodeid": "tests/gateway/test_grid_sweep_gateway_diagnostics.py::test_background_task_requested_result_is_never_suppressed"
+    },
+    {
+      "file": "tests/gateway/test_google_chat.py",
+      "nodeid": "tests/gateway/test_google_chat.py::TestEnvConfigLoading::test_multiplex_scoped_profile_never_borrows_process_env"
+    },
+    {
+      "file": "tests/gateway/test_internal_event_bypass_pairing.py",
+      "nodeid": "tests/gateway/test_internal_event_bypass_pairing.py::test_internal_event_bypasses_authorization"
+    },
+    {
+      "file": "tests/gateway/test_internal_event_bypass_pairing.py",
+      "nodeid": "tests/gateway/test_internal_event_bypass_pairing.py::test_none_user_id_does_not_generate_pairing_code"
+    },
+    {
+      "file": "tests/gateway/test_internal_event_bypass_pairing.py",
+      "nodeid": "tests/gateway/test_internal_event_bypass_pairing.py::test_notify_on_complete_uses_session_store_origin_for_group_topic"
+    },
+    {
+      "file": "tests/gateway/test_internal_notification_marker.py",
+      "nodeid": "tests/gateway/test_internal_notification_marker.py::test_failed_early_fallback_row_is_marked_for_internal_event"
+    },
+    {
+      "file": "tests/gateway/test_internal_notification_marker.py",
+      "nodeid": "tests/gateway/test_internal_notification_marker.py::test_failed_early_fallback_row_is_unmarked_for_real_user"
+    },
+    {
+      "file": "tests/gateway/test_internal_notification_marker.py",
+      "nodeid": "tests/gateway/test_internal_notification_marker.py::test_internal_event_threads_marker_into_agent_run"
+    },
+    {
+      "file": "tests/gateway/test_internal_notification_marker.py",
+      "nodeid": "tests/gateway/test_internal_notification_marker.py::test_no_new_messages_fallback_row_is_marked_for_internal_event"
+    },
+    {
+      "file": "tests/gateway/test_internal_notification_marker.py",
+      "nodeid": "tests/gateway/test_internal_notification_marker.py::test_real_user_event_gets_no_marker"
+    },
+    {
+      "file": "tests/gateway/test_kanban_lifecycle_fence_semantics_20260924.py",
+      "nodeid": "tests/gateway/test_kanban_lifecycle_fence_semantics_20260924.py::test_fenced_claim_reported_in_claim_errors_and_tick_continues"
+    },
+    {
+      "file": "tests/gateway/test_kanban_lifecycle_fence_semantics_20260924.py",
+      "nodeid": "tests/gateway/test_kanban_lifecycle_fence_semantics_20260924.py::test_full_tick_matrix_protected_and_local_advance_together"
+    },
+    {
+      "file": "tests/gateway/test_kanban_lifecycle_fence_semantics_20260924.py",
+      "nodeid": "tests/gateway/test_kanban_lifecycle_fence_semantics_20260924.py::test_manual_reclaim_refused_by_fence_sends_no_signal"
+    },
+    {
+      "file": "tests/gateway/test_kanban_lifecycle_fence_semantics_20260924.py",
+      "nodeid": "tests/gateway/test_kanban_lifecycle_fence_semantics_20260924.py::test_max_runtime_survivor_keeps_its_claim"
+    },
+    {
+      "file": "tests/gateway/test_kanban_lifecycle_fence_semantics_20260924.py",
+      "nodeid": "tests/gateway/test_kanban_lifecycle_fence_semantics_20260924.py::test_reclaim_sibling_isolates_fenced_row_without_signal[detect_crashed_workers]"
+    },
+    {
+      "file": "tests/gateway/test_kanban_lifecycle_fence_semantics_20260924.py",
+      "nodeid": "tests/gateway/test_kanban_lifecycle_fence_semantics_20260924.py::test_reclaim_sibling_isolates_fenced_row_without_signal[detect_stale_running]"
+    },
+    {
+      "file": "tests/gateway/test_kanban_lifecycle_fence_semantics_20260924.py",
+      "nodeid": "tests/gateway/test_kanban_lifecycle_fence_semantics_20260924.py::test_reclaim_sibling_isolates_fenced_row_without_signal[enforce_max_runtime]"
+    },
+    {
+      "file": "tests/gateway/test_kanban_lifecycle_fence_semantics_20260924.py",
+      "nodeid": "tests/gateway/test_kanban_lifecycle_fence_semantics_20260924.py::test_reclaim_sibling_isolates_fenced_row_without_signal[release_stale_claims]"
+    },
+    {
+      "file": "tests/gateway/test_kanban_lifecycle_fence_semantics_20260924.py",
+      "nodeid": "tests/gateway/test_kanban_lifecycle_fence_semantics_20260924.py::test_remote_protected_row_skipped_eligible_local_sibling_advances"
+    },
+    {
+      "file": "tests/gateway/test_kanban_lifecycle_fence_semantics_20260924.py",
+      "nodeid": "tests/gateway/test_kanban_lifecycle_fence_semantics_20260924.py::test_stale_fence_refusal_reported_in_tick_result"
+    },
+    {
+      "file": "tests/gateway/test_kanban_lifecycle_fence_semantics_20260924.py",
+      "nodeid": "tests/gateway/test_kanban_lifecycle_fence_semantics_20260924.py::test_stale_reclaim_same_host_revoked_generation_sends_zero_signals"
+    },
+    {
+      "file": "tests/gateway/test_kanban_lifecycle_fence_semantics_20260924.py",
+      "nodeid": "tests/gateway/test_kanban_lifecycle_fence_semantics_20260924.py::test_stale_reclaim_whole_tick_matrix_with_remote_and_revoked_siblings"
+    },
+    {
+      "file": "tests/gateway/test_kanban_lifecycle_fence_semantics_20260924.py",
+      "nodeid": "tests/gateway/test_kanban_lifecycle_fence_semantics_20260924.py::test_unrelated_check_constraint_with_fence_text_is_not_swallowed"
+    },
+    {
+      "file": "tests/gateway/test_kanban_lifecycle_fence_semantics_20260924.py",
+      "nodeid": "tests/gateway/test_kanban_lifecycle_fence_semantics_20260924.py::test_whole_tick_isolates_fenced_rows_in_every_reclaim_sibling"
+    },
+    {
+      "file": "tests/gateway/test_matrix_deps_rebind.py",
+      "nodeid": "tests/gateway/test_matrix_deps_rebind.py::test_failed_install_returns_false_with_hint_and_never_raises"
+    },
+    {
+      "file": "tests/gateway/test_matrix_deps_rebind.py",
+      "nodeid": "tests/gateway/test_matrix_deps_rebind.py::test_fresh_install_rebinds_type_globals_without_nameerror"
+    },
+    {
+      "file": "tests/gateway/test_media_only_outcome.py",
+      "nodeid": "tests/gateway/test_media_only_outcome.py::test_media_only_failure_still_reports_failure"
+    },
+    {
+      "file": "tests/gateway/test_media_only_outcome.py",
+      "nodeid": "tests/gateway/test_media_only_outcome.py::test_media_only_success_reports_success"
+    },
+    {
+      "file": "tests/gateway/test_media_spaced_paths_and_history_dedupe.py",
+      "nodeid": "tests/gateway/test_media_spaced_paths_and_history_dedupe.py::TestSpacedPaths::test_forward_extension_stops_at_next_media_tag"
+    },
+    {
+      "file": "tests/gateway/test_media_spaced_paths_and_history_dedupe.py",
+      "nodeid": "tests/gateway/test_media_spaced_paths_and_history_dedupe.py::TestSpacedPaths::test_spaced_path_followed_by_prose_keeps_prose"
+    },
+    {
+      "file": "tests/gateway/test_media_resend_dedup.py",
+      "nodeid": "tests/gateway/test_media_resend_dedup.py::test_explicit_media_resend_is_delivered_despite_history"
+    },
+    {
+      "file": "tests/gateway/test_media_resend_dedup.py",
+      "nodeid": "tests/gateway/test_media_resend_dedup.py::test_explicit_media_response_does_not_load_transcript"
+    },
+    {
+      "file": "tests/gateway/test_media_resend_dedup.py",
+      "nodeid": "tests/gateway/test_media_resend_dedup.py::test_first_delivery_not_poisoned_by_current_turn_tool_output"
+    },
+    {
+      "file": "tests/gateway/test_media_resend_dedup.py",
+      "nodeid": "tests/gateway/test_media_resend_dedup.py::test_streamed_explicit_media_resend_is_delivered"
+    },
+    {
+      "file": "tests/gateway/test_media_tag_formatting_variants.py",
+      "nodeid": "tests/gateway/test_media_tag_formatting_variants.py::TestInlineCodeWrappedTags::test_real_path_in_inline_code_delivers"
+    },
+    {
+      "file": "tests/gateway/test_media_terminal_sentinel.py",
+      "nodeid": "tests/gateway/test_media_terminal_sentinel.py::test_terminal_eos_sentinel_leaves_extraction_and_cleanup_unchanged[Caddyfile-<|eos|><|eos|>]"
+    },
+    {
+      "file": "tests/gateway/test_media_terminal_sentinel.py",
+      "nodeid": "tests/gateway/test_media_terminal_sentinel.py::test_terminal_eos_sentinel_leaves_extraction_and_cleanup_unchanged[Caddyfile-<|eos|>]"
+    },
+    {
+      "file": "tests/gateway/test_media_terminal_sentinel.py",
+      "nodeid": "tests/gateway/test_media_terminal_sentinel.py::test_terminal_eos_sentinel_leaves_extraction_and_cleanup_unchanged[payload.weirdext-<|eos|><|eos|>]"
+    },
+    {
+      "file": "tests/gateway/test_media_terminal_sentinel.py",
+      "nodeid": "tests/gateway/test_media_terminal_sentinel.py::test_terminal_eos_sentinel_leaves_extraction_and_cleanup_unchanged[payload.weirdext-<|eos|>]"
+    },
+    {
+      "file": "tests/gateway/test_multiplex_docker_media_delivery_scope.py",
+      "nodeid": "tests/gateway/test_multiplex_docker_media_delivery_scope.py::test_secondary_docker_media_resolves_via_its_own_mounts"
+    },
+    {
+      "file": "tests/gateway/test_multiplex_hot_serve.py",
+      "nodeid": "tests/gateway/test_multiplex_hot_serve.py::test_profile_lifecycle_over_real_control_socket"
+    },
+    {
+      "file": "tests/gateway/test_multiplex_adapter_registry.py",
+      "nodeid": "tests/gateway/test_multiplex_adapter_registry.py::TestSecondaryProfileFatalRecovery::test_secondary_hydrates_secrets_off_the_event_loop[reconnect]"
+    },
+    {
+      "file": "tests/gateway/test_multiplex_adapter_registry.py",
+      "nodeid": "tests/gateway/test_multiplex_adapter_registry.py::TestSecondaryStartupFailureRecovery::test_raising_initial_connect_schedules_reconnect"
+    },
+    {
+      "file": "tests/gateway/test_multiplex_adapter_registry.py",
+      "nodeid": "tests/gateway/test_multiplex_adapter_registry.py::TestSecondaryStartupFailureRecovery::test_retryable_initial_failure_schedules_reconnect"
+    },
+    {
+      "file": "tests/gateway/test_native_producer_owner_matrix.py",
+      "nodeid": "tests/gateway/test_native_producer_owner_matrix.py::test_signal_pacing_owner_scope_keeps_acquisition_and_upload[False]"
+    },
+    {
+      "file": "tests/gateway/test_native_producer_owner_matrix.py",
+      "nodeid": "tests/gateway/test_native_producer_owner_matrix.py::test_signal_pacing_owner_scope_keeps_acquisition_and_upload[None]"
+    },
+    {
+      "file": "tests/gateway/test_native_producer_owner_matrix.py",
+      "nodeid": "tests/gateway/test_native_producer_owner_matrix.py::test_signal_pacing_owner_scope_keeps_acquisition_and_upload[True]"
+    },
+    {
+      "file": "tests/gateway/test_native_producer_owner_matrix.py",
+      "nodeid": "tests/gateway/test_native_producer_owner_matrix.py::test_signal_pacing_owner_scope_keeps_acquisition_and_upload[managed]"
+    },
+    {
+      "file": "tests/gateway/test_native_producer_owner_matrix.py",
+      "nodeid": "tests/gateway/test_native_producer_owner_matrix.py::test_signal_pacing_owner_scope_keeps_acquisition_and_upload[null]"
+    },
+    {
+      "file": "tests/gateway/test_native_producer_owner_matrix.py",
+      "nodeid": "tests/gateway/test_native_producer_owner_matrix.py::test_signal_pacing_owner_scope_keeps_acquisition_and_upload[override]"
+    },
+    {
+      "file": "tests/gateway/test_native_producer_owner_matrix.py",
+      "nodeid": "tests/gateway/test_native_producer_owner_matrix.py::test_slack_upload_failure_owner_scope_keeps_caption_and_result[False-document]"
+    },
+    {
+      "file": "tests/gateway/test_native_producer_owner_matrix.py",
+      "nodeid": "tests/gateway/test_native_producer_owner_matrix.py::test_slack_upload_failure_owner_scope_keeps_caption_and_result[None-document]"
+    },
+    {
+      "file": "tests/gateway/test_native_producer_owner_matrix.py",
+      "nodeid": "tests/gateway/test_native_producer_owner_matrix.py::test_slack_upload_failure_owner_scope_keeps_caption_and_result[True-document]"
+    },
+    {
+      "file": "tests/gateway/test_native_producer_owner_matrix.py",
+      "nodeid": "tests/gateway/test_native_producer_owner_matrix.py::test_slack_upload_failure_owner_scope_keeps_caption_and_result[managed-document]"
+    },
+    {
+      "file": "tests/gateway/test_native_producer_owner_matrix.py",
+      "nodeid": "tests/gateway/test_native_producer_owner_matrix.py::test_slack_upload_failure_owner_scope_keeps_caption_and_result[null-document]"
+    },
+    {
+      "file": "tests/gateway/test_native_producer_owner_matrix.py",
+      "nodeid": "tests/gateway/test_native_producer_owner_matrix.py::test_slack_upload_failure_owner_scope_keeps_caption_and_result[override-document]"
+    },
+    {
+      "file": "tests/gateway/test_own_policy_startup_gate.py",
+      "nodeid": "tests/gateway/test_own_policy_startup_gate.py::test_unrelated_allow_all_does_not_bypass_yuanbao_open_gate"
+    },
+    {
+      "file": "tests/gateway/test_peer_dm_into_open_bot_chat.py",
+      "nodeid": "tests/gateway/test_peer_dm_into_open_bot_chat.py::test_a_peer_run_into_an_open_bot_chat_is_driven_by_its_owners_receipt[owner-fails-with-reason]"
+    },
+    {
+      "file": "tests/gateway/test_peer_dm_into_open_bot_chat.py",
+      "nodeid": "tests/gateway/test_peer_dm_into_open_bot_chat.py::test_a_peer_run_into_an_open_bot_chat_is_driven_by_its_owners_receipt[owner-settles]"
+    },
+    {
+      "file": "tests/gateway/test_peer_dm_into_open_bot_chat.py",
+      "nodeid": "tests/gateway/test_peer_dm_into_open_bot_chat.py::test_a_peer_run_into_an_open_bot_chat_is_driven_by_its_owners_receipt[stopped-while-queued]"
+    },
+    {
+      "file": "tests/gateway/test_peer_dm_into_open_bot_chat.py",
+      "nodeid": "tests/gateway/test_peer_dm_into_open_bot_chat.py::test_a_peer_turn_into_an_open_bot_chat_is_answered_by_its_live_owner[open-bot-chat-answers]"
+    },
+    {
+      "file": "tests/gateway/test_peer_dm_into_open_bot_chat.py",
+      "nodeid": "tests/gateway/test_peer_dm_into_open_bot_chat.py::test_a_peer_turn_into_an_open_bot_chat_is_answered_by_its_live_owner[open-bot-chat-still-running]"
+    },
+    {
+      "file": "tests/gateway/test_peer_dm_into_open_bot_chat.py",
+      "nodeid": "tests/gateway/test_peer_dm_into_open_bot_chat.py::test_a_streamed_peer_turn_into_an_open_bot_chat_is_answered_by_its_live_owner[open-bot-chat-answers]"
+    },
+    {
+      "file": "tests/gateway/test_peer_dm_into_open_bot_chat.py",
+      "nodeid": "tests/gateway/test_peer_dm_into_open_bot_chat.py::test_a_streamed_peer_turn_into_an_open_bot_chat_is_answered_by_its_live_owner[open-bot-chat-still-running]"
+    },
+    {
+      "file": "tests/gateway/test_platform_reconnect.py",
+      "nodeid": "tests/gateway/test_platform_reconnect.py::TestPlatformReconnectWatcher::test_reconnect_retries_resume_pending_for_platform"
+    },
+    {
+      "file": "tests/gateway/test_platform_reconnect.py",
+      "nodeid": "tests/gateway/test_platform_reconnect.py::TestPlatformReconnectWatcher::test_reconnect_stamp_honours_adapter_send_path_degraded[False]"
+    },
+    {
+      "file": "tests/gateway/test_platform_reconnect.py",
+      "nodeid": "tests/gateway/test_platform_reconnect.py::TestPlatformReconnectWatcher::test_reconnect_stamp_honours_adapter_send_path_degraded[True]"
+    },
+    {
+      "file": "tests/gateway/test_platform_reconnect.py",
+      "nodeid": "tests/gateway/test_platform_reconnect.py::TestStartupPlatformIsolation::test_start_continues_after_platform_connect_timeout"
+    },
+    {
+      "file": "tests/gateway/test_platform_reconnect.py",
+      "nodeid": "tests/gateway/test_platform_reconnect.py::TestVoiceInputCallbackWiring::test_startup_wires_voice_input_callback"
+    },
+    {
+      "file": "tests/gateway/test_platform_base.py",
+      "nodeid": "tests/gateway/test_platform_base.py::TestDockerContainerMediaPathTranslation::test_cache_dir_container_path_translates_to_host_cache"
+    },
+    {
+      "file": "tests/gateway/test_platform_base.py",
+      "nodeid": "tests/gateway/test_platform_base.py::TestDockerContainerMediaPathTranslation::test_configured_output_mount_translates"
+    },
+    {
+      "file": "tests/gateway/test_platform_base.py",
+      "nodeid": "tests/gateway/test_platform_base.py::TestDockerContainerMediaPathTranslation::test_configured_workspace_mount_translates"
+    },
+    {
+      "file": "tests/gateway/test_platform_base.py",
+      "nodeid": "tests/gateway/test_platform_base.py::TestDockerContainerMediaPathTranslation::test_default_persistent_workspace_fallback"
+    },
+    {
+      "file": "tests/gateway/test_platform_base.py",
+      "nodeid": "tests/gateway/test_platform_base.py::TestDockerContainerMediaPathTranslation::test_longest_prefix_wins"
+    },
+    {
+      "file": "tests/gateway/test_platform_base.py",
+      "nodeid": "tests/gateway/test_platform_base.py::TestDockerContainerMediaPathTranslation::test_persistent_home_root_write_translates"
+    },
+    {
+      "file": "tests/gateway/test_platform_base.py",
+      "nodeid": "tests/gateway/test_platform_base.py::TestDockerProfileSandboxMediaTranslation::test_default_profile_workspace_media_translates"
+    },
+    {
+      "file": "tests/gateway/test_platform_base.py",
+      "nodeid": "tests/gateway/test_platform_base.py::TestDockerProfileSandboxMediaTranslation::test_filter_passes_session_key_through"
+    },
+    {
+      "file": "tests/gateway/test_platform_base.py",
+      "nodeid": "tests/gateway/test_platform_base.py::TestDockerProfileSandboxMediaTranslation::test_home_mount_translates_stray_root_writes"
+    },
+    {
+      "file": "tests/gateway/test_platform_base.py",
+      "nodeid": "tests/gateway/test_platform_base.py::TestDockerProfileSandboxMediaTranslation::test_legacy_session_sandbox_still_resolves"
+    },
+    {
+      "file": "tests/gateway/test_platform_base.py",
+      "nodeid": "tests/gateway/test_platform_base.py::TestDockerProfileSandboxMediaTranslation::test_profile_and_legacy_sandboxes_both_searched"
+    },
+    {
+      "file": "tests/gateway/test_platform_base.py",
+      "nodeid": "tests/gateway/test_platform_base.py::TestExtensionlessMediaDelivery::test_extensionless_media_extracted_when_file_validates"
+    },
+    {
+      "file": "tests/gateway/test_platform_base.py",
+      "nodeid": "tests/gateway/test_platform_base.py::TestMediaDeliveryDefaultMode::test_accepts_stale_file_outside_allowlist"
+    },
+    {
+      "file": "tests/gateway/test_platform_base.py",
+      "nodeid": "tests/gateway/test_platform_base.py::TestMediaDeliveryDefaultMode::test_root_home_deliverable_is_accepted"
+    },
+    {
+      "file": "tests/gateway/test_platform_base.py",
+      "nodeid": "tests/gateway/test_platform_base.py::TestMediaDeliveryDefaultMode::test_root_home_workdir_symlink_to_credential_blocked"
+    },
+    {
+      "file": "tests/gateway/test_platform_base.py",
+      "nodeid": "tests/gateway/test_platform_base.py::TestMediaDeliveryDefaultMode::test_strict_mode_envvar_restores_legacy_behavior"
+    },
+    {
+      "file": "tests/gateway/test_platform_base.py",
+      "nodeid": "tests/gateway/test_platform_base.py::TestMediaDeliveryDiagnosability::test_crafted_null_path_does_not_abort_batch"
+    },
+    {
+      "file": "tests/gateway/test_platform_base.py",
+      "nodeid": "tests/gateway/test_platform_base.py::TestMediaDeliveryDiagnosability::test_rejected_path_appears_in_log"
+    },
+    {
+      "file": "tests/gateway/test_platform_base.py",
+      "nodeid": "tests/gateway/test_platform_base.py::TestMediaDeliveryPathValidation::test_allows_stale_kanban_attachment_but_not_neighboring_workspace"
+    },
+    {
+      "file": "tests/gateway/test_platform_base.py",
+      "nodeid": "tests/gateway/test_platform_base.py::TestMediaDeliveryPathValidation::test_filter_keeps_safe_media_and_drops_unsafe"
+    },
+    {
+      "file": "tests/gateway/test_platform_base.py",
+      "nodeid": "tests/gateway/test_platform_base.py::TestMediaDeliveryPathValidation::test_recency_trust_denies_system_paths_even_when_fresh"
+    },
+    {
+      "file": "tests/gateway/test_platform_base.py",
+      "nodeid": "tests/gateway/test_platform_base.py::TestMediaDeliveryPathValidation::test_rejects_symlink_escape_from_safe_root"
+    },
+    {
+      "file": "tests/gateway/test_platform_base.py",
+      "nodeid": "tests/gateway/test_platform_base.py::TestUniversalMediaEgress::test_unknown_extension_delivered_when_file_validates[app.ts]"
+    },
+    {
+      "file": "tests/gateway/test_platform_base.py",
+      "nodeid": "tests/gateway/test_platform_base.py::TestUniversalMediaEgress::test_unknown_extension_delivered_when_file_validates[config.toml]"
+    },
+    {
+      "file": "tests/gateway/test_platform_base.py",
+      "nodeid": "tests/gateway/test_platform_base.py::TestUniversalMediaEgress::test_unknown_extension_delivered_when_file_validates[contract.sol]"
+    },
+    {
+      "file": "tests/gateway/test_platform_base.py",
+      "nodeid": "tests/gateway/test_platform_base.py::TestUniversalMediaEgress::test_unknown_extension_delivered_when_file_validates[notes.weirdext]"
+    },
+    {
+      "file": "tests/gateway/test_platform_base.py",
+      "nodeid": "tests/gateway/test_platform_base.py::TestUniversalMediaEgress::test_unknown_extension_delivered_when_file_validates[run.sh]"
+    },
+    {
+      "file": "tests/gateway/test_platform_base.py",
+      "nodeid": "tests/gateway/test_platform_base.py::TestUniversalMediaEgress::test_unknown_extension_delivered_when_file_validates[script.py]"
+    },
+    {
+      "file": "tests/gateway/test_platform_base.py",
+      "nodeid": "tests/gateway/test_platform_base.py::TestUniversalMediaEgress::test_unknown_extension_delivered_when_file_validates[server.log]"
+    },
+    {
+      "file": "tests/gateway/test_platform_base.py",
+      "nodeid": "tests/gateway/test_platform_base.py::TestUniversalMediaEgress::test_unknown_extension_delivered_when_file_validates[styles.css]"
+    },
+    {
+      "file": "tests/gateway/test_platform_base.py",
+      "nodeid": "tests/gateway/test_platform_base.py::test_media_delivery_denies_encrypted_bitwarden_cache"
+    },
+    {
+      "file": "tests/gateway/test_post_stream_media_delivery.py",
+      "nodeid": "tests/gateway/test_post_stream_media_delivery.py::test_explicit_media_tag_still_delivers_post_stream"
+    },
+    {
+      "file": "tests/gateway/test_queued_followup_final_delivery.py",
+      "nodeid": "tests/gateway/test_queued_followup_final_delivery.py::test_queued_lane_delivers_text_and_media_exactly_once"
+    },
+    {
+      "file": "tests/gateway/test_reaped_session_recovery.py",
+      "nodeid": "tests/gateway/test_reaped_session_recovery.py::test_alive_session_keeps_priority_interrupt_path"
+    },
+    {
+      "file": "tests/gateway/test_reaped_session_recovery.py",
+      "nodeid": "tests/gateway/test_reaped_session_recovery.py::test_guard_is_inert_with_stubbed_session_store"
+    },
+    {
+      "file": "tests/gateway/test_reasoning_config_per_model.py",
+      "nodeid": "tests/gateway/test_reasoning_config_per_model.py::TestApiServerPerModelReasoning::test_model_without_an_override_falls_back_to_global"
+    },
+    {
+      "file": "tests/gateway/test_reasoning_config_per_model.py",
+      "nodeid": "tests/gateway/test_reasoning_config_per_model.py::TestApiServerPerModelReasoning::test_reasoning_follows_the_requested_model"
+    },
+    {
+      "file": "tests/gateway/test_remote_media_fetch.py",
+      "nodeid": "tests/gateway/test_remote_media_fetch.py::test_sandbox_artifact_is_fetched_but_credentials_and_symlinks_to_them_are_not"
+    },
+    {
+      "file": "tests/gateway/test_restart_drain.py",
+      "nodeid": "tests/gateway/test_restart_drain.py::test_load_busy_text_mode_follows_input_mode_and_honors_legacy"
+    },
+    {
+      "file": "tests/gateway/test_restart_resume_pending.py",
+      "nodeid": "tests/gateway/test_restart_resume_pending.py::test_served_profile_reconnect_resumes_what_boot_deferred"
+    },
+    {
+      "file": "tests/gateway/test_runner_fatal_adapter.py",
+      "nodeid": "tests/gateway/test_runner_fatal_adapter.py::test_fatal_handler_outer_timeout_still_queues_platform"
+    },
+    {
+      "file": "tests/gateway/test_runner_fatal_adapter.py",
+      "nodeid": "tests/gateway/test_runner_fatal_adapter.py::test_retryable_fatal_queues_before_disconnect_returns"
+    },
+    {
+      "file": "tests/gateway/test_runner_fatal_adapter.py",
+      "nodeid": "tests/gateway/test_runner_fatal_adapter.py::test_retryable_fatal_queues_reconnect_after_cancellation_swallowing_disconnect"
+    },
+    {
+      "file": "tests/gateway/test_runner_fatal_adapter.py",
+      "nodeid": "tests/gateway/test_runner_fatal_adapter.py::test_runner_queues_retryable_runtime_fatal_for_reconnection"
+    },
+    {
+      "file": "tests/gateway/test_runner_startup_failures.py",
+      "nodeid": "tests/gateway/test_runner_startup_failures.py::test_live_foreign_token_lock_at_startup_exits_ex_config"
+    },
+    {
+      "file": "tests/gateway/test_runner_startup_failures.py",
+      "nodeid": "tests/gateway/test_runner_startup_failures.py::test_runner_degrades_gracefully_when_all_adapters_missing"
+    },
+    {
+      "file": "tests/gateway/test_runner_startup_failures.py",
+      "nodeid": "tests/gateway/test_runner_startup_failures.py::test_runner_exits_with_ex_config_on_nonretryable_startup_error"
+    },
+    {
+      "file": "tests/gateway/test_runner_startup_failures.py",
+      "nodeid": "tests/gateway/test_runner_startup_failures.py::test_token_lock_plus_retryable_peer_stays_alive"
+    },
+    {
+      "file": "tests/gateway/test_run_progress_topics.py",
+      "nodeid": "tests/gateway/test_run_progress_topics.py::test_run_agent_queued_message_delivers_first_response_media"
+    },
+    {
+      "file": "tests/gateway/test_run_progress_topics.py",
+      "nodeid": "tests/gateway/test_run_progress_topics.py::test_run_agent_queued_message_delivers_streamed_first_response_media"
+    },
+    {
+      "file": "tests/gateway/test_session_race_guard.py",
+      "nodeid": "tests/gateway/test_session_race_guard.py::test_recent_telegram_followups_append_in_pending_queue"
+    },
+    {
+      "file": "tests/gateway/test_shutdown_watchdog.py",
+      "nodeid": "tests/gateway/test_shutdown_watchdog.py::test_loop_tick_witness_arms_on_posix"
+    },
+    {
+      "file": "tests/gateway/test_slack_bang_help.py",
+      "nodeid": "tests/gateway/test_slack_bang_help.py::test_import_path_is_worktree"
+    },
+    {
+      "file": "tests/gateway/test_startup_failed_platform_reports_degraded.py",
+      "nodeid": "tests/gateway/test_startup_failed_platform_reports_degraded.py::test_every_platform_connected_still_reports_a_normal_run"
+    },
+    {
+      "file": "tests/gateway/test_startup_failed_platform_reports_degraded.py",
+      "nodeid": "tests/gateway/test_startup_failed_platform_reports_degraded.py::test_parked_platform_is_logged_at_error_and_the_run_is_degraded"
+    },
+    {
+      "file": "tests/gateway/test_startup_connect_parallel.py",
+      "nodeid": "tests/gateway/test_startup_connect_parallel.py::TestTelegramColdStartCap::test_env_override_applies_to_initial"
+    },
+    {
+      "file": "tests/gateway/test_startup_connect_parallel.py",
+      "nodeid": "tests/gateway/test_startup_connect_parallel.py::TestTelegramColdStartCap::test_initial_connect_times_out_at_cap_and_queues_retry"
+    },
+    {
+      "file": "tests/gateway/test_startup_connect_parallel.py",
+      "nodeid": "tests/gateway/test_startup_connect_parallel.py::TestTelegramColdStartCap::test_initial_telegram_budget_is_capped"
+    },
+    {
+      "file": "tests/gateway/test_startup_connect_parallel.py",
+      "nodeid": "tests/gateway/test_startup_connect_parallel.py::TestTelegramColdStartCap::test_other_platforms_unchanged"
+    },
+    {
+      "file": "tests/gateway/test_startup_connect_parallel.py",
+      "nodeid": "tests/gateway/test_startup_connect_parallel.py::test_startup_connects_platforms_concurrently"
+    },
+    {
+      "file": "tests/gateway/test_startup_connect_parallel.py",
+      "nodeid": "tests/gateway/test_startup_connect_parallel.py::test_startup_one_failing_platform_does_not_block_others"
+    },
+    {
+      "file": "tests/gateway/test_stop_ends_background_delegations.py",
+      "nodeid": "tests/gateway/test_stop_ends_background_delegations.py::test_stop_ends_background_delegations_of_the_session[busy]"
+    },
+    {
+      "file": "tests/gateway/test_stop_ends_background_delegations.py",
+      "nodeid": "tests/gateway/test_stop_ends_background_delegations.py::test_stop_ends_background_delegations_of_the_session[idle]"
+    },
+    {
+      "file": "tests/gateway/test_telegram_inbound_warning_owner.py",
+      "nodeid": "tests/gateway/test_telegram_inbound_warning_owner.py::test_inbound_cache_failure_keeps_owner_policy_and_context[document-False-False]"
+    },
+    {
+      "file": "tests/gateway/test_telegram_inbound_warning_owner.py",
+      "nodeid": "tests/gateway/test_telegram_inbound_warning_owner.py::test_inbound_cache_failure_keeps_owner_policy_and_context[document-False-True]"
+    },
+    {
+      "file": "tests/gateway/test_telegram_inbound_warning_owner.py",
+      "nodeid": "tests/gateway/test_telegram_inbound_warning_owner.py::test_inbound_cache_failure_keeps_owner_policy_and_context[document-None-False]"
+    },
+    {
+      "file": "tests/gateway/test_telegram_inbound_warning_owner.py",
+      "nodeid": "tests/gateway/test_telegram_inbound_warning_owner.py::test_inbound_cache_failure_keeps_owner_policy_and_context[document-None-True]"
+    },
+    {
+      "file": "tests/gateway/test_telegram_inbound_warning_owner.py",
+      "nodeid": "tests/gateway/test_telegram_inbound_warning_owner.py::test_inbound_cache_failure_keeps_owner_policy_and_context[document-True-False]"
+    },
+    {
+      "file": "tests/gateway/test_telegram_inbound_warning_owner.py",
+      "nodeid": "tests/gateway/test_telegram_inbound_warning_owner.py::test_inbound_cache_failure_keeps_owner_policy_and_context[document-True-True]"
+    },
+    {
+      "file": "tests/gateway/test_telegram_inbound_warning_owner.py",
+      "nodeid": "tests/gateway/test_telegram_inbound_warning_owner.py::test_inbound_cache_failure_keeps_owner_policy_and_context[photo-False-False]"
+    },
+    {
+      "file": "tests/gateway/test_telegram_inbound_warning_owner.py",
+      "nodeid": "tests/gateway/test_telegram_inbound_warning_owner.py::test_inbound_cache_failure_keeps_owner_policy_and_context[photo-False-True]"
+    },
+    {
+      "file": "tests/gateway/test_telegram_inbound_warning_owner.py",
+      "nodeid": "tests/gateway/test_telegram_inbound_warning_owner.py::test_inbound_cache_failure_keeps_owner_policy_and_context[photo-None-False]"
+    },
+    {
+      "file": "tests/gateway/test_telegram_inbound_warning_owner.py",
+      "nodeid": "tests/gateway/test_telegram_inbound_warning_owner.py::test_inbound_cache_failure_keeps_owner_policy_and_context[photo-None-True]"
+    },
+    {
+      "file": "tests/gateway/test_telegram_inbound_warning_owner.py",
+      "nodeid": "tests/gateway/test_telegram_inbound_warning_owner.py::test_inbound_cache_failure_keeps_owner_policy_and_context[photo-True-False]"
+    },
+    {
+      "file": "tests/gateway/test_telegram_inbound_warning_owner.py",
+      "nodeid": "tests/gateway/test_telegram_inbound_warning_owner.py::test_inbound_cache_failure_keeps_owner_policy_and_context[photo-True-True]"
+    },
+    {
+      "file": "tests/gateway/test_telegram_network_reconnect.py",
+      "nodeid": "tests/gateway/test_telegram_network_reconnect.py::test_retry_exhaustion_queues_reconnect_before_child_disconnect"
+    },
+    {
+      "file": "tests/gateway/test_tts_media_routing.py",
+      "nodeid": "tests/gateway/test_tts_media_routing.py::test_base_adapter_routes_voice_tagged_telegram_ogg_media_tag_to_voice_sender"
+    },
+    {
+      "file": "tests/gateway/test_tts_media_routing.py",
+      "nodeid": "tests/gateway/test_tts_media_routing.py::test_non_streaming_media_failure_notifies_user"
+    },
+    {
+      "file": "tests/gateway/test_tts_media_routing.py",
+      "nodeid": "tests/gateway/test_tts_media_routing.py::test_queued_followup_delivery_reuses_routing_metadata_for_media"
+    },
+    {
+      "file": "tests/gateway/test_tts_media_routing.py",
+      "nodeid": "tests/gateway/test_tts_media_routing.py::test_queued_followup_delivery_strips_media_tag_from_text_and_sends_image"
+    },
+    {
+      "file": "tests/gateway/test_tts_media_routing.py",
+      "nodeid": "tests/gateway/test_tts_media_routing.py::test_queued_resend_branch_delivers_media_and_preserves_protected_example"
+    },
+    {
+      "file": "tests/gateway/test_whatsapp_connect.py",
+      "nodeid": "tests/gateway/test_whatsapp_connect.py::TestConnectCleanup::test_releases_lock_when_npm_install_fails"
+    },
+    {
+      "file": "tests/gateway/test_whatsapp_connect.py",
+      "nodeid": "tests/gateway/test_whatsapp_connect.py::TestFileHandleClosedOnError::test_closed_when_bridge_dies_phase1"
+    },
+    {
+      "file": "tests/gateway/test_whatsapp_stale_bridge.py",
+      "nodeid": "tests/gateway/test_whatsapp_stale_bridge.py::TestCacheDirEnvPassthrough::test_bridge_spawn_env_has_cache_dirs"
+    },
+    {
+      "file": "tests/gateway/test_whatsapp_stale_bridge.py",
+      "nodeid": "tests/gateway/test_whatsapp_stale_bridge.py::TestStaleBridgeHandshake::test_restarts_bridge_when_read_receipt_config_changed"
+    },
+    {
+      "file": "tests/hermes_cli/test_auth_provider_gate.py",
+      "nodeid": "tests/hermes_cli/test_auth_provider_gate.py::test_vertex_ambient_google_creds_env_does_not_count_as_explicit"
+    },
+    {
+      "file": "tests/hermes_cli/test_bundled_desktop_launch.py",
+      "nodeid": "tests/hermes_cli/test_bundled_desktop_launch.py::TestCmdGuiOnABundle::test_a_checkout_still_takes_the_build_ladder"
+    },
+    {
+      "file": "tests/hermes_cli/test_config_read_guard.py",
+      "nodeid": "tests/hermes_cli/test_config_read_guard.py::test_no_raw_config_yaml_reads_outside_owner_modules"
+    },
+    {
+      "file": "tests/hermes_cli/test_data_uninstall_holders.py",
+      "nodeid": "tests/hermes_cli/test_data_uninstall_holders.py::test_manual_gateway_drains_over_real_control_transport_before_deletion"
+    },
+    {
+      "file": "tests/hermes_cli/test_desktop_source_build.py",
+      "nodeid": "tests/hermes_cli/test_desktop_source_build.py::test_desktop_build_only_prepares_once_and_keeps_fresh_launch_fast"
+    },
+    {
+      "file": "tests/hermes_cli/test_desktop_source_build.py",
+      "nodeid": "tests/hermes_cli/test_desktop_source_build.py::test_failed_pack_exits_without_launching_or_replacing_the_app"
+    },
+    {
+      "file": "tests/hermes_cli/test_desktop_source_build.py",
+      "nodeid": "tests/hermes_cli/test_desktop_source_build.py::test_skip_build_source_checks_artifacts_without_provisioning"
+    },
+    {
+      "file": "tests/hermes_cli/test_desktop_update_verify.py",
+      "nodeid": "tests/hermes_cli/test_desktop_update_verify.py::test_current_stamp_does_not_hide_damaged_output[archive]"
+    },
+    {
+      "file": "tests/hermes_cli/test_desktop_update_verify.py",
+      "nodeid": "tests/hermes_cli/test_desktop_update_verify.py::test_current_stamp_does_not_hide_damaged_output[empty-index]"
+    },
+    {
+      "file": "tests/hermes_cli/test_desktop_update_verify.py",
+      "nodeid": "tests/hermes_cli/test_desktop_update_verify.py::test_current_stamp_does_not_hide_damaged_output[entry]"
+    },
+    {
+      "file": "tests/hermes_cli/test_desktop_update_verify.py",
+      "nodeid": "tests/hermes_cli/test_desktop_update_verify.py::test_current_stamp_does_not_hide_damaged_output[no-module]"
+    },
+    {
+      "file": "tests/hermes_cli/test_desktop_update_verify.py",
+      "nodeid": "tests/hermes_cli/test_desktop_update_verify.py::test_current_stamp_does_not_hide_damaged_output[truncated]"
+    },
+    {
+      "file": "tests/hermes_cli/test_desktop_update_verify.py",
+      "nodeid": "tests/hermes_cli/test_desktop_update_verify.py::test_current_stamp_does_not_hide_damaged_output[unreadable-index]"
+    },
+    {
+      "file": "tests/hermes_cli/test_desktop_update_verify.py",
+      "nodeid": "tests/hermes_cli/test_desktop_update_verify.py::test_readable_packaged_entry_passes"
+    },
+    {
+      "file": "tests/hermes_cli/test_display_ws_drop_keeps_lease.py",
+      "nodeid": "tests/hermes_cli/test_display_ws_drop_keeps_lease.py::test_a_takeover_made_by_another_process_stops_input_within_the_refresh_interval"
+    },
+    {
+      "file": "tests/hermes_cli/test_display_ws_drop_keeps_lease.py",
+      "nodeid": "tests/hermes_cli/test_display_ws_drop_keeps_lease.py::test_no_bridge_task_or_socket_outlives_the_bridge"
+    },
+    {
+      "file": "tests/hermes_cli/test_display_ws_drop_keeps_lease.py",
+      "nodeid": "tests/hermes_cli/test_display_ws_drop_keeps_lease.py::test_only_a_clean_viewer_close_hands_the_screen_back[1000-False]"
+    },
+    {
+      "file": "tests/hermes_cli/test_display_ws_drop_keeps_lease.py",
+      "nodeid": "tests/hermes_cli/test_display_ws_drop_keeps_lease.py::test_only_a_clean_viewer_close_hands_the_screen_back[1005-True]"
+    },
+    {
+      "file": "tests/hermes_cli/test_display_ws_drop_keeps_lease.py",
+      "nodeid": "tests/hermes_cli/test_display_ws_drop_keeps_lease.py::test_only_a_clean_viewer_close_hands_the_screen_back[1006-True]"
+    },
+    {
+      "file": "tests/hermes_cli/test_enable_no_capabilities.py",
+      "nodeid": "tests/hermes_cli/test_enable_no_capabilities.py::test_enable_consent[None-False-True-n-False-0]"
+    },
+    {
+      "file": "tests/hermes_cli/test_enable_no_capabilities.py",
+      "nodeid": "tests/hermes_cli/test_enable_no_capabilities.py::test_enable_consent[None-None-None-n-None-0]"
+    },
+    {
+      "file": "tests/hermes_cli/test_enable_no_capabilities.py",
+      "nodeid": "tests/hermes_cli/test_enable_no_capabilities.py::test_enable_consent[None-None-True-n-True-0]"
+    },
+    {
+      "file": "tests/hermes_cli/test_enable_no_capabilities.py",
+      "nodeid": "tests/hermes_cli/test_enable_no_capabilities.py::test_enable_consent[None-True-None-n-True-0]"
+    },
+    {
+      "file": "tests/hermes_cli/test_enable_no_capabilities.py",
+      "nodeid": "tests/hermes_cli/test_enable_no_capabilities.py::test_enable_consent[caps1-None-None-n-None-0]"
+    },
+    {
+      "file": "tests/hermes_cli/test_enable_no_capabilities.py",
+      "nodeid": "tests/hermes_cli/test_enable_no_capabilities.py::test_enable_consent[caps5-None-None-y-True-1]"
+    },
+    {
+      "file": "tests/hermes_cli/test_doctor.py",
+      "nodeid": "tests/hermes_cli/test_doctor.py::test_doctor_reports_vercel_backend_diagnostics"
+    },
+    {
+      "file": "tests/hermes_cli/test_home_init_soul_symlink.py",
+      "nodeid": "tests/hermes_cli/test_home_init_soul_symlink.py::test_initialize_home_replaces_unwritable_soul_symlink[cyclic]"
+    },
+    {
+      "file": "tests/hermes_cli/test_install_identity.py",
+      "nodeid": "tests/hermes_cli/test_install_identity.py::test_concurrent_corrupt_file_repair_returns_one_committed_identity"
+    },
+    {
+      "file": "tests/hermes_cli/test_install_lock_timeout.py",
+      "nodeid": "tests/hermes_cli/test_install_lock_timeout.py::test_boot_activation_proceeds_while_the_install_is_locked"
+    },
+    {
+      "file": "tests/hermes_cli/test_kanban_recompute_ready_ownership_20260924.py",
+      "nodeid": "tests/hermes_cli/test_kanban_recompute_ready_ownership_20260924.py::test_blank_current_node_is_unknown_owner_not_local[   ]"
+    },
+    {
+      "file": "tests/hermes_cli/test_kanban_recompute_ready_ownership_20260924.py",
+      "nodeid": "tests/hermes_cli/test_kanban_recompute_ready_ownership_20260924.py::test_blank_current_node_is_unknown_owner_not_local[]"
+    },
+    {
+      "file": "tests/hermes_cli/test_kanban_recompute_ready_ownership_20260924.py",
+      "nodeid": "tests/hermes_cli/test_kanban_recompute_ready_ownership_20260924.py::test_foreign_blocked_task_no_parents_not_promoted"
+    },
+    {
+      "file": "tests/hermes_cli/test_kanban_recompute_ready_ownership_20260924.py",
+      "nodeid": "tests/hermes_cli/test_kanban_recompute_ready_ownership_20260924.py::test_foreign_todo_task_satisfied_parents_not_promoted"
+    },
+    {
+      "file": "tests/hermes_cli/test_kanban_recompute_ready_ownership_20260924.py",
+      "nodeid": "tests/hermes_cli/test_kanban_recompute_ready_ownership_20260924.py::test_local_dependency_blocked_all_parents_done_promotes"
+    },
+    {
+      "file": "tests/hermes_cli/test_kanban_recompute_ready_ownership_20260924.py",
+      "nodeid": "tests/hermes_cli/test_kanban_recompute_ready_ownership_20260924.py::test_local_manual_blocked_no_parents_stays_blocked"
+    },
+    {
+      "file": "tests/hermes_cli/test_kanban_recompute_ready_ownership_20260924.py",
+      "nodeid": "tests/hermes_cli/test_kanban_recompute_ready_ownership_20260924.py::test_reformatted_trigger_still_parses_node"
+    },
+    {
+      "file": "tests/hermes_cli/test_kanban_recompute_ready_ownership_20260924.py",
+      "nodeid": "tests/hermes_cli/test_kanban_recompute_ready_ownership_20260924.py::test_unparseable_trigger_fails_closed_and_warns"
+    },
+    {
+      "file": "tests/hermes_cli/test_memory_dependency_admission.py",
+      "nodeid": "tests/hermes_cli/test_memory_dependency_admission.py::test_setup_requires_dependencies_and_keeps_the_existing_union[False]"
+    },
+    {
+      "file": "tests/hermes_cli/test_memory_dependency_admission.py",
+      "nodeid": "tests/hermes_cli/test_memory_dependency_admission.py::test_setup_requires_dependencies_and_keeps_the_existing_union[True]"
+    },
+    {
+      "file": "tests/hermes_cli/test_oneshot_resumed_session_persist.py",
+      "nodeid": "tests/hermes_cli/test_oneshot_resumed_session_persist.py::TestOneShotDurableFlush::test_finalize_single_query_ends_session_row"
+    },
+    {
+      "file": "tests/hermes_cli/test_oneshot_resumed_session_persist.py",
+      "nodeid": "tests/hermes_cli/test_oneshot_resumed_session_persist.py::TestOneShotDurableFlush::test_finalize_single_query_persists_unflushed_turn"
+    },
+    {
+      "file": "tests/hermes_cli/test_oneshot_resumed_session_persist.py",
+      "nodeid": "tests/hermes_cli/test_oneshot_resumed_session_persist.py::TestOneShotDurableFlush::test_flush_is_idempotent_for_already_persisted_turns"
+    },
+    {
+      "file": "tests/hermes_cli/test_oneshot_resumed_session_persist.py",
+      "nodeid": "tests/hermes_cli/test_oneshot_resumed_session_persist.py::TestOneShotDurableFlush::test_flush_skips_handed_off_sessions"
+    },
+    {
+      "file": "tests/hermes_cli/test_oneshot_resumed_session_persist.py",
+      "nodeid": "tests/hermes_cli/test_oneshot_resumed_session_persist.py::TestOneShotDurableFlush::test_flush_skips_persist_disabled_agents"
+    },
+    {
+      "file": "tests/hermes_cli/test_plugin_dependency_consent.py",
+      "nodeid": "tests/hermes_cli/test_plugin_dependency_consent.py::test_install_only_requests_relevant_python_consent[None]"
+    },
+    {
+      "file": "tests/hermes_cli/test_plugin_dependency_consent.py",
+      "nodeid": "tests/hermes_cli/test_plugin_dependency_consent.py::test_install_only_requests_relevant_python_consent[legacy]"
+    },
+    {
+      "file": "tests/hermes_cli/test_plugin_dependency_consent.py",
+      "nodeid": "tests/hermes_cli/test_plugin_dependency_consent.py::test_install_only_requests_relevant_python_consent[pyproject]"
+    },
+    {
+      "file": "tests/hermes_cli/test_plugin_install_manifest_version.py",
+      "nodeid": "tests/hermes_cli/test_plugin_install_manifest_version.py::test_install_accepts_every_loader_supported_manifest_version[1]"
+    },
+    {
+      "file": "tests/hermes_cli/test_plugin_install_manifest_version.py",
+      "nodeid": "tests/hermes_cli/test_plugin_install_manifest_version.py::test_install_accepts_every_loader_supported_manifest_version[2]"
+    },
+    {
+      "file": "tests/hermes_cli/test_plugin_install_manifest_version.py",
+      "nodeid": "tests/hermes_cli/test_plugin_install_manifest_version.py::test_manifest_version_above_shared_support_is_refused_cleanly"
+    },
+    {
+      "file": "tests/hermes_cli/test_plugin_install_ref.py",
+      "nodeid": "tests/hermes_cli/test_plugin_install_ref.py::test_annotated_tag_pin_installs_at_its_commit"
+    },
+    {
+      "file": "tests/hermes_cli/test_plugin_install_ref.py",
+      "nodeid": "tests/hermes_cli/test_plugin_install_ref.py::test_canonical_source_never_persists_http_credentials"
+    },
+    {
+      "file": "tests/hermes_cli/test_plugin_install_ref.py",
+      "nodeid": "tests/hermes_cli/test_plugin_install_ref.py::test_checkout_mismatch_is_rejected"
+    },
+    {
+      "file": "tests/hermes_cli/test_plugin_install_ref.py",
+      "nodeid": "tests/hermes_cli/test_plugin_install_ref.py::test_checkout_that_lands_on_another_commit_is_still_rejected"
+    },
+    {
+      "file": "tests/hermes_cli/test_plugin_install_ref.py",
+      "nodeid": "tests/hermes_cli/test_plugin_install_ref.py::test_clone_timeout_applies_to_every_network_step_of_a_pinned_install"
+    },
+    {
+      "file": "tests/hermes_cli/test_plugin_install_ref.py",
+      "nodeid": "tests/hermes_cli/test_plugin_install_ref.py::test_clone_timeout_uses_active_profile_and_bounds_invalid_values"
+    },
+    {
+      "file": "tests/hermes_cli/test_plugin_install_ref.py",
+      "nodeid": "tests/hermes_cli/test_plugin_install_ref.py::test_cloned_origin_never_persists_http_credentials"
+    },
+    {
+      "file": "tests/hermes_cli/test_plugin_install_ref.py",
+      "nodeid": "tests/hermes_cli/test_plugin_install_ref.py::test_dashboard_update_also_refuses_to_drift_pin"
+    },
+    {
+      "file": "tests/hermes_cli/test_plugin_install_ref.py",
+      "nodeid": "tests/hermes_cli/test_plugin_install_ref.py::test_exact_ref_installs_old_commit_and_normalizes_uppercase"
+    },
+    {
+      "file": "tests/hermes_cli/test_plugin_install_ref.py",
+      "nodeid": "tests/hermes_cli/test_plugin_install_ref.py::test_failed_force_reinstall_keeps_existing_plugin_and_metadata"
+    },
+    {
+      "file": "tests/hermes_cli/test_plugin_install_ref.py",
+      "nodeid": "tests/hermes_cli/test_plugin_install_ref.py::test_force_reinstall_does_not_drift_pin_without_explicit_new_ref"
+    },
+    {
+      "file": "tests/hermes_cli/test_plugin_install_ref.py",
+      "nodeid": "tests/hermes_cli/test_plugin_install_ref.py::test_git_errors_never_echo_source_credentials"
+    },
+    {
+      "file": "tests/hermes_cli/test_plugin_install_ref.py",
+      "nodeid": "tests/hermes_cli/test_plugin_install_ref.py::test_install_refuses_a_non_https_update_url[file:///etc/feed.yml]"
+    },
+    {
+      "file": "tests/hermes_cli/test_plugin_install_ref.py",
+      "nodeid": "tests/hermes_cli/test_plugin_install_ref.py::test_install_refuses_a_non_https_update_url[ftp://feed.example/f.yml]"
+    },
+    {
+      "file": "tests/hermes_cli/test_plugin_install_ref.py",
+      "nodeid": "tests/hermes_cli/test_plugin_install_ref.py::test_install_refuses_a_non_https_update_url[http://feed.example/f.yml]"
+    },
+    {
+      "file": "tests/hermes_cli/test_plugin_install_ref.py",
+      "nodeid": "tests/hermes_cli/test_plugin_install_ref.py::test_install_saves_an_https_update_url_tag"
+    },
+    {
+      "file": "tests/hermes_cli/test_plugin_install_ref.py",
+      "nodeid": "tests/hermes_cli/test_plugin_install_ref.py::test_invalid_ref_is_rejected_before_any_install_state[]"
+    },
+    {
+      "file": "tests/hermes_cli/test_plugin_install_ref.py",
+      "nodeid": "tests/hermes_cli/test_plugin_install_ref.py::test_invalid_ref_is_rejected_before_any_install_state[aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa]"
+    },
+    {
+      "file": "tests/hermes_cli/test_plugin_install_ref.py",
+      "nodeid": "tests/hermes_cli/test_plugin_install_ref.py::test_invalid_ref_is_rejected_before_any_install_state[aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa]"
+    },
+    {
+      "file": "tests/hermes_cli/test_plugin_install_ref.py",
+      "nodeid": "tests/hermes_cli/test_plugin_install_ref.py::test_invalid_ref_is_rejected_before_any_install_state[abc]"
+    },
+    {
+      "file": "tests/hermes_cli/test_plugin_install_ref.py",
+      "nodeid": "tests/hermes_cli/test_plugin_install_ref.py::test_invalid_ref_is_rejected_before_any_install_state[gggggggggggggggggggggggggggggggggggggggg]"
+    },
+    {
+      "file": "tests/hermes_cli/test_plugin_install_ref.py",
+      "nodeid": "tests/hermes_cli/test_plugin_install_ref.py::test_invalid_ref_is_rejected_before_any_install_state[main]"
+    },
+    {
+      "file": "tests/hermes_cli/test_plugin_install_ref.py",
+      "nodeid": "tests/hermes_cli/test_plugin_install_ref.py::test_metadata_is_profile_local_and_read_from_disk_each_time"
+    },
+    {
+      "file": "tests/hermes_cli/test_plugin_install_ref.py",
+      "nodeid": "tests/hermes_cli/test_plugin_install_ref.py::test_metadata_write_failure_rolls_back_new_install"
+    },
+    {
+      "file": "tests/hermes_cli/test_plugin_install_ref.py",
+      "nodeid": "tests/hermes_cli/test_plugin_install_ref.py::test_metadata_write_failure_rolls_back_removal"
+    },
+    {
+      "file": "tests/hermes_cli/test_plugin_install_ref.py",
+      "nodeid": "tests/hermes_cli/test_plugin_install_ref.py::test_pinned_plugin_update_refuses_to_drift"
+    },
+    {
+      "file": "tests/hermes_cli/test_plugin_install_ref.py",
+      "nodeid": "tests/hermes_cli/test_plugin_install_ref.py::test_reinstall_after_manual_directory_removal_retains_pin"
+    },
+    {
+      "file": "tests/hermes_cli/test_plugin_install_ref.py",
+      "nodeid": "tests/hermes_cli/test_plugin_install_ref.py::test_subdir_install_downloads_only_that_subdirectory[False]"
+    },
+    {
+      "file": "tests/hermes_cli/test_plugin_install_ref.py",
+      "nodeid": "tests/hermes_cli/test_plugin_install_ref.py::test_subdir_install_downloads_only_that_subdirectory[True]"
+    },
+    {
+      "file": "tests/hermes_cli/test_plugin_install_ref.py",
+      "nodeid": "tests/hermes_cli/test_plugin_install_ref.py::test_subdir_pin_records_source_identity_and_installs_requested_tree"
+    },
+    {
+      "file": "tests/hermes_cli/test_plugin_install_ref.py",
+      "nodeid": "tests/hermes_cli/test_plugin_install_ref.py::test_unpinned_install_and_force_reinstall_keep_tracking_head"
+    },
+    {
+      "file": "tests/hermes_cli/test_plugin_update_transaction.py",
+      "nodeid": "tests/hermes_cli/test_plugin_update_transaction.py::test_failed_update_keeps_code_metadata_config_and_environment[dependencies-catalog]"
+    },
+    {
+      "file": "tests/hermes_cli/test_plugin_update_transaction.py",
+      "nodeid": "tests/hermes_cli/test_plugin_update_transaction.py::test_failed_update_keeps_code_metadata_config_and_environment[dependencies-custom]"
+    },
+    {
+      "file": "tests/hermes_cli/test_plugin_update_transaction.py",
+      "nodeid": "tests/hermes_cli/test_plugin_update_transaction.py::test_failed_update_keeps_code_metadata_config_and_environment[manifest-catalog]"
+    },
+    {
+      "file": "tests/hermes_cli/test_plugin_update_transaction.py",
+      "nodeid": "tests/hermes_cli/test_plugin_update_transaction.py::test_failed_update_keeps_code_metadata_config_and_environment[manifest-custom]"
+    },
+    {
+      "file": "tests/hermes_cli/test_plugin_update_transaction.py",
+      "nodeid": "tests/hermes_cli/test_plugin_update_transaction.py::test_failed_update_keeps_code_metadata_config_and_environment[publication-catalog]"
+    },
+    {
+      "file": "tests/hermes_cli/test_plugin_update_transaction.py",
+      "nodeid": "tests/hermes_cli/test_plugin_update_transaction.py::test_failed_update_keeps_code_metadata_config_and_environment[publication-custom]"
+    },
+    {
+      "file": "tests/hermes_cli/test_plugin_update_transaction.py",
+      "nodeid": "tests/hermes_cli/test_plugin_update_transaction.py::test_failed_update_keeps_code_metadata_config_and_environment[version-catalog]"
+    },
+    {
+      "file": "tests/hermes_cli/test_plugin_update_transaction.py",
+      "nodeid": "tests/hermes_cli/test_plugin_update_transaction.py::test_failed_update_keeps_code_metadata_config_and_environment[version-custom]"
+    },
+    {
+      "file": "tests/hermes_cli/test_plugin_update_transaction.py",
+      "nodeid": "tests/hermes_cli/test_plugin_update_transaction.py::test_interactive_update_asks_before_installing_new_python_dependencies[n-False-custom]"
+    },
+    {
+      "file": "tests/hermes_cli/test_plugin_update_transaction.py",
+      "nodeid": "tests/hermes_cli/test_plugin_update_transaction.py::test_interactive_update_asks_before_installing_new_python_dependencies[y-True-custom]"
+    },
+    {
+      "file": "tests/hermes_cli/test_plugin_update_transaction.py",
+      "nodeid": "tests/hermes_cli/test_plugin_update_transaction.py::test_successful_update_publishes_matching_code_and_durable_workspace[catalog]"
+    },
+    {
+      "file": "tests/hermes_cli/test_plugin_update_transaction.py",
+      "nodeid": "tests/hermes_cli/test_plugin_update_transaction.py::test_successful_update_publishes_matching_code_and_durable_workspace[custom]"
+    },
+    {
+      "file": "tests/hermes_cli/test_plugin_update_transaction.py",
+      "nodeid": "tests/hermes_cli/test_plugin_update_transaction.py::test_unattended_update_refuses_newly_declared_python_dependencies[catalog]"
+    },
+    {
+      "file": "tests/hermes_cli/test_plugin_update_transaction.py",
+      "nodeid": "tests/hermes_cli/test_plugin_update_transaction.py::test_unattended_update_refuses_newly_declared_python_dependencies[custom]"
+    },
+    {
+      "file": "tests/hermes_cli/test_plugin_update_transaction.py",
+      "nodeid": "tests/hermes_cli/test_plugin_update_transaction.py::test_update_rebuilds_an_accepted_node_sidecar_when_its_manifest_moves[catalog]"
+    },
+    {
+      "file": "tests/hermes_cli/test_plugin_update_transaction.py",
+      "nodeid": "tests/hermes_cli/test_plugin_update_transaction.py::test_update_rebuilds_an_accepted_node_sidecar_when_its_manifest_moves[custom]"
+    },
+    {
+      "file": "tests/hermes_cli/test_plugin_worker_lifecycle.py",
+      "nodeid": "tests/hermes_cli/test_plugin_worker_lifecycle.py::test_active_force_reinstall_decline_preserves_entire_selection"
+    },
+    {
+      "file": "tests/hermes_cli/test_plugin_worker_lifecycle.py",
+      "nodeid": "tests/hermes_cli/test_plugin_worker_lifecycle.py::test_active_reinstall_does_not_overwrite_a_later_disable[enable]"
+    },
+    {
+      "file": "tests/hermes_cli/test_plugin_worker_lifecycle.py",
+      "nodeid": "tests/hermes_cli/test_plugin_worker_lifecycle.py::test_active_reinstall_does_not_overwrite_a_later_disable[no_enable]"
+    },
+    {
+      "file": "tests/hermes_cli/test_plugin_worker_lifecycle.py",
+      "nodeid": "tests/hermes_cli/test_plugin_worker_lifecycle.py::test_concurrent_commands_keep_acknowledged_enables[same-profile]"
+    },
+    {
+      "file": "tests/hermes_cli/test_plugin_worker_lifecycle.py",
+      "nodeid": "tests/hermes_cli/test_plugin_worker_lifecycle.py::test_concurrent_commands_keep_acknowledged_enables[sibling-profiles]"
+    },
+    {
+      "file": "tests/hermes_cli/test_plugin_worker_lifecycle.py",
+      "nodeid": "tests/hermes_cli/test_plugin_worker_lifecycle.py::test_declaration_consent_admission_and_resync[pip_dependencies-yaml]"
+    },
+    {
+      "file": "tests/hermes_cli/test_plugin_worker_lifecycle.py",
+      "nodeid": "tests/hermes_cli/test_plugin_worker_lifecycle.py::test_declaration_consent_admission_and_resync[pip_dependencies-yml]"
+    },
+    {
+      "file": "tests/hermes_cli/test_plugin_worker_lifecycle.py",
+      "nodeid": "tests/hermes_cli/test_plugin_worker_lifecycle.py::test_declaration_consent_admission_and_resync[pyproject-yaml]"
+    },
+    {
+      "file": "tests/hermes_cli/test_plugin_worker_lifecycle.py",
+      "nodeid": "tests/hermes_cli/test_plugin_worker_lifecycle.py::test_declaration_consent_admission_and_resync[python_dependencies-yaml]"
+    },
+    {
+      "file": "tests/hermes_cli/test_plugin_worker_lifecycle.py",
+      "nodeid": "tests/hermes_cli/test_plugin_worker_lifecycle.py::test_declaration_consent_admission_and_resync[python_dependencies-yml]"
+    },
+    {
+      "file": "tests/hermes_cli/test_plugin_worker_lifecycle.py",
+      "nodeid": "tests/hermes_cli/test_plugin_worker_lifecycle.py::test_malformed_portable_member_cannot_join_a_new_generation"
+    },
+    {
+      "file": "tests/hermes_cli/test_plugin_worker_lifecycle.py",
+      "nodeid": "tests/hermes_cli/test_plugin_worker_lifecycle.py::test_pack_admits_compatible_members_and_reports_conflict"
+    },
+    {
+      "file": "tests/hermes_cli/test_plugins_admission_setter.py",
+      "nodeid": "tests/hermes_cli/test_plugins_admission_setter.py::test_core_conflict_names_the_plugin_and_keeps_selection"
+    },
+    {
+      "file": "tests/hermes_cli/test_plugins_admission_setter.py",
+      "nodeid": "tests/hermes_cli/test_plugins_admission_setter.py::test_failed_publication_preserves_selection_and_imports[config]"
+    },
+    {
+      "file": "tests/hermes_cli/test_plugins_admission_setter.py",
+      "nodeid": "tests/hermes_cli/test_plugins_admission_setter.py::test_failed_publication_preserves_selection_and_imports[facts]"
+    },
+    {
+      "file": "tests/hermes_cli/test_plugins_admission_setter.py",
+      "nodeid": "tests/hermes_cli/test_plugins_admission_setter.py::test_historical_writer_hands_off_without_mutating_config"
+    },
+    {
+      "file": "tests/hermes_cli/test_plugins_admission_setter.py",
+      "nodeid": "tests/hermes_cli/test_plugins_admission_setter.py::test_ui_conflict_is_reported_without_changing_selection[composite]"
+    },
+    {
+      "file": "tests/hermes_cli/test_plugins_admission_setter.py",
+      "nodeid": "tests/hermes_cli/test_plugins_admission_setter.py::test_ui_conflict_is_reported_without_changing_selection[dashboard]"
+    },
+    {
+      "file": "tests/hermes_cli/test_plugins_cmd_enable_disable_nested.py",
+      "nodeid": "tests/hermes_cli/test_plugins_cmd_enable_disable_nested.py::test_ambiguous_and_unknown_names_cannot_change_config"
+    },
+    {
+      "file": "tests/hermes_cli/test_plugins_cmd_enable_disable_nested.py",
+      "nodeid": "tests/hermes_cli/test_plugins_cmd_enable_disable_nested.py::test_dependency_free_enable_no_churn_and_tool_override_fails_closed"
+    },
+    {
+      "file": "tests/hermes_cli/test_plugins_cmd_enable_disable_nested.py",
+      "nodeid": "tests/hermes_cli/test_plugins_cmd_enable_disable_nested.py::test_fallback_compares_the_preinteraction_selection[False]"
+    },
+    {
+      "file": "tests/hermes_cli/test_plugins_cmd_enable_disable_nested.py",
+      "nodeid": "tests/hermes_cli/test_plugins_cmd_enable_disable_nested.py::test_fallback_compares_the_preinteraction_selection[True]"
+    },
+    {
+      "file": "tests/hermes_cli/test_plugins_cmd_enable_disable_nested.py",
+      "nodeid": "tests/hermes_cli/test_plugins_cmd_enable_disable_nested.py::test_nested_enable_disable_and_composite_use_canonical_key[observability/trace-leaf]"
+    },
+    {
+      "file": "tests/hermes_cli/test_plugins_cmd_enable_disable_nested.py",
+      "nodeid": "tests/hermes_cli/test_plugins_cmd_enable_disable_nested.py::test_nested_enable_disable_and_composite_use_canonical_key[trace-leaf]"
+    },
+    {
+      "file": "tests/hermes_cli/test_plugins_cmd_enable_disable_nested.py",
+      "nodeid": "tests/hermes_cli/test_plugins_cmd_enable_disable_nested.py::test_nested_enable_disable_and_composite_use_canonical_key[trace-manifest]"
+    },
+    {
+      "file": "tests/hermes_cli/test_plugins_cmd_catalog.py",
+      "nodeid": "tests/hermes_cli/test_plugins_cmd_catalog.py::test_annotated_tag_pin_keeps_reviewed_trust_and_reads_as_at_pin"
+    },
+    {
+      "file": "tests/hermes_cli/test_plugins_cmd_catalog.py",
+      "nodeid": "tests/hermes_cli/test_plugins_cmd_catalog.py::test_catalog_name_installs_pinned_sha_with_sidecar_then_update_repins"
+    },
+    {
+      "file": "tests/hermes_cli/test_plugins_cmd_catalog.py",
+      "nodeid": "tests/hermes_cli/test_plugins_cmd_catalog.py::test_catalog_platform_mismatch_refuses_before_install"
+    },
+    {
+      "file": "tests/hermes_cli/test_plugins_cmd_catalog.py",
+      "nodeid": "tests/hermes_cli/test_plugins_cmd_catalog.py::test_in_tree_sidecar_cannot_forge_catalog_provenance"
+    },
+    {
+      "file": "tests/hermes_cli/test_plugins_cmd_catalog.py",
+      "nodeid": "tests/hermes_cli/test_plugins_cmd_catalog.py::test_kill_list_blocks_cli_dashboard_and_tui_paths"
+    },
+    {
+      "file": "tests/hermes_cli/test_plugins_cmd_catalog.py",
+      "nodeid": "tests/hermes_cli/test_plugins_cmd_catalog.py::test_kill_list_covers_update_enable_and_load_of_an_installed_plugin"
+    },
+    {
+      "file": "tests/hermes_cli/test_plugins_cmd_catalog.py",
+      "nodeid": "tests/hermes_cli/test_plugins_cmd_catalog.py::test_ref_install_records_installed_sha_so_update_is_offered"
+    },
+    {
+      "file": "tests/hermes_cli/test_plugins_cmd_catalog.py",
+      "nodeid": "tests/hermes_cli/test_plugins_cmd_catalog.py::test_repin_keeps_local_files_backs_up_edits_and_follows_manifest_rename"
+    },
+    {
+      "file": "tests/hermes_cli/test_plugins_cmd_catalog.py",
+      "nodeid": "tests/hermes_cli/test_plugins_cmd_catalog.py::test_repin_that_widens_the_plugin_requires_consent_on_every_surface"
+    },
+    {
+      "file": "tests/hermes_cli/test_plugins_cmd.py",
+      "nodeid": "tests/hermes_cli/test_plugins_cmd.py::TestInstallReadabilityGate::test_unreadable_file_is_repaired_before_install"
+    },
+    {
+      "file": "tests/hermes_cli/test_plugins_cmd.py",
+      "nodeid": "tests/hermes_cli/test_plugins_cmd.py::TestInstallReadabilityGate::test_unrepairable_tree_rolls_back_and_names_the_fix"
+    },
+    {
+      "file": "tests/hermes_cli/test_plugins_cmd.py",
+      "nodeid": "tests/hermes_cli/test_plugins_cmd.py::TestReviewedPinScanTrust::test_caution_trusted_only_at_the_reviewed_sha"
+    },
+    {
+      "file": "tests/hermes_cli/test_plugins_cmd.py",
+      "nodeid": "tests/hermes_cli/test_plugins_cmd.py::TestReviewedPinScanTrust::test_dangerous_blocks_even_at_the_reviewed_sha"
+    },
+    {
+      "file": "tests/hermes_cli/test_plugins_cmd.py",
+      "nodeid": "tests/hermes_cli/test_plugins_cmd.py::TestSubdirInstallE2E::test_installs_only_the_subdir_plugin"
+    },
+    {
+      "file": "tests/hermes_cli/test_plugins_cmd.py",
+      "nodeid": "tests/hermes_cli/test_plugins_cmd.py::TestSubdirInstallE2E::test_installs_portable_root_package_disabled"
+    },
+    {
+      "file": "tests/hermes_cli/test_plugins_cmd.py",
+      "nodeid": "tests/hermes_cli/test_plugins_cmd.py::TestSubdirInstallE2E::test_missing_subdir_raises"
+    },
+    {
+      "file": "tests/hermes_cli/test_plugins_cmd.py",
+      "nodeid": "tests/hermes_cli/test_plugins_cmd.py::TestSubdirInstallE2E::test_subdir_install_stays_updatable"
+    },
+    {
+      "file": "tests/hermes_cli/test_plugins_picker_effective_state.py",
+      "nodeid": "tests/hermes_cli/test_plugins_picker_effective_state.py::test_only_flipped_rows_are_written"
+    },
+    {
+      "file": "tests/hermes_cli/test_plugins_picker_effective_state.py",
+      "nodeid": "tests/hermes_cli/test_plugins_picker_effective_state.py::test_open_and_exit_without_changes_writes_nothing"
+    },
+    {
+      "file": "tests/hermes_cli/test_plugins_update_sync.py",
+      "nodeid": "tests/hermes_cli/test_plugins_update_sync.py::test_cli_update_scan_refusal_keeps_the_installed_tree[catalog]"
+    },
+    {
+      "file": "tests/hermes_cli/test_plugins_update_sync.py",
+      "nodeid": "tests/hermes_cli/test_plugins_update_sync.py::test_cli_update_scan_refusal_keeps_the_installed_tree[custom]"
+    },
+    {
+      "file": "tests/hermes_cli/test_plugins_update_sync.py",
+      "nodeid": "tests/hermes_cli/test_plugins_update_sync.py::test_disabled_update_does_not_change_dependencies_or_enablement[catalog]"
+    },
+    {
+      "file": "tests/hermes_cli/test_plugins_update_sync.py",
+      "nodeid": "tests/hermes_cli/test_plugins_update_sync.py::test_disabled_update_does_not_change_dependencies_or_enablement[custom]"
+    },
+    {
+      "file": "tests/hermes_cli/test_plugins_update_sync.py",
+      "nodeid": "tests/hermes_cli/test_plugins_update_sync.py::test_enablement_before_lock_acquisition_cannot_skip_validation[catalog]"
+    },
+    {
+      "file": "tests/hermes_cli/test_plugins_update_sync.py",
+      "nodeid": "tests/hermes_cli/test_plugins_update_sync.py::test_enablement_before_lock_acquisition_cannot_skip_validation[custom]"
+    },
+    {
+      "file": "tests/hermes_cli/test_process_dock.py",
+      "nodeid": "tests/hermes_cli/test_process_dock.py::test_monitor_controls_stop_processes_and_never_steer_them"
+    },
+    {
+      "file": "tests/hermes_cli/test_profile_export_default_path.py",
+      "nodeid": "tests/hermes_cli/test_profile_export_default_path.py::test_checkout_detection_does_not_depend_on_cwd"
+    },
+    {
+      "file": "tests/hermes_cli/test_profile_export_default_path.py",
+      "nodeid": "tests/hermes_cli/test_profile_export_default_path.py::test_cli_export_default_does_not_write_into_the_current_checkout"
+    },
+    {
+      "file": "tests/hermes_cli/test_profile_export_default_path.py",
+      "nodeid": "tests/hermes_cli/test_profile_export_default_path.py::test_custom_hermes_home_inside_a_checkout_uses_a_sibling_store"
+    },
+    {
+      "file": "tests/hermes_cli/test_profile_export_default_path.py",
+      "nodeid": "tests/hermes_cli/test_profile_export_default_path.py::test_cwd_in_unrelated_checkout_does_not_prove_safety"
+    },
+    {
+      "file": "tests/hermes_cli/test_profile_export_default_path.py",
+      "nodeid": "tests/hermes_cli/test_profile_export_default_path.py::test_default_export_path_is_managed_and_outside_named_profiles"
+    },
+    {
+      "file": "tests/hermes_cli/test_profile_export_default_path.py",
+      "nodeid": "tests/hermes_cli/test_profile_export_default_path.py::test_export_dir_symlink_is_rejected"
+    },
+    {
+      "file": "tests/hermes_cli/test_profile_export_default_path.py",
+      "nodeid": "tests/hermes_cli/test_profile_export_default_path.py::test_slash_export_uses_the_same_managed_destination"
+    },
+    {
+      "file": "tests/hermes_cli/test_quiet_turn_author.py",
+      "nodeid": "tests/hermes_cli/test_quiet_turn_author.py::test_quiet_one_shot_consumes_the_variable_before_the_turn"
+    },
+    {
+      "file": "tests/hermes_cli/test_quiet_turn_author.py",
+      "nodeid": "tests/hermes_cli/test_quiet_turn_author.py::test_quiet_one_shot_passes_turn_author_from_env"
+    },
+    {
+      "file": "tests/hermes_cli/test_quiet_turn_author.py",
+      "nodeid": "tests/hermes_cli/test_quiet_turn_author.py::test_quiet_one_shot_resumes_nested_notify_on_this_session_not_parent"
+    },
+    {
+      "file": "tests/hermes_cli/test_relaunch.py",
+      "nodeid": "tests/hermes_cli/test_relaunch.py::TestRelaunch::test_calls_execvp"
+    },
+    {
+      "file": "tests/hermes_cli/test_relay_shared_metrics.py",
+      "nodeid": "tests/hermes_cli/test_relay_shared_metrics.py::test_cross_process_client_active_attempts_record_one_install"
+    },
+    {
+      "file": "tests/hermes_cli/test_relay_shared_metrics.py",
+      "nodeid": "tests/hermes_cli/test_relay_shared_metrics.py::test_cross_process_model_call_updates_are_transactional"
+    },
+    {
+      "file": "tests/hermes_cli/test_service_manager.py",
+      "nodeid": "tests/hermes_cli/test_service_manager.py::test_s6_log_run_creates_leaf_as_hermes_without_chown"
+    },
+    {
+      "file": "tests/hermes_cli/test_service_manager.py",
+      "nodeid": "tests/hermes_cli/test_service_manager.py::test_seed_supervise_skeleton_creates_expected_layout"
+    },
+    {
+      "file": "tests/hermes_cli/test_service_manager.py",
+      "nodeid": "tests/hermes_cli/test_service_manager.py::test_seed_supervise_skeleton_sets_setgid_on_event_dirs"
+    },
+    {
+      "file": "tests/hermes_cli/test_show_config_credential.py",
+      "nodeid": "tests/hermes_cli/test_show_config_credential.py::TestShowConfigCredentialSource::test_falls_back_to_cli_key_without_agent"
+    },
+    {
+      "file": "tests/hermes_cli/test_show_config_credential.py",
+      "nodeid": "tests/hermes_cli/test_show_config_credential.py::TestShowConfigCredentialSource::test_prefers_live_agent_key"
+    },
+    {
+      "file": "tests/hermes_cli/test_source_build.py",
+      "nodeid": "tests/hermes_cli/test_source_build.py::test_installed_npm_does_not_authorize_missing_workspace_dependencies"
+    },
+    {
+      "file": "tests/hermes_cli/test_source_build.py",
+      "nodeid": "tests/hermes_cli/test_source_build.py::test_module_cli_builds_the_requested_products[False]"
+    },
+    {
+      "file": "tests/hermes_cli/test_source_build.py",
+      "nodeid": "tests/hermes_cli/test_source_build.py::test_module_cli_builds_the_requested_products[True]"
+    },
+    {
+      "file": "tests/hermes_cli/test_source_build.py",
+      "nodeid": "tests/hermes_cli/test_source_build.py::test_preparation_reuses_only_the_exact_completed_workspace_union"
+    },
+    {
+      "file": "tests/hermes_cli/test_source_build.py",
+      "nodeid": "tests/hermes_cli/test_source_build.py::test_update_builds_selected_products_after_one_union_preparation[False]"
+    },
+    {
+      "file": "tests/hermes_cli/test_source_build.py",
+      "nodeid": "tests/hermes_cli/test_source_build.py::test_update_builds_selected_products_after_one_union_preparation[True]"
+    },
+    {
+      "file": "tests/hermes_cli/test_source_build.py",
+      "nodeid": "tests/hermes_cli/test_source_build.py::test_update_failure_raises_without_retries_or_replacing_live_app[desktop]"
+    },
+    {
+      "file": "tests/hermes_cli/test_source_build.py",
+      "nodeid": "tests/hermes_cli/test_source_build.py::test_update_failure_raises_without_retries_or_replacing_live_app[tui]"
+    },
+    {
+      "file": "tests/hermes_cli/test_source_build.py",
+      "nodeid": "tests/hermes_cli/test_source_build.py::test_update_failure_raises_without_retries_or_replacing_live_app[web]"
+    },
+    {
+      "file": "tests/hermes_cli/test_source_release_channels.py",
+      "nodeid": "tests/hermes_cli/test_source_release_channels.py::test_source_check_and_apply_land_on_selected_release[utf-8-ahead-canary]"
+    },
+    {
+      "file": "tests/hermes_cli/test_source_release_channels.py",
+      "nodeid": "tests/hermes_cli/test_source_release_channels.py::test_source_check_and_apply_land_on_selected_release[utf-8-ahead-stable]"
+    },
+    {
+      "file": "tests/hermes_cli/test_source_release_channels.py",
+      "nodeid": "tests/hermes_cli/test_source_release_channels.py::test_source_check_and_apply_land_on_selected_release[utf-8-local-canary]"
+    },
+    {
+      "file": "tests/hermes_cli/test_source_release_channels.py",
+      "nodeid": "tests/hermes_cli/test_source_release_channels.py::test_source_check_and_apply_land_on_selected_release[utf-8-local-stable]"
+    },
+    {
+      "file": "tests/hermes_cli/test_source_release_channels.py",
+      "nodeid": "tests/hermes_cli/test_source_release_channels.py::test_source_check_and_apply_land_on_selected_release[utf-8-sig-ahead-canary]"
+    },
+    {
+      "file": "tests/hermes_cli/test_source_release_channels.py",
+      "nodeid": "tests/hermes_cli/test_source_release_channels.py::test_source_check_and_apply_land_on_selected_release[utf-8-sig-ahead-stable]"
+    },
+    {
+      "file": "tests/hermes_cli/test_source_release_channels.py",
+      "nodeid": "tests/hermes_cli/test_source_release_channels.py::test_source_check_and_apply_land_on_selected_release[utf-8-sig-local-canary]"
+    },
+    {
+      "file": "tests/hermes_cli/test_source_release_channels.py",
+      "nodeid": "tests/hermes_cli/test_source_release_channels.py::test_source_check_and_apply_land_on_selected_release[utf-8-sig-local-stable]"
+    },
+    {
+      "file": "tests/hermes_cli/test_stream_json.py",
+      "nodeid": "tests/hermes_cli/test_stream_json.py::test_chat_stream_json_implies_quiet_and_closes_with_result[_ok_turn-True-0-types0]"
+    },
+    {
+      "file": "tests/hermes_cli/test_tui_npm_install.py",
+      "nodeid": "tests/hermes_cli/test_tui_npm_install.py::test_dev_launch_builds_ink_before_running_source[False]"
+    },
+    {
+      "file": "tests/hermes_cli/test_tui_npm_install.py",
+      "nodeid": "tests/hermes_cli/test_tui_npm_install.py::test_dev_launch_builds_ink_before_running_source[True]"
+    },
+    {
+      "file": "tests/hermes_cli/test_tui_npm_install.py",
+      "nodeid": "tests/hermes_cli/test_tui_npm_install.py::test_fresh_bundle_does_not_prepare_or_compile[False]"
+    },
+    {
+      "file": "tests/hermes_cli/test_tui_npm_install.py",
+      "nodeid": "tests/hermes_cli/test_tui_npm_install.py::test_fresh_bundle_does_not_prepare_or_compile[True]"
+    },
+    {
+      "file": "tests/hermes_cli/test_tui_npm_install.py",
+      "nodeid": "tests/hermes_cli/test_tui_npm_install.py::test_prebuilt_bundle_launch_does_not_touch_missing_source"
+    },
+    {
+      "file": "tests/hermes_cli/test_tui_npm_install.py",
+      "nodeid": "tests/hermes_cli/test_tui_npm_install.py::test_runtime_node_comes_from_pm_without_legacy_repair"
+    },
+    {
+      "file": "tests/hermes_cli/test_tui_npm_install.py",
+      "nodeid": "tests/hermes_cli/test_tui_npm_install.py::test_source_compile_failure_stops_launch_without_reinstall"
+    },
+    {
+      "file": "tests/hermes_cli/test_tui_npm_install.py",
+      "nodeid": "tests/hermes_cli/test_tui_npm_install.py::test_source_launch_prepares_base_union_but_compiles_only_tui"
+    },
+    {
+      "file": "tests/hermes_cli/test_tui_npm_install.py",
+      "nodeid": "tests/hermes_cli/test_tui_npm_install.py::test_tui_rebuild_preserves_the_prepared_desktop_and_web_union"
+    },
+    {
+      "file": "tests/hermes_cli/test_update_missing_configured_deps.py",
+      "nodeid": "tests/hermes_cli/test_update_missing_configured_deps.py::test_unconfigured_or_disabled_features_are_quiet"
+    },
+    {
+      "file": "tests/hermes_cli/test_update_missing_configured_deps.py",
+      "nodeid": "tests/hermes_cli/test_update_missing_configured_deps.py::test_update_names_missing_configured_features_from_selected_child"
+    },
+    {
+      "file": "tests/hermes_cli/test_update_wedged_gateway.py",
+      "nodeid": "tests/hermes_cli/test_update_wedged_gateway.py::TestLoopTickWitness::test_legacy_fresh_file_with_dead_node_is_unknown"
+    },
+    {
+      "file": "tests/hermes_cli/test_update_wedged_gateway.py",
+      "nodeid": "tests/hermes_cli/test_update_wedged_gateway.py::TestLoopTickWitness::test_off_loop_completion_cannot_manufacture_fresh_liveness"
+    },
+    {
+      "file": "tests/hermes_cli/test_update_wedged_gateway.py",
+      "nodeid": "tests/hermes_cli/test_update_wedged_gateway.py::TestLoopTickWitness::test_producer_rebinds_over_stale_socket_node"
+    },
+    {
+      "file": "tests/hermes_cli/test_update_wedged_gateway.py",
+      "nodeid": "tests/hermes_cli/test_update_wedged_gateway.py::TestLoopTickWitness::test_sustained_stop_above_wedge_budget_still_escalates"
+    },
+    {
+      "file": "tests/hermes_cli/test_update_wedged_gateway.py",
+      "nodeid": "tests/hermes_cli/test_update_wedged_gateway.py::TestLoopTickWitness::test_transient_stall_below_wedge_budget_never_escalates"
+    },
+    {
+      "file": "tests/hermes_cli/test_update_wedged_gateway.py",
+      "nodeid": "tests/hermes_cli/test_update_wedged_gateway.py::TestLoopTickWitness::test_true_wedge_requires_sustained_witness_silence"
+    },
+    {
+      "file": "tests/hermes_cli/test_venv_sync_currency.py",
+      "nodeid": "tests/hermes_cli/test_venv_sync_currency.py::test_check_uses_real_pm_selection_and_keeps_invalid_evidence"
+    },
+    {
+      "file": "tests/hermes_cli/test_venv_sync_currency.py",
+      "nodeid": "tests/hermes_cli/test_venv_sync_currency.py::test_own_tree_sync_reuses_pm_without_writing_an_extra_stamp"
+    },
+    {
+      "file": "tests/hermes_cli/test_web_memory_provider_setup_install.py",
+      "nodeid": "tests/hermes_cli/test_web_memory_provider_setup_install.py::test_setup_admits_real_provider_union_and_keeps_selection_on_failure[pip_dependencies-cli]"
+    },
+    {
+      "file": "tests/hermes_cli/test_web_memory_provider_setup_install.py",
+      "nodeid": "tests/hermes_cli/test_web_memory_provider_setup_install.py::test_setup_admits_real_provider_union_and_keeps_selection_on_failure[pip_dependencies-dashboard]"
+    },
+    {
+      "file": "tests/hermes_cli/test_web_memory_provider_setup_install.py",
+      "nodeid": "tests/hermes_cli/test_web_memory_provider_setup_install.py::test_setup_admits_real_provider_union_and_keeps_selection_on_failure[pyproject-cli]"
+    },
+    {
+      "file": "tests/hermes_cli/test_web_memory_provider_setup_install.py",
+      "nodeid": "tests/hermes_cli/test_web_memory_provider_setup_install.py::test_setup_admits_real_provider_union_and_keeps_selection_on_failure[pyproject-dashboard]"
+    },
+    {
+      "file": "tests/hermes_cli/test_web_memory_provider_setup_install.py",
+      "nodeid": "tests/hermes_cli/test_web_memory_provider_setup_install.py::test_setup_admits_real_provider_union_and_keeps_selection_on_failure[python_dependencies-cli]"
+    },
+    {
+      "file": "tests/hermes_cli/test_web_memory_provider_setup_install.py",
+      "nodeid": "tests/hermes_cli/test_web_memory_provider_setup_install.py::test_setup_admits_real_provider_union_and_keeps_selection_on_failure[python_dependencies-dashboard]"
+    },
+    {
+      "file": "tests/hermes_cli/test_update_finish.py",
+      "nodeid": "tests/hermes_cli/test_update_finish.py::test_real_compiler_failure_retains_receipt_and_skips_completion"
+    },
+    {
+      "file": "tests/hermes_cli/test_update_finish.py",
+      "nodeid": "tests/hermes_cli/test_update_finish.py::test_selected_child_builds_and_finalizes_under_parent_lock"
+    },
+    {
+      "file": "tests/hermes_cli/test_web_ui_build.py",
+      "nodeid": "tests/hermes_cli/test_web_ui_build.py::test_contended_build_waits_and_rechecks_winner[False]"
+    },
+    {
+      "file": "tests/hermes_cli/test_web_ui_build.py",
+      "nodeid": "tests/hermes_cli/test_web_ui_build.py::test_contended_build_waits_and_rechecks_winner[True]"
+    },
+    {
+      "file": "tests/hermes_cli/test_web_ui_build.py",
+      "nodeid": "tests/hermes_cli/test_web_ui_build.py::test_failed_preparation_never_runs_web_compilation"
+    },
+    {
+      "file": "tests/hermes_cli/test_web_ui_build.py",
+      "nodeid": "tests/hermes_cli/test_web_ui_build.py::test_lock_open_failure_does_not_start_an_unprotected_build"
+    },
+    {
+      "file": "tests/hermes_cli/test_web_ui_build.py",
+      "nodeid": "tests/hermes_cli/test_web_ui_build.py::test_web_build_prepares_once_and_skips_a_current_product"
+    },
+    {
+      "file": "tests/hermes_cli/test_web_ui_build.py",
+      "nodeid": "tests/hermes_cli/test_web_ui_build.py::test_web_failure_is_not_success_even_with_an_old_dist[False]"
+    },
+    {
+      "file": "tests/hermes_cli/test_web_ui_build.py",
+      "nodeid": "tests/hermes_cli/test_web_ui_build.py::test_web_failure_is_not_success_even_with_an_old_dist[True]"
+    },
+    {
+      "file": "tests/hermes_cli/test_web_ui_build.py",
+      "nodeid": "tests/hermes_cli/test_web_ui_build.py::test_web_rebuild_reuses_the_existing_desktop_union"
+    },
+    {
+      "file": "tests/hermes_cli/test_web_server.py",
+      "nodeid": "tests/hermes_cli/test_web_server.py::TestWebServerEndpoints::test_update_hermes_returns_apt_guidance_without_spawning"
+    },
+    {
+      "file": "tests/hermes_cli/test_web_server.py",
+      "nodeid": "tests/hermes_cli/test_web_server.py::TestWebServerEndpoints::test_update_hermes_returns_docker_guidance_without_spawning"
+    },
+    {
+      "file": "tests/hermes_state/test_fts_runtime_rebuild.py",
+      "nodeid": "tests/hermes_state/test_fts_runtime_rebuild.py::TestRuntimeFtsRebuild::test_foreign_holder_detection_proc_readlink_deleted_wal"
+    },
+    {
+      "file": "tests/plugins/platforms/photon/test_npm_error_log_regression.py",
+      "nodeid": "tests/plugins/platforms/photon/test_npm_error_log_regression.py::test_regression_stale_log_not_surfaced_after_successful_reinstall"
+    },
+    {
+      "file": "tests/plugins/platforms/photon/test_outbound_media.py",
+      "nodeid": "tests/plugins/platforms/photon/test_outbound_media.py::test_standalone_send_text_then_attachments"
+    },
+    {
+      "file": "tests/plugins/platforms/photon/test_runtime_record.py",
+      "nodeid": "tests/plugins/platforms/photon/test_runtime_record.py::test_record_written_after_healthz_success"
+    },
+    {
+      "file": "tests/plugins/platforms/photon/test_url_send_path.py",
+      "nodeid": "tests/plugins/platforms/photon/test_url_send_path.py::test_send_builder_selection[markdown_bare_domain_without_scheme_keeps_markdown]"
+    },
+    {
+      "file": "tests/plugins/platforms/photon/test_url_send_path.py",
+      "nodeid": "tests/plugins/platforms/photon/test_url_send_path.py::test_send_builder_selection[markdown_link_syntax_also_falls_back_to_text]"
+    },
+    {
+      "file": "tests/plugins/platforms/photon/test_url_send_path.py",
+      "nodeid": "tests/plugins/platforms/photon/test_url_send_path.py::test_send_builder_selection[markdown_with_http_url_falls_back_to_text]"
+    },
+    {
+      "file": "tests/plugins/platforms/photon/test_url_send_path.py",
+      "nodeid": "tests/plugins/platforms/photon/test_url_send_path.py::test_send_builder_selection[markdown_with_https_url_falls_back_to_text]"
+    },
+    {
+      "file": "tests/plugins/platforms/photon/test_url_send_path.py",
+      "nodeid": "tests/plugins/platforms/photon/test_url_send_path.py::test_send_builder_selection[markdown_with_uppercase_scheme_falls_back_to_text]"
+    },
+    {
+      "file": "tests/plugins/platforms/photon/test_url_send_path.py",
+      "nodeid": "tests/plugins/platforms/photon/test_url_send_path.py::test_send_builder_selection[markdown_without_url_keeps_markdown]"
+    },
+    {
+      "file": "tests/plugins/platforms/photon/test_url_send_path.py",
+      "nodeid": "tests/plugins/platforms/photon/test_url_send_path.py::test_send_builder_selection[text_format_stays_text]"
+    },
+    {
+      "file": "tests/plugins/platforms/photon/test_url_send_path.py",
+      "nodeid": "tests/plugins/platforms/photon/test_url_send_path.py::test_send_builder_selection[text_format_with_url_stays_text]"
+    },
+    {
+      "file": "tests/plugins/platforms/photon/test_spectrum_patch.py",
+      "nodeid": "tests/plugins/platforms/photon/test_spectrum_patch.py::test_sidecar_patch_failure_still_reaches_health_endpoint"
+    },
+    {
+      "file": "tests/plugins/platforms/photon/test_spectrum_patch.py",
+      "nodeid": "tests/plugins/platforms/photon/test_spectrum_patch.py::test_spectrum_patch_rewrites_the_imessage_mapper"
+    },
+    {
+      "file": "tests/plugins/platforms/photon/test_sidecar_lifecycle.py",
+      "nodeid": "tests/plugins/platforms/photon/test_sidecar_lifecycle.py::test_spectrum_patch_runs_off_the_event_loop"
+    },
+    {
+      "file": "tests/plugins/platforms/photon/test_sidecar_lifecycle.py",
+      "nodeid": "tests/plugins/platforms/photon/test_sidecar_lifecycle.py::test_start_sidecar_spawns_with_stdin_pipe"
+    },
+    {
+      "file": "tests/plugins/platforms/photon/test_zombie_stream_watchdog.py",
+      "nodeid": "tests/plugins/platforms/photon/test_zombie_stream_watchdog.py::test_probe_message_id_is_guid_shaped_and_unique"
+    },
+    {
+      "file": "tests/plugins/platforms/photon/test_zombie_stream_watchdog.py",
+      "nodeid": "tests/plugins/platforms/photon/test_zombie_stream_watchdog.py::test_probe_rejection_classification_is_strict"
+    },
+    {
+      "file": "tests/plugins/platforms/photon/test_zombie_stream_watchdog.py",
+      "nodeid": "tests/plugins/platforms/photon/test_zombie_stream_watchdog.py::test_should_probe_requires_silence_past_threshold_and_cooldown"
+    },
+    {
+      "file": "tests/plugins/platforms/photon/test_zombie_stream_watchdog.py",
+      "nodeid": "tests/plugins/platforms/photon/test_zombie_stream_watchdog.py::test_zombie_requires_probe_proven_connectivity_never_silence_alone"
+    },
+    {
+      "file": "tests/plugins/test_kanban_model_override.py",
+      "nodeid": "tests/plugins/test_kanban_model_override.py::test_spawn_omits_reasoning_when_unset"
+    },
+    {
+      "file": "tests/plugins/test_kanban_model_override.py",
+      "nodeid": "tests/plugins/test_kanban_model_override.py::test_spawn_passes_reasoning_without_a_model"
+    },
+    {
+      "file": "tests/pm/test_activation_setup.py",
+      "nodeid": "tests/pm/test_activation_setup.py::test_activation_real_setup_pm_lifecycle"
+    },
+    {
+      "file": "tests/pm/test_build_operations.py",
+      "nodeid": "tests/pm/test_build_operations.py::test_check_lock_never_changes_source[current]"
+    },
+    {
+      "file": "tests/pm/test_build_operations.py",
+      "nodeid": "tests/pm/test_build_operations.py::test_check_lock_never_changes_source[missing]"
+    },
+    {
+      "file": "tests/pm/test_build_operations.py",
+      "nodeid": "tests/pm/test_build_operations.py::test_check_lock_never_changes_source[stale]"
+    },
+    {
+      "file": "tests/pm/test_build_operations.py",
+      "nodeid": "tests/pm/test_build_operations.py::test_failed_requirement_build_removes_only_its_candidate[check]"
+    },
+    {
+      "file": "tests/pm/test_build_operations.py",
+      "nodeid": "tests/pm/test_build_operations.py::test_failed_requirement_build_removes_only_its_candidate[create]"
+    },
+    {
+      "file": "tests/pm/test_build_operations.py",
+      "nodeid": "tests/pm/test_build_operations.py::test_failed_requirement_build_removes_only_its_candidate[install]"
+    },
+    {
+      "file": "tests/pm/test_build_operations.py",
+      "nodeid": "tests/pm/test_build_operations.py::test_frozen_export_keeps_markers_and_excludes_build_metadata"
+    },
+    {
+      "file": "tests/pm/test_build_operations.py",
+      "nodeid": "tests/pm/test_build_operations.py::test_frozen_export_preserves_git_commit_pin"
+    },
+    {
+      "file": "tests/pm/test_build_operations.py",
+      "nodeid": "tests/pm/test_build_operations.py::test_prune_cache_preserves_downloaded_wheels_unless_ci[False]"
+    },
+    {
+      "file": "tests/pm/test_build_operations.py",
+      "nodeid": "tests/pm/test_build_operations.py::test_prune_cache_preserves_downloaded_wheels_unless_ci[True]"
+    },
+    {
+      "file": "tests/pm/test_build_operations.py",
+      "nodeid": "tests/pm/test_build_operations.py::test_ready_tools_do_not_bypass_disabled_lazy_operations[build]"
+    },
+    {
+      "file": "tests/pm/test_build_operations.py",
+      "nodeid": "tests/pm/test_build_operations.py::test_ready_tools_do_not_bypass_disabled_lazy_operations[check]"
+    },
+    {
+      "file": "tests/pm/test_build_operations.py",
+      "nodeid": "tests/pm/test_build_operations.py::test_ready_tools_do_not_bypass_disabled_lazy_operations[export]"
+    },
+    {
+      "file": "tests/pm/test_build_operations.py",
+      "nodeid": "tests/pm/test_build_operations.py::test_requirements_build_installs_offline_markers_and_seals_only_build_pth[False]"
+    },
+    {
+      "file": "tests/pm/test_build_operations.py",
+      "nodeid": "tests/pm/test_build_operations.py::test_requirements_build_installs_offline_markers_and_seals_only_build_pth[True]"
+    },
+    {
+      "file": "tests/pm/test_build_operations.py",
+      "nodeid": "tests/pm/test_build_operations.py::test_stage_tools_copies_verified_closure_without_acquiring_or_live_state"
+    },
+    {
+      "file": "tests/pm/test_build_operations.py",
+      "nodeid": "tests/pm/test_build_operations.py::test_wheelhouse_cannot_fall_back_to_index_or_build_source"
+    },
+    {
+      "file": "tests/pm/test_member_selection.py",
+      "nodeid": "tests/pm/test_member_selection.py::test_pyproject_member_is_renamed_by_its_key_and_stays_unique"
+    },
+    {
+      "file": "tests/pm/test_environment_build.py",
+      "nodeid": "tests/pm/test_environment_build.py::test_all_extras_build_leaves_out_opt_in_extras"
+    },
+    {
+      "file": "tests/pm/test_environment_build.py",
+      "nodeid": "tests/pm/test_environment_build.py::test_build_backend_output_is_streamed_before_build_finishes[application]"
+    },
+    {
+      "file": "tests/pm/test_environment_build.py",
+      "nodeid": "tests/pm/test_environment_build.py::test_build_backend_output_is_streamed_before_build_finishes[requirements]"
+    },
+    {
+      "file": "tests/pm/test_environment_build.py",
+      "nodeid": "tests/pm/test_environment_build.py::test_build_backend_output_is_streamed_before_build_finishes[sync]"
+    },
+    {
+      "file": "tests/pm/test_environment_build.py",
+      "nodeid": "tests/pm/test_environment_build.py::test_explicit_environment_installs_locked_members_without_live_selection"
+    },
+    {
+      "file": "tests/pm/test_environment_build.py",
+      "nodeid": "tests/pm/test_environment_build.py::test_explicit_workspace_preserves_seed_and_replays_copied_members"
+    },
+    {
+      "file": "tests/pm/test_environment_build.py",
+      "nodeid": "tests/pm/test_environment_build.py::test_failed_build_removes_only_its_candidate[check]"
+    },
+    {
+      "file": "tests/pm/test_environment_build.py",
+      "nodeid": "tests/pm/test_environment_build.py::test_failed_build_removes_only_its_candidate[lock]"
+    },
+    {
+      "file": "tests/pm/test_environment_build.py",
+      "nodeid": "tests/pm/test_environment_build.py::test_failed_build_removes_only_its_candidate[source]"
+    },
+    {
+      "file": "tests/pm/test_environment_build.py",
+      "nodeid": "tests/pm/test_environment_build.py::test_first_bundle_extension_preserves_shipped_extras[False]"
+    },
+    {
+      "file": "tests/pm/test_environment_build.py",
+      "nodeid": "tests/pm/test_environment_build.py::test_first_bundle_extension_preserves_shipped_extras[True]"
+    },
+    {
+      "file": "tests/pm/test_environment_build.py",
+      "nodeid": "tests/pm/test_environment_build.py::test_live_apply_keeps_selection_on_failed_union"
+    },
+    {
+      "file": "tests/pm/test_environment_build.py",
+      "nodeid": "tests/pm/test_environment_build.py::test_lock_upgrade_and_group_selection_use_the_same_environment"
+    },
+    {
+      "file": "tests/pm/test_environment_build.py",
+      "nodeid": "tests/pm/test_environment_build.py::test_public_build_installs_all_extras_at_explicit_destination[False]"
+    },
+    {
+      "file": "tests/pm/test_environment_build.py",
+      "nodeid": "tests/pm/test_environment_build.py::test_public_build_installs_all_extras_at_explicit_destination[True]"
+    },
+    {
+      "file": "tests/pm/test_environment_build.py",
+      "nodeid": "tests/pm/test_environment_build.py::test_public_dependency_only_build_needs_no_application_source[selection0-expected0]"
+    },
+    {
+      "file": "tests/pm/test_environment_build.py",
+      "nodeid": "tests/pm/test_environment_build.py::test_public_dependency_only_build_needs_no_application_source[selection1-expected1]"
+    },
+    {
+      "file": "tests/pm/test_environment_build.py",
+      "nodeid": "tests/pm/test_environment_build.py::test_public_dependency_only_build_needs_no_application_source[selection2-expected2]"
+    },
+    {
+      "file": "tests/pm/test_environment_build.py",
+      "nodeid": "tests/pm/test_environment_build.py::test_real_sync_retains_selection_until_commit[facts]"
+    },
+    {
+      "file": "tests/pm/test_environment_build.py",
+      "nodeid": "tests/pm/test_environment_build.py::test_real_sync_retains_selection_until_commit[missing-cfg]"
+    },
+    {
+      "file": "tests/pm/test_environment_build.py",
+      "nodeid": "tests/pm/test_environment_build.py::test_real_sync_retains_selection_until_commit[restart]"
+    },
+    {
+      "file": "tests/pm/test_environment_build.py",
+      "nodeid": "tests/pm/test_environment_build.py::test_worker_sync_reuses_unions_and_reports_real_lock_drift"
+    },
+    {
+      "file": "tests/pm/test_plugin_declarations.py",
+      "nodeid": "tests/pm/test_plugin_declarations.py::test_declaration_policy_survives_cross_profile_resolution[False]"
+    },
+    {
+      "file": "tests/pm/test_plugin_declarations.py",
+      "nodeid": "tests/pm/test_plugin_declarations.py::test_declaration_policy_survives_cross_profile_resolution[True]"
+    },
+    {
+      "file": "tests/pm/test_restart_needed.py",
+      "nodeid": "tests/pm/test_restart_needed.py::test_a_process_on_a_superseded_generation_needs_a_restart_until_it_adopts"
+    },
+    {
+      "file": "tests/pm/test_recovery.py",
+      "nodeid": "tests/pm/test_recovery.py::test_repair_restores_recorded_plugin_dependencies_without_config[None]"
+    },
+    {
+      "file": "tests/pm/test_recovery.py",
+      "nodeid": "tests/pm/test_recovery.py::test_repair_restores_recorded_plugin_dependencies_without_config[corrupt_facts]"
+    },
+    {
+      "file": "tests/pm/test_recovery.py",
+      "nodeid": "tests/pm/test_recovery.py::test_repair_restores_recorded_plugin_dependencies_without_config[empty_environment]"
+    },
+    {
+      "file": "tests/pm/test_recovery.py",
+      "nodeid": "tests/pm/test_recovery.py::test_repair_restores_recorded_plugin_dependencies_without_config[missing_extras]"
+    },
+    {
+      "file": "tests/pm/test_recovery.py",
+      "nodeid": "tests/pm/test_recovery.py::test_repair_restores_recorded_plugin_dependencies_without_config[missing_lock]"
+    },
+    {
+      "file": "tests/pm/test_recovery.py",
+      "nodeid": "tests/pm/test_recovery.py::test_repair_restores_recorded_plugin_dependencies_without_config[publication]"
+    },
+    {
+      "file": "tests/pm/test_recovery.py",
+      "nodeid": "tests/pm/test_recovery.py::test_repair_restores_recorded_plugin_dependencies_without_config[validation]"
+    },
+    {
+      "file": "tests/pm/test_recovery.py",
+      "nodeid": "tests/pm/test_recovery.py::test_uncertain_profile_selection_skips_sync_but_not_admission_or_recorded_repair"
+    },
+    {
+      "file": "tests/pm/test_runtime.py",
+      "nodeid": "tests/pm/test_runtime.py::test_cold_worker_bootstrap_reuses_the_requests_cache"
+    },
+    {
+      "file": "tests/pm/test_runtime_bootstrap_tls.py",
+      "nodeid": "tests/pm/test_runtime_bootstrap_tls.py::test_pm_cli_verifies_tls_with_platform_trust"
+    },
+    {
+      "file": "tests/pm/test_runtime_bootstrap_tls.py",
+      "nodeid": "tests/pm/test_runtime_bootstrap_tls.py::test_staged_uv_prepares_pm_before_any_tool_download"
+    },
+    {
+      "file": "tests/pm/test_runtime_wheelhouse.py",
+      "nodeid": "tests/pm/test_runtime_wheelhouse.py::test_offline_wheelhouse_rejects_missing_locked_wheel"
+    },
+    {
+      "file": "tests/pm/test_runtime_wheelhouse.py",
+      "nodeid": "tests/pm/test_runtime_wheelhouse.py::test_offline_wheelhouse_runtime_survives_sealing_and_move"
+    },
+    {
+      "file": "tests/pm/test_source_update_launch.py",
+      "nodeid": "tests/pm/test_source_update_launch.py::test_failed_launch_completion_degrades_to_a_warning[argv0]"
+    },
+    {
+      "file": "tests/pm/test_source_update_launch.py",
+      "nodeid": "tests/pm/test_source_update_launch.py::test_failed_launch_completion_degrades_to_a_warning[argv1]"
+    },
+    {
+      "file": "tests/pm/test_source_update_launch.py",
+      "nodeid": "tests/pm/test_source_update_launch.py::test_failed_real_sync_preserves_previous_selection_and_retries"
+    },
+    {
+      "file": "tests/pm/test_source_update_launch.py",
+      "nodeid": "tests/pm/test_source_update_launch.py::test_launch_without_marker_publishes_then_skips_and_rebuilds_on_lock_change"
+    },
+    {
+      "file": "tests/pm/test_source_update_launch.py",
+      "nodeid": "tests/pm/test_source_update_launch.py::test_launcher_publication_failure_retries_without_rebuilding_dependencies"
+    },
+    {
+      "file": "tests/pm/test_source_update_launch.py",
+      "nodeid": "tests/pm/test_source_update_launch.py::test_process_spawned_by_the_update_commits_dependencies_but_not_the_tail"
+    },
+    {
+      "file": "tests/pm/test_source_update_launch.py",
+      "nodeid": "tests/pm/test_source_update_launch.py::test_real_bootstrap_reexecs_before_app_imports[command]"
+    },
+    {
+      "file": "tests/pm/test_source_update_launch.py",
+      "nodeid": "tests/pm/test_source_update_launch.py::test_real_bootstrap_reexecs_before_app_imports[module]"
+    },
+    {
+      "file": "tests/pm/test_source_update_launch.py",
+      "nodeid": "tests/pm/test_source_update_launch.py::test_real_bootstrap_reexecs_before_app_imports[script]"
+    },
+    {
+      "file": "tests/pm/test_source_update_launch.py",
+      "nodeid": "tests/pm/test_source_update_launch.py::test_source_publication_leaves_external_install_launchers_alone[False]"
+    },
+    {
+      "file": "tests/pm/test_source_update_launch.py",
+      "nodeid": "tests/pm/test_source_update_launch.py::test_source_publication_leaves_external_install_launchers_alone[True]"
+    },
+    {
+      "file": "tests/pm/test_source_update_launch.py",
+      "nodeid": "tests/pm/test_source_update_launch.py::test_source_python_pin_update_survives_real_gc[launch]"
+    },
+    {
+      "file": "tests/pm/test_source_update_launch.py",
+      "nodeid": "tests/pm/test_source_update_launch.py::test_source_python_pin_update_survives_real_gc[pm-update]"
+    },
+    {
+      "file": "tests/pm/test_source_update_launch.py",
+      "nodeid": "tests/pm/test_source_update_launch.py::test_source_python_pin_update_survives_real_gc[sync]"
+    },
+    {
+      "file": "tests/pm/test_startup_recovery.py",
+      "nodeid": "tests/pm/test_startup_recovery.py::test_bootstrap_repairs_before_dependency_activation[.lazy-refresh-incomplete]"
+    },
+    {
+      "file": "tests/pm/test_startup_recovery.py",
+      "nodeid": "tests/pm/test_startup_recovery.py::test_bootstrap_repairs_before_dependency_activation[.update-incomplete]"
+    },
+    {
+      "file": "tests/pm/test_startup_recovery.py",
+      "nodeid": "tests/pm/test_startup_recovery.py::test_bootstrap_repairs_before_dependency_activation[None]"
+    },
+    {
+      "file": "tests/pm/test_startup_recovery.py",
+      "nodeid": "tests/pm/test_startup_recovery.py::test_bootstrap_repairs_before_dependency_activation[baseline]"
+    },
+    {
+      "file": "tests/pm/test_startup_recovery.py",
+      "nodeid": "tests/pm/test_startup_recovery.py::test_bootstrap_repairs_before_dependency_activation[manual]"
+    },
+    {
+      "file": "tests/pm/test_takeover_preparation.py",
+      "nodeid": "tests/pm/test_takeover_preparation.py::test_fresh_takeover_prepares_generation_and_runs_selected_python"
+    },
+    {
+      "file": "tests/pm/test_update_dependency_legs.py",
+      "nodeid": "tests/pm/test_update_dependency_legs.py::test_npm_refresh_uses_its_installed_entry_and_owned_project"
+    },
+    {
+      "file": "tests/pm/test_update_dependency_legs.py",
+      "nodeid": "tests/pm/test_update_dependency_legs.py::test_uv_refresh_uses_real_installed_tool_and_only_the_owned_project"
+    },
+    {
+      "file": "tests/pm/test_worker.py",
+      "nodeid": "tests/pm/test_worker.py::test_cold_manager_build_does_not_bootstrap_a_worker"
+    },
+    {
+      "file": "tests/pm/test_worker.py",
+      "nodeid": "tests/pm/test_worker.py::test_currency_probe_preserves_union_and_candidate_inputs[direct-paths]"
+    },
+    {
+      "file": "tests/pm/test_worker.py",
+      "nodeid": "tests/pm/test_worker.py::test_currency_probe_preserves_union_and_candidate_inputs[direct-sources]"
+    },
+    {
+      "file": "tests/pm/test_worker.py",
+      "nodeid": "tests/pm/test_worker.py::test_currency_probe_preserves_union_and_candidate_inputs[foreign-runtime-paths]"
+    },
+    {
+      "file": "tests/pm/test_worker.py",
+      "nodeid": "tests/pm/test_worker.py::test_currency_probe_preserves_union_and_candidate_inputs[foreign-runtime-sources]"
+    },
+    {
+      "file": "tests/pm/test_worker.py",
+      "nodeid": "tests/pm/test_worker.py::test_currency_probe_preserves_union_and_candidate_inputs[worker-paths]"
+    },
+    {
+      "file": "tests/pm/test_worker.py",
+      "nodeid": "tests/pm/test_worker.py::test_currency_probe_preserves_union_and_candidate_inputs[worker-sources]"
+    },
+    {
+      "file": "tests/pm/test_worker.py",
+      "nodeid": "tests/pm/test_worker.py::test_environment_probe_needs_no_pm_runtime"
+    },
+    {
+      "file": "tests/pm/test_worker.py",
+      "nodeid": "tests/pm/test_worker.py::test_failed_facts_write_restores_exact_config_before_reporting"
+    },
+    {
+      "file": "tests/pm/test_worker.py",
+      "nodeid": "tests/pm/test_worker.py::test_foreign_checkout_sync_uses_its_own_pm_generation"
+    },
+    {
+      "file": "tests/pm/test_worker.py",
+      "nodeid": "tests/pm/test_worker.py::test_installed_tool_needs_no_pm_runtime"
+    },
+    {
+      "file": "tests/pm/test_worker.py",
+      "nodeid": "tests/pm/test_worker.py::test_invalid_arguments_keep_the_engine_exception_type"
+    },
+    {
+      "file": "tests/pm/test_worker.py",
+      "nodeid": "tests/pm/test_worker.py::test_invalid_selection_waits_for_failed_receipt_and_lock_release"
+    },
+    {
+      "file": "tests/pm/test_worker.py",
+      "nodeid": "tests/pm/test_worker.py::test_isolated_worker_preserves_install_error"
+    },
+    {
+      "file": "tests/pm/test_worker.py",
+      "nodeid": "tests/pm/test_worker.py::test_lazy_disabled_sync_does_not_bootstrap_tools[cold-tools-False]"
+    },
+    {
+      "file": "tests/pm/test_worker.py",
+      "nodeid": "tests/pm/test_worker.py::test_lazy_disabled_sync_does_not_bootstrap_tools[cold-tools-True]"
+    },
+    {
+      "file": "tests/pm/test_worker.py",
+      "nodeid": "tests/pm/test_worker.py::test_lazy_disabled_sync_does_not_bootstrap_tools[ready-tools-False]"
+    },
+    {
+      "file": "tests/pm/test_worker.py",
+      "nodeid": "tests/pm/test_worker.py::test_lazy_disabled_sync_does_not_bootstrap_tools[ready-tools-True]"
+    },
+    {
+      "file": "tests/pm/test_worker.py",
+      "nodeid": "tests/pm/test_worker.py::test_pause_event_reaches_running_worker_without_hanging[False]"
+    },
+    {
+      "file": "tests/pm/test_worker.py",
+      "nodeid": "tests/pm/test_worker.py::test_pause_event_reaches_running_worker_without_hanging[True]"
+    },
+    {
+      "file": "tests/pm/test_worker.py",
+      "nodeid": "tests/pm/test_worker.py::test_refused_or_already_paused_install_does_not_acquire_runtime"
+    },
+    {
+      "file": "tests/pm/test_worker.py",
+      "nodeid": "tests/pm/test_worker.py::test_resolution_conflict_survives_worker_and_receipt"
+    },
+    {
+      "file": "tests/pm/test_worker.py",
+      "nodeid": "tests/pm/test_worker.py::test_sync_discovers_profile_members_after_worker_acquires_lock[False]"
+    },
+    {
+      "file": "tests/pm/test_worker.py",
+      "nodeid": "tests/pm/test_worker.py::test_sync_discovers_profile_members_after_worker_acquires_lock[True]"
+    },
+    {
+      "file": "tests/pm/test_worker.py",
+      "nodeid": "tests/pm/test_worker.py::test_unknown_worker_operation_is_not_dispatched[client-activate]"
+    },
+    {
+      "file": "tests/pm/test_worker.py",
+      "nodeid": "tests/pm/test_worker.py::test_unknown_worker_operation_is_not_dispatched[client-stage_manager_runtime]"
+    },
+    {
+      "file": "tests/pm/test_worker.py",
+      "nodeid": "tests/pm/test_worker.py::test_unknown_worker_operation_is_not_dispatched[wire-activate]"
+    },
+    {
+      "file": "tests/pm/test_worker.py",
+      "nodeid": "tests/pm/test_worker.py::test_unknown_worker_operation_is_not_dispatched[wire-stage_manager_runtime]"
+    },
+    {
+      "file": "tests/pm/test_worker.py",
+      "nodeid": "tests/pm/test_worker.py::test_worker_artifact_lifecycle_keeps_identity_and_relays_progress[ensure]"
+    },
+    {
+      "file": "tests/pm/test_worker.py",
+      "nodeid": "tests/pm/test_worker.py::test_worker_artifact_lifecycle_keeps_identity_and_relays_progress[stage_only]"
+    },
+    {
+      "file": "tests/pm/test_worker.py",
+      "nodeid": "tests/pm/test_worker.py::test_worker_death_reports_transport_failure"
+    },
+    {
+      "file": "tests/pm/test_worker.py",
+      "nodeid": "tests/pm/test_worker.py::test_worker_receipt_is_exact_even_if_latest_is_replaced"
+    },
+    {
+      "file": "tests/pm/test_worker.py",
+      "nodeid": "tests/pm/test_worker.py::test_worker_side_environment_reuses_and_keeps_selection_on_failed_tool"
+    },
+    {
+      "file": "tests/pm/test_venv_sync_ambient_config.py",
+      "nodeid": "tests/pm/test_venv_sync_ambient_config.py::test_ambient_uv_config_does_not_affect_pm_venv_sync"
+    },
+    {
+      "file": "tests/pm/test_uv_python.py",
+      "nodeid": "tests/pm/test_uv_python.py::test_all_uv_commands_keep_the_pm_interpreter"
+    },
+    {
+      "file": "tests/pm/test_uv_python.py",
+      "nodeid": "tests/pm/test_uv_python.py::test_copy_failure_preserves_previous_python[None]"
+    },
+    {
+      "file": "tests/pm/test_uv_python.py",
+      "nodeid": "tests/pm/test_uv_python.py::test_copy_failure_preserves_previous_python[copy]"
+    },
+    {
+      "file": "tests/pm/test_uv_python.py",
+      "nodeid": "tests/pm/test_uv_python.py::test_copy_failure_preserves_previous_python[publication]"
+    },
+    {
+      "file": "tests/pm/test_uv_python.py",
+      "nodeid": "tests/pm/test_uv_python.py::test_copy_failure_preserves_previous_python[source]"
+    },
+    {
+      "file": "tests/pm/test_uv_python.py",
+      "nodeid": "tests/pm/test_uv_python.py::test_internal_tooling_cannot_escape_package_queries"
+    },
+    {
+      "file": "tests/pm/test_uv_python.py",
+      "nodeid": "tests/pm/test_uv_python.py::test_project_environment_replaces_generation_when_pinned_python_moves"
+    },
+    {
+      "file": "tests/pm/test_uv_python.py",
+      "nodeid": "tests/pm/test_uv_python.py::test_uv_refuses_discovery_when_pm_python_is_missing"
+    },
+    {
+      "file": "tests/pm/test_worker_observers.py",
+      "nodeid": "tests/pm/test_worker_observers.py::test_slow_worker_observer_does_not_hold_range_writers"
+    },
+    {
+      "file": "tests/pm/test_worker_observers.py",
+      "nodeid": "tests/pm/test_worker_observers.py::test_worker_observer_failure_preserves_resumable_bytes[error]"
+    },
+    {
+      "file": "tests/pm/test_worker_observers.py",
+      "nodeid": "tests/pm/test_worker_observers.py::test_worker_observer_failure_preserves_resumable_bytes[pause]"
+    },
+    {
+      "file": "tests/pm/test_worker_stdio.py",
+      "nodeid": "tests/pm/test_worker_stdio.py::test_worker_children_get_eof_while_control_pipe_stays_open[False]"
+    },
+    {
+      "file": "tests/pm/test_worker_stdio.py",
+      "nodeid": "tests/pm/test_worker_stdio.py::test_worker_children_get_eof_while_control_pipe_stays_open[True]"
+    },
+    {
+      "file": "tests/pm/test_worker_publication.py",
+      "nodeid": "tests/pm/test_worker_publication.py::test_additional_candidates_are_discovered_by_sync_and_passive_probe"
+    },
+    {
+      "file": "tests/pm/test_worker_publication.py",
+      "nodeid": "tests/pm/test_worker_publication.py::test_explicit_publication_keeps_its_intent_through_tool_acquisition"
+    },
+    {
+      "file": "tests/pm/test_worker_publication.py",
+      "nodeid": "tests/pm/test_worker_publication.py::test_inactive_portable_publication_does_not_inspect_unrelated_dependency_manifests"
+    },
+    {
+      "file": "tests/pm/test_worker_publication.py",
+      "nodeid": "tests/pm/test_worker_publication.py::test_selection_preserves_yaml11_values_and_quotes_plugin_names"
+    },
+    {
+      "file": "tests/pm/test_worker_publication.py",
+      "nodeid": "tests/pm/test_worker_publication.py::test_selection_refuses_config_edits_during_preparation[active]"
+    },
+    {
+      "file": "tests/pm/test_worker_publication.py",
+      "nodeid": "tests/pm/test_worker_publication.py::test_selection_refuses_config_edits_during_preparation[sibling]"
+    },
+    {
+      "file": "tests/pm/test_worker_publication.py",
+      "nodeid": "tests/pm/test_worker_publication.py::test_staged_plugin_publication_uses_installed_identity_and_local_dependencies[existing-False]"
+    },
+    {
+      "file": "tests/pm/test_worker_publication.py",
+      "nodeid": "tests/pm/test_worker_publication.py::test_staged_plugin_publication_uses_installed_identity_and_local_dependencies[existing-True]"
+    },
+    {
+      "file": "tests/pm/test_worker_publication.py",
+      "nodeid": "tests/pm/test_worker_publication.py::test_staged_plugin_publication_uses_installed_identity_and_local_dependencies[missing-False]"
+    },
+    {
+      "file": "tests/pm/test_worker_publication.py",
+      "nodeid": "tests/pm/test_worker_publication.py::test_staged_plugin_publication_uses_installed_identity_and_local_dependencies[missing-True]"
+    },
+    {
+      "file": "tests/pm/test_worker_publication.py",
+      "nodeid": "tests/pm/test_worker_publication.py::test_staged_publication_preserves_a_concurrent_sibling_install_record"
+    },
+    {
+      "file": "tests/pm/test_worker_publication.py",
+      "nodeid": "tests/pm/test_worker_publication.py::test_staged_publication_refuses_concurrent_input_edits[metadata]"
+    },
+    {
+      "file": "tests/pm/test_worker_publication.py",
+      "nodeid": "tests/pm/test_worker_publication.py::test_staged_publication_refuses_concurrent_input_edits[sibling-manifest]"
+    },
+    {
+      "file": "tests/pm/test_worker_publication.py",
+      "nodeid": "tests/pm/test_worker_publication.py::test_staged_publication_refuses_concurrent_input_edits[staged]"
+    },
+    {
+      "file": "tests/pm/test_worker_publication.py",
+      "nodeid": "tests/pm/test_worker_publication.py::test_staged_publication_refuses_concurrent_input_edits[target]"
+    },
+    {
+      "file": "tests/pm/test_worker_publication.py",
+      "nodeid": "tests/pm/test_worker_publication.py::test_stale_enablement_cannot_replace_a_newer_selection"
+    },
+    {
+      "file": "tests/pm/test_worker_publication.py",
+      "nodeid": "tests/pm/test_worker_publication.py::test_worker_death_recovers_at_each_durable_publication_boundary[selection-False-commit]"
+    },
+    {
+      "file": "tests/pm/test_worker_publication.py",
+      "nodeid": "tests/pm/test_worker_publication.py::test_worker_death_recovers_at_each_durable_publication_boundary[selection-False-journal]"
+    },
+    {
+      "file": "tests/pm/test_worker_publication.py",
+      "nodeid": "tests/pm/test_worker_publication.py::test_worker_death_recovers_at_each_durable_publication_boundary[selection-False-payload]"
+    },
+    {
+      "file": "tests/pm/test_worker_publication.py",
+      "nodeid": "tests/pm/test_worker_publication.py::test_worker_death_recovers_at_each_durable_publication_boundary[selection-True-commit]"
+    },
+    {
+      "file": "tests/pm/test_worker_publication.py",
+      "nodeid": "tests/pm/test_worker_publication.py::test_worker_death_recovers_at_each_durable_publication_boundary[selection-True-journal]"
+    },
+    {
+      "file": "tests/pm/test_worker_publication.py",
+      "nodeid": "tests/pm/test_worker_publication.py::test_worker_death_recovers_at_each_durable_publication_boundary[selection-True-payload]"
+    },
+    {
+      "file": "tests/pm/test_worker_publication.py",
+      "nodeid": "tests/pm/test_worker_publication.py::test_worker_death_recovers_at_each_durable_publication_boundary[tree-False-backup]"
+    },
+    {
+      "file": "tests/pm/test_worker_publication.py",
+      "nodeid": "tests/pm/test_worker_publication.py::test_worker_death_recovers_at_each_durable_publication_boundary[tree-False-commit]"
+    },
+    {
+      "file": "tests/pm/test_worker_publication.py",
+      "nodeid": "tests/pm/test_worker_publication.py::test_worker_death_recovers_at_each_durable_publication_boundary[tree-False-journal]"
+    },
+    {
+      "file": "tests/pm/test_worker_publication.py",
+      "nodeid": "tests/pm/test_worker_publication.py::test_worker_death_recovers_at_each_durable_publication_boundary[tree-False-payload]"
+    },
+    {
+      "file": "tests/pm/test_worker_publication.py",
+      "nodeid": "tests/pm/test_worker_publication.py::test_worker_death_recovers_at_each_durable_publication_boundary[tree-False-tree]"
+    },
+    {
+      "file": "tests/pm/test_worker_publication.py",
+      "nodeid": "tests/pm/test_worker_publication.py::test_worker_death_recovers_at_each_durable_publication_boundary[tree-True-backup]"
+    },
+    {
+      "file": "tests/pm/test_worker_publication.py",
+      "nodeid": "tests/pm/test_worker_publication.py::test_worker_death_recovers_at_each_durable_publication_boundary[tree-True-commit]"
+    },
+    {
+      "file": "tests/pm/test_worker_publication.py",
+      "nodeid": "tests/pm/test_worker_publication.py::test_worker_death_recovers_at_each_durable_publication_boundary[tree-True-journal]"
+    },
+    {
+      "file": "tests/pm/test_worker_publication.py",
+      "nodeid": "tests/pm/test_worker_publication.py::test_worker_death_recovers_at_each_durable_publication_boundary[tree-True-payload]"
+    },
+    {
+      "file": "tests/pm/test_worker_publication.py",
+      "nodeid": "tests/pm/test_worker_publication.py::test_worker_death_recovers_at_each_durable_publication_boundary[tree-True-tree]"
+    },
+    {
+      "file": "tests/pm/test_worker_publication.py",
+      "nodeid": "tests/pm/test_worker_publication.py::test_worker_publishes_selection_even_when_dependencies_are_current"
+    },
+    {
+      "file": "tests/pm/test_worker_publication.py",
+      "nodeid": "tests/pm/test_worker_publication.py::test_worker_rejects_unloadable_staged_plugin_without_app_dependencies[manifest_version: 999]"
+    },
+    {
+      "file": "tests/pm/test_worker_publication.py",
+      "nodeid": "tests/pm/test_worker_publication.py::test_worker_rejects_unloadable_staged_plugin_without_app_dependencies[name: []"
+    },
+    {
+      "file": "tests/pm/test_worker_publication.py",
+      "nodeid": "tests/pm/test_worker_publication.py::test_worker_rejects_unloadable_staged_plugin_without_app_dependencies[name: other]"
+    },
+    {
+      "file": "tests/pm/test_worker_publication.py",
+      "nodeid": "tests/pm/test_worker_publication.py::test_worker_rejects_unloadable_staged_plugin_without_app_dependencies[requires_hermes: '>=999']"
+    },
+    {
+      "file": "tests/pm/test_worker_registry.py",
+      "nodeid": "tests/pm/test_worker_registry.py::test_non_importable_registration_fails_with_package_remedy[local]"
+    },
+    {
+      "file": "tests/pm/test_worker_registry.py",
+      "nodeid": "tests/pm/test_worker_registry.py::test_non_importable_registration_fails_with_package_remedy[main]"
+    },
+    {
+      "file": "tests/pm/test_worker_registry.py",
+      "nodeid": "tests/pm/test_worker_registry.py::test_non_importable_registration_fails_with_package_remedy[unbound]"
+    },
+    {
+      "file": "tests/pm/test_worker_registry.py",
+      "nodeid": "tests/pm/test_worker_registry.py::test_registered_package_installs_archive_in_real_worker[ensure]"
+    },
+    {
+      "file": "tests/pm/test_worker_registry.py",
+      "nodeid": "tests/pm/test_worker_registry.py::test_registered_package_installs_archive_in_real_worker[stage_only]"
+    },
+    {
+      "file": "tests/pm/test_workspace.py",
+      "nodeid": "tests/pm/test_workspace.py::test_core_quarantine_covers_core_packages_and_not_plugin_ones"
+    },
+    {
+      "file": "tests/pm/test_workspace.py",
+      "nodeid": "tests/pm/test_workspace.py::test_missing_explicit_seed_cannot_silently_resolve_new_versions"
+    },
+    {
+      "file": "tests/pm/test_workspace.py",
+      "nodeid": "tests/pm/test_workspace.py::test_preparation_refuses_existing_workspace_without_mutating_it"
+    },
+    {
+      "file": "tests/pm/test_workspace.py",
+      "nodeid": "tests/pm/test_workspace.py::test_staging_root_and_env_are_honored_without_live_mutation"
+    },
+    {
+      "file": "tests/pm/test_workspace.py",
+      "nodeid": "tests/pm/test_workspace.py::test_sync_failure_is_never_a_conflict"
+    },
+    {
+      "file": "tests/pm/test_workspace_build_inputs.py",
+      "nodeid": "tests/pm/test_workspace_build_inputs.py::test_legacy_member_is_generated_only_inside_workspace"
+    },
+    {
+      "file": "tests/pm/test_workspace_build_inputs.py",
+      "nodeid": "tests/pm/test_workspace_build_inputs.py::test_plugin_can_move_compatible_transitive_but_not_exact_requirement[False]"
+    },
+    {
+      "file": "tests/pm/test_workspace_build_inputs.py",
+      "nodeid": "tests/pm/test_workspace_build_inputs.py::test_plugin_can_move_compatible_transitive_but_not_exact_requirement[True]"
+    },
+    {
+      "file": "tests/pm/test_workspace_build_inputs.py",
+      "nodeid": "tests/pm/test_workspace_build_inputs.py::test_real_build_inputs_stay_in_generated_root"
+    },
+    {
+      "file": "tests/pm/test_workspace_build_inputs.py",
+      "nodeid": "tests/pm/test_workspace_build_inputs.py::test_repair_replays_saved_in_tree_build_backend"
+    },
+    {
+      "file": "tests/pm/test_workspace_build_inputs.py",
+      "nodeid": "tests/pm/test_workspace_build_inputs.py::test_source_refresh_does_not_need_metadata_change_and_refuses_live_root"
+    },
+    {
+      "file": "tests/scripts/install/test_install_sh_reuse_supported_python.py",
+      "nodeid": "tests/scripts/install/test_install_sh_reuse_supported_python.py::test_supported_base_python_is_reused_offline[False]"
+    },
+    {
+      "file": "tests/scripts/install/test_install_sh_reuse_supported_python.py",
+      "nodeid": "tests/scripts/install/test_install_sh_reuse_supported_python.py::test_supported_base_python_is_reused_offline[True]"
+    },
+    {
+      "file": "tests/scripts/test_bundle_npm.py",
+      "nodeid": "tests/scripts/test_bundle_npm.py::test_bundle_npm_runs_workspace_from_unrelated_directory"
+    },
+    {
+      "file": "tests/scripts/test_bundle_native.py",
+      "nodeid": "tests/scripts/test_bundle_native.py::test_bundle_stages_git_tree_and_runs_native_children_before_manifest"
+    },
+    {
+      "file": "tests/scripts/test_bundle_native.py",
+      "nodeid": "tests/scripts/test_bundle_native.py::test_staged_cache_ships_full_wheel_set_and_rebuilds_offline"
+    },
+    {
+      "file": "tests/scripts/test_desktop_build_cache.py",
+      "nodeid": "tests/scripts/test_desktop_build_cache.py::test_direct_snapshot_preserves_node_receipt_and_excludes_job_secrets"
+    },
+    {
+      "file": "tests/scripts/test_fresh_source_install.py",
+      "nodeid": "tests/scripts/test_fresh_source_install.py::test_current_installer_publishes_real_dependencies_and_warm_path[None]"
+    },
+    {
+      "file": "tests/scripts/test_fresh_source_install.py",
+      "nodeid": "tests/scripts/test_fresh_source_install.py::test_current_installer_publishes_real_dependencies_and_warm_path[bad-hash]"
+    },
+    {
+      "file": "tests/scripts/test_fresh_source_install.py",
+      "nodeid": "tests/scripts/test_fresh_source_install.py::test_current_installer_publishes_real_dependencies_and_warm_path[missing-wheel]"
+    },
+    {
+      "file": "tests/scripts/test_install_sh_launch_handoff.py",
+      "nodeid": "tests/scripts/test_install_sh_launch_handoff.py::test_installer_post_pm_stages[gateway-expected1]"
+    },
+    {
+      "file": "tests/scripts/test_install_sh_launch_handoff.py",
+      "nodeid": "tests/scripts/test_install_sh_launch_handoff.py::test_installer_post_pm_stages[setup-expected0]"
+    },
+    {
+      "file": "tests/scripts/test_pm_build_consumers.py",
+      "nodeid": "tests/scripts/test_pm_build_consumers.py::test_ci_packages_exports_python_and_preserves_real_child_exit"
+    },
+    {
+      "file": "tests/scripts/test_pm_build_consumers.py",
+      "nodeid": "tests/scripts/test_pm_build_consumers.py::test_ci_setup_exports_python_first_and_no_installer_policy"
+    },
+    {
+      "file": "tests/scripts/test_pm_build_consumers.py",
+      "nodeid": "tests/scripts/test_pm_build_consumers.py::test_termux_gate_checks_real_offline_wheels_and_application_uses_same_graph"
+    },
+    {
+      "file": "tests/scripts/test_icon_flavors.py",
+      "nodeid": "tests/scripts/test_icon_flavors.py::test_canary_changes_only_desktop_background_preserving_art_and_native_geometry"
+    },
+    {
+      "file": "tests/scripts/test_icon_flavors.py",
+      "nodeid": "tests/scripts/test_icon_flavors.py::test_commit_icons_are_red_and_print_only_the_actual_seven_digit_prefix"
+    },
+    {
+      "file": "tests/scripts/test_icon_flavors.py",
+      "nodeid": "tests/scripts/test_icon_flavors.py::test_invalid_or_conflicting_build_identity_cannot_emit_icons[-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA]"
+    },
+    {
+      "file": "tests/scripts/test_icon_flavors.py",
+      "nodeid": "tests/scripts/test_icon_flavors.py::test_invalid_or_conflicting_build_identity_cannot_emit_icons[-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\\n]"
+    },
+    {
+      "file": "tests/scripts/test_icon_flavors.py",
+      "nodeid": "tests/scripts/test_icon_flavors.py::test_invalid_or_conflicting_build_identity_cannot_emit_icons[-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa]"
+    },
+    {
+      "file": "tests/scripts/test_icon_flavors.py",
+      "nodeid": "tests/scripts/test_icon_flavors.py::test_invalid_or_conflicting_build_identity_cannot_emit_icons[-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaag]"
+    },
+    {
+      "file": "tests/scripts/test_icon_flavors.py",
+      "nodeid": "tests/scripts/test_icon_flavors.py::test_invalid_or_conflicting_build_identity_cannot_emit_icons[-abcdef0]"
+    },
+    {
+      "file": "tests/scripts/test_icon_flavors.py",
+      "nodeid": "tests/scripts/test_icon_flavors.py::test_invalid_or_conflicting_build_identity_cannot_emit_icons[v1.2.3-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa]"
+    },
+    {
+      "file": "tests/scripts/test_pm_runtime_bundle.py",
+      "nodeid": "tests/scripts/test_pm_runtime_bundle.py::test_native_pm_runtime_survives_payload_move"
+    },
+    {
+      "file": "tests/scripts/test_pm_runtime_bundle.py",
+      "nodeid": "tests/scripts/test_pm_runtime_bundle.py::test_pm_builder_ignores_ambient_uv_configuration[cwd]"
+    },
+    {
+      "file": "tests/scripts/test_pm_runtime_bundle.py",
+      "nodeid": "tests/scripts/test_pm_runtime_bundle.py::test_pm_builder_ignores_ambient_uv_configuration[global]"
+    },
+    {
+      "file": "tests/scripts/test_run_tests_parallel_stdio.py",
+      "nodeid": "tests/scripts/test_run_tests_parallel_stdio.py::test_silent_child_failure_reports_exit_code"
+    },
+    {
+      "file": "tests/scripts/test_run_tests_parallel.py",
+      "nodeid": "tests/scripts/test_run_tests_parallel.py::test_file_retry_self_heals_and_prints_both_attempts"
+    },
+    {
+      "file": "tests/scripts/test_run_tests_parallel.py",
+      "nodeid": "tests/scripts/test_run_tests_parallel.py::test_files_from_dash_reads_the_list_from_stdin"
+    },
+    {
+      "file": "tests/scripts/test_run_tests_parallel.py",
+      "nodeid": "tests/scripts/test_run_tests_parallel.py::test_files_from_runs_exactly_the_listed_files"
+    },
+    {
+      "file": "tests/scripts/test_run_tests_parallel.py",
+      "nodeid": "tests/scripts/test_run_tests_parallel.py::test_grandchild_leak_is_killed_by_runner"
+    },
+    {
+      "file": "tests/scripts/test_run_tests_parallel.py",
+      "nodeid": "tests/scripts/test_run_tests_parallel.py::test_interpreter_crash_is_reported_as_a_crash_not_as_no_tests_ran"
+    },
+    {
+      "file": "tests/scripts/test_run_tests_parallel.py",
+      "nodeid": "tests/scripts/test_run_tests_parallel.py::test_progress_output_tolerates_legacy_stdout_encoding"
+    },
+    {
+      "file": "tests/scripts/test_run_tests_parallel.py",
+      "nodeid": "tests/scripts/test_run_tests_parallel.py::test_runner_selection_records_actual_test_identity[bare-k-expected1]"
+    },
+    {
+      "file": "tests/scripts/test_run_tests_parallel.py",
+      "nodeid": "tests/scripts/test_run_tests_parallel.py::test_runner_selection_records_actual_test_identity[explicit-k-expected3]"
+    },
+    {
+      "file": "tests/scripts/test_run_tests_parallel.py",
+      "nodeid": "tests/scripts/test_run_tests_parallel.py::test_runner_selection_records_actual_test_identity[node-id-expected2]"
+    },
+    {
+      "file": "tests/scripts/test_run_tests_parallel.py",
+      "nodeid": "tests/scripts/test_run_tests_parallel.py::test_runner_selection_records_actual_test_identity[pathsep-expected4]"
+    },
+    {
+      "file": "tests/scripts/test_run_tests_parallel.py",
+      "nodeid": "tests/scripts/test_run_tests_parallel.py::test_runner_selection_records_actual_test_identity[positional-expected0]"
+    },
+    {
+      "file": "tests/scripts/test_run_tests_parallel.py",
+      "nodeid": "tests/scripts/test_run_tests_parallel.py::test_unknown_bare_flag_errors_with_usage_instead_of_sweeping"
+    },
+    {
+      "file": "tests/scripts/test_setup_toolchain.py",
+      "nodeid": "tests/scripts/test_setup_toolchain.py::test_development_setup_keeps_test_groups_out_of_the_runtime[runtime]"
+    },
+    {
+      "file": "tests/scripts/test_setup_toolchain.py",
+      "nodeid": "tests/scripts/test_setup_toolchain.py::test_development_setup_keeps_test_groups_out_of_the_runtime[tests]"
+    },
+    {
+      "file": "tests/scripts/test_source_build_env.py",
+      "nodeid": "tests/scripts/test_source_build_env.py::test_posix_build_children_stamp_old_and_new_without_changing_parent[node]"
+    },
+    {
+      "file": "tests/scripts/test_stage_apt_repo.py",
+      "nodeid": "tests/scripts/test_stage_apt_repo.py::test_multi_key_import_is_rejected_not_first_key_used"
+    },
+    {
+      "file": "tests/scripts/test_stage_apt_repo.py",
+      "nodeid": "tests/scripts/test_stage_apt_repo.py::test_real_gpg_signs_and_published_public_key_verifies[]"
+    },
+    {
+      "file": "tests/scripts/test_stage_apt_repo.py",
+      "nodeid": "tests/scripts/test_stage_apt_repo.py::test_real_gpg_signs_and_published_public_key_verifies[correct-horse-battery-staple]"
+    },
+    {
+      "file": "tests/scripts/test_stage_apt_repo.py",
+      "nodeid": "tests/scripts/test_stage_apt_repo.py::test_real_gpg_tampered_metadata_fails_closed"
+    },
+    {
+      "file": "tests/scripts/test_run_tests_shell.py",
+      "nodeid": "tests/scripts/test_run_tests_shell.py::test_shell_runner_executes_tests_and_propagates_failure"
+    },
+    {
+      "file": "tests/scripts/test_verify_plugin_preservation.py",
+      "nodeid": "tests/scripts/test_verify_plugin_preservation.py::test_preservation_cli_fault_matrix[plugins-tree-deleted]"
+    },
+    {
+      "file": "tests/scripts/test_verify_plugin_preservation.py",
+      "nodeid": "tests/scripts/test_verify_plugin_preservation.py::test_preservation_cli_fault_matrix[plugins/fresh-from-upgrade/b.txt-add-added]"
+    },
+    {
+      "file": "tests/scripts/test_verify_plugin_preservation.py",
+      "nodeid": "tests/scripts/test_verify_plugin_preservation.py::test_preservation_cli_fault_matrix[plugins/mnemosyne-wrapper/mnemosyne-wrapper.json-change-modified]"
+    },
+    {
+      "file": "tests/scripts/test_verify_plugin_preservation.py",
+      "nodeid": "tests/scripts/test_verify_plugin_preservation.py::test_preservation_cli_fault_matrix[plugins/mnemosyne-wrapper/plugin.py-delete-deleted]"
+    },
+    {
+      "file": "tests/scripts/test_verify_plugin_preservation.py",
+      "nodeid": "tests/scripts/test_verify_plugin_preservation.py::test_preservation_cli_fault_matrix[plugins/mnemosyne-wrapper/runtime-repoint-modified]"
+    },
+    {
+      "file": "tests/scripts/test_verify_plugin_preservation.py",
+      "nodeid": "tests/scripts/test_verify_plugin_preservation.py::test_preservation_cli_fault_matrix[plugins/mnemosyne-wrapper/runtime/engine.bin-delete-modified]"
+    },
+    {
+      "file": "tests/scripts/test_verify_plugin_preservation.py",
+      "nodeid": "tests/scripts/test_verify_plugin_preservation.py::test_preservation_cli_fault_matrix[plugins/mnemosyne-wrapper/runtime/sidecar-witness.txt-change-modified]"
+    },
+    {
+      "file": "tests/scripts/test_verify_plugin_preservation.py",
+      "nodeid": "tests/scripts/test_verify_plugin_preservation.py::test_preservation_cli_fault_matrix[plugins/wrapper-b/empty-cache-tree-deleted]"
+    },
+    {
+      "file": "tests/scripts/test_verify_plugin_preservation.py",
+      "nodeid": "tests/scripts/test_verify_plugin_preservation.py::test_preservation_cli_fault_matrix[profiles/work/plugins/second-plugin/data.bin-delete-deleted]"
+    },
+    {
+      "file": "tests/scripts/test_source_driver.py",
+      "nodeid": "tests/scripts/test_source_driver.py::test_pm_observer_accepts_ready_fixture_and_leaves_failed_fixture_untouched[foreign-launcher-belongs to another installation]"
+    },
+    {
+      "file": "tests/scripts/test_source_driver.py",
+      "nodeid": "tests/scripts/test_source_driver.py::test_pm_observer_accepts_ready_fixture_and_leaves_failed_fixture_untouched[incomplete-incomplete]"
+    },
+    {
+      "file": "tests/scripts/test_source_driver.py",
+      "nodeid": "tests/scripts/test_source_driver.py::test_pm_observer_accepts_ready_fixture_and_leaves_failed_fixture_untouched[missing-launcher-]"
+    },
+    {
+      "file": "tests/scripts/test_source_driver.py",
+      "nodeid": "tests/scripts/test_source_driver.py::test_pm_observer_accepts_ready_fixture_and_leaves_failed_fixture_untouched[no-desktop-dependency generation is not current]"
+    },
+    {
+      "file": "tests/scripts/test_source_driver.py",
+      "nodeid": "tests/scripts/test_source_driver.py::test_pm_observer_accepts_ready_fixture_and_leaves_failed_fixture_untouched[uv-lock-dependency generation is not current]"
+    },
+    {
+      "file": "tests/scripts/test_source_driver.py",
+      "nodeid": "tests/scripts/test_source_driver.py::test_pm_observer_accepts_ready_fixture_and_leaves_failed_fixture_untouched[web-changed-web output]"
+    },
+    {
+      "file": "tests/scripts/test_source_driver.py",
+      "nodeid": "tests/scripts/test_source_driver.py::test_pm_observer_accepts_ready_fixture_and_leaves_failed_fixture_untouched[web-missing-web output]"
+    },
+    {
+      "file": "tests/scripts/test_agent_build.py",
+      "nodeid": "tests/scripts/test_agent_build.py::test_payload_smoke_uses_relocated_manifest_commands"
+    },
+    {
+      "file": "tests/test_atomic_replace_symlinks.py",
+      "nodeid": "tests/test_atomic_replace_symlinks.py::test_atomic_replace_real_cross_device"
+    },
+    {
+      "file": "tests/tools/test_a2a_reason_roundtrip.py",
+      "nodeid": "tests/tools/test_a2a_reason_roundtrip.py::test_waiter_healthy_reply_has_no_reason_tag"
+    },
+    {
+      "file": "tests/tools/test_approved_command_clean_slate.py",
+      "nodeid": "tests/tools/test_approved_command_clean_slate.py::test_execute_code_approved_clears_stale_interrupt_bit"
+    },
+    {
+      "file": "tests/tools/test_approved_command_clean_slate.py",
+      "nodeid": "tests/tools/test_approved_command_clean_slate.py::test_execute_code_non_approved_still_interrupts_on_stale_bit"
+    },
+    {
+      "file": "tests/tools/test_bot_relay_windows_paths.py",
+      "nodeid": "tests/tools/test_bot_relay_windows_paths.py::test_delivery_lock_recognizes_resolved_cli_paths"
+    },
+    {
+      "file": "tests/tools/test_browser_use_pm.py",
+      "nodeid": "tests/tools/test_browser_use_pm.py::test_installed_cli_selection_and_child_environment"
+    },
+    {
+      "file": "tests/tools/test_browser_real_profile.py",
+      "nodeid": "tests/tools/test_browser_real_profile.py::TestRealProfileCdpLaunch::test_reuses_only_session_on_our_copy_dir"
+    },
+    {
+      "file": "tests/tools/test_code_execution.py",
+      "nodeid": "tests/tools/test_code_execution.py::TestEnvVarFiltering::test_api_keys_excluded"
+    },
+    {
+      "file": "tests/tools/test_code_execution.py",
+      "nodeid": "tests/tools/test_code_execution.py::TestEnvVarFiltering::test_timezone_injected_when_set"
+    },
+    {
+      "file": "tests/tools/test_code_execution.py",
+      "nodeid": "tests/tools/test_code_execution.py::TestEnvVarFiltering::test_tokens_excluded"
+    },
+    {
+      "file": "tests/tools/test_code_execution.py",
+      "nodeid": "tests/tools/test_code_execution.py::TestExecuteCode::test_basic_print"
+    },
+    {
+      "file": "tests/tools/test_code_execution.py",
+      "nodeid": "tests/tools/test_code_execution.py::TestExecuteCode::test_concurrent_tool_calls_match_responses"
+    },
+    {
+      "file": "tests/tools/test_code_execution.py",
+      "nodeid": "tests/tools/test_code_execution.py::TestExecuteCode::test_json_parse_helper_bom"
+    },
+    {
+      "file": "tests/tools/test_code_execution.py",
+      "nodeid": "tests/tools/test_code_execution.py::TestExecuteCode::test_no_tool_call_script_does_not_wait_for_rpc_accept_timeout"
+    },
+    {
+      "file": "tests/tools/test_code_execution.py",
+      "nodeid": "tests/tools/test_code_execution.py::TestExecuteCode::test_repo_root_modules_are_importable"
+    },
+    {
+      "file": "tests/tools/test_code_execution.py",
+      "nodeid": "tests/tools/test_code_execution.py::TestExecuteCode::test_retry_helper_all_fail"
+    },
+    {
+      "file": "tests/tools/test_code_execution.py",
+      "nodeid": "tests/tools/test_code_execution.py::TestExecuteCode::test_shell_quote_helper"
+    },
+    {
+      "file": "tests/tools/test_code_execution.py",
+      "nodeid": "tests/tools/test_code_execution.py::TestExecuteCode::test_single_tool_call"
+    },
+    {
+      "file": "tests/tools/test_code_execution.py",
+      "nodeid": "tests/tools/test_code_execution.py::TestExecuteCode::test_stderr_on_error"
+    },
+    {
+      "file": "tests/tools/test_code_execution.py",
+      "nodeid": "tests/tools/test_code_execution.py::TestExecuteCodeEdgeCases::test_nonoverlapping_tools_fallback"
+    },
+    {
+      "file": "tests/tools/test_code_execution.py",
+      "nodeid": "tests/tools/test_code_execution.py::TestHeadTailTruncation::test_short_output_not_truncated"
+    },
+    {
+      "file": "tests/tools/test_code_execution.py",
+      "nodeid": "tests/tools/test_code_execution.py::TestInterruptHandling::test_interrupt_event_stops_execution"
+    },
+    {
+      "file": "tests/tools/test_code_execution_modes.py",
+      "nodeid": "tests/tools/test_code_execution_modes.py::test_credential_policy_and_whitelist_in_real_child[project]"
+    },
+    {
+      "file": "tests/tools/test_code_execution_modes.py",
+      "nodeid": "tests/tools/test_code_execution_modes.py::test_credential_policy_and_whitelist_in_real_child[strict]"
+    },
+    {
+      "file": "tests/tools/test_code_execution_modes.py",
+      "nodeid": "tests/tools/test_code_execution_modes.py::test_selected_interpreter_environment_and_real_rpc[CONDA_PREFIX-project]"
+    },
+    {
+      "file": "tests/tools/test_code_execution_modes.py",
+      "nodeid": "tests/tools/test_code_execution_modes.py::test_selected_interpreter_environment_and_real_rpc[CONDA_PREFIX-strict]"
+    },
+    {
+      "file": "tests/tools/test_code_execution_modes.py",
+      "nodeid": "tests/tools/test_code_execution_modes.py::test_selected_interpreter_environment_and_real_rpc[VIRTUAL_ENV-project]"
+    },
+    {
+      "file": "tests/tools/test_code_execution_modes.py",
+      "nodeid": "tests/tools/test_code_execution_modes.py::test_selected_interpreter_environment_and_real_rpc[VIRTUAL_ENV-strict]"
+    },
+    {
+      "file": "tests/tools/test_code_kernel.py",
+      "nodeid": "tests/tools/test_code_kernel.py::TestBackgroundIdleReaper::test_reap_once_spares_attached_and_fresh_kernels"
+    },
+    {
+      "file": "tests/tools/test_code_kernel.py",
+      "nodeid": "tests/tools/test_code_kernel.py::TestBackgroundIdleReaper::test_reap_once_sweeps_idle_kernels_without_a_new_acquire"
+    },
+    {
+      "file": "tests/tools/test_code_kernel.py",
+      "nodeid": "tests/tools/test_code_kernel.py::TestKernelLifecycle::test_kernel_exits_when_its_backend_parent_dies"
+    },
+    {
+      "file": "tests/tools/test_code_kernel.py",
+      "nodeid": "tests/tools/test_code_kernel.py::TestKernelLifecycle::test_subprocess_fd_output_reaches_the_result"
+    },
+    {
+      "file": "tests/tools/test_code_kernel.py",
+      "nodeid": "tests/tools/test_code_kernel.py::TestKernelLifecycle::test_sys_exit_ends_the_kernel"
+    },
+    {
+      "file": "tests/tools/test_code_kernel.py",
+      "nodeid": "tests/tools/test_code_kernel.py::TestKernelLifecycle::test_timeout_kills_the_kernel_and_reports_state_loss"
+    },
+    {
+      "file": "tests/tools/test_code_kernel.py",
+      "nodeid": "tests/tools/test_code_kernel.py::TestKernelOwnershipAndLifecycle::test_delegated_children_get_their_own_kernels"
+    },
+    {
+      "file": "tests/tools/test_code_kernel.py",
+      "nodeid": "tests/tools/test_code_kernel.py::TestKernelOwnershipAndLifecycle::test_finished_children_release_their_kernels"
+    },
+    {
+      "file": "tests/tools/test_code_kernel.py",
+      "nodeid": "tests/tools/test_code_kernel.py::TestKernelOwnershipAndLifecycle::test_idle_kernels_are_reaped"
+    },
+    {
+      "file": "tests/tools/test_code_kernel.py",
+      "nodeid": "tests/tools/test_code_kernel.py::TestKernelOwnershipAndLifecycle::test_live_children_keep_their_kernels_past_the_lru_cap"
+    },
+    {
+      "file": "tests/tools/test_code_kernel.py",
+      "nodeid": "tests/tools/test_code_kernel.py::TestKernelOwnershipAndLifecycle::test_live_kernels_are_capped_lru_across_owners"
+    },
+    {
+      "file": "tests/tools/test_code_kernel.py",
+      "nodeid": "tests/tools/test_code_kernel.py::TestKernelOwnershipAndLifecycle::test_parallel_cells_share_one_kernel_process"
+    },
+    {
+      "file": "tests/tools/test_code_kernel.py",
+      "nodeid": "tests/tools/test_code_kernel.py::TestKernelOwnershipAndLifecycle::test_session_clear_disposes_the_owners_kernels"
+    },
+    {
+      "file": "tests/tools/test_code_kernel.py",
+      "nodeid": "tests/tools/test_code_kernel.py::TestKernelOwnershipAndLifecycle::test_sessions_are_isolated_from_each_other"
+    },
+    {
+      "file": "tests/tools/test_code_kernel.py",
+      "nodeid": "tests/tools/test_code_kernel.py::TestKernelOwnershipAndLifecycle::test_state_survives_across_turns_of_one_conversation"
+    },
+    {
+      "file": "tests/tools/test_code_kernel.py",
+      "nodeid": "tests/tools/test_code_kernel.py::TestKernelOwnershipAndLifecycle::test_two_delegated_children_are_isolated_from_each_other"
+    },
+    {
+      "file": "tests/tools/test_code_kernel.py",
+      "nodeid": "tests/tools/test_code_kernel.py::TestModelFacingReset::test_reset_is_reachable_from_a_model_call_despite_stale_kernel_mode"
+    },
+    {
+      "file": "tests/tools/test_code_kernel.py",
+      "nodeid": "tests/tools/test_code_kernel.py::TestPerCellRpcAuthority::test_a_later_cells_rpc_runs_under_that_cells_authority"
+    },
+    {
+      "file": "tests/tools/test_code_kernel.py",
+      "nodeid": "tests/tools/test_code_kernel.py::TestPerCellRpcAuthority::test_cross_cell_alias_dispatches_under_the_current_cell"
+    },
+    {
+      "file": "tests/tools/test_code_kernel.py",
+      "nodeid": "tests/tools/test_code_kernel.py::TestPerCellRpcAuthority::test_each_cell_installs_a_fresh_authority"
+    },
+    {
+      "file": "tests/tools/test_code_kernel.py",
+      "nodeid": "tests/tools/test_code_kernel.py::TestSessionStatePersistence::test_exception_keeps_the_kernel_alive"
+    },
+    {
+      "file": "tests/tools/test_code_kernel.py",
+      "nodeid": "tests/tools/test_code_kernel.py::TestSessionStatePersistence::test_imports_persist"
+    },
+    {
+      "file": "tests/tools/test_code_kernel.py",
+      "nodeid": "tests/tools/test_code_kernel.py::TestSessionStatePersistence::test_reset_discards_state"
+    },
+    {
+      "file": "tests/tools/test_code_kernel.py",
+      "nodeid": "tests/tools/test_code_kernel.py::TestSessionStatePersistence::test_state_persists_across_cells"
+    },
+    {
+      "file": "tests/tools/test_execute_helper_contract.py",
+      "nodeid": "tests/tools/test_execute_helper_contract.py::test_missing_helper_recovery_instructions_execute"
+    },
+    {
+      "file": "tests/tools/test_execute_helper_contract.py",
+      "nodeid": "tests/tools/test_execute_helper_contract.py::test_schema_helper_instructions_work_across_kernel_lifetimes"
+    },
+    {
+      "file": "tests/tools/test_execute_code_approval_cluster.py",
+      "nodeid": "tests/tools/test_execute_code_approval_cluster.py::test_rpc_carries_authority_to_real_dispatch[local]"
+    },
+    {
+      "file": "tests/tools/test_kill_verify_tree_death.py",
+      "nodeid": "tests/tools/test_kill_verify_tree_death.py::test_kill_reaps_children_spawned_during_the_grace_window"
+    },
+    {
+      "file": "tests/tools/test_local_env_blocklist.py",
+      "nodeid": "tests/tools/test_local_env_blocklist.py::TestNativeEnvironmentContracts::test_execute_code_composition_strips_inherited_hermes_entries[False]"
+    },
+    {
+      "file": "tests/tools/test_local_env_blocklist.py",
+      "nodeid": "tests/tools/test_local_env_blocklist.py::TestNativeEnvironmentContracts::test_execute_code_composition_strips_inherited_hermes_entries[True]"
+    },
+    {
+      "file": "tests/tools/test_local_env_blocklist.py",
+      "nodeid": "tests/tools/test_local_env_blocklist.py::test_terminal_child_observes_declared_policy"
+    },
+    {
+      "file": "tests/tools/test_plugin_guard.py",
+      "nodeid": "tests/tools/test_plugin_guard.py::TestInstallIntegration::test_caution_plugin_accepted_via_callback[desktop/plugin.js-const help = \"Add this public key to authorized_keys on the server.\";\\n]"
+    },
+    {
+      "file": "tests/tools/test_plugin_guard.py",
+      "nodeid": "tests/tools/test_plugin_guard.py::TestInstallIntegration::test_caution_plugin_accepted_via_callback[desktop/plugin.js-const lookup = `dig +short +time=3 A ${hostname}`;\\n]"
+    },
+    {
+      "file": "tests/tools/test_plugin_guard.py",
+      "nodeid": "tests/tools/test_plugin_guard.py::TestInstallIntegration::test_caution_plugin_accepted_via_callback[helper.py-eval('1 + 1')\\n]"
+    },
+    {
+      "file": "tests/tools/test_plugin_guard.py",
+      "nodeid": "tests/tools/test_plugin_guard.py::TestInstallIntegration::test_clean_plugin_installs"
+    },
+    {
+      "file": "tests/tools/test_plugin_guard.py",
+      "nodeid": "tests/tools/test_plugin_guard.py::TestInstallIntegration::test_dangerous_plugin_is_blocked"
+    },
+    {
+      "file": "tests/tools/test_plugin_guard.py",
+      "nodeid": "tests/tools/test_plugin_guard.py::TestInstallIntegration::test_dashboard_install_reports_scan_block"
+    },
+    {
+      "file": "tests/tools/test_plugin_guard.py",
+      "nodeid": "tests/tools/test_plugin_guard.py::TestInstallIntegration::test_scan_disabled_via_config"
+    },
+    {
+      "file": "tests/tools/test_read_special_file_guard.py",
+      "nodeid": "tests/tools/test_read_special_file_guard.py::TestSpecialFileKind::test_socket"
+    },
+    {
+      "file": "tests/tools/test_sandbox_failure_hints.py",
+      "nodeid": "tests/tools/test_sandbox_failure_hints.py::TestLiveSandboxHint::test_bad_import_produces_hint_field"
+    },
+    {
+      "file": "tests/tools/test_sandbox_failure_hints.py",
+      "nodeid": "tests/tools/test_sandbox_failure_hints.py::TestLiveSandboxHint::test_successful_script_has_no_hint"
+    },
+    {
+      "file": "tests/tools/test_search_budget_truncation.py",
+      "nodeid": "tests/tools/test_search_budget_truncation.py::test_find_discovery_is_one_unsorted_pruned_bounded_scan"
+    },
+    {
+      "file": "tests/tools/test_search_budget_truncation.py",
+      "nodeid": "tests/tools/test_search_budget_truncation.py::test_find_hard_error_discards_partial_output[discovery-/narrow/partial.py\\n-bounded find traversal]"
+    },
+    {
+      "file": "tests/tools/test_search_budget_truncation.py",
+      "nodeid": "tests/tools/test_search_budget_truncation.py::test_find_hard_error_discards_partial_output[modified-/narrow/not-a-timestamp.py\\n-modification-time]"
+    },
+    {
+      "file": "tests/tools/test_search_budget_truncation.py",
+      "nodeid": "tests/tools/test_search_budget_truncation.py::test_find_modified_capability_failure_is_actionable_without_retry"
+    },
+    {
+      "file": "tests/tools/test_search_budget_truncation.py",
+      "nodeid": "tests/tools/test_search_budget_truncation.py::test_find_modified_is_one_exact_scan_without_bsd_retry"
+    },
+    {
+      "file": "tests/tools/test_search_budget_truncation.py",
+      "nodeid": "tests/tools/test_search_budget_truncation.py::test_find_sigpipe_is_benign_only_after_fetch_limit_rows[discovery-/narrow/a.py\\n/narrow/b.py\\n/narrow/c.py\\n/narrow/d.py\\n]"
+    },
+    {
+      "file": "tests/tools/test_search_budget_truncation.py",
+      "nodeid": "tests/tools/test_search_budget_truncation.py::test_find_sigpipe_is_benign_only_after_fetch_limit_rows[modified-40 /narrow/a.py\\n30 /narrow/b.py\\n20 /narrow/c.py\\n10 /narrow/d.py\\n]"
+    },
+    {
+      "file": "tests/tools/test_search_budget_truncation.py",
+      "nodeid": "tests/tools/test_search_budget_truncation.py::test_find_sigpipe_with_fewer_than_fetch_limit_rows_fails_closed[discovery-/narrow/partial.py\\n-bounded find traversal]"
+    },
+    {
+      "file": "tests/tools/test_search_budget_truncation.py",
+      "nodeid": "tests/tools/test_search_budget_truncation.py::test_find_sigpipe_with_fewer_than_fetch_limit_rows_fails_closed[modified-10 /narrow/partial.py\\n-modification-time]"
+    },
+    {
+      "file": "tests/tools/test_search_budget_truncation.py",
+      "nodeid": "tests/tools/test_search_budget_truncation.py::test_find_timeout_preserves_partial_results_and_limit_reason"
+    },
+    {
+      "file": "tests/tools/test_search_budget_truncation.py",
+      "nodeid": "tests/tools/test_search_budget_truncation.py::test_find_zero_match_exit_zero_is_success"
+    },
+    {
+      "file": "tests/tools/test_search_budget_truncation.py",
+      "nodeid": "tests/tools/test_search_budget_truncation.py::test_no_rg_multi_root_modified_is_one_globally_sorted_scan"
+    },
+    {
+      "file": "tests/tools/test_search_files_engine_selection.py",
+      "nodeid": "tests/tools/test_search_files_engine_selection.py::test_bounded_filename_total_is_serialized_as_a_lower_bound[find]"
+    },
+    {
+      "file": "tests/tools/test_search_files_engine_selection.py",
+      "nodeid": "tests/tools/test_search_files_engine_selection.py::test_bounded_filename_total_is_serialized_as_a_lower_bound[rg]"
+    },
+    {
+      "file": "tests/tools/test_search_files_engine_selection.py",
+      "nodeid": "tests/tools/test_search_files_engine_selection.py::test_comma_delimited_file_roots_preserve_internal_spaces_in_one_search"
+    },
+    {
+      "file": "tests/tools/test_search_files_engine_selection.py",
+      "nodeid": "tests/tools/test_search_files_engine_selection.py::test_default_file_search_runs_one_bounded_unsorted_rg_command"
+    },
+    {
+      "file": "tests/tools/test_search_files_engine_selection.py",
+      "nodeid": "tests/tools/test_search_files_engine_selection.py::test_empty_discovery_output_is_zero_matches_without_retry"
+    },
+    {
+      "file": "tests/tools/test_search_files_engine_selection.py",
+      "nodeid": "tests/tools/test_search_files_engine_selection.py::test_modified_accepts_complete_ripgrep_semver_with_revision_text"
+    },
+    {
+      "file": "tests/tools/test_search_files_engine_selection.py",
+      "nodeid": "tests/tools/test_search_files_engine_selection.py::test_modified_accepts_ripgrep_semver_with_prerelease_and_build_metadata"
+    },
+    {
+      "file": "tests/tools/test_search_files_engine_selection.py",
+      "nodeid": "tests/tools/test_search_files_engine_selection.py::test_modified_capability_failure_is_actionable_and_not_downgraded"
+    },
+    {
+      "file": "tests/tools/test_search_files_engine_selection.py",
+      "nodeid": "tests/tools/test_search_files_engine_selection.py::test_modified_file_search_runs_one_exact_order_rg_command"
+    },
+    {
+      "file": "tests/tools/test_search_files_engine_selection.py",
+      "nodeid": "tests/tools/test_search_files_engine_selection.py::test_modified_multi_path_search_preserves_exact_order_request"
+    },
+    {
+      "file": "tests/tools/test_search_files_engine_selection.py",
+      "nodeid": "tests/tools/test_search_files_engine_selection.py::test_modified_requires_parseable_ripgrep_14_before_search[ripgrep 13.0.0\\n]"
+    },
+    {
+      "file": "tests/tools/test_search_files_engine_selection.py",
+      "nodeid": "tests/tools/test_search_files_engine_selection.py::test_modified_requires_parseable_ripgrep_14_before_search[ripgrep 14.1.1-alpha..1\\n]"
+    },
+    {
+      "file": "tests/tools/test_search_files_engine_selection.py",
+      "nodeid": "tests/tools/test_search_files_engine_selection.py::test_modified_requires_parseable_ripgrep_14_before_search[ripgrep 14.1\\n]"
+    },
+    {
+      "file": "tests/tools/test_search_files_engine_selection.py",
+      "nodeid": "tests/tools/test_search_files_engine_selection.py::test_modified_requires_parseable_ripgrep_14_before_search[ripgrep unknown\\n]"
+    },
+    {
+      "file": "tests/tools/test_search_files_engine_selection.py",
+      "nodeid": "tests/tools/test_search_files_engine_selection.py::test_modified_timeout_preserves_partial_results_and_limit_reason"
+    },
+    {
+      "file": "tests/tools/test_search_files_engine_selection.py",
+      "nodeid": "tests/tools/test_search_files_engine_selection.py::test_modified_zero_match_exit_one_is_valid_without_capability_error"
+    },
+    {
+      "file": "tests/tools/test_search_files_engine_selection.py",
+      "nodeid": "tests/tools/test_search_files_engine_selection.py::test_multi_path_modified_capability_error_propagates"
+    },
+    {
+      "file": "tests/tools/test_search_files_engine_selection.py",
+      "nodeid": "tests/tools/test_search_files_engine_selection.py::test_order_is_ignored_for_content_search"
+    },
+    {
+      "file": "tests/tools/test_search_files_engine_selection.py",
+      "nodeid": "tests/tools/test_search_files_engine_selection.py::test_remote_resolution_never_probes_controller_host_paths"
+    },
+    {
+      "file": "tests/tools/test_search_files_engine_selection.py",
+      "nodeid": "tests/tools/test_search_files_engine_selection.py::test_resolved_executable_with_spaces_is_used_by_every_rg_invocation"
+    },
+    {
+      "file": "tests/tools/test_search_files_engine_selection.py",
+      "nodeid": "tests/tools/test_search_files_engine_selection.py::test_rg_partial_output_with_error_exit_fails_closed[discovery]"
+    },
+    {
+      "file": "tests/tools/test_search_files_engine_selection.py",
+      "nodeid": "tests/tools/test_search_files_engine_selection.py::test_rg_partial_output_with_error_exit_fails_closed[modified]"
+    },
+    {
+      "file": "tests/tools/test_search_files_engine_selection.py",
+      "nodeid": "tests/tools/test_search_files_engine_selection.py::test_rg_sigpipe_is_benign_only_after_fetch_limit_paths[discovery]"
+    },
+    {
+      "file": "tests/tools/test_search_files_engine_selection.py",
+      "nodeid": "tests/tools/test_search_files_engine_selection.py::test_rg_sigpipe_is_benign_only_after_fetch_limit_paths[modified]"
+    },
+    {
+      "file": "tests/tools/test_search_native_rg.py",
+      "nodeid": "tests/tools/test_search_native_rg.py::test_kill_switch_routes_search_back_to_the_shell"
+    },
+    {
+      "file": "tests/tools/test_send_message_tool.py",
+      "nodeid": "tests/tools/test_send_message_tool.py::TestSendMessageTool::test_media_tag_outside_allowed_roots_is_not_sent"
+    },
+    {
+      "file": "tests/tools/test_send_message_tool.py",
+      "nodeid": "tests/tools/test_send_message_tool.py::TestSendMessageTool::test_missing_media_is_reported_to_the_caller_and_hermes_send_exits_nonzero"
+    },
+    {
+      "file": "tests/tools/test_skills_sync.py",
+      "nodeid": "tests/tools/test_skills_sync.py::TestCallTimeDirResolution::test_rmtree_guard_anchors_on_overridden_profile"
+    },
+    {
+      "file": "tests/tools/test_subprocess_stdin_guard.py",
+      "nodeid": "tests/tools/test_subprocess_stdin_guard.py::test_all_tui_subprocess_calls_have_stdin"
+    },
+    {
+      "file": "tests/tools/test_tts_deepinfra.py",
+      "nodeid": "tests/tools/test_tts_deepinfra.py::test_unselected_cloud_credentials_do_not_expose_edge_tool"
+    },
+    {
+      "file": "tests/tools/test_tts_mistral.py",
+      "nodeid": "tests/tools/test_tts_mistral.py::TestCheckTtsRequirementsMistral::test_mistral_key_missing_returns_false"
+    },
+    {
+      "file": "tests/tools/test_voice_mode.py",
+      "nodeid": "tests/tools/test_voice_mode.py::TestPulseSocketReachable::test_listening_socket_reachable_via_xdg_runtime"
+    },
+    {
+      "file": "tests/tools/test_voice_mode.py",
+      "nodeid": "tests/tools/test_voice_mode.py::TestPulseSocketReachable::test_stale_socket_file_not_reachable"
+    },
+    {
+      "file": "tests/tui_gateway/contracts/test_generated.py",
+      "nodeid": "tests/tui_gateway/contracts/test_generated.py::test_generated_files_are_current"
+    },
+    {
+      "file": "tests/tui_gateway/test_compute_host.py",
+      "nodeid": "tests/tui_gateway/test_compute_host.py::test_compute_host_line_json_hello_and_shutdown"
+    },
+    {
+      "file": "tests/tui_gateway/test_connector_operation_e2e.py",
+      "nodeid": "tests/tui_gateway/test_connector_operation_e2e.py::test_desktop_connect_settles_through_callback_response"
+    },
+    {
+      "file": "tests/tui_gateway/test_connector_operation_rpc.py",
+      "nodeid": "tests/tui_gateway/test_connector_operation_rpc.py::test_a_failed_reissue_leaves_the_row_failed_with_no_link[expired]"
+    },
+    {
+      "file": "tests/tui_gateway/test_connector_operation_rpc.py",
+      "nodeid": "tests/tui_gateway/test_connector_operation_rpc.py::test_a_failed_reissue_leaves_the_row_failed_with_no_link[failed]"
+    },
+    {
+      "file": "tests/tui_gateway/test_connector_operation_rpc.py",
+      "nodeid": "tests/tui_gateway/test_connector_operation_rpc.py::test_panel_connect_reissues_only_a_dead_link"
+    },
+    {
+      "file": "tests/tui_gateway/test_connector_operation_rpc.py",
+      "nodeid": "tests/tui_gateway/test_connector_operation_rpc.py::test_respond_continue_settles_and_emits_the_settlement_update"
+    },
+    {
+      "file": "tests/tui_gateway/test_connector_operation_rpc.py",
+      "nodeid": "tests/tui_gateway/test_connector_operation_rpc.py::test_respond_drives_the_live_operation_and_emits_update"
+    },
+    {
+      "file": "tests/tui_gateway/test_fallback_chain_hot_reload.py",
+      "nodeid": "tests/tui_gateway/test_fallback_chain_hot_reload.py::test_torn_config_keeps_the_last_known_good_chain_but_removal_still_applies"
+    },
+    {
+      "file": "tests/tui_gateway/test_local_model_session_identity.py",
+      "nodeid": "tests/tui_gateway/test_local_model_session_identity.py::test_live_local_identity_survives_new_chat_and_resume"
+    },
+    {
+      "file": "tests/tui_gateway/test_projects_rpc.py",
+      "nodeid": "tests/tui_gateway/test_projects_rpc.py::test_projects_reads_are_scoped_to_the_requested_profile"
+    },
+    {
+      "file": "tests/tui_gateway/test_projects_rpc.py",
+      "nodeid": "tests/tui_gateway/test_projects_rpc.py::test_projects_tree_is_scoped_to_the_requested_profile"
+    },
+    {
+      "file": "tests/verify/test_ledger_and_nudge_integration.py",
+      "nodeid": "tests/verify/test_ledger_and_nudge_integration.py::test_nudge_mentions_hermes_verify_when_manifest_exists"
+    },
+    {
+      "file": "tests/verify/test_ledger_and_nudge_integration.py",
+      "nodeid": "tests/verify/test_ledger_and_nudge_integration.py::test_nudge_mentions_hermes_verify_when_recipe_has_start"
+    }
+  ],
+  "incomplete_files": [],
+  "no_pytest_cases": [
+    {
+      "file": "tests/gateway/test_kanban_lifecycle_fence_repro_20260924.py",
+      "candidate_rc": 5,
+      "baseline_rc": 5,
+      "test_sha256": "470b492cfb818cbdbf1e9c57cf20a7d5b9da25c28c02d2e6658b0226d9d09b1d"
+    },
+    {
+      "file": "tests/tools/test_browser_supervisor.py",
+      "candidate_rc": 5,
+      "baseline_rc": 5,
+      "test_sha256": "90c80949f281377c2c351fde8c647c86b13fe2960ff800664ca9656ac5448a7e"
+    }
+  ],
+  "waived_failures": [
+    {
+      "file": "tests/agent/test_run_agent.py",
+      "nodeid": "tests/agent/test_run_agent.py::TestRunConversation::test_redirect_from_input_thread_cancels_live_model_request"
+    }
+  ],
+  "waived_incomplete_files": [
+    {
+      "file": "tests/agent/test_run_agent.py",
+      "candidate_rc": 1,
+      "baseline_rc": -15,
+      "candidate_stop": null,
+      "baseline_stop": "STOP_LOAD"
+    },
+    {
+      "file": "tests/hermes_cli/test_update_finish.py",
+      "candidate_rc": 1,
+      "baseline_rc": -15,
+      "candidate_stop": null,
+      "baseline_stop": "TIMEOUT"
+    }
+  ],
+  "waivers_file": "waivers.json",
+  "counts": {
+    "passed": 53549,
+    "failed": 917,
+    "skipped": 668
+  },
+  "candidate_failing_files": 206,
+  "rc1_control_files": 221,
+  "selection_method": "For each file and tree, use the newest finished attempt, including failures and incomplete attempts. Retain all prior receipts.",
+  "method": "Run every canonical-discovery candidate file. For each failure run the same file on rc1 with the same runner. Compare exact node IDs; no inherited failure is counted as passed.",
+  "pytest_totals": {
+    "passed": 52890,
+    "failed": 577,
+    "errors": 330,
+    "skipped": 667,
+    "xfailed": 1,
+    "xpassed": 0,
+    "subtests_passed": 39,
+    "subtests_failed": 0,
+    "subtests_errors": 0,
+    "subtests_skipped": 0,
+    "subtests_xfailed": 0,
+    "subtests_xpassed": 0
+  },
+  "receipt_count_disagreements": [],
+  "gate_pass": true,
+  "adc_restriction_receipts": [
+    {
+      "label": "full-rc1",
+      "receipt": "/home/max/Scratchpad/5-Oct-2026_Mass-Review/exec/work/hermes-goal/U2e/evidence/full-rc1/3815dea1c8b5.events.jsonl.adc-denials.jsonl",
+      "rules": {
+        "forbidden_ADC_environment_export": 1
+      }
+    },
+    {
+      "label": "full-rc1",
+      "receipt": "/home/max/Scratchpad/5-Oct-2026_Mass-Review/exec/work/hermes-goal/U2e/evidence/full-rc1/d1fa8e8271c8.events.jsonl.adc-denials.jsonl",
+      "rules": {
+        "forbidden_ADC_environment_export": 1
+      }
+    },
+    {
+      "label": "full-rc1",
+      "receipt": "/home/max/Scratchpad/5-Oct-2026_Mass-Review/exec/work/hermes-goal/U2e/evidence/full-rc1/6e54db048dbd.events.jsonl.adc-denials.jsonl",
+      "rules": {
+        "forbidden_ADC_environment_export": 1
+      }
+    },
+    {
+      "label": "full",
+      "receipt": "/home/max/Scratchpad/5-Oct-2026_Mass-Review/exec/work/hermes-goal/U2e/evidence/full/3815dea1c8b5.events.jsonl.adc-denials.jsonl",
+      "rules": {
+        "forbidden_ADC_environment_export": 1
+      }
+    },
+    {
+      "label": "full",
+      "receipt": "/home/max/Scratchpad/5-Oct-2026_Mass-Review/exec/work/hermes-goal/U2e/evidence/full/d1fa8e8271c8.events.jsonl.adc-denials.jsonl",
+      "rules": {
+        "forbidden_ADC_environment_export": 1
+      }
+    },
+    {
+      "label": "full",
+      "receipt": "/home/max/Scratchpad/5-Oct-2026_Mass-Review/exec/work/hermes-goal/U2e/evidence/full/6e54db048dbd.events.jsonl.adc-denials.jsonl",
+      "rules": {
+        "forbidden_ADC_environment_export": 1
+      }
+    }
+  ]
+}

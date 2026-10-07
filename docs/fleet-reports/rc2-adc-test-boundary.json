@@ -1,0 +1,9 @@
+{
+  "activated_at": "2026-10-06 19:40:22 CDT",
+  "guard_sha256": "c13ed41b00160bbd184ecb9f46b2ee0b5c8ab68759ab2565c74880599a981e0f",
+  "forbidden_rules": [
+    "forbidden_ADC_environment_export",
+    "forbidden_real_ADC_discovery"
+  ],
+  "changed_product": false
+}

@@ -1,10 +1,8 @@
-# Still carried in fleet/0.21.5-union
+# Still carried in rc2
 
-This release retains 182 classified changes: 122 KEEP-FIX and 60 MOVE-OUT. MOVE-OUT means retained for this release, with extraction still pending. Source: [FINAL-CHANGES.tsv](docs/fleet-reports/FINAL-CHANGES.tsv).
+This list includes retained source behavior and host-local preservation obligations. U2d-005 and U2d-033 are private or scratch artifacts to archive on their host; they are not shared Hermes source. Other MOVE-OUT rows remain pending extraction. Overlapping rows are preserved for provenance.
 
-The 41 DROP replay units are listed in [DROP-LIST.md](docs/fleet-reports/DROP-LIST.md). Historical DROP commits may remain ancestors when a later accepted implementation supersedes them. Source: [drop-kept.md](docs/fleet-reports/drop-kept.md).
-
-| ID | Class | Change |
+| Change | Classification | Subject |
 |---|---|---|
 | C2-001 | KEEP-FIX | carry: bot relay and Bot Chat DM delivery |
 | C2-002 | KEEP-FIX | fix(bot-mode): the DM delivery runner selects the committed dependency environment |
@@ -126,6 +124,7 @@ The 41 DROP replay units are listed in [DROP-LIST.md](docs/fleet-reports/DROP-LI
 | C2-138 | KEEP-FIX | Refuse a second gateway restart inside 60 minutes unless crash recovery or force. |
 | C2-140 | MOVE-OUT | carry: drop the second -Q exit drain (TurnerBook resolved this only in merge 0e8073226f) |
 | C2-142 | MOVE-OUT | fix(fleet-messages): strip Hermes bootstrap PYTHONPATH/PYTHONHOME from the gcloud token subprocess (gcloud's own Python crashed on Hermes's pyOpenSSL) |
+| C2-143 | KEEP-FIX | fix(gateway): an inbound bot message does not interrupt a running turn |
 | C2-144 | MOVE-OUT | fix(gateway): busy_input_mode defaults to queue, so a mid-turn message never kills a running turn (Turner 2026-09-28) |
 | C2-145 | MOVE-OUT | fix: sort fleet message drain page without Firestore orderBy |
 | C2-146 | KEEP-FIX | port(msgfix-0928): review r1 - a busy bot's message waits instead of bouncing; no stale drain; failed replay keeps its spool |
@@ -188,3 +187,17 @@ The 41 DROP replay units are listed in [DROP-LIST.md](docs/fleet-reports/DROP-LI
 | C2-221 | MOVE-OUT | test(kanban): cover real lease fence and spawn reset (t_0923de5e) |
 | C2-222 | MOVE-OUT | fix(fleet-drain): sign in with named service-account key file, never ADC (A-L3) |
 | C2-223 | KEEP-FIX | Skip foreign-home and unverified-owner recovery before probing PIDs or writing cards |
+| G3d | KEEP-FIX | Fail-closed Hermes launch guard during restart pause |
+| U2c-SHELDON | KEEP-FIX | Stall-aware Bot Chat delivery cap (t_d0edbb6e) |
+| U2d-001 | MOVE-OUT | Named service-account source for fleet drain |
+| U2d-003 | KEEP-FIX | Initial profile-owned single-use credential claim |
+| U2d-004 | MOVE-OUT | Named service-account source for fleet drain |
+| U2d-005 | MOVE-OUT | Private session export |
+| U2d-008 | KEEP-FIX | Recover only verified local fleet cards |
+| U2d-009 | KEEP-FIX | Recover only verified local fleet cards |
+| U2d-032 | KEEP-FIX | Fleet recovery ownership regressions |
+| U2d-033 | MOVE-OUT | Personal response style |
+| U2d-034 | MOVE-OUT | Named service-account source for fleet drain |
+| U2d-036 | KEEP-FIX | Stall-aware Bot Chat delivery cap |
+
+The full reasons, source commits, proof tests and archive destinations are in docs/fleet-reports/FINAL-CHANGES-rc2.tsv. Runtime backup, archive and switch actions remain the rollout lane's work.
