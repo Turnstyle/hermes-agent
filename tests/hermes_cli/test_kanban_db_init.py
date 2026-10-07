@@ -223,3 +223,28 @@ def test_healthy_fast_path_stays_lock_free(tmp_path, monkeypatch):
     with kbc.connect_closing(db_path):
         pass
     assert len(locks) == 1
+
+
+def test_imported_hold_survives_legacy_event_rebuild_and_reopen(tmp_path, monkeypatch):
+    """Migration cannot turn an old release into permission for a later hold."""
+    db_path = _setup_home(tmp_path, monkeypatch)
+    _make_legacy_db(db_path)
+    with sqlite3.connect(db_path) as conn:
+        conn.execute("INSERT INTO tasks(id,title,status,created_at) VALUES('held','Imported','ready',1000)")
+        conn.execute("INSERT INTO task_events(id,task_id,kind,created_at) VALUES('e-3','held','unblocked',2000)")
+        conn.execute("UPDATE tasks SET status='blocked',block_kind='needs_input' WHERE id='held'")
+    with kbc.connect_closing(db_path=db_path) as conn:
+        assert kb.recompute_ready(conn) == 0
+        assert kb.get_task(conn, 'held').status == 'blocked'
+        kb._append_event(conn, 'held', 'unblocked')
+        conn.commit()
+    # A fresh process's schema initialization must preserve a real later release.
+    kb._INITIALIZED_PATHS.discard(str(db_path.resolve()))
+    with kbc.connect_closing(db_path=db_path) as conn:
+        assert kb.recompute_ready(conn) == 1
+        assert kb.get_task(conn, 'held').status == 'ready'
+        conn.execute("UPDATE tasks SET status='blocked' WHERE id='held'")
+        conn.commit()
+        assert kb.recompute_ready(conn) == 0
+        assert kb.unblock_task(conn, 'held')
+        assert kb.get_task(conn, 'held').status == 'ready'

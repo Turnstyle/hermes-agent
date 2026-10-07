@@ -650,12 +650,9 @@ def test_recompute_ready_honours_dispatcher_failure_limit(kanban_home):
         # Config allows MORE retries than the default. A task blocked
         # with failures below the configured limit must still recover.
         t = kb.create_task(conn, title="lenient", assignee="a")
-        conn.execute(
-            "UPDATE tasks SET status='blocked', consecutive_failures=? "
-            "WHERE id=?",
-            (kb.DEFAULT_FAILURE_LIMIT, t),
-        )
-        conn.commit()
+        from hermes_cli.kanban_db_dispatch import _record_task_failure
+        for _ in range(kb.DEFAULT_FAILURE_LIMIT):
+            _record_task_failure(conn, t, "fixture failure", outcome="crashed")
         # Default-limit call would stick it (failures >= default).
         assert kb.recompute_ready(conn) == 0
         assert kb.get_task(conn, t).status == "blocked"
@@ -671,12 +668,7 @@ def test_recompute_ready_honours_dispatcher_failure_limit(kanban_home):
         # Config allows FEWER retries than the default. A task at the
         # stricter limit must stay blocked even though it's below default.
         t2 = kb.create_task(conn, title="strict", assignee="a")
-        conn.execute(
-            "UPDATE tasks SET status='blocked', consecutive_failures=1 "
-            "WHERE id=?",
-            (t2,),
-        )
-        conn.commit()
+        _record_task_failure(conn, t2, "fixture failure", outcome="crashed", failure_limit=1)
         # Default-limit (2) would recover it (1 < 2).
         # Stricter config limit (1) must keep it blocked (1 >= 1).
         assert kb.recompute_ready(conn, failure_limit=1) == 0

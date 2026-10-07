@@ -9,7 +9,7 @@ Exact required matrix (TB-cndr, 2026-09-24 authorization):
      'promoted' event.
   2. manually-blocked local task with no causal parents — unchanged
      (sticky-block guard, pre-existing behavior, must not regress).
-  3. local dependency-blocked task, all parents done — still promotes
+  3. local dependency wait in todo, all parents done — still promotes
      (legitimate local dependency progress must not regress).
   4. explicit unblock (promote_task / unblock_task) still works — those
      are operator-driven paths, untouched by this correction, covered
@@ -49,6 +49,7 @@ from hermes_cli import kanban_db as kb  # noqa: E402
 # a plugin-compat pointer in-tree code may not use.
 from hermes_cli import kanban_db_connect as kbc  # noqa: E402
 import fleet_kanban_sqlite as adapter  # noqa: E402
+from fleet_kanban_home import refresh_assignee_homes  # noqa: E402
 
 
 @pytest.fixture
@@ -70,7 +71,7 @@ def _minimal_board_schema(conn: sqlite3.Connection) -> None:
             claim_lock TEXT, claim_expires INTEGER, worker_pid INTEGER,
             worker_started_at TEXT,
             current_run_id INTEGER, last_heartbeat_at INTEGER,
-            current_step_key TEXT
+            current_step_key TEXT, block_kind TEXT
         );
         CREATE TABLE task_comments (
             id INTEGER PRIMARY KEY, task_id TEXT, author TEXT,
@@ -96,6 +97,9 @@ def _make_fleet_board(conn: sqlite3.Connection, *, node_id: str = "snowdrop") ->
     _minimal_board_schema(conn)
     adapter.install_adapter_schema(
         conn, board_slug="fleet", node_id=node_id, source_profile="snow-cndr",
+    )
+    refresh_assignee_homes(
+        conn, {"snow-cndr": "snowdrop", "tb-cndr": "turnerbook"}, source="test fixture",
     )
 
 
@@ -217,11 +221,8 @@ def test_local_manual_blocked_no_parents_stays_blocked(monkeypatch) -> None:
     assert row["status"] == "blocked"
 
 
-def test_local_dependency_blocked_all_parents_done_promotes(monkeypatch) -> None:
-    """Genuine LOCAL dependency-blocked progress (current_node == this
-    board's own node, no sticky block event, all parents done) must
-    still promote — legitimate local work must not regress.
-    """
+def test_local_dependency_wait_all_parents_done_promotes(monkeypatch) -> None:
+    """Local dependency waits use todo, as block_task does for dependency blocks."""
     conn = sqlite3.connect(":memory:")
     conn.row_factory = sqlite3.Row
     _make_fleet_board(conn, node_id="snowdrop")
@@ -232,16 +233,16 @@ def test_local_dependency_blocked_all_parents_done_promotes(monkeypatch) -> None
     )
     conn.execute(
         "INSERT INTO tasks (id, title, status, assignee, tenant) "
-        "VALUES ('t_local_dep_blocked', 'local dep-blocked child', 'blocked', "
+        "VALUES ('t_local_dep_wait', 'local dependency wait', 'todo', "
         "'snow-cndr', 'snowdrop')"
     )
     conn.execute(
         "UPDATE fleet_kanban_issue_map SET current_node='snowdrop', "
-        "source_node='snowdrop' WHERE local_task_id='t_local_dep_blocked'"
+        "source_node='snowdrop' WHERE local_task_id='t_local_dep_wait'"
     )
     conn.execute(
         "INSERT INTO task_links (parent_id, child_id) VALUES "
-        "('t_parent_done', 't_local_dep_blocked')"
+        "('t_parent_done', 't_local_dep_wait')"
     )
     conn.commit()
 
@@ -249,10 +250,10 @@ def test_local_dependency_blocked_all_parents_done_promotes(monkeypatch) -> None
 
     assert promoted == 1
     row = conn.execute(
-        "SELECT status FROM tasks WHERE id='t_local_dep_blocked'"
+        "SELECT status FROM tasks WHERE id='t_local_dep_wait'"
     ).fetchone()
     assert row["status"] == "ready"
-    events = _events(conn, "t_local_dep_blocked")
+    events = _events(conn, "t_local_dep_wait")
     assert any(e["kind"] == "promoted" for e in events)
 
 

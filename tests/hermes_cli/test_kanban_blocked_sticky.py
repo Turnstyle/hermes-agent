@@ -188,3 +188,58 @@ def test_created_with_initial_status_blocked_is_not_promoted_by_recompute_ready(
         assert 'promoted' not in kinds
         assert kb.unblock_task(conn, child_id) is True
         assert kb.get_task(conn, child_id).status == "ready"
+
+
+@pytest.mark.parametrize("block_kind", [None, "needs_input"])
+def test_imported_parentless_block_requires_explicit_release(kanban_home, block_kind):
+    """A blocked snapshot without local events still represents an unresolved hold."""
+    with kbc.connect() as conn:
+        conn.execute(
+            "INSERT INTO tasks(id,title,status,created_by,created_at,block_kind) "
+            "VALUES('t_imported_hold','Imported hold','blocked','sync',?,?)",
+            (int(time.time()), block_kind),
+        )
+        conn.commit()
+        assert kb.recompute_ready(conn) == 0
+        assert kb.get_task(conn, 't_imported_hold').status == 'blocked'
+        assert kb.unblock_task(conn, 't_imported_hold') is True
+        assert kb.get_task(conn, 't_imported_hold').status == 'ready'
+
+
+@pytest.mark.parametrize("with_parent", [False, True])
+@pytest.mark.parametrize("release", ["unblocked", "gave_up", "promoted_manual"])
+@pytest.mark.parametrize("failures", [0, 1])
+@pytest.mark.parametrize("block_kind", [None, "needs_input"])
+def test_imported_block_rejects_old_release_then_accepts_new_release(
+    kanban_home, release, failures, block_kind, with_parent,
+):
+    """Import can re-block a card in the same second, without a local block event."""
+    with kbc.connect() as conn:
+        parents = []
+        if with_parent:
+            parent = kb.create_task(conn, title="finished parent")
+            assert kb.complete_task(conn, parent, result="done")
+            parents.append(parent)
+        tid = kb.create_task(conn, title="imported hold", parents=parents)
+        kb._append_event(conn, tid, release)
+        conn.execute(
+            "UPDATE tasks SET status='blocked', block_kind=?, consecutive_failures=? WHERE id=?",
+            (block_kind, failures, tid),
+        )
+        conn.commit()
+        for _ in range(2):
+            assert kb.recompute_ready(conn) == 0
+            assert kb.get_task(conn, tid).status == "blocked"
+        # A release after this exact blocked write permits recovery.
+        kb._append_event(conn, tid, release)
+        conn.commit()
+        assert kb.recompute_ready(conn) == 1
+        assert kb.get_task(conn, tid).status == "ready"
+        # Even an import that repeats blocked must invalidate an earlier release.
+        conn.execute("UPDATE tasks SET status='blocked' WHERE id=?", (tid,))
+        kb._append_event(conn, tid, release)
+        conn.execute("UPDATE tasks SET status='blocked' WHERE id=?", (tid,))
+        conn.commit()
+        assert kb.recompute_ready(conn) == 0
+        assert kb.unblock_task(conn, tid)
+        assert kb.get_task(conn, tid).status == "ready"

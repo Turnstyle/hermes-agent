@@ -1002,6 +1002,35 @@ CREATE TABLE IF NOT EXISTS task_events (
     created_at INTEGER NOT NULL
 );
 
+-- Direct SQL snapshot imports do not emit a local blocked event. Remember
+-- the event boundary of every blocked write, including blocked-to-blocked
+-- snapshots, so an older release cannot release a newer hold.
+CREATE TABLE IF NOT EXISTS task_block_entries (
+    task_id TEXT PRIMARY KEY,
+    event_id INTEGER NOT NULL
+);
+INSERT OR IGNORE INTO task_block_entries (task_id, event_id)
+    SELECT t.id, COALESCE((SELECT MAX(e.id) FROM task_events e WHERE e.task_id = t.id), 0)
+    FROM tasks t WHERE t.status = 'blocked';
+CREATE TRIGGER IF NOT EXISTS task_block_entry_insert AFTER INSERT ON tasks
+WHEN NEW.status = 'blocked'
+BEGIN
+    INSERT OR REPLACE INTO task_block_entries VALUES (
+        NEW.id, COALESCE((SELECT MAX(id) FROM task_events WHERE task_id = NEW.id), 0)
+    );
+END;
+CREATE TRIGGER IF NOT EXISTS task_block_entry_update AFTER UPDATE OF status ON tasks
+WHEN NEW.status = 'blocked'
+BEGIN
+    INSERT OR REPLACE INTO task_block_entries VALUES (
+        NEW.id, COALESCE((SELECT MAX(id) FROM task_events WHERE task_id = NEW.id), 0)
+    );
+END;
+CREATE TRIGGER IF NOT EXISTS task_block_entry_delete AFTER DELETE ON tasks
+BEGIN
+    DELETE FROM task_block_entries WHERE task_id = OLD.id;
+END;
+
 -- Historical attempt record. Each time the dispatcher claims a task, a
 -- new row is created here; claim state, PID, heartbeat, runtime cap,
 -- and structured summary all live on the run, not the task. Multiple
@@ -2102,7 +2131,7 @@ def _has_sticky_block(conn: sqlite3.Connection, task_id: str) -> bool:
     ``ready`` in the same tick and the card respawns forever. A plain
     (unified-budget) ``gave_up`` carries no marker and is judged by the counter,
     so raising ``failure_limit`` or ``assign_task`` to a fresh profile still
-    releases it; a task with no such event at all (direct DB edit) auto-recovers.
+    releases it. Imported blocks require recovery evidence after the blocked write.
     """
     if _newest_event_kind(conn, task_id, ("blocked", "unblocked")) == "blocked":
         return True
@@ -2418,6 +2447,18 @@ def recompute_ready(conn: sqlite3.Connection, failure_limit: int = None) -> int:
                 "JOIN task_links l ON l.parent_id = t.id "
                 "WHERE l.child_id = ?", (task_id,),
             ).fetchall()
+            if cur_status == "blocked":
+                recovery = conn.execute(
+                    "SELECT 1 FROM task_events e JOIN task_block_entries b "
+                    "ON b.task_id = e.task_id WHERE e.task_id = ? "
+                    "AND e.id > b.event_id "
+                    "AND e.kind IN ('unblocked', 'gave_up', 'promoted_manual') LIMIT 1",
+                    (task_id,),
+                ).fetchone()
+                if recovery is None:
+                    # Failure counts and releases from an older hold prove nothing
+                    # about the blocker in the current imported snapshot.
+                    continue
             if all(p["status"] in ("done", "archived") for p in parents):
                 resume_status = _resume_status_from_events(conn, task_id)
                 if cur_status == "blocked":

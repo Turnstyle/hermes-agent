@@ -1301,6 +1301,18 @@ def _rebuild_drifted_tables(conn: sqlite3.Connection) -> None:
 
     conn.execute("BEGIN IMMEDIATE")
     try:
+        block_triggers = []
+        if "task_events" in drifted:
+            # SQLite rewrites trigger references on RENAME, and this migration
+            # renumbers event IDs. Restore both triggers and boundaries together.
+            block_triggers = conn.execute(
+                "SELECT name, sql FROM sqlite_master WHERE type = 'trigger' "
+                "AND name IN ('task_block_entry_insert', 'task_block_entry_update')"
+            ).fetchall()
+            for trigger in block_triggers:
+                conn.execute(f"DROP TRIGGER {trigger['name']}")
+            if block_triggers:
+                conn.execute("DELETE FROM task_block_entries")
         for table in drifted:
             create_sql, index_sqls = _REBUILD_SPECS[table]
             old_cols = [c["name"] for c in conn.execute(f"PRAGMA table_info({table})")]
@@ -1323,6 +1335,14 @@ def _rebuild_drifted_tables(conn: sqlite3.Connection) -> None:
             conn.execute(f"DROP TABLE {table}_legacy")
             for index_sql in index_sqls:
                 conn.execute(index_sql)
+        if block_triggers:
+            conn.execute(
+                "INSERT INTO task_block_entries (task_id, event_id) "
+                "SELECT t.id, COALESCE((SELECT MAX(e.id) FROM task_events e "
+                "WHERE e.task_id = t.id), 0) FROM tasks t WHERE t.status = 'blocked'"
+            )
+            for trigger in block_triggers:
+                conn.execute(trigger["sql"])
         conn.execute("COMMIT")
     except Exception:
         with contextlib.suppress(sqlite3.OperationalError):
