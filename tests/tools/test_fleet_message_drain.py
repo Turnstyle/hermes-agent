@@ -1146,3 +1146,109 @@ def test_message_agent_reply_marks_queued_doc_done(monkeypatch, tmp_path):
     monkeypatch.setattr(bot_mode_dm, "_message_agent_tool", lambda **kw: json.dumps({"error": "no"}))
     bot_mode_dm.message_agent_tool(target="tb-cndr", message="answer", agent=object())
     assert store.get("failed-send").fields["status"] == "read"
+
+# ---------- queued-timeout clock: requeue and restart do not count ----------
+TIMEOUT = 7200
+
+
+def test_requeue_restarts_the_queued_clock(store):
+    # created 3 h ago (past the 2 h timeout), but requeued 22 seconds ago: not expired
+    doc = uid("requeued")
+    store.seed(doc, msg(180, requeued_at=fmd.rfc3339(NOW - datetime.timedelta(seconds=22))))
+    claimed = fmd.claim_next(store, ME, now=NOW, queued_timeout_seconds=TIMEOUT)
+    assert claimed is not None and claimed.doc_id == doc
+    assert store.get(doc).fields["status"] == "delivered"
+
+
+def test_requeued_doc_still_expires_a_full_timeout_after_the_requeue(store):
+    doc = uid("requeued-old")
+    store.seed(doc, msg(300, requeued_at=fmd.rfc3339(NOW - datetime.timedelta(seconds=TIMEOUT + 1))))
+    assert fmd.claim_next(store, ME, now=NOW, queued_timeout_seconds=TIMEOUT) is None
+    assert store.get(doc).fields["status"] == "expired"
+    assert store.get(doc).fields["last_error"] == "queued_delivery_timeout"
+
+
+def test_requeue_paths_store_requeued_at():
+    store = MemoryStore()
+    store.seed("rel", msg(10))
+    claimed = fmd.claim_next(store, ME, now=NOW)
+    later = NOW + datetime.timedelta(minutes=5)
+    assert fmd.release(store, claimed, now=later)
+    assert store.get("rel").fields["requeued_at"] == fmd.rfc3339(later)
+
+    store.seed("err", msg(10))
+    claimed = fmd.claim_next(store, ME, now=NOW + datetime.timedelta(minutes=6))
+    assert claimed.doc_id == "err"
+    later = NOW + datetime.timedelta(minutes=7)
+    assert fmd.record_error(store, claimed, "boom", max_attempts=5, now=later)
+    assert store.get("err").fields["status"] == "queued"
+    assert store.get("err").fields["requeued_at"] == fmd.rfc3339(later)
+
+    store.seed("stale", msg(40, status="read", attempts=1))
+    fmd.reclaim_stale(store, now=NOW)
+    assert store.get("stale").fields["requeued_at"] == fmd.rfc3339(NOW)
+
+
+def test_gateway_restart_does_not_expire_queued_messages(store):
+    # created 3 h ago; the receiving gateway came back up 10 minutes ago
+    doc = uid("restart")
+    store.seed(doc, msg(180))
+    up = NOW - datetime.timedelta(minutes=10)
+    claimed = fmd.claim_next(store, ME, now=NOW, queued_timeout_seconds=TIMEOUT, receiver_up_since=up)
+    assert claimed is not None and claimed.doc_id == doc
+
+
+def test_message_expires_a_full_timeout_after_the_gateway_came_back(store):
+    doc = uid("after-restart")
+    store.seed(doc, msg(600))
+    up = NOW - datetime.timedelta(seconds=TIMEOUT + 1)
+    assert fmd.claim_next(store, ME, now=NOW, queued_timeout_seconds=TIMEOUT, receiver_up_since=up) is None
+    assert store.get(doc).fields["status"] == "expired"
+
+
+def test_24_hour_sender_limit_is_kept_after_requeue_and_restart(store):
+    doc = uid("day")
+    store.seed(doc, msg(25 * 60, requeued_at=fmd.rfc3339(NOW - datetime.timedelta(seconds=5))))
+    assert fmd.claim_next(store, ME, now=NOW, queued_timeout_seconds=TIMEOUT,
+                          receiver_up_since=NOW - datetime.timedelta(seconds=5)) is None
+    fields = store.get(doc).fields
+    assert fields["status"] == "expired" and fields["last_error"] == "expired"
+    assert "24 hours" in fields["sender_notice"]
+
+
+def test_receiver_up_since_reads_gateway_state(tmp_path, monkeypatch):
+    root = tmp_path / ".hermes"
+    home = root / "profiles" / ME
+    home.mkdir(parents=True)
+    assert fmd.receiver_up_since(home) is None  # no state file: unknown
+    # draining gateway: counts from its last state write
+    (root / "gateway_state.json").write_text(json.dumps(
+        {"pid": 1, "start_time": 1, "gateway_state": "draining", "updated_at": "2026-09-28T05:50:00+00:00"}))
+    assert fmd.receiver_up_since(home) == NOW - datetime.timedelta(minutes=10)
+    # running gateway with a live process: counts from the process start
+    import gateway.status as gstatus
+    import psutil
+    monkeypatch.setattr(gstatus, "_pid_exists", lambda pid: True)
+    monkeypatch.setattr(gstatus, "get_process_start_time", lambda pid: 7)
+    monkeypatch.setattr(psutil, "Process", lambda pid: SimpleNamespace(create_time=lambda: NOW.timestamp() - 90))
+    (root / "gateway_state.json").write_text(json.dumps(
+        {"pid": 4242, "start_time": 7, "gateway_state": "running", "updated_at": "2026-09-28T05:59:59+00:00"}))
+    assert fmd.receiver_up_since(home) == NOW - datetime.timedelta(seconds=90)
+    # recorded start does not match the live process (pid reused): falls back to updated_at
+    (root / "gateway_state.json").write_text(json.dumps(
+        {"pid": 4242, "start_time": 8, "gateway_state": "running", "updated_at": "2026-09-28T05:59:00+00:00"}))
+    assert fmd.receiver_up_since(home) == NOW - datetime.timedelta(minutes=1)
+
+
+def test_idle_tick_does_not_expire_after_gateway_restart(tmp_path):
+    root = tmp_path / ".hermes"
+    home = root / "profiles" / ME
+    home.mkdir(parents=True)
+    (root / "gateway_state.json").write_text(json.dumps(
+        {"pid": 1, "start_time": 1, "gateway_state": "starting", "updated_at": fmd.rfc3339(NOW)}))
+    store = MemoryStore()
+    store.seed("waited", msg(180))
+    assert fmd.idle_tick(home, store=store, busy=lambda: True, now=NOW,
+                         config=fmd.DrainConfig(target="emulator", emulator_host="fake",
+                                                queued_timeout_seconds=TIMEOUT)) is False
+    assert store.get("waited").fields["status"] == "queued"

@@ -91,11 +91,11 @@ DEFAULT_PROJECT = "mission-control-444444"
 DEFAULT_DATABASE = "fleet-operations"
 KINDS = frozenset({"dm", "notify_wake"})
 TS_FIELDS = frozenset({"created_at", "updated_at", "expires_at", "delivered_at", "read_at", "replied_at",
-                       "done_at", "failed_at", "rejected_at", "expired_at", "sender_notice_at"})
+                       "done_at", "failed_at", "rejected_at", "expired_at", "sender_notice_at", "requeued_at"})
 # The only fields this reader may write. Message content (from/to/body/kind/created_at) is never written.
 WRITABLE_FIELDS = frozenset({"status", "updated_at", "delivered_at", "read_at", "done_at", "failed_at",
                              "rejected_at", "expired_at", "attempts", "last_error", "sender_notice",
-                             "sender_notice_at"})
+                             "sender_notice_at", "requeued_at"})
 MAX_LIMIT = 50
 SYSTEM_SENDER = "fleet-system"
 EXPIRY_NOTICE_SUFFIX = "-expiry-notice"
@@ -653,12 +653,57 @@ def _notify_sender_of_expiry(store: Any, doc_id: str, fields: dict, now: datetim
         logger.warning("fleet message drain: could not write expiry notice for %s", doc_id, exc_info=True)
 
 
+def queued_clock_start(fields: dict, receiver_up_since: Optional[datetime.datetime] = None) -> datetime.datetime:
+    """When the queued-timeout clock of a doc started: the latest of created_at, requeued_at and
+    the time the receiver came back up."""
+    starts = [parse_ts(fields.get("created_at")), parse_ts(fields.get("requeued_at")), receiver_up_since]
+    return max(start for start in starts if start is not None)
+
+
+def receiver_up_since(home: Path | str) -> Optional[datetime.datetime]:
+    """Best-effort time since which the gateway that serves this profile has been up and taking
+    messages; None when unknown. A running gateway counts from its process start. A gateway that is
+    starting, draining, stopped or gone counts from its last state write, so waiting out a restart
+    does not use up the queued timeout. A profile is served by its own gateway_state.json or by the
+    shared gateway one level above ``profiles/``; the latest time wins."""
+    home = Path(home)
+    candidates = [home]
+    if home.parent.name == "profiles":
+        candidates.append(home.parent.parent)
+    latest: Optional[datetime.datetime] = None
+    for root in candidates:
+        try:
+            record = json.loads((root / "gateway_state.json").read_text(encoding="utf-8"))
+            if not isinstance(record, dict):
+                continue
+            since = None
+            pid, recorded_start = record.get("pid"), record.get("start_time")
+            if record.get("gateway_state") == "running" and isinstance(pid, int) and pid > 0:
+                from gateway.status import _pid_exists, get_process_start_time
+                if _pid_exists(pid) and (recorded_start is None or get_process_start_time(pid) == recorded_start):
+                    import psutil
+                    since = datetime.datetime.fromtimestamp(psutil.Process(pid).create_time(),
+                                                            tz=datetime.timezone.utc)
+            if since is None:
+                since = parse_ts(record.get("updated_at"))
+        except Exception:
+            continue
+        if since is not None and (latest is None or since > latest):
+            latest = since
+    return latest
+
+
 def claim_next(store: Any, me: str, *, limit: int = 10, now: Optional[datetime.datetime] = None,
-               queued_timeout_seconds: int = 1800, allow_claim: bool = True) -> Optional[Claimed]:
+               queued_timeout_seconds: int = 1800, allow_claim: bool = True,
+               receiver_up_since: Optional[datetime.datetime] = None) -> Optional[Claimed]:
     """Run one recipient query and atomically claim the oldest claimable doc (queued -> delivered).
 
     Expires docs past ``expires_at`` or the queued timeout and skips foreign docs. A doc whose claim
     precondition fails was moved by someone else (late sender success, a racing turn end): skipped.
+
+    The queued timeout counts from the latest of ``created_at``, ``requeued_at`` (a requeue restarts
+    the clock) and ``receiver_up_since`` (time the receiving gateway was draining or restarting does
+    not count). The 24-hour ``expires_at`` limit is unchanged.
     """
     now = now or utcnow()
     now_s = rfc3339(now)
@@ -677,8 +722,8 @@ def claim_next(store: Any, me: str, *, limit: int = 10, now: Optional[datetime.d
                 logger.warning("fleet message drain: could not reject malformed doc %s", row.doc_id, exc_info=True)
             continue
         expired_at = parse_ts(fields["expires_at"])
-        queued_timed_out = now - parse_ts(fields["created_at"]) >= datetime.timedelta(
-            seconds=queued_timeout_seconds)
+        clock_start = queued_clock_start(fields, receiver_up_since)
+        queued_timed_out = now - clock_start >= datetime.timedelta(seconds=queued_timeout_seconds)
         if expired_at <= now or queued_timed_out:
             notice = (_handed_over_sender_notice(row.doc_id, fields.get("to"), fields["read_at"])
                       if fields.get("read_at") else
@@ -724,7 +769,8 @@ def turn_end_drain_query(
         return None
     store = store_for(config)
     claimed = claim_next(store, bot_identity(profile_home), limit=config.limit,
-                         queued_timeout_seconds=config.queued_timeout_seconds)
+                         queued_timeout_seconds=config.queued_timeout_seconds,
+                         receiver_up_since=receiver_up_since(profile_home))
     return config, store, claimed
 
 
@@ -849,7 +895,8 @@ def idle_tick(profile_home: Path | str, *, config: Optional[DrainConfig] = None,
     busy = busy or (lambda: _idle_bot_chat_busy(home))
     occupied = busy()
     claimed = claim_next(store, bot_identity(home), limit=config.limit, now=now,
-                         queued_timeout_seconds=config.queued_timeout_seconds, allow_claim=not occupied)
+                         queued_timeout_seconds=config.queued_timeout_seconds, allow_claim=not occupied,
+                         receiver_up_since=receiver_up_since(home))
     if claimed is None:
         return False
     if busy():
@@ -1012,7 +1059,8 @@ def release(store: Any, claimed: Claimed, now: Optional[datetime.datetime] = Non
     with claimed.lock:
         if claimed.finished:
             return False
-        fields = claimed.pending_fields or {"status": "queued", "updated_at": rfc3339(now or utcnow())}
+        now_s = rfc3339(now or utcnow())
+        fields = claimed.pending_fields or {"status": "queued", "updated_at": now_s, "requeued_at": now_s}
         committed = _write(store, claimed, fields)
         claimed.finished = True
         _unregister_active(claimed)
@@ -1035,7 +1083,7 @@ def record_error(store: Any, claimed: Claimed, error: str, *, max_attempts: int,
             if attempts >= max_attempts:
                 fields.update(status="failed", failed_at=now_s)
             else:
-                fields["status"] = "queued"
+                fields.update(status="queued", requeued_at=now_s)
         committed = _write(store, claimed, fields)
         claimed.finished = True
         _unregister_active(claimed)
@@ -1100,7 +1148,7 @@ def reclaim_stale(store: Any, *, older_than_seconds: int = 1800, max_attempts: i
                 changes.update(status=outcome, failed_at=now_s)
             else:
                 outcome = "requeued"
-                changes["status"] = "queued"
+                changes.update(status="queued", requeued_at=now_s)
             if not dry_run:
                 try:
                     store.update(row.doc_id, changes, row.update_time)
