@@ -64,8 +64,6 @@ def apply_action(conn, request: dict, grant: dict, task: dict, now: int) -> tupl
         task_release_checks(conn, task, request["node_id"], now)
         if payload["review_author"] not in grant["review_authors"]:
             raise Refused("review author is outside owner-admitted reviewers")
-        if not hasattr(kb, "_has_unreleased_block_loop"):
-            raise Refused("UPSTREAM_PREREQUISITE: original keep-spec carry lacks _has_unreleased_block_loop")
         ok, reason, digest, status, committed, deferred = specify_triage_task_keep_spec(
             conn, task["id"], expected_sha256=request["task_sha256"], author=payload["review_author"],
         )

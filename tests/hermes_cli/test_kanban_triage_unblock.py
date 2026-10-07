@@ -57,7 +57,7 @@ def _held_task(conn, kind, *, title='Reviewed spec', body='Keep these instructio
     return tid
 
 
-@pytest.mark.parametrize('kind', ['block_loop_detected', 'sticky_block', 'sticky_gave_up', 'needs_input'])
+@pytest.mark.parametrize('kind', ['sticky_block', 'needs_input'])
 def test_triage_clear_then_keep_spec(kanban_home, kind, capsys):
     with kbc.connect() as conn:
         tid = _held_task(conn, kind)
@@ -99,10 +99,30 @@ def test_triage_clear_then_keep_spec(kanban_home, kind, capsys):
         assert (task.title, task.body) == ('Reviewed spec', 'Keep these instructions')
 
 
+@pytest.mark.parametrize('kind', ['block_loop_detected', 'sticky_gave_up'])
+def test_automatic_hold_is_advisory_and_keep_spec_continues(kanban_home, kind, capsys):
+    with kbc.connect() as conn:
+        tid = _held_task(conn, kind)
+        before = _snapshot(conn, tid)
+        assert kb.unblock_task(conn, tid, actor='owner', reason='redundant release') is False
+        assert _snapshot(conn, tid) == before
+    assert _cli('unblock', tid, '--reason', 'redundant release') == 1
+    capsys.readouterr()
+    with kbc.connect() as conn:
+        assert _snapshot(conn, tid) == before
+    digest = kb.compute_task_sha256('Reviewed spec', 'Keep these instructions')
+    assert _cli('specify', tid, '--keep-spec', '--expect-sha256', digest, '--author', 'owner') == 0
+    with kbc.connect() as conn:
+        task = kb.get_task(conn, tid)
+        assert task.status == 'ready'
+        assert (task.title, task.body) == ('Reviewed spec', 'Keep these instructions')
+        assert not [event for event in kb.list_events(conn, tid) if event.kind == 'unblocked']
+
+
 @pytest.mark.parametrize('refusal', ['no_hold', 'foreign', 'worker', 'delegate', 'audit_failure'])
 def test_triage_refusal_or_failure_writes_nothing(kanban_home, refusal, monkeypatch, capsys):
     with kbc.connect() as conn:
-        tid = _held_task(conn, 'none' if refusal == 'no_hold' else 'block_loop_detected')
+        tid = _held_task(conn, 'none' if refusal == 'no_hold' else 'sticky_block')
         if refusal == 'foreign':
             conn.executescript("""
                 CREATE TABLE fleet_kanban_issue_map (

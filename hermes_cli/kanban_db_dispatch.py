@@ -1648,6 +1648,9 @@ def detect_stale_running(
 
         pid = row["worker_pid"]
         tid = row["id"]
+        if pid and _kb._worker_alive(pid, _kb._row_get(row, "worker_started_at")):
+            _record_degree_warning(conn, tid, "stale_heartbeat_live_owner")
+            continue
 
         # Set strictly AFTER the guarded UPDATE is accepted, so a fenced
         # reclaim never signals the worker.
@@ -2407,23 +2410,11 @@ def _record_task_failure(
     event_payload_extra: Optional[dict] = None,
     infrastructure: bool = False,
 ) -> bool:
-    """Record a non-success outcome and maybe trip the circuit breaker; every
-    non-success path funnels through here so ``consecutive_failures`` stays
-    consistent. Returns True when the task was auto-blocked.
+    """Record failure evidence and restore the retry phase; thresholds warn before any stop.
 
-    ``release_claim=True, end_run=True``: spawn-failure path (task still
-    running with an open run — restore source phase or ``blocked``, release
-    claim, close run). Both False: timeout/crash path (caller already restored
-    the phase and closed the run; only the counter moves, a trip flips to
-    ``blocked`` + ``gave_up``). Threshold: per-task ``max_retries`` >
-    ``failure_limit`` > ``DEFAULT_FAILURE_LIMIT``. ``force_trip`` trips
-    unconditionally (caller applied its own bounded-retry policy).
-
-    ``infrastructure=True``: the host refused the spawn (no restart-safe scope,
-    #114720) — nothing about the card ran, so the run and event are recorded
-    with ``infrastructure: true`` but ``consecutive_failures`` is left alone and
-    the breaker never trips; the card stays retryable and
-    :func:`check_respawn_guard` spaces the retries.
+    Native lease/generation and explicit owner holds remain authoritative. The
+    counter stays durable, and its warning sends uncertainty through Jev/another
+    model and a Decider instead of automatically parking the card.
     """
     if failure_limit is None:
         failure_limit = DEFAULT_FAILURE_LIMIT
@@ -2449,72 +2440,29 @@ def _record_task_failure(
         else:
             effective_limit, limit_source = int(failure_limit), "dispatcher"
 
-        if infrastructure or not (force_trip or failures >= effective_limit):
-            if release_claim:
-                # Spawn path: restore the claimed source phase + clear claim.
-                conn.execute(
-                    "UPDATE tasks SET status = ?, claim_lock = NULL, "
-                    "claim_expires = NULL, worker_pid = NULL, worker_started_at = NULL, "
-                    "consecutive_failures = ?, last_failure_error = ? "
-                    "WHERE id = ? AND status = 'running'",
-                    (retry_status, failures, error, task_id),
-                )
-            else:
-                conn.execute(
-                    "UPDATE tasks SET consecutive_failures = ?, "
-                    "last_failure_error = ? WHERE id = ?",
-                    (failures, error, task_id),
-                )
-            # Timeout/crash path's caller already emitted its own event.
-            if end_run:
-                detail = {"failures": failures, "retry_status": retry_status}
-                if infrastructure:
-                    detail["infrastructure"] = True
-                run_id = _kb._end_run(
-                    conn, task_id, outcome=outcome, status=outcome, error=error, metadata=detail,
-                )
-                _kb._append_event(conn, task_id, outcome, {"error": error, **detail}, run_id=run_id)
-            return False
-
-        # Spawn path (release_claim) is still running and also clears claim
-        # state; the timeout/crash path already did.
-        conn.execute(
-            "UPDATE tasks SET status = 'blocked', "
-            + ("claim_lock = NULL, claim_expires = NULL, worker_pid = NULL, worker_started_at = NULL, "
-               if release_claim else "")
-            + "consecutive_failures = ?, last_failure_error = ? "
-            "WHERE id = ? AND status IN ('running', 'ready', 'review')",
-            (failures, error, task_id),
-        )
-        payload = {
-            "failures": failures,
-            "effective_limit": effective_limit,
-            "limit_source": limit_source,
-            "error": error,
-            "trigger_outcome": outcome,
-            "retry_status": retry_status,
-        }
-        run_id = None
-        if end_run:
-            # Only the spawn path has an open run to close.
-            run_id = _kb._end_run(
-                conn, task_id, outcome="gave_up", status="gave_up", error=error,
-                metadata={
-                    "failures": failures,
-                    "trigger_outcome": outcome,
-                    "effective_limit": effective_limit,
-                    "limit_source": limit_source,
-                    "retry_status": retry_status,
-                },
+        threshold_reached = not infrastructure and (force_trip or failures >= effective_limit)
+        if release_claim:
+            conn.execute(
+                "UPDATE tasks SET status = ?, claim_lock = NULL, "
+                "claim_expires = NULL, worker_pid = NULL, worker_started_at = NULL, "
+                "consecutive_failures = ?, last_failure_error = ? "
+                "WHERE id = ? AND status = 'running'",
+                (retry_status, failures, error, task_id),
             )
-        if force_trip:
-            # The caller applied its own bounded policy, so the counter cannot
-            # judge this block: ``recompute_ready`` holds it for an operator.
-            payload["sticky"] = True
-        if event_payload_extra:
-            payload.update(event_payload_extra)
-        _kb._append_event(conn, task_id, "gave_up", payload, run_id=run_id)
-        return True
+        else:
+            conn.execute(
+                "UPDATE tasks SET consecutive_failures = ?, last_failure_error = ? WHERE id = ?",
+                (failures, error, task_id),
+            )
+        if end_run:
+            detail = {"failures": failures, "retry_status": retry_status}
+            if infrastructure:
+                detail["infrastructure"] = True
+            run_id = _kb._end_run(conn, task_id, outcome=outcome, status=outcome, error=error, metadata=detail)
+            _kb._append_event(conn, task_id, outcome, {"error": error, **detail}, run_id=run_id)
+        if threshold_reached:
+            _record_degree_warning(conn, task_id, "failure_counter")
+        return False
 
 
 def _set_worker_pid(conn: sqlite3.Connection, task_id: str, pid: int) -> None:
@@ -2615,6 +2563,40 @@ def _clear_failure_counter(conn: sqlite3.Connection, task_id: str) -> None:
         )
 
 
+_DEGREE_RESPAWN_REASONS = frozenset({"unchanged_block_reason", "active_pr", "blocker_auth"})
+_DEGREE_NEXT_STEP = (
+    "Assess your own confidence against the card; when uncertain use hermes jev evaluate --file "
+    "<request.json> or a quick second model. Low confidence: send the card/evidence pointer through "
+    "fleet handoff to a Decider; continue the existing card/PR, never create duplicate work. "
+    "A stop is the last step; a Decider may release the advisory."
+)
+
+
+def _record_degree_warning(conn: sqlite3.Connection, task_id: str, reason: str, *, retry_seconds: int = 60) -> None:
+    """One durable, visible advisory per reason/window; never changes card ownership or status."""
+    now = int(time.time())
+    recent = conn.execute(
+        "SELECT payload FROM task_events WHERE task_id = ? AND kind = 'degree_warning' "
+        "AND created_at >= ? ORDER BY id DESC", (task_id, now - retry_seconds),
+    ).fetchall()
+    if any(_kb._json_dict(row["payload"]).get("reason") == reason for row in recent):
+        return
+    next_step = _DEGREE_NEXT_STEP
+    if reason == "execution_lease":
+        next_step = (
+            "Run the installed fleet-kanban-sync owner-node sync/acquire pass; verify current-node "
+            "execution lease and generation before retry. Never bypass the lease trigger or another "
+            "writer. If ownership remains uncertain, send this card/lease pointer to a Decider. "
+            + next_step
+        )
+    _kb._log.warning("LOUD WARNING: card %s: %s. %s", task_id, reason, next_step)
+    with _kb.write_txn(conn, allow_nested=True):
+        _kb._append_event(conn, task_id, "degree_warning", {
+            "reason": reason, "next_step": next_step, "card_pointer": task_id,
+            "retry_seconds": retry_seconds,
+        })
+
+
 def check_respawn_guard(
     conn: sqlite3.Connection, task_id: str, *, lane: str = "ready",
     lifted: Optional[list[tuple[str, str]]] = None,
@@ -2657,6 +2639,34 @@ def check_respawn_guard(
         return "unchanged_block_reason"
 
     now = int(time.time())
+    lease_notice = conn.execute(
+        "SELECT id, created_at, payload FROM task_events WHERE task_id = ? AND kind = 'degree_warning' "
+        "AND created_at > ? ORDER BY id DESC", (task_id, now - 300),
+    ).fetchall()
+    for notice in lease_notice:
+        if _kb._json_dict(notice["payload"]).get("reason") != "execution_lease":
+            continue
+        recovery = conn.execute(
+            "SELECT 1 FROM task_events WHERE task_id = ? AND id > ? "
+            "AND kind IN ('unblocked', 'assigned', 'lease_acquired') LIMIT 1", (task_id, notice["id"]),
+        ).fetchone()
+        if recovery is None:
+            tables = conn.execute(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' "
+                "AND name IN ('fleet_kanban_issue_map', 'fleet_kanban_verified_leases')"
+            ).fetchone()[0]
+            verified = None
+            if tables == 2:
+                verified = conn.execute(
+                    "SELECT 1 FROM tasks t JOIN fleet_kanban_issue_map im ON im.local_task_id=t.id "
+                    "JOIN fleet_kanban_verified_leases lease ON lease.issue_id=im.issue_id "
+                    "WHERE t.id=? AND lease.holder_profile=t.assignee "
+                    "AND lease.holder_node=COALESCE(im.current_node,im.source_node) "
+                    "AND lease.expires_at>? LIMIT 1", (task_id, now),
+                ).fetchone()
+            if verified is None:
+                return "execution_lease_retry"
+        break
 
     # 1. Rate-limit cooldown — see docstring for why this precedes blocker_auth.
     #    LATEST run only: a newer crash/completion supersedes the rate-limit run.
@@ -2681,7 +2691,7 @@ def check_respawn_guard(
         # Returns before blocker_auth: the stamped error carries the worker's output, which
         # is context, not a quota/auth diagnosis. Retries forever, spaced, never counted.
         ended_at = latest_run["ended_at"]
-        wait = _profile_busy_backoff_seconds(_profile_busy_streak(conn, task_id))
+        wait = min(60, _profile_busy_backoff_seconds(_profile_busy_streak(conn, task_id)))
         if ended_at is not None and (now - int(ended_at)) < wait:
             return "profile_busy_backoff"
         return None
@@ -3229,7 +3239,7 @@ def _count_spawnable(conn: sqlite3.Connection, status: str) -> int:
         assignee = row["assignee"]
         if profile_exists is not None and not profile_exists(assignee):
             continue
-        if check_respawn_guard(conn, row["id"], lane=status) is not None:
+        if check_respawn_guard(conn, row["id"], lane=status) not in (None, *_DEGREE_RESPAWN_REASONS):
             continue
         count += 1
     return count
@@ -3590,12 +3600,18 @@ def _dispatch_lane_task(
     if per_profile_cap is not None:
         current = per_profile_running.get(assignee, 0)
         if current >= per_profile_cap:
-            result.skipped_per_profile_capped.append((task_id, assignee, current))
-            return False
+            if not dry_run:
+                _record_degree_warning(conn, task_id, "profile_count_cap")
     guard_reason = check_respawn_guard(
         conn, task_id, lane=lane, lifted=result.respawn_guard_lifted,
     )
+    if guard_reason in _DEGREE_RESPAWN_REASONS:
+        if not dry_run:
+            _record_degree_warning(conn, task_id, guard_reason)
+        guard_reason = None
     if guard_reason is not None:
+        if not dry_run:
+            _record_degree_warning(conn, task_id, guard_reason)
         result.respawn_guarded.append((task_id, guard_reason))
         # Event so ``hermes kanban tail`` shows why the task looks stuck.
         # Honour kanban.default_assignee: when the dispatcher hits an unassigned ready task and an
@@ -3660,6 +3676,7 @@ def _dispatch_lane_task(
         # lane (and later phases) still run this tick. Anything else aborts.
         if not _isolate_fenced_row(result.claim_errors, "claim", task_id, exc):
             raise
+        _record_degree_warning(conn, task_id, "execution_lease", retry_seconds=300)
         installed_node = _kb._fleet_adapter_installed_node_id(conn)
         if _kb._is_foreign_fleet_mirror(conn, task_id, installed_node):
             kind = "foreign"
@@ -3823,8 +3840,10 @@ def _run_reclaim_phase(
 def _note_capacity_held(result: DispatchResult, reason: str) -> None:
     """Record + log a tick-level capacity hold so a zero-spawn tick names its cause."""
     result.capacity_held = reason
-    _kb._log.info(
-        "kanban dispatch: spawning no new workers this tick (%s; deferred, not dropped)",
+    _kb._log.warning(
+        "LOUD WARNING: kanban count budget reached (%s); admitting one more worker after actual "
+        "resource checks. Assess confidence/Jev or second model; low confidence goes to a Decider "
+        "with this board pointer, not one Conductor.",
         reason,
     )
 
@@ -3858,8 +3877,9 @@ def _tick_spawn_budget(
     if max_spawn is not None:
         if running_count >= max_spawn:
             _note_capacity_held(result, f"board cap: {running_count} running of {max_spawn}")
-            return False, None
-        spawn_budget = max_spawn - running_count
+            spawn_budget = 1
+        else:
+            spawn_budget = max_spawn - running_count
 
     if max_in_progress is not None:
         total_running = running_count + count_running_tasks_other_boards(board, dry_run=dry_run)
@@ -3867,8 +3887,7 @@ def _tick_spawn_budget(
             _note_capacity_held(
                 result, f"host cap: {total_running} running of {max_in_progress}",
             )
-            return False, None
-        remaining = max_in_progress - total_running
+        remaining = max(1, max_in_progress - total_running)
         if spawn_budget is None or spawn_budget > remaining:
             spawn_budget = remaining
 
@@ -3881,7 +3900,8 @@ def _tick_spawn_budget(
         result.memory_pressure = pressure
         _kb._log.warning(
             "kanban dispatch: system memory pressure is critical; "
-            "spawning no new workers this tick (deferred, not dropped)"
+            "retry after the next resource sample; use Jev/second-model confidence and send the board/resource "
+            "pointer to a Decider for another host or bounded release. Existing cards stay queued."
         )
         return False, None
     if pressure == "elevated":
@@ -3929,9 +3949,7 @@ def _any_spawnable_review(
             continue
         if profile_exists is not None and not profile_exists(assignee):
             continue
-        if per_profile_cap is not None and running.get(assignee, 0) >= per_profile_cap:
-            continue
-        if check_respawn_guard(conn, row["id"], lane="review") is None:
+        if check_respawn_guard(conn, row["id"], lane="review") in (None, *_DEGREE_RESPAWN_REASONS):
             return True
     return False
 
@@ -4408,7 +4426,7 @@ def _worker_argv(task: Task, profile_arg: str, hermes_home: Optional[str]) -> li
     worker_toolsets = _resolve_worker_cli_toolsets(hermes_home)
     if worker_toolsets:
         cmd.extend(["--toolsets", ",".join(worker_toolsets)])
-    cmd.extend(["chat", "-q", f"work kanban task {task.id}"])
+    cmd.extend(["chat", "-q", f"work kanban task {task.id}. Read its recent degree_warning events. " + _DEGREE_NEXT_STEP])
     # goal_mode rides the same `-q` path: cli.py runs the judge loop there too, so the
     # worker log keeps its live tool feed (forcing -Q blanked it).
     return cmd

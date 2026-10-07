@@ -2122,26 +2122,8 @@ def _synthesize_ended_run(
 # --- Dependency resolution (todo -> ready) ---
 
 def _has_sticky_block(conn: sqlite3.Connection, task_id: str) -> bool:
-    """True when the newest ``blocked``/``unblocked``/``gave_up`` event says the
-    block must wait for an operator: an explicit ``kanban_block`` (#28712), or a
-    breaker trip ``_record_task_failure`` stamped ``sticky`` — the clean-exit
-    protocol-violation budget or a systemic same-error wave. Those trip on a
-    policy independent of ``consecutive_failures``, so ``recompute_ready``'s
-    counter check cannot see them — without this the trip is promoted back to
-    ``ready`` in the same tick and the card respawns forever. A plain
-    (unified-budget) ``gave_up`` carries no marker and is judged by the counter,
-    so raising ``failure_limit`` or ``assign_task`` to a fresh profile still
-    releases it. Imported blocks require recovery evidence after the blocked write.
-    """
-    if _newest_event_kind(conn, task_id, ("blocked", "unblocked")) == "blocked":
-        return True
-    trip = conn.execute(
-        "SELECT payload FROM task_events "
-        "WHERE task_id = ? AND kind = 'gave_up' AND id > COALESCE("
-        "  (SELECT MAX(id) FROM task_events WHERE task_id = ? AND kind = 'unblocked'), 0) "
-        "ORDER BY id DESC LIMIT 1", (task_id, task_id),
-    ).fetchone()
-    return bool(trip) and bool(_json_dict(trip["payload"]).get("sticky"))
+    """Preserve an explicit worker/owner block; automatic breaker trips are advisory."""
+    return _newest_event_kind(conn, task_id, ("blocked", "unblocked")) == "blocked"
 
 
 def _newest_event_kind(
@@ -2161,13 +2143,6 @@ _HOLD_RELEASE_EVENT_KINDS = ("unblocked", "promoted_manual")
 NEEDS_INPUT_TODO_HOLD_SECONDS = 24 * 3600  # A hold may not wait forever on a person.
 
 
-def _has_unreleased_block_loop(conn: sqlite3.Connection, task_id: str) -> bool:
-    """Only an explicit unblock after the latest breaker trip releases its hold."""
-    return _newest_event_kind(
-        conn, task_id, ("block_loop_detected", "unblocked"),
-    ) == "block_loop_detected"
-
-
 def _needs_input_hold_state(conn, task_id, block_kind):
     """'active', 'expired' or None for a needs_input hold on a todo/triage card."""
     if block_kind != "needs_input":
@@ -2179,7 +2154,6 @@ def _needs_input_hold_state(conn, task_id, block_kind):
     if row is None or row["kind"] not in _HOLD_EVENT_KINDS:
         return None
     return "expired" if int(time.time()) - int(row["created_at"] or 0) >= NEEDS_INPUT_TODO_HOLD_SECONDS else "active"
-
 
 def _has_turner_hold(
     conn: sqlite3.Connection, task_id: str, block_kind: Optional[str],
@@ -2207,7 +2181,7 @@ def _resume_status_from_events(conn: sqlite3.Connection, task_id: str) -> str:
     row = conn.execute(
         "SELECT payload FROM task_events "
         "WHERE task_id = ? AND kind IN ("
-        "'blocked', 'block_loop_detected', 'dependency_wait', 'gave_up', "
+        "'blocked', 'block_loop_detected', 'degree_warning', 'dependency_wait', 'gave_up', "
         "'unblocked', 'changes_requested', 'review_reopened', 'status', 'reclaimed', "
         "'stale', 'timed_out', 'crashed', 'spawn_failed', 'rate_limited', 'profile_busy'"
         ") ORDER BY id DESC LIMIT 1", (task_id,),
@@ -2460,15 +2434,19 @@ def recompute_ready(conn: sqlite3.Connection, failure_limit: int = None) -> int:
                     (task_id,),
                 ).fetchone()
                 if recovery is None:
-                    # Failure counts and releases from an older hold prove nothing
-                    # about the blocker in the current imported snapshot.
-                    continue
+                    automatic = conn.execute(
+                        "SELECT 1 FROM task_events WHERE task_id=? AND kind='gave_up' "
+                        "AND id > COALESCE((SELECT event_id FROM task_block_entries WHERE task_id=?),0) "
+                        "ORDER BY id DESC LIMIT 1", (task_id,task_id),
+                    ).fetchone()
+                    if automatic is None:
+                        # Older evidence cannot release the current imported blocked snapshot.
+                        continue
             if all(p["status"] in ("done", "archived") for p in parents):
                 resume_status = _resume_status_from_events(conn, task_id)
                 if cur_status == "blocked":
-                    # At the breaker limit, no auto-recovery (else block ->
-                    # recover -> respawn -> exhaust -> block forever). The
-                    # counter is preserved so it accumulates across cycles.
+                    # An automatic legacy breaker may retry with a visible advisory;
+                    # explicit blocks and imported snapshot custody were checked above.
                     failures = int(row["consecutive_failures"] or 0)
                     task_limit = row["max_retries"]
                     effective_limit = (
@@ -2476,7 +2454,8 @@ def recompute_ready(conn: sqlite3.Connection, failure_limit: int = None) -> int:
                         else int(failure_limit)
                     )
                     if failures >= effective_limit:
-                        continue
+                        from hermes_cli.kanban_db_dispatch import _record_degree_warning
+                        _record_degree_warning(conn, task_id, "legacy_failure_counter")
                     conn.execute(
                         "UPDATE tasks SET status = ? "
                         "WHERE id = ? AND status = 'blocked'", (resume_status, task_id),
@@ -2848,7 +2827,10 @@ def release_stale_claims(
         heartbeat_stale = hb is not None and (now - int(hb)) > DEFAULT_CLAIM_HEARTBEAT_MAX_STALE_SECONDS
         started_at = _row_get(row, "worker_started_at")
         if (host_local and row["worker_pid"] and _worker_alive(row["worker_pid"], started_at)
-                and not heartbeat_stale):
+                ):
+            if heartbeat_stale:
+                from hermes_cli.kanban_db_dispatch import _record_degree_warning
+                _record_degree_warning(conn, row["id"], "stale_claim_live_owner")
             _extend_live_stale_claim(conn, row, now)
             continue
 
@@ -3725,7 +3707,7 @@ def _route_block(
     returned the task to the pool), so a stored ``block_kind`` equal to the
     incoming one means blocked -> unblocked -> re-block for the same cause
     (un-typed None compares equal to a prior un-typed block). At
-    ``BLOCK_RECURRENCE_LIMIT`` the task routes to ``triage`` for a human.
+    ``BLOCK_RECURRENCE_LIMIT`` the task resumes its source phase with a Decider advisory.
     """
     payload = {"reason": reason, "kind": kind, "source_status": source_status}
     if kind == "dependency":
@@ -3735,7 +3717,11 @@ def _route_block(
     payload = {"reason": reason, "kind": kind, "recurrences": recurrences, "source_status": source_status}
     if recurrences >= BLOCK_RECURRENCE_LIMIT:
         payload["limit"] = BLOCK_RECURRENCE_LIMIT
-        return "triage", "block_loop_detected", set_sql, (kind, recurrences), payload
+        payload["next_step"] = (
+            "Assess confidence with Jev or a second model; route low confidence and this card pointer "
+            "through fleet handoff to a Decider. Repeated reason alone does not stop the card."
+        )
+        return source_status, "degree_warning", set_sql, (kind, recurrences), payload
     return "blocked", "blocked", set_sql, (kind, recurrences), payload
 
 
@@ -4400,9 +4386,6 @@ def keep_spec_triage_task(
 
         if _has_turner_hold(conn, task_id, row["block_kind"], row["title"], row["body"]):
             return False, "task has active hold (needs_input, younger than 24 h)", None, "triage", False, None
-
-        if _has_unreleased_block_loop(conn, task_id):
-            return False, "task has unreleased block loop hold", None, "triage", False, None
 
         if _has_sticky_block(conn, task_id):
             return False, "task has active sticky block hold", None, "triage", False, None

@@ -21,8 +21,6 @@ def clear_triage_hold(
         conn, task_id, row['block_kind'], row['title'], row['body'],
     ):
         cleared_hold = 'needs_input'
-    elif kb._has_unreleased_block_loop(conn, task_id):
-        cleared_hold = 'block_loop_detected'
     elif kb._has_sticky_block(conn, task_id):
         cleared_hold = 'sticky_block'
     else:

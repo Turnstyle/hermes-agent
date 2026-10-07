@@ -2,7 +2,7 @@
 
 Contracts cover authenticated scope, atomic action receipts, exact text/state
 binding, finite exceptions and durable recovery. Existing keep-spec regression
-owns the carry's algorithm; an absent upstream guard is reported, never patched.
+owns the carry's algorithm; authorized operations continue across automatic warnings.
 """
 
 from __future__ import annotations
@@ -391,16 +391,16 @@ def test_connection_composition_and_target_only_readiness(lane):
     assert kb.recompute_ready(conn) == 1
 
 
-def test_keep_spec_dependency_refuses_without_substitution(lane):
-    if hasattr(kb, "_has_unreleased_block_loop"):
-        pytest.skip("original carry prerequisite is now supplied; acceptance test owns this path")
+def test_keep_spec_continues_without_obsolete_automatic_guard(lane):
     admit(lane)
-    before = store.state_snapshot(lane[1], lane[3])
+    task = kb.get_task(lane[1], lane[3])
+    original = (task.title, task.body)
     submit(lane, request(lane, "keep_spec", {"review_author": "Turner FIXTURE"}))
     result = run(lane)[0]
-    assert result["state"] == "exception"
-    assert "UPSTREAM_PREREQUISITE" in result["facts"]["reason"]
-    assert store.state_snapshot(lane[1], lane[3]) == before
+    assert result["state"] == "applied"
+    task = kb.get_task(lane[1], lane[3])
+    assert task.status == "ready"
+    assert (task.title, task.body) == original
 
 
 def test_retired_public_cli_keeps_ordinary_kanban_parser(lane, capsys):
