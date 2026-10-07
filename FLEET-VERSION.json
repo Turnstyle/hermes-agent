@@ -1,0 +1,22 @@
+{
+  "time": "2026-10-06 23:29:42 CDT",
+  "source_commit": "4303dfa9c9c9067fc11a8c488444253fbd5a1cc4",
+  "source_base": "35ad70c035dec839846056073ad81a9bdceffca4",
+  "upstream_tag": "v2026.9.24",
+  "upstream_commit": "f97608f178d1ffeca59860195ab7da295f7c8e5f",
+  "carried_commits": 198,
+  "mode": "build",
+  "publish": true,
+  "switch_order": [
+    "max",
+    "snowdrop",
+    "turnerbook",
+    "sheldon",
+    "rosie"
+  ],
+  "source_dirty": false,
+  "source_contains_upstream": true,
+  "rebuilt_commit": "4303dfa9c9c9067fc11a8c488444253fbd5a1cc4",
+  "carried_list_sha256": "cb8b518310e2d2ad17326324334552b64aba4ec13bd3877fa98b9c624cf5f114",
+  "test_comparison_sha256": "2ef4d87618179a7e0819704d1e1dd8855f2eff62585080e0ab16b7bc7acbab0d"
+}
