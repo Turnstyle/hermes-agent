@@ -190,6 +190,26 @@ class TestBusyHandlerDemotesInterruptForSubagents:
         parent.interrupt.assert_called_once_with("please stop")
 
     @pytest.mark.asyncio
+    async def test_bot_message_does_not_interrupt_a_running_turn(self) -> None:
+        """An inbound bot message in interrupt mode is queued, never interrupt()."""
+        runner = _make_runner()
+        runner._busy_input_mode = "interrupt"
+        adapter = _make_adapter()
+        event = _make_event(text="standing work, do not stop")
+        event.source.is_bot = True
+        sk = build_session_key(event.source)
+        parent = _make_parent_no_subagents()
+        runner._running_agents[sk] = parent
+        runner.adapters[event.source.platform] = adapter
+
+        with patch("gateway.platforms.base.merge_pending_message_event"):
+            await runner._handle_active_session_busy_message(event, sk)
+
+        parent.interrupt.assert_not_called()
+        queued = list(adapter._pending_messages.values())
+        assert queued and queued[0].text == "standing work, do not stop"
+
+    @pytest.mark.asyncio
     async def test_queue_mode_unchanged_with_subagents(self) -> None:
         """Configured ``queue`` mode is already subagent-safe; the new
         guard must not change its behaviour or its ack text."""
