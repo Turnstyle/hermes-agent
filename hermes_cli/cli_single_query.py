@@ -62,7 +62,7 @@ def _drain_quiet_bot_chat(cli, history) -> None:
                        max_attempts=config.max_attempts)
             if not settled:
                 return  # Let a later turn retry this doc; do not spend the whole cap on one failure.
-        except Exception as exc:
+        except BaseException as exc:  # a signal exit must also settle the claim, not leave it 'read'
             try:
                 # Mirror tui_gateway recover(): an uncertain mark_read leaves pending_fields at
                 # status=read; reconcile first so record_error requeues instead of re-committing a
@@ -336,7 +336,7 @@ def _run_single_query_fleet_turn_end_drain(cli) -> None:
             )
         else:
             fmd.finish(store, claimed, {"status": "settled"}, max_attempts=config.max_attempts)
-    except Exception as exc:
+    except BaseException as exc:  # a signal exit must also settle the claim, not leave it 'read'
         fmd.record_error(store, claimed, str(exc), max_attempts=config.max_attempts)
         raise
     finally:

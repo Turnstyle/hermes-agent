@@ -1052,3 +1052,97 @@ def test_writes_are_limited_to_status_bookkeeping():
 def test_bot_identity_is_the_profile_folder(tmp_path):
     assert fmd.bot_identity(tmp_path / "profiles" / "tb-king") == "tb-king"
     assert fmd.bot_identity(tmp_path / ".hermes") == "default"
+
+
+# ---------- an answered message becomes done (no false "NOT delivered" after reclaim) ----------
+def test_reply_to_sender_marks_claimed_doc_done_even_if_turn_never_settles():
+    store = MemoryStore()
+    store.seed("answered", msg(5))
+    claimed = fmd.claim_next(store, ME, limit=10, now=NOW)
+    assert fmd.mark_read(store, claimed, now=NOW)
+
+    # The bot answers the sender with message_agent; the turn is then killed before it reports.
+    assert fmd.note_reply(ME, "@tb-cndr", store=store, now=NOW) == 1
+    assert store.get("answered").fields["status"] == "done"
+    assert fmd.record_error(store, claimed, "turn interrupted", max_attempts=5, now=NOW) is False
+    assert store.get("answered").fields["status"] == "done"
+
+    # The reclaim job finds nothing to requeue and no sender notice is written.
+    later = NOW + datetime.timedelta(hours=2)
+    counts = fmd.reclaim_stale(store, older_than_seconds=3600, now=later)
+    assert counts["requeued"] == 0 and counts["expired"] == 0
+    assert fmd.claim_next(store, ME, limit=10, now=later) is None
+    assert store.get("answered").fields["status"] == "done"
+    assert not [k for k in store.docs if k.endswith(fmd.EXPIRY_NOTICE_SUFFIX)]
+
+
+def test_reply_to_someone_else_does_not_mark_done():
+    store = MemoryStore()
+    store.seed("other", msg(5))
+    claimed = fmd.claim_next(store, ME, limit=10, now=NOW)
+    assert fmd.mark_read(store, claimed, now=NOW)
+    assert fmd.note_reply(ME, "tb-other", store=store, now=NOW) == 0
+    assert store.get("other").fields["status"] == "read"
+    fmd.finish(store, claimed, {"status": "settled"}, max_attempts=5, now=NOW)
+    assert store.get("other").fields["status"] == "done"
+
+
+def test_finish_after_reply_is_done_once_and_registry_is_cleared():
+    store = MemoryStore()
+    store.seed("both", msg(5))
+    claimed = fmd.claim_next(store, ME, limit=10, now=NOW)
+    assert fmd.mark_read(store, claimed, now=NOW)
+    assert "both" in fmd._ACTIVE_CLAIMS
+    fmd.note_reply(ME, "tb-cndr", store=store, now=NOW)
+    assert fmd.finish(store, claimed, {"status": "settled"}, max_attempts=5, now=NOW) is False
+    assert store.get("both").fields["status"] == "done"
+    assert "both" not in fmd._ACTIVE_CLAIMS
+
+
+def test_child_turn_reply_marks_done_from_claim_env(monkeypatch):
+    """A child CLI turn only has the doc id in its environment."""
+    store = MemoryStore()
+    store.seed("child", msg(5))
+    claimed = fmd.claim_next(store, ME, limit=10, now=NOW)
+    assert fmd.mark_read(store, claimed, now=NOW)
+    fmd._unregister_active(claimed)  # the parent process holds the claim, not this one
+    monkeypatch.setenv(fmd.CLAIM_ENV, "child")
+    assert fmd.note_reply(ME, "tb-cndr", store=store, now=NOW) == 1
+    assert store.get("child").fields["status"] == "done"
+    # The parent's later receipt accepts the done doc instead of warning and requeueing.
+    assert fmd.finish(store, claimed, {"status": "settled"}, max_attempts=5, now=NOW) is True
+    assert store.get("child").fields["status"] == "done"
+
+
+def test_expiry_of_a_handed_over_doc_does_not_say_not_delivered():
+    store = MemoryStore()
+    store.seed("handed", msg(60, read_at=fmd.rfc3339(NOW - datetime.timedelta(minutes=55))))
+    assert fmd.claim_next(store, ME, limit=10, now=NOW) is None
+    fields = store.get("handed").fields
+    assert fields["status"] == "expired"
+    assert "NOT delivered" not in fields["sender_notice"]
+    notice = store.get("handed" + fmd.EXPIRY_NOTICE_SUFFIX).fields["body"]
+    assert "NOT delivered" not in notice and "handed to a Bot Chat turn" in notice
+
+
+def test_message_agent_reply_marks_queued_doc_done(monkeypatch, tmp_path):
+    from tools import bot_mode_dm
+
+    home = tmp_path / "profiles" / ME
+    home.mkdir(parents=True)
+    store = MemoryStore()
+    store.seed("via-tool", msg(5))
+    claimed = fmd.claim_next(store, ME, limit=10, now=NOW)
+    assert fmd.mark_read(store, claimed, now=NOW)
+    monkeypatch.setattr(bot_mode_dm, "_message_agent_tool", lambda **kw: json.dumps({"status": "delivered"}))
+    monkeypatch.setattr(bot_mode_dm, "_agent_home", lambda agent: str(home))
+    monkeypatch.setattr(fmd, "_store_for_active", lambda: store)
+    bot_mode_dm.message_agent_tool(target="tb-cndr", message="answer", agent=object())
+    assert store.get("via-tool").fields["status"] == "done"
+
+    store.seed("failed-send", msg(4))
+    claimed = fmd.claim_next(store, ME, limit=10, now=NOW)
+    assert fmd.mark_read(store, claimed, now=NOW)
+    monkeypatch.setattr(bot_mode_dm, "_message_agent_tool", lambda **kw: json.dumps({"error": "no"}))
+    bot_mode_dm.message_agent_tool(target="tb-cndr", message="answer", agent=object())
+    assert store.get("failed-send").fields["status"] == "read"

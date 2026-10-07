@@ -287,7 +287,32 @@ def _err(message: str, *, roster: list[str] | None = None, peers: list[str] | No
 
 def message_agent_tool(target: str = "", message: str = "", task_id: Optional[str] = None, agent: Any = None) -> str:
     """Deliver ``message`` to ``target``'s Bot Chat. Returns a JSON ack/error.
-    ``agent`` is the calling AIAgent — used for the Bot Chat gate and sender identity."""
+    ``agent`` is the calling AIAgent — used for the Bot Chat gate and sender identity.
+
+    A delivered message to the sender of a queued fleet message this bot is answering marks that
+    queued doc done (a reply is the answer; the turn may still be interrupted afterwards)."""
+    result = _message_agent_tool(target=target, message=message, task_id=task_id, agent=agent)
+    try:
+        if not _is_error_result(result):
+            from tools import fleet_message_drain as fmd
+
+            home = Path(_agent_home(agent))
+            fmd.note_reply(fmd.bot_identity(home), str(target or ""))
+    except Exception:
+        logger.debug("fleet message drain: reply note skipped", exc_info=True)
+    return result
+
+
+def _is_error_result(result: Any) -> bool:
+    try:
+        data = json.loads(result) if isinstance(result, str) else result
+    except Exception:
+        return True
+    return not isinstance(data, dict) or bool(data.get("error")) or data.get("success") is False
+
+
+def _message_agent_tool(target: str = "", message: str = "", task_id: Optional[str] = None,
+                        agent: Any = None) -> str:
     home = _agent_home(agent)
     try:
         from tools.bot_mode_probe import (

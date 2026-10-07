@@ -60,6 +60,7 @@ from __future__ import annotations
 
 import argparse
 import contextlib
+import contextvars
 import dataclasses
 import datetime
 import json
@@ -483,6 +484,98 @@ class Claimed:
         return str(self.fields.get("kind") or "")
 
 
+# Claims whose turn is running in THIS process. A reply to the original sender (message_agent) marks the
+# doc done at once, so a turn that is later interrupted, killed or never reports cannot leave an answered
+# message in 'read' for the reclaim job to requeue (and expire with a false "NOT delivered" notice).
+_ACTIVE_CLAIMS: dict[str, "Claimed"] = {}
+_ACTIVE_LOCK = threading.Lock()
+CLAIM_ENV = "HERMES_FLEET_CLAIM_DOC"
+
+
+_child_claim_id: contextvars.ContextVar = contextvars.ContextVar("fleet_child_claim_id", default=None)
+
+
+@contextlib.contextmanager
+def _child_claim(doc_id: str):
+    """The doc id the next child CLI turn (``_idle_cli_turn``) carries in its environment."""
+    token = _child_claim_id.set(doc_id)
+    try:
+        yield
+    finally:
+        _child_claim_id.reset(token)
+
+
+def _register_active(claimed: "Claimed") -> None:
+    with _ACTIVE_LOCK:
+        _ACTIVE_CLAIMS[claimed.doc_id] = claimed
+
+
+def _unregister_active(claimed: "Claimed") -> None:
+    with _ACTIVE_LOCK:
+        if _ACTIVE_CLAIMS.get(claimed.doc_id) is claimed:
+            del _ACTIVE_CLAIMS[claimed.doc_id]
+
+
+def _same_handle(a: Any, b: Any) -> bool:
+    def norm(v: Any) -> str:
+        return str(v or "").strip().lstrip("@").split("@", 1)[0].lower()
+    return bool(norm(a)) and norm(a) == norm(b)
+
+
+def note_reply(me: str, target: str, *, store: Any = None, now: Optional[datetime.datetime] = None) -> int:
+    """The bot ``me`` just sent a message to ``target``. Mark every claimed DM from that sender that is
+    in flight for ``me`` as done (the message was answered). In this process the claim registry finds
+    them; a child CLI turn carries its claim in ``HERMES_FLEET_CLAIM_DOC``. Best effort: never raises.
+    Returns how many docs were marked done."""
+    marked = 0
+    try:
+        with _ACTIVE_LOCK:
+            active = [c for c in _ACTIVE_CLAIMS.values() if c.me == me]
+        for claimed in active:
+            if claimed.kind != "dm" or not _same_handle(claimed.fields.get("from"), target):
+                continue
+            with claimed.lock:
+                if claimed.finished:
+                    continue
+                now_s = rfc3339(now or utcnow())
+                if _write(store if store is not None else _store_for_active(), claimed,
+                          {"status": "done", "done_at": now_s, "updated_at": now_s}):
+                    marked += 1
+                claimed.finished = True
+            _unregister_active(claimed)
+        env_doc = os.environ.get(CLAIM_ENV, "").strip()
+        if env_doc and not marked and not any(c.doc_id == env_doc for c in active):
+            marked += _mark_done_by_id(env_doc, me, target, store=store, now=now)
+    except Exception:
+        logger.warning("fleet message drain: could not mark an answered message done", exc_info=True)
+    return marked
+
+
+def _store_for_active() -> Any:
+    config = drain_config()
+    if config is None:
+        raise Refused("fleet message drain is not enabled")
+    return store_for(config)
+
+
+def _mark_done_by_id(doc_id: str, me: str, target: str, *, store: Any = None,
+                     now: Optional[datetime.datetime] = None) -> int:
+    """done for a doc claimed by a parent process (id from the environment); same guards as a claim."""
+    _check_id(doc_id)
+    store = store if store is not None else _store_for_active()
+    row = store.get(doc_id)
+    if (row is None or row.fields.get("to") != me or row.fields.get("kind") != "dm"
+            or row.fields.get("status") not in ("delivered", "read")
+            or not _same_handle(row.fields.get("from"), target)):
+        return 0
+    now_s = rfc3339(now or utcnow())
+    try:
+        store.update(doc_id, {"status": "done", "done_at": now_s, "updated_at": now_s}, row.update_time)
+    except PreconditionFailed:
+        return 0
+    return 1
+
+
 def _malformed(fields: dict) -> str:
     if fields.get("kind") not in KINDS:
         return f"unknown kind {fields.get('kind')!r}"
@@ -518,6 +611,12 @@ def _reclaimed_sender_notice(doc_id: str, recipient: Any) -> str:
             "a previously started turn may have received it.")
 
 
+def _handed_over_sender_notice(doc_id: str, recipient: Any, read_at: Any) -> str:
+    return (f"Queued message {doc_id} to @{recipient or 'recipient'} was handed to a Bot Chat turn at "
+            f"{read_at}; no reply or completion was recorded before it timed out. It may have been "
+            "answered (check for a reply), so do not treat it as undelivered.")
+
+
 def _notify_sender_of_expiry(store: Any, doc_id: str, fields: dict, now: datetime.datetime,
                              reason: str) -> None:
     """Push the expiry to the original sender as one ``notify_wake`` doc from ``fleet-system`` (the
@@ -535,6 +634,8 @@ def _notify_sender_of_expiry(store: Any, doc_id: str, fields: dict, now: datetim
     now_s = rfc3339(now)
     body = (_reclaimed_sender_notice(doc_id, fields.get("to"))
             if fields.get("status") in ("delivered", "read") else
+            _handed_over_sender_notice(doc_id, fields.get("to"), fields["read_at"])
+            if fields.get("read_at") else
             f"to @{fields.get('to') or 'recipient'}, message {doc_id} was NOT delivered: "
             f"{reason}, queued {minutes} minutes")
     notice = {
@@ -579,7 +680,9 @@ def claim_next(store: Any, me: str, *, limit: int = 10, now: Optional[datetime.d
         queued_timed_out = now - parse_ts(fields["created_at"]) >= datetime.timedelta(
             seconds=queued_timeout_seconds)
         if expired_at <= now or queued_timed_out:
-            notice = (_expire_sender_notice(row.doc_id, fields.get("to")) if expired_at <= now else
+            notice = (_handed_over_sender_notice(row.doc_id, fields.get("to"), fields["read_at"])
+                      if fields.get("read_at") else
+                      _expire_sender_notice(row.doc_id, fields.get("to")) if expired_at <= now else
                       _queued_timeout_sender_notice(row.doc_id, fields.get("to"), queued_timeout_seconds))
             try:
                 store.update(row.doc_id, {"status": "expired", "expired_at": now_s, "updated_at": now_s,
@@ -643,9 +746,10 @@ def drain_agent_turn(agent: Any, profile_home: Path | str, history: Optional[lis
         return False
     try:
         text, author, _metadata = render_input(claimed)
-        outcome = _idle_cli_turn(Path(profile_home), text, author)
+        with _child_claim(claimed.doc_id):
+            outcome = _idle_cli_turn(Path(profile_home), text, author)
         finish(store, claimed, outcome, max_attempts=config.max_attempts)
-    except Exception as exc:
+    except BaseException as exc:
         record_error(store, claimed, str(exc), max_attempts=config.max_attempts)
         raise
     return True
@@ -755,9 +859,10 @@ def idle_tick(profile_home: Path | str, *, config: Optional[DrainConfig] = None,
         return False
     try:
         text, author, metadata = render_input(claimed)
-        outcome = (run_turn or (lambda t, a, m: _idle_cli_turn(home, t, a)))(text, author, metadata)
+        with _child_claim(claimed.doc_id):
+            outcome = (run_turn or (lambda t, a, m: _idle_cli_turn(home, t, a)))(text, author, metadata)
         finish(store, claimed, outcome, max_attempts=config.max_attempts, now=now)
-    except Exception as exc:
+    except BaseException as exc:
         record_error(store, claimed, str(exc), max_attempts=config.max_attempts, now=now)
         raise
     return True
@@ -808,8 +913,12 @@ def _idle_cli_turn(home: Path, text: str, author: Optional[dict]) -> dict:
         argv = [_hermes_cli(), "-p", bot_identity(home), *BOT_CHAT_TURN_ARGS, "--query-file", str(path)]
         with tempfile.TemporaryDirectory(prefix="fleet-turn-report-") as report_dir:
             report_path = Path(report_dir) / "turn.json"
+            child_env = delivery_env(author, home)
+            claim_id = _child_claim_id.get()
+            if claim_id:
+                child_env[CLAIM_ENV] = claim_id  # the child's reply to the sender marks this doc done
             proc = run_reported_turn(
-                argv, env=delivery_env(author, home), report_path=str(report_path),
+                argv, env=child_env, report_path=str(report_path),
                 timeout=TURN_ATTEMPT_TIMEOUT_SECONDS, cwd=str(home),
                 stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
             report = json.loads(report_path.read_text(encoding="utf-8")) if report_path.exists() else None
@@ -859,6 +968,13 @@ def _write(store: Any, claimed: Claimed, fields: dict) -> bool:
             claimed.fields.update(fields)
             claimed.pending_fields = None
             return True
+        if (row is not None and fields.get("status") == "done" and row.fields.get("status") == "done"
+                and row.fields.get("to") == claimed.me):
+            # A reply already marked it done (note_reply, maybe from the child turn): same outcome.
+            claimed.update_time = row.update_time
+            claimed.fields.update(status="done")
+            claimed.pending_fields = None
+            return True
         logger.warning("fleet message drain: %s was changed by another writer; leaving it as is", claimed.doc_id)
         return False
     except Exception:
@@ -885,7 +1001,10 @@ def reconcile_claim(store: Any, claimed: Claimed) -> bool:
 
 def mark_read(store: Any, claimed: Claimed, now: Optional[datetime.datetime] = None) -> bool:
     now_s = rfc3339(now or utcnow())
-    return _write(store, claimed, {"status": "read", "read_at": now_s, "updated_at": now_s})
+    committed = _write(store, claimed, {"status": "read", "read_at": now_s, "updated_at": now_s})
+    if committed:
+        _register_active(claimed)
+    return committed
 
 
 def release(store: Any, claimed: Claimed, now: Optional[datetime.datetime] = None) -> bool:
@@ -896,6 +1015,7 @@ def release(store: Any, claimed: Claimed, now: Optional[datetime.datetime] = Non
         fields = claimed.pending_fields or {"status": "queued", "updated_at": rfc3339(now or utcnow())}
         committed = _write(store, claimed, fields)
         claimed.finished = True
+        _unregister_active(claimed)
         return committed
 
 
@@ -918,6 +1038,7 @@ def record_error(store: Any, claimed: Claimed, error: str, *, max_attempts: int,
                 fields["status"] = "queued"
         committed = _write(store, claimed, fields)
         claimed.finished = True
+        _unregister_active(claimed)
         return committed
 
 
@@ -936,6 +1057,7 @@ def finish(store: Any, claimed: Claimed, outcome: dict, *, max_attempts: int,
         fields = claimed.pending_fields or {"status": "done", "done_at": now_s, "updated_at": now_s}
         committed = _write(store, claimed, fields)
         claimed.finished = True
+        _unregister_active(claimed)
         return committed
 
 
