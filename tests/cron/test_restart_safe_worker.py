@@ -861,6 +861,10 @@ def test_managed_gateway_restart_preserves_active_worker_and_single_side_effect(
         "os.environ['INVOCATION_ID'] = 'restart-fixture'\n"
         "from cron import scheduler\n"
         "from tools import process_registry\n"
+        "import sys, cron.scheduler_worker_env as _wenv\n"
+        # This test covers restart survival, not argv shape; the fixture has no dependency generation
+        # for the bootstrap form, so pin the plain module form (argv shape: test_worker_bare_interpreter_argv).
+        "_wenv.external_worker_argv = lambda _root, _args: [sys.executable, '-m', 'cron.scheduler', *_args]\n"
         "process_registry._is_supervised_gateway_process = lambda: True\n"
         f"job = json.loads(pathlib.Path({str(payload)!r}).read_text())\n"
         "if not scheduler.run_one_job(job, adapters=None, loop=None):\n"
