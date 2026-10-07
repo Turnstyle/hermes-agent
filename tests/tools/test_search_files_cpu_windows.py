@@ -276,9 +276,14 @@ def test_admission_releases_after_every_base_exception_path(raised):
 
 def test_remote_roots_are_normalized_lexically_against_backend_cwd(monkeypatch):
     env = RemoteEnvironment()
+
+    class RefuseControllerOS:
+        def __getattr__(self, name):
+            raise AssertionError(f"controller resolution used: os.{name}")
+
     monkeypatch.setattr(
-        "tools.file_operations.os.path.abspath",
-        lambda path: (_ for _ in ()).throw(AssertionError("controller resolution used")),
+        "tools.file_operations_search.os",
+        RefuseControllerOS(),
     )
 
     relative = _normalized_filename_search_root(env, "repo/../repo", "/controller")

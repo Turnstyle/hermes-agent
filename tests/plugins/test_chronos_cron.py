@@ -202,25 +202,22 @@ def test_fire_due_rearms_next_oneshot(chronos, monkeypatch):
     assert fake.provisions[0]["fire_at"] == "2026-06-18T12:05:00+00:00"
 
 
-def test_fire_due_rearms_after_claimed_job_failure(chronos, monkeypatch, tmp_path):
+def test_fire_due_rearms_after_claimed_job_failure(temp_home, chronos, monkeypatch):
     """A claimed attempt is consumed even when the job pipeline reports failure."""
-    import cron.executions as executions
+    from cron import executions, jobs, scheduler
 
-    monkeypatch.setattr(executions, "EXECUTIONS_FILE", tmp_path / "executions.db")
     prov, fake = chronos
-    claimed = {"id": "j1", "fire_claim": {"by": "owner-1"}}
-    persisted = {
-        "id": "j1",
-        "enabled": True,
-        "next_run_at": "2026-06-18T12:05:00+00:00",
-    }
+    job = jobs.create_job(prompt="local failure probe", schedule="every 5m")
+    monkeypatch.setattr(scheduler, "_launch_external_cron_worker", lambda job: False)
+    monkeypatch.setattr(
+        scheduler, "run_job",
+        lambda *args, **kwargs: (False, "failed job output", "", "local job failed"),
+    )
 
-    monkeypatch.setattr("cron.jobs.claim_job_for_fire", lambda jid, **kw: claimed)
-    monkeypatch.setattr("cron.scheduler.run_one_job", lambda *args, **kwargs: False)
-    monkeypatch.setattr("cron.jobs.get_job", lambda jid: persisted)
-
-    assert prov.fire_due("j1") is True
-    assert [provision["job_id"] for provision in fake.provisions] == ["j1"]
+    assert prov.fire_due(job["id"], force=True) is True
+    assert [provision["job_id"] for provision in fake.provisions] == [job["id"]]
+    assert jobs.get_job(job["id"])["last_status"] == "error"
+    assert executions.list_executions(job_id=job["id"])[0]["status"] == "failed"
 
 
 def test_fire_due_forwards_manual_force_to_claim(chronos, monkeypatch):
