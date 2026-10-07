@@ -4055,17 +4055,34 @@ def _landing_status_after_parents(conn: sqlite3.Connection, task_id: str) -> str
 def unblock_task(
     conn: sqlite3.Connection, task_id: str, *,
     actor: Optional[str] = None, reason: Optional[str] = None,
+    to_todo: bool = False, expected_blocked_event_id: Optional[int] = None,
 ) -> bool:
     """``blocked``/``scheduled`` -> its resumable phase (parent re-gated; ``review``
     when that is where it left off), closing any leaked run first. A ``todo``
     row with a fresh ``needs_input`` hold is also accepted: the
     ``unblocked`` event releases it immediately, before its 24-hour expiry.
-    Triage holds require actor/reason and stay in triage for separate spec release."""
+    Triage holds require actor/reason and stay in triage for separate spec release.
+    to_todo accepts only currently blocked cards and lands in todo regardless of
+    parent completion. Expected event 0 asserts absent blocked history; positive
+    IDs assert the latest blocked event; None leaves event history unguarded."""
+    if expected_blocked_event_id is not None and expected_blocked_event_id < 0:
+        raise ValueError("expected_blocked_event_id must be nonnegative")
     now = int(time.time())
     with write_txn(conn):
         hold_row = conn.execute(
             "SELECT status, block_kind, title, body FROM tasks WHERE id = ?", (task_id,),
         ).fetchone()
+        if to_todo or expected_blocked_event_id is not None:
+            if hold_row is None or hold_row["status"] != "blocked":
+                return False
+            if expected_blocked_event_id is not None:
+                latest_block = conn.execute(
+                    "SELECT id FROM task_events WHERE task_id = ? AND kind = 'blocked' "
+                    "ORDER BY id DESC LIMIT 1", (task_id,),
+                ).fetchone()
+                latest_block_id = latest_block["id"] if latest_block is not None else 0
+                if latest_block_id != expected_blocked_event_id:
+                    return False
         if hold_row is not None and hold_row["status"] == "triage":
             from hermes_cli.kanban_db_triage_unblock import clear_triage_hold
             return clear_triage_hold(
@@ -4095,6 +4112,9 @@ def unblock_task(
             if landing_status == "ready" and resume_status == "review"
             else landing_status
         )
+        if to_todo:
+            new_status = "todo"
+            unblockable = ("blocked",)
         # ``block_kind``/``block_recurrences`` deliberately survive the unblock:
         # resetting them is the amnesia that let cron-unblock <-> re-block loop
         # unbounded; only complete_task clears them. ``consecutive_failures``
