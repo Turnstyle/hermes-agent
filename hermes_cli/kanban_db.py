@@ -322,7 +322,7 @@ def _resolve_crash_grace_seconds() -> int:
 
 def _resolve_rate_limit_cooldown_seconds() -> int:
     """``HERMES_KANBAN_RATE_LIMIT_COOLDOWN_SECONDS`` (0 = next tick, for tests) else default."""
-    return _env_int("HERMES_KANBAN_RATE_LIMIT_COOLDOWN_SECONDS", DEFAULT_RATE_LIMIT_COOLDOWN_SECONDS)
+    return min(600, _env_int("HERMES_KANBAN_RATE_LIMIT_COOLDOWN_SECONDS", DEFAULT_RATE_LIMIT_COOLDOWN_SECONDS))
 
 
 # build_worker_context() caps, sized for a ~100k-char prompt with headroom.
@@ -2140,7 +2140,7 @@ def _newest_event_kind(
 
 _HOLD_EVENT_KINDS = ("blocked", "block_loop_detected")
 _HOLD_RELEASE_EVENT_KINDS = ("unblocked", "promoted_manual")
-NEEDS_INPUT_TODO_HOLD_SECONDS = 24 * 3600  # A hold may not wait forever on a person.
+NEEDS_INPUT_TODO_HOLD_SECONDS = 2 * 3600  # A hold may not wait forever on a person.
 
 
 def _needs_input_hold_state(conn, task_id, block_kind):
@@ -2159,7 +2159,7 @@ def _has_turner_hold(
     conn: sqlite3.Connection, task_id: str, block_kind: Optional[str],
     title: str, body: Optional[str],
 ) -> bool:
-    """Only a needs_input hold younger than 24 hours pauses a todo/triage card."""
+    """Only a needs_input hold younger than 2 hours pauses a todo/triage card."""
     return _needs_input_hold_state(conn, task_id, block_kind) == "active"
 
 
@@ -2381,7 +2381,7 @@ def recompute_ready(conn: sqlite3.Connection, failure_limit: int = None) -> int:
 
     1. The most recent block event was a worker-initiated ``kanban_block`` — those stay blocked until an
     explicit ``kanban_unblock`` (#28712).
-    2. ``todo`` is skipped while its ``needs_input`` hold is younger than 24 hours.
+    2. ``todo`` is skipped while its ``needs_input`` hold is younger than 2 hours.
     Older holds expire automatically; title/body text never holds a card.
 
     A Fleet-mirrored row owned by ANOTHER node is never promoted: this is
@@ -2412,6 +2412,9 @@ def recompute_ready(conn: sqlite3.Connection, failure_limit: int = None) -> int:
             # local status / blocked reason / dependency state.
             if _is_foreign_fleet_mirror(conn, task_id, installed_node_id):
                 continue
+            if cur_status == "blocked" and _needs_input_hold_state(conn, task_id, row["block_kind"]) == "expired":
+                _handoff_to_decider(conn, task_id, "needs_input expired after 2 hours")
+                continue
             if cur_status == "blocked" and _has_sticky_block(conn, task_id):
                 # Explicit human-intervention block; only ``unblock_task`` may exit it.
                 continue
@@ -2419,6 +2422,9 @@ def recompute_ready(conn: sqlite3.Connection, failure_limit: int = None) -> int:
                 conn, task_id, row["block_kind"], row["title"], row["body"],
             ):
                 # Fresh needs_input hold; unblock/promote can release it sooner.
+                continue
+            if cur_status == "todo" and _needs_input_hold_state(conn, task_id, row["block_kind"]) == "expired":
+                _handoff_to_decider(conn, task_id, "needs_input expired after 2 hours")
                 continue
             parents = conn.execute(
                 "SELECT t.status FROM tasks t "
@@ -3648,6 +3654,12 @@ def block_task(
             return True
         source_status = _retry_status_for_run(conn, task_id) if cur_row["status"] == "running" else "ready"
         requested_kind = kind
+        prior_reason = conn.execute(
+            "SELECT payload FROM task_events WHERE task_id=? "
+            "AND kind IN ('blocked','degree_warning','decider_handoff') ORDER BY id DESC LIMIT 1",
+            (task_id,),
+        ).fetchone()
+        same_reason = prior_reason is not None and _json_dict(prior_reason["payload"]).get("reason") == reason
         rekind_reason = None
         # ``dependency`` only waits on incomplete parents. A worker filing that
         # kind with none open would park in ``todo`` and ``recompute_ready``
@@ -3658,7 +3670,7 @@ def block_task(
             rekind_reason = "no_open_parent"
         new_status, event_kind, set_sql, params, payload = _route_block(
             kind, reason, source_status, prev_kind=_row_get(cur_row, "block_kind"),
-            prev_recurrences=int(_row_get(cur_row, "block_recurrences") or 0),
+            prev_recurrences=int(_row_get(cur_row, "block_recurrences") or 0) if same_reason else 0,
         )
         if rekind_reason:
             payload["requested_kind"] = requested_kind
@@ -3683,6 +3695,8 @@ def block_task(
             conn, task_id, outcome="blocked", status="blocked", summary=reason, synthesize=bool(reason),
         )
         _append_event(conn, task_id, event_kind, payload, run_id=run_id)
+        if event_kind == "decider_handoff":
+            _handoff_to_decider(conn, task_id, reason or "same block reason three times")
         blocked_task = get_task(conn, task_id)
         if kind == "dependency":
             # Historical ordering: the dependency lane fires inside the txn.
@@ -3707,7 +3721,7 @@ def _route_block(
     returned the task to the pool), so a stored ``block_kind`` equal to the
     incoming one means blocked -> unblocked -> re-block for the same cause
     (un-typed None compares equal to a prior un-typed block). At
-    ``BLOCK_RECURRENCE_LIMIT`` the task resumes its source phase with a Decider advisory.
+    the second identical reason warns and resumes; the third queues a Decider hand-back.
     """
     payload = {"reason": reason, "kind": kind, "source_status": source_status}
     if kind == "dependency":
@@ -3715,14 +3729,30 @@ def _route_block(
     recurrences = prev_recurrences + 1 if prev_kind == kind else 1
     set_sql = "block_kind    = ?,\n                       block_recurrences = ?"
     payload = {"reason": reason, "kind": kind, "recurrences": recurrences, "source_status": source_status}
-    if recurrences >= BLOCK_RECURRENCE_LIMIT:
-        payload["limit"] = BLOCK_RECURRENCE_LIMIT
-        payload["next_step"] = (
-            "Assess confidence with Jev or a second model; route low confidence and this card pointer "
-            "through fleet handoff to a Decider. Repeated reason alone does not stop the card."
-        )
+    if recurrences >= 3:
+        payload["target_role"] = "Decider"
+        payload["next_step"] = "Tasker hands this card to an available Decider; no automatic retry by the prior worker. Decider may release with a reason."
+        return "triage", "decider_handoff", set_sql, (kind, recurrences), payload
+    if recurrences == 2:
+        payload["next_step"] = "Warning: same reason twice. Resume once with a reason; a third recurrence hands the card to a Decider."
         return source_status, "degree_warning", set_sql, (kind, recurrences), payload
-    return "blocked", "blocked", set_sql, (kind, recurrences), payload
+    return ("todo" if kind == "needs_input" else "blocked"), "blocked", set_sql, (kind, recurrences), payload
+
+
+def _handoff_to_decider(conn, task_id: str, reason: str) -> bool:
+    """Queue scoped decision work without inventing a local Decider profile."""
+    row = conn.execute("SELECT assignee,status,claim_lock,current_run_id FROM tasks WHERE id=?", (task_id,)).fetchone()
+    if row is None or row["status"] == "running" or row["claim_lock"] is not None or row["current_run_id"] is not None:
+        return False
+    conn.execute("UPDATE tasks SET status='triage', assignee=NULL, block_kind=NULL WHERE id=?", (task_id,))
+    _append_event(conn, task_id, "assigned", {
+        "from": row["assignee"], "assignee": None, "target_role": "Decider", "reason": reason,
+    })
+    body = ("DECIDER HAND-BACK: " + reason + ". Tasker: hand this card and evidence to an available local or cross-node Decider. "
+        "The prior assignee does not auto-resume. A Decider may release the affected action with a reason; independent work can continue.")
+    _insert_comment(conn, task_id, "dispatcher", body, int(time.time()))
+    _append_event(conn, task_id, "commented", {"author": "dispatcher", "body": body})
+    return True
 
 
 def redact_review_value(value: Any) -> Any:
@@ -4385,7 +4415,7 @@ def keep_spec_triage_task(
             return False, "foreign fleet mirror cannot be promoted locally", None, "triage", False, None
 
         if _has_turner_hold(conn, task_id, row["block_kind"], row["title"], row["body"]):
-            return False, "task has active hold (needs_input, younger than 24 h)", None, "triage", False, None
+            return False, "task has active hold (needs_input, younger than 2 h)", None, "triage", False, None
 
         if _has_sticky_block(conn, task_id):
             return False, "task has active sticky block hold", None, "triage", False, None

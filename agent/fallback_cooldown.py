@@ -36,7 +36,7 @@ def switch_deferred_by_reset(agent, reason: "FailoverReason | None", reset_at) -
     if threshold <= 0:
         return False
     delay = _provider_reset_delay(reset_at)
-    if delay is None or delay >= threshold:
+    if delay is None or delay >= min(600, threshold):
         return False
     logging.info("Rate limit resets in %.0f s (< fallback.min_switch_reset_seconds=%.0f): staying on the primary", delay, threshold)
     return True
@@ -63,10 +63,10 @@ def _arm_rate_limit_cooldown(
     agent._rate_limit_backoff_count = backoff_count + 1
     provider_delay = _provider_reset_delay(reset_at)
     if provider_delay is not None:
-        backoff_seconds = math.ceil(provider_delay)
+        backoff_seconds = min(600, math.ceil(provider_delay))
         source = "provider reset"
     else:
-        cap = 1800 if (getattr(agent, "_long_lived_session", False) or getattr(agent, "_user_turn_count", 0) > 0) else 14400
+        cap = 600  # Owner default: next fixed-chain rung/Decider within ten minutes.
         backoff_seconds = min(60 * (2 ** backoff_count), cap)
         source = "exponential fallback"
     agent._rate_limited_until = time.monotonic() + backoff_seconds

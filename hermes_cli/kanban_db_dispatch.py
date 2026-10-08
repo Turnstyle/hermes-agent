@@ -2675,12 +2675,30 @@ def check_respawn_guard(
     #    reaches the breaker.
     rl_cooldown = _kb._resolve_rate_limit_cooldown_seconds()
     latest_run = conn.execute(
-        "SELECT outcome, ended_at, metadata, error FROM task_runs "
+        "SELECT id, outcome, ended_at, metadata, error FROM task_runs "
         "WHERE task_id = ? AND ended_at IS NOT NULL "
         # ``id`` breaks same-second ties so the newest run decides (checker round 1).
         "ORDER BY ended_at DESC, id DESC LIMIT 1",
         (task_id,),
     ).fetchone()
+    if latest_run is not None and latest_run["outcome"] in ("spawn_failed", "rate_limited"):
+        handled = conn.execute(
+            "SELECT 1 FROM task_events WHERE task_id=? AND kind='model_chain_handoff' AND run_id=? LIMIT 1",
+            (task_id, latest_run["id"]),
+        ).fetchone()
+        if handled is not None:
+            return None
+        ended_at = latest_run["ended_at"]
+        if ended_at is not None and now - int(ended_at) >= rl_cooldown:
+            with _kb.write_txn(conn):
+                handed_back = _kb._handoff_to_decider(conn, task_id,
+                    "failed start/rate limit cooldown elapsed (at most 10 minutes); "
+                    "select the next existing fixed model-chain rung without changing model/fallback keys, "
+                    "or release with a reason if that rung is unavailable")
+                if handed_back:
+                    _kb._append_event(conn, task_id, "model_chain_handoff",
+                        {"next_step": "next existing fixed chain rung or reasoned Decider release"}, run_id=latest_run["id"])
+            return "model_chain_handoff" if handed_back else "claim_race"
     if latest_run is not None and latest_run["outcome"] == "spawn_failed":
         if rl_cooldown > 0 and _kb._json_dict(latest_run["metadata"]).get("infrastructure"):
             ended_at = latest_run["ended_at"]

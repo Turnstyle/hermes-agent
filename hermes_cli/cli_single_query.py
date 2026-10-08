@@ -150,6 +150,16 @@ def _run_kanban_goal_loop_q(cli: "HermesCLI", first_response: str, run_turn=None
         with _kbc.connect_closing() as c:
             _kb.block_task(c, task_id, reason=reason, expected_run_id=worker_run_id)
 
+    from hermes_cli.kanban_budget_handback import handback_budget
+
+    def _handback(reason: str, summary: str) -> bool:
+        with _kbc.connect_closing() as c:
+            return handback_budget(
+                c, task_id, expected_run_id=worker_run_id,
+                claim_lock=os.environ.get("HERMES_KANBAN_CLAIM_LOCK", ""),
+                reason=reason, summary=summary,
+            )
+
     def _blocked_payload_rows(conn, limit: int):
         return conn.execute(
             "SELECT payload FROM task_events WHERE task_id = ? AND kind = 'blocked' "
@@ -179,6 +189,7 @@ def _run_kanban_goal_loop_q(cli: "HermesCLI", first_response: str, run_turn=None
     _run_loop(
         task_id=task_id, goal_text=goal_text, run_turn=run_turn or _quiet_turn,
         task_status_fn=_task_status, block_fn=_block,
+        handback_fn=_handback,
         max_turns=task.goal_max_turns or _DEF_TURNS, first_response=first_response or "",
         log=log or (lambda m: logger.info("%s", m)),
         block_is_bookkeeping_fn=_block_is_bookkeeping,
