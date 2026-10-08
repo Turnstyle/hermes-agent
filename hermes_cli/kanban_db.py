@@ -2403,87 +2403,91 @@ def recompute_ready(conn: sqlite3.Connection, failure_limit: int = None) -> int:
         ).fetchall()
         for row in todo_rows:
             task_id = row["id"]
-            if not promotion_in_scope(conn, task_id):
-                continue
-            cur_status = row["status"]
-            # Ownership FIRST, before the sticky-block check or anything else: a
-            # foreign-owned mirror is entirely out of scope for automatic
-            # promotion — no write, no event, no outbox entry — whatever its
-            # local status / blocked reason / dependency state.
-            if _is_foreign_fleet_mirror(conn, task_id, installed_node_id):
-                continue
-            if cur_status == "blocked" and _needs_input_hold_state(conn, task_id, row["block_kind"]) == "expired":
-                _handoff_to_decider(conn, task_id, "needs_input expired after 2 hours")
-                continue
-            if cur_status == "blocked" and _has_sticky_block(conn, task_id):
-                # Explicit human-intervention block; only ``unblock_task`` may exit it.
-                continue
-            if cur_status == "todo" and _has_turner_hold(
-                conn, task_id, row["block_kind"], row["title"], row["body"],
-            ):
-                # Fresh needs_input hold; unblock/promote can release it sooner.
-                continue
-            if cur_status == "todo" and _needs_input_hold_state(conn, task_id, row["block_kind"]) == "expired":
-                _handoff_to_decider(conn, task_id, "needs_input expired after 2 hours")
-                continue
-            parents = conn.execute(
-                "SELECT t.status FROM tasks t "
-                "JOIN task_links l ON l.parent_id = t.id "
-                "WHERE l.child_id = ?", (task_id,),
-            ).fetchall()
-            if cur_status == "blocked":
-                recovery = conn.execute(
-                    "SELECT 1 FROM task_events e JOIN task_block_entries b "
-                    "ON b.task_id = e.task_id WHERE e.task_id = ? "
-                    "AND e.id > b.event_id "
-                    "AND e.kind IN ('unblocked', 'gave_up', 'promoted_manual') LIMIT 1",
-                    (task_id,),
-                ).fetchone()
-                if recovery is None:
-                    automatic = conn.execute(
-                        "SELECT 1 FROM task_events WHERE task_id=? AND kind='gave_up' "
-                        "AND id > COALESCE((SELECT event_id FROM task_block_entries WHERE task_id=?),0) "
-                        "ORDER BY id DESC LIMIT 1", (task_id,task_id),
-                    ).fetchone()
-                    if automatic is None:
-                        # Older evidence cannot release the current imported blocked snapshot.
+            try:
+                with _card_write_savepoint(conn):
+                    if not promotion_in_scope(conn, task_id):
                         continue
-            if all(p["status"] in ("done", "archived") for p in parents):
-                resume_status = _resume_status_from_events(conn, task_id)
-                if cur_status == "blocked":
-                    # An automatic legacy breaker may retry with a visible advisory;
-                    # explicit blocks and imported snapshot custody were checked above.
-                    failures = int(row["consecutive_failures"] or 0)
-                    task_limit = row["max_retries"]
-                    effective_limit = (
-                        int(task_limit) if task_limit is not None
-                        else int(failure_limit)
-                    )
-                    if failures >= effective_limit:
-                        from hermes_cli.kanban_db_dispatch import _record_degree_warning
-                        _record_degree_warning(conn, task_id, "legacy_failure_counter")
-                    conn.execute(
-                        "UPDATE tasks SET status = ? "
-                        "WHERE id = ? AND status = 'blocked'", (resume_status, task_id),
-                    )
-                else:
-                    conn.execute(
-                        "UPDATE tasks SET status = ? WHERE id = ? AND status = 'todo'",
-                        (resume_status, task_id),
-                    )
-                    if _needs_input_hold_state(conn, task_id, row["block_kind"]) == "expired":
-                        _insert_comment(
-                            conn, task_id, "dispatcher",
-                            "NEEDS-INPUT HOLD EXPIRED: nobody answered in 24 hours, so this card moves on. "
-                            "The assignee takes the recommended option written in the card. "
-                            f'To hold it again run: hermes kanban block {task_id} "<reason>" --kind needs_input',
-                            int(time.time()),
+                    cur_status = row["status"]
+                    # Ownership FIRST, before the sticky-block check or anything else: a
+                    # foreign-owned mirror is entirely out of scope for automatic
+                    # promotion — no write, no event, no outbox entry — whatever its
+                    # local status / blocked reason / dependency state.
+                    if _is_foreign_fleet_mirror(conn, task_id, installed_node_id):
+                        continue
+                    if cur_status == "blocked" and _needs_input_hold_state(conn, task_id, row["block_kind"]) == "expired":
+                        _handoff_to_decider(conn, task_id, "needs_input expired after 2 hours")
+                        continue
+                    if cur_status == "blocked" and _has_sticky_block(conn, task_id):
+                        # Explicit human-intervention block; only ``unblock_task`` may exit it.
+                        continue
+                    if cur_status == "todo" and _has_turner_hold(
+                        conn, task_id, row["block_kind"], row["title"], row["body"],
+                    ):
+                        # Fresh needs_input hold; unblock/promote can release it sooner.
+                        continue
+                    if cur_status == "todo" and _needs_input_hold_state(conn, task_id, row["block_kind"]) == "expired":
+                        _handoff_to_decider(conn, task_id, "needs_input expired after 2 hours")
+                        continue
+                    parents = conn.execute(
+                        "SELECT t.status FROM tasks t "
+                        "JOIN task_links l ON l.parent_id = t.id "
+                        "WHERE l.child_id = ?", (task_id,),
+                    ).fetchall()
+                    if cur_status == "blocked":
+                        recovery = conn.execute(
+                            "SELECT 1 FROM task_events e JOIN task_block_entries b "
+                            "ON b.task_id = e.task_id WHERE e.task_id = ? "
+                            "AND e.id > b.event_id "
+                            "AND e.kind IN ('unblocked', 'gave_up', 'promoted_manual') LIMIT 1",
+                            (task_id,),
+                        ).fetchone()
+                        if recovery is None:
+                            automatic = conn.execute(
+                                "SELECT 1 FROM task_events WHERE task_id=? AND kind='gave_up' "
+                                "AND id > COALESCE((SELECT event_id FROM task_block_entries WHERE task_id=?),0) "
+                                "ORDER BY id DESC LIMIT 1", (task_id,task_id),
+                            ).fetchone()
+                            if automatic is None:
+                                # Older evidence cannot release the current imported blocked snapshot.
+                                continue
+                    if all(p["status"] in ("done", "archived") for p in parents):
+                        resume_status = _resume_status_from_events(conn, task_id)
+                        if cur_status == "blocked":
+                            # An automatic legacy breaker may retry with a visible advisory;
+                            # explicit blocks and imported snapshot custody were checked above.
+                            failures = int(row["consecutive_failures"] or 0)
+                            task_limit = row["max_retries"]
+                            effective_limit = (
+                                int(task_limit) if task_limit is not None
+                                else int(failure_limit)
+                            )
+                            if failures >= effective_limit:
+                                from hermes_cli.kanban_db_dispatch import _record_degree_warning
+                                _record_degree_warning(conn, task_id, "legacy_failure_counter")
+                            conn.execute(
+                                "UPDATE tasks SET status = ? "
+                                "WHERE id = ? AND status = 'blocked'", (resume_status, task_id),
+                            )
+                        else:
+                            conn.execute(
+                                "UPDATE tasks SET status = ? WHERE id = ? AND status = 'todo'",
+                                (resume_status, task_id),
+                            )
+                            if _needs_input_hold_state(conn, task_id, row["block_kind"]) == "expired":
+                                _insert_comment(
+                                    conn, task_id, "dispatcher",
+                                    "NEEDS-INPUT HOLD EXPIRED: nobody answered in 24 hours, so this card moves on. "
+                                    "The assignee takes the recommended option written in the card. "
+                                    f'To hold it again run: hermes kanban block {task_id} "<reason>" --kind needs_input',
+                                    int(time.time()),
+                                )
+                        _append_event(
+                            conn, task_id, "promoted",
+                            {"status": resume_status} if resume_status != "ready" else None,
                         )
-                _append_event(
-                    conn, task_id, "promoted",
-                    {"status": resume_status} if resume_status != "ready" else None,
-                )
-                promoted += 1
+                        promoted += 1
+            except Exception:
+                _log.warning("kanban recompute_ready: card %s failed; rolled back this card and continuing tick", task_id, exc_info=True)
     return promoted
 
 
@@ -3739,20 +3743,66 @@ def _route_block(
     return ("todo" if kind == "needs_input" else "blocked"), "blocked", set_sql, (kind, recurrences), payload
 
 
-def _handoff_to_decider(conn, task_id: str, reason: str) -> bool:
-    """Queue scoped decision work without inventing a local Decider profile."""
-    row = conn.execute("SELECT assignee,status,claim_lock,current_run_id FROM tasks WHERE id=?", (task_id,)).fetchone()
-    if row is None or row["status"] == "running" or row["claim_lock"] is not None or row["current_run_id"] is not None:
+@contextlib.contextmanager
+def _card_write_savepoint(conn):
+    """Roll back this card's writes without discarding other cards in the tick."""
+    name = "card_" + secrets.token_hex(8)
+    conn.execute(f"SAVEPOINT {name}")
+    try:
+        yield
+    except Exception:
+        conn.execute(f"ROLLBACK TO {name}")
+        raise
+    finally:
+        conn.execute(f"RELEASE {name}")
+
+
+def _local_triage_owner(conn, prior_assignee):
+    node = _fleet_adapter_installed_node_id(conn)
+    if node is None:
+        # Legacy boards have no node registry. Retain their existing owner.
+        if prior_assignee and str(prior_assignee).strip():
+            return prior_assignee
+        raise ValueError("no node-bound triage owner on this board")
+    candidates = {
+        "sheldon": ("shld-decider",),
+        "turnerbook": ("tb-decider",),
+        "snowdrop": ("snow-decider",),
+        "max": ("max-king", "max-cndr"),
+        "rosie": ("rosie-king", "rosie-cndr"),
+    }.get(node, ())
+    for profile in candidates:
+        home = conn.execute(
+            "SELECT home_node FROM fleet_kanban_assignee_homes WHERE assignee=?", (profile,),
+        ).fetchone()
+        if home is not None and home[0] == node:
+            return profile
+    raise ValueError(f"no registered local triage owner for node {node!r}")
+
+
+def _handoff_to_decider(conn, task_id: str, reason: str, *, raise_errors: bool = False) -> bool:
+    """Keep a registered local owner while routing the decision to a Decider."""
+    try:
+        with _card_write_savepoint(conn):
+            row = conn.execute("SELECT assignee,status,claim_lock,current_run_id FROM tasks WHERE id=?", (task_id,)).fetchone()
+            if row is None or row["status"] == "running" or row["claim_lock"] is not None or row["current_run_id"] is not None:
+                return False
+            owner = _local_triage_owner(conn, row["assignee"])
+            conn.execute("UPDATE tasks SET status='triage', assignee=?, block_kind=NULL WHERE id=?", (owner, task_id))
+            _append_event(conn, task_id, "assigned", {
+                "from": row["assignee"], "assignee": owner, "target_role": "Decider", "reason": reason,
+            })
+            body = ("DECIDER HAND-BACK: " + reason + ". Local triage owner: " + owner + ". Decider route: "
+                "the local Decider handles this card where available; otherwise the local King/Conductor routes the evidence to an available cross-node Decider. "
+                "The prior worker does not auto-resume. A Decider may release the affected action with a reason; independent work can continue.")
+            _insert_comment(conn, task_id, "dispatcher", body, int(time.time()))
+            _append_event(conn, task_id, "commented", {"author": "dispatcher", "body": body})
+        return True
+    except Exception:
+        _log.warning("kanban Decider handoff: card %s failed; rolled back handoff; continuing", task_id, exc_info=True)
+        if raise_errors:
+            raise
         return False
-    conn.execute("UPDATE tasks SET status='triage', assignee=NULL, block_kind=NULL WHERE id=?", (task_id,))
-    _append_event(conn, task_id, "assigned", {
-        "from": row["assignee"], "assignee": None, "target_role": "Decider", "reason": reason,
-    })
-    body = ("DECIDER HAND-BACK: " + reason + ". Tasker: hand this card and evidence to an available local or cross-node Decider. "
-        "The prior assignee does not auto-resume. A Decider may release the affected action with a reason; independent work can continue.")
-    _insert_comment(conn, task_id, "dispatcher", body, int(time.time()))
-    _append_event(conn, task_id, "commented", {"author": "dispatcher", "body": body})
-    return True
 
 
 def redact_review_value(value: Any) -> Any:

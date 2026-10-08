@@ -2690,15 +2690,19 @@ def check_respawn_guard(
             return None
         ended_at = latest_run["ended_at"]
         if ended_at is not None and now - int(ended_at) >= rl_cooldown:
-            with _kb.write_txn(conn):
-                handed_back = _kb._handoff_to_decider(conn, task_id,
-                    "failed start/rate limit cooldown elapsed (at most 10 minutes); "
-                    "select the next existing fixed model-chain rung without changing model/fallback keys, "
-                    "or release with a reason if that rung is unavailable")
-                if handed_back:
-                    _kb._append_event(conn, task_id, "model_chain_handoff",
-                        {"next_step": "next existing fixed chain rung or reasoned Decider release"}, run_id=latest_run["id"])
-            return "model_chain_handoff" if handed_back else "claim_race"
+            try:
+                with _kb.write_txn(conn), _kb._card_write_savepoint(conn):
+                    handed_back = _kb._handoff_to_decider(conn, task_id,
+                        "failed start/rate limit cooldown elapsed (at most 10 minutes); "
+                        "select the next existing fixed model-chain rung without changing model/fallback keys, "
+                        "or release with a reason if that rung is unavailable", raise_errors=True)
+                    if handed_back:
+                        _kb._append_event(conn, task_id, "model_chain_handoff",
+                            {"next_step": "next existing fixed chain rung or reasoned Decider release"}, run_id=latest_run["id"])
+                return "model_chain_handoff" if handed_back else "claim_race"
+            except Exception:
+                _kb._log.warning("kanban next-rung handoff: card %s failed; rolled back handoff; continuing tick", task_id, exc_info=True)
+                return None
     if latest_run is not None and latest_run["outcome"] == "spawn_failed":
         if rl_cooldown > 0 and _kb._json_dict(latest_run["metadata"]).get("infrastructure"):
             ended_at = latest_run["ended_at"]
