@@ -1261,6 +1261,8 @@ def _maybe_auto_subscribe(conn: Any, task_id: str) -> bool:
 def _handle_unblock(args: dict, **kw) -> str:
     """Transition a blocked task to ready, or todo while parents remain open."""
     _reject_delegated_child_mutation("kanban_unblock")
+    from hermes_cli.kanban_db_moves import validate_board_move_text
+    validate_board_move_text(evidence=args.get("evidence"))
     if _has_worker_move_identity():
         return _handle_worker_board_move(args, "unblock")
     _require_orchestrator_tool("kanban_unblock")
@@ -1291,8 +1293,10 @@ def _handle_link(args: dict, **kw) -> str:
 
 
 def _handle_worker_board_move(args: dict, move: str) -> str:
-    from hermes_cli.kanban_db_moves import _worker_pins, worker_board_move
+    from hermes_cli.kanban_db_moves import _worker_pins, worker_board_move, validate_board_move_text
     _worker_pins(args.get("board"))
+    validate_board_move_text(evidence=args.get("evidence"), reason=args.get("reason"),
+                             require_evidence=move == "unblock")
     tid = args.get("task_id")
     _check(isinstance(tid, str) and tid.strip(), "task_id is required")
     with _board(args.get("board")) as (_kb, conn):
@@ -1306,16 +1310,16 @@ def _handle_worker_board_move(args: dict, move: str) -> str:
 @_kanban_handler("kanban_promote")
 def _handle_promote(args: dict, **kw) -> str:
     _reject_delegated_child_mutation("kanban_promote")
+    from hermes_cli.kanban_db_moves import promote_todo_task, validate_board_move_text
+    validate_board_move_text(reason=args.get("reason"))
     if _has_worker_move_identity():
         return _handle_worker_board_move(args, "promote")
     _require_orchestrator_tool("kanban_promote")
     tid = args.get("task_id")
     _check(isinstance(tid, str) and tid.strip(), "task_id is required")
-    with _board(args.get("board")) as (kb, conn):
-        ok, reason = kb.promote_task(conn, tid.strip(), actor=_persisted_identity(),
-                                     reason=_redact_opt(args.get("reason")))
-        _check(ok, reason or "could not promote task")
-        return _ok(task_id=tid.strip(), status=kb.get_task(conn, tid.strip()).status)
+    with _board(args.get("board")) as (_kb, conn):
+        status = promote_todo_task(conn, tid.strip(), actor=_persisted_identity(), reason=args.get("reason"))
+        return _ok(task_id=tid.strip(), status=status)
 
 
 def _has_worker_move_identity() -> bool:

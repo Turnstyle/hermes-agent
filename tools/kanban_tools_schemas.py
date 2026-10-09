@@ -541,7 +541,8 @@ KANBAN_UNBLOCK_SCHEMA = _schema(
     {
         "task_id": _prop("string", "Blocked task id to move to ready or parent-gated todo."),
         "expected_blocked_event": _prop("integer", "Latest blocked event id. Required for worker unblock."),
-        "evidence": _prop("string", "Evidence that the block condition is resolved. Required for workers."),
+        "evidence": {**_prop("string", "Evidence that the block condition is resolved. Required for workers."),
+                     "maxLength": 4000},
     },
     ["task_id"],
 )
@@ -565,10 +566,11 @@ KANBAN_LINK_SCHEMA = _schema(
 
 KANBAN_PROMOTE_SCHEMA = _schema(
     "kanban_promote",
-    "Promote a task to ready when parents are terminal. Orchestrators may promote todo or "
-    "blocked cards. Opted-in native dispatcher parents may only promote other todo cards "
+    "Promote a todo task to ready when parents are terminal, without live claims or review "
+    "resumption provenance. Use kanban_unblock for blocked cards. Opted-in native dispatcher "
+    "parents may only promote other todo cards "
     "on their pinned board, without bypassing review resumption.",
     {"task_id": _prop("string", "Task to promote."),
-     "reason": _prop("string", "Reason for the manual promotion audit event.")},
+     "reason": {**_prop("string", "Reason for the manual promotion audit event."), "maxLength": 4000}},
     ["task_id"],
 )

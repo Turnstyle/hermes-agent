@@ -1449,7 +1449,7 @@ Every transition appends a row to `task_events`. Each row carries an optional `r
 Kanban is deliberately single-host. `~/.hermes/kanban.db` is a local SQLite file and the dispatcher spawns workers on the same machine. Running a shared board across two hosts is not supported — there's no coordination primitive for "worker X on host A, worker Y on host B," and the crash-detection path assumes PIDs are host-local. If you need multi-host, run an independent board per host and use `delegate_task` / a message queue to bridge them.
 
 
-### Opt-in worker board moves
+## opt-in worker board moves
 
 `kanban.worker_board_moves` defaults to `false`. Set it to boolean `true` in the
 worker profile's config to let a verified native dispatcher parent promote or
@@ -1468,5 +1468,18 @@ Both moves refuse self targets, active target claims and open runs. Source task,
 run, profile, lock, lease, PID and process fingerprint are verified under the same
 write transaction as the target checks. Audit events retain `unblocked` and
 `promoted_manual`, with trusted source identity and redacted evidence/reason.
-Orchestrators retain normal unblock and promote behavior. Other lifecycle tools
-and descendant write fences are unchanged.
+The new native `kanban_promote` tool also restricts orchestrators to `todo` cards
+with satisfied dependencies, no live claims/runs, and no review-resumption
+provenance. Use `kanban_unblock` for blocked cards; ordinary orchestrator unblock
+and the human CLI's existing `hermes kanban promote` behavior are unchanged.
+Other lifecycle tools and descendant write fences are unchanged.
+
+Any residual dispatcher identity (`HERMES_KANBAN_TASK`, `HERMES_KANBAN_RUN_ID`,
+or `HERMES_KANBAN_CLAIM_LOCK`) routes board moves through worker authority and
+fails closed if that identity is partial. An ordinary orchestrator has all three
+absent. A stray run or lock pin cannot grant orchestrator board-move authority.
+
+Evidence and reason are limited to 4000 characters before redaction. Excess or
+malformed values are rejected rather than truncated. Worker unblock requires
+nonempty string evidence; promotion reason is optional and must be a string
+when supplied.

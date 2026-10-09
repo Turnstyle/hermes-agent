@@ -134,15 +134,9 @@ def worker_board_move(conn, task_id: str, *, move: str, board: str | None = None
     with kb.write_txn(conn):
         audit = _verify_worker(conn, board)
         _require(task_id != audit["source_task_id"], "workers cannot move their own source card")
-        target = conn.execute("SELECT * FROM tasks WHERE id = ?", (task_id,)).fetchone()
-        _require(target is not None, "target task not found")
-        open_run = conn.execute("SELECT 1 FROM task_runs WHERE task_id = ? AND ended_at IS NULL",
-                                (task_id,)).fetchone()
-        _require(not target["claim_lock"] and not target["current_run_id"] and not open_run,
-                 "target has a claim or open run")
-        _require(not target["worker_pid"] or not kb._worker_alive(
-            target["worker_pid"], target["worker_started_at"]), "target worker is still live")
+        validate_board_move_text(evidence=evidence, reason=reason, require_evidence=move == "unblock")
         if move == "unblock":
+            target = _idle_target(conn, task_id)
             _require(target["status"] == "blocked", "worker unblock requires blocked status")
             _require(type(expected_blocked_event) is int and expected_blocked_event > 0,
                      "expected_blocked_event must be a positive integer, not bool")
@@ -152,16 +146,60 @@ def worker_board_move(conn, task_id: str, *, move: str, board: str | None = None
             claim = conn.execute("SELECT 1 FROM task_events WHERE task_id = ? AND kind = 'claimed' "
                                  "AND id > ? LIMIT 1", (task_id, expected_blocked_event)).fetchone()
             _require(not claim, "target was claimed after the blocked event")
-            _require(isinstance(evidence, str) and evidence.strip(), "evidence is required")
             audit.update(expected_blocked_event=expected_blocked_event,
                          evidence=kb.redact_review_value(evidence.strip()))
             _require(_unblock_in_txn(conn, task_id, audit), "target changed during unblock")
         else:
-            _require(target["status"] == "todo", "worker promote requires todo status")
-            _require(kb._resume_status_from_events(conn, task_id) != "review",
-                     "worker promote cannot bypass review resumption")
-            _require(kb._parents_satisfied(conn, task_id), "unsatisfied parent dependencies")
-            conn.execute("UPDATE tasks SET status = 'ready' WHERE id = ? AND status = 'todo'", (task_id,))
             audit["reason"] = kb.redact_review_value(reason)
-            kb._append_event(conn, task_id, "promoted_manual", audit)
+            _promote_todo_in_txn(conn, task_id, audit)
+        return kb._task_status(conn, task_id)
+
+
+BOARD_MOVE_TEXT_MAX = 4000
+
+
+def validate_board_move_text(*, evidence=None, reason=None, require_evidence: bool = False) -> None:
+    """Reject malformed/oversized audit text before redaction; never truncate."""
+    for name, value in (("evidence", evidence), ("reason", reason)):
+        _require(value is None or isinstance(value, str), f"{name} must be a string or None")
+        _require(value is None or len(value) <= BOARD_MOVE_TEXT_MAX,
+                 f"{name} must be at most {BOARD_MOVE_TEXT_MAX} characters")
+    if require_evidence:
+        _require(isinstance(evidence, str) and evidence.strip(), "evidence is required")
+
+
+def _idle_target(conn, task_id: str):
+    from hermes_cli import kanban_db as kb
+
+    target = conn.execute("SELECT * FROM tasks WHERE id = ?", (task_id,)).fetchone()
+    _require(target is not None, "target task not found")
+    open_run = conn.execute("SELECT 1 FROM task_runs WHERE task_id = ? AND ended_at IS NULL",
+                            (task_id,)).fetchone()
+    _require(not target["claim_lock"] and not target["current_run_id"] and not open_run,
+             "target has a claim or open run")
+    _require(not target["worker_pid"] or not kb._worker_alive(
+        target["worker_pid"], target["worker_started_at"]), "target worker is still live")
+    return target
+
+
+def _promote_todo_in_txn(conn, task_id: str, audit: dict) -> None:
+    """Safe native promotion for either caller; caller owns the write transaction."""
+    from hermes_cli import kanban_db as kb
+
+    target = _idle_target(conn, task_id)
+    _require(target["status"] == "todo", "native promote requires todo status; use kanban_unblock for blocked cards")
+    _require(kb._resume_status_from_events(conn, task_id) != "review",
+             "native promote cannot bypass review resumption")
+    _require(kb._parents_satisfied(conn, task_id), "unsatisfied parent dependencies")
+    conn.execute("UPDATE tasks SET status = 'ready' WHERE id = ? AND status = 'todo'", (task_id,))
+    kb._append_event(conn, task_id, "promoted_manual", audit)
+
+
+def promote_todo_task(conn, task_id: str, *, actor: str, reason: str | None = None) -> str:
+    """Native orchestrator tool promotion; human CLI promote_task is unchanged."""
+    from hermes_cli import kanban_db as kb
+
+    with kb.write_txn(conn):
+        validate_board_move_text(reason=reason)
+        _promote_todo_in_txn(conn, task_id, {"actor": actor, "reason": kb.redact_review_value(reason)})
         return kb._task_status(conn, task_id)

@@ -346,7 +346,7 @@ def test_visibility_does_not_create_db(board, monkeypatch):
 def test_orchestrator_retains_ordinary_moves(board, monkeypatch):
     conn = board[0]
     first = target(board)
-    second = target(board)
+    second = target(board, 'todo')
     for name in ('TASK', 'RUN_ID', 'CLAIM_LOCK'):
         monkeypatch.delenv('HERMES_KANBAN_' + name)
     assert call('unblock', first) == {'ok': True, 'task_id': first, 'status': 'ready'}
