@@ -87,7 +87,12 @@ sessions still have zero `kanban_*` schema footprint unless configured.
   `kanban_block`, `kanban_heartbeat`, `kanban_comment`, `kanban_create`,
   `kanban_link`; profiles that explicitly enable the `kanban` toolset
   outside a dispatcher-spawned task also get `kanban_list` and
-  `kanban_unblock` for board routing.
+  `kanban_unblock` and `kanban_promote` for board routing. Native dispatcher
+  parent workers can opt into moving other cards on their pinned board with
+  `kanban.worker_board_moves: true`. Worker promote accepts only `todo`; worker
+  unblock requires evidence and the latest blocked event's integer id from
+  `kanban_show`. Children, descendants, cron and separate MCP processes receive
+  no worker board-move authority.
 - **Dispatcher** runs inside the gateway by default
   (`kanban.dispatch_in_gateway: true`) — reclaims stale claims,
   promotes ready tasks, atomically claims, spawns assigned profiles.

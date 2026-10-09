@@ -534,12 +534,14 @@ KANBAN_UNBLOCK_SCHEMA = _schema(
     "kanban_unblock",
     (
         "Unblock a Kanban task. It moves to ready when all parents are done, "
-        "or todo while any parent remains open. Orchestrator-only — only "
-        "profiles with the kanban toolset can unblock routed work; "
-        "dispatcher-spawned task workers never see this tool."
+        "or todo while any parent remains open, preserving review resumption. "
+        "Opted-in native dispatcher parents may unblock other cards on their pinned board "
+        "with evidence and the latest blocked event id from kanban_show."
     ),
     {
         "task_id": _prop("string", "Blocked task id to move to ready or parent-gated todo."),
+        "expected_blocked_event": _prop("integer", "Latest blocked event id. Required for worker unblock."),
+        "evidence": _prop("string", "Evidence that the block condition is resolved. Required for workers."),
     },
     ["task_id"],
 )
@@ -558,4 +560,15 @@ KANBAN_LINK_SCHEMA = _schema(
         "child_id":  {"type": "string", "description": "Child task id."},
     },
     ["parent_id", "child_id"],
+)
+
+
+KANBAN_PROMOTE_SCHEMA = _schema(
+    "kanban_promote",
+    "Promote a task to ready when parents are terminal. Orchestrators may promote todo or "
+    "blocked cards. Opted-in native dispatcher parents may only promote other todo cards "
+    "on their pinned board, without bypassing review resumption.",
+    {"task_id": _prop("string", "Task to promote."),
+     "reason": _prop("string", "Reason for the manual promotion audit event.")},
+    ["task_id"],
 )

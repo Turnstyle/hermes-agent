@@ -4266,6 +4266,7 @@
                 "kanban_heartbeat",
                 "kanban_link",
                 "kanban_list",
+                "kanban_promote",
                 "kanban_request_changes",
                 "kanban_request_review",
                 "kanban_show",

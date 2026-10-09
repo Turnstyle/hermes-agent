@@ -1447,3 +1447,26 @@ Every transition appends a row to `task_events`. Each row carries an optional `r
 ## Out of scope
 
 Kanban is deliberately single-host. `~/.hermes/kanban.db` is a local SQLite file and the dispatcher spawns workers on the same machine. Running a shared board across two hosts is not supported — there's no coordination primitive for "worker X on host A, worker Y on host B," and the crash-detection path assumes PIDs are host-local. If you need multi-host, run an independent board per host and use `delegate_task` / a message queue to bridge them.
+
+
+### Opt-in worker board moves
+
+`kanban.worker_board_moves` defaults to `false`. Set it to boolean `true` in the
+worker profile's config to let a verified native dispatcher parent promote or
+unblock another card on its exact pinned board. This permission does not extend
+to delegated children, spawned descendants, cron sessions, CLI commands, or a
+separate MCP server process. Changing tool visibility takes effect next session.
+
+Workers use `kanban_promote` only for `todo` cards with all parents terminal.
+Blocked, scheduled, triage and review cards cannot use worker promotion; review
+resumption cannot be bypassed. For `kanban_unblock`, read `kanban_show` and supply
+the latest `blocked` event's integer `id` as `expected_blocked_event`, together
+with evidence that resolves the block. A stale token or intervening claim fails.
+Unblock preserves review resumption and lands in `todo` while parents remain open.
+
+Both moves refuse self targets, active target claims and open runs. Source task,
+run, profile, lock, lease, PID and process fingerprint are verified under the same
+write transaction as the target checks. Audit events retain `unblocked` and
+`promoted_manual`, with trusted source identity and redacted evidence/reason.
+Orchestrators retain normal unblock and promote behavior. Other lifecycle tools
+and descendant write fences are unchanged.

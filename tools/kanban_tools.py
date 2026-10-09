@@ -24,7 +24,7 @@ from tools.kanban_tools_schemas import (
     KANBAN_ATTACH_URL_SCHEMA, KANBAN_ATTACHMENTS_SCHEMA, KANBAN_BLOCK_SCHEMA, KANBAN_COMMENT_SCHEMA,
     KANBAN_COMPLETE_SCHEMA, KANBAN_CREATE_SCHEMA, KANBAN_HEARTBEAT_SCHEMA, KANBAN_LINK_SCHEMA,
     KANBAN_LIST_SCHEMA, KANBAN_REQUEST_CHANGES_SCHEMA, KANBAN_REQUEST_REVIEW_SCHEMA,
-    KANBAN_SCHEDULE_SCHEMA, KANBAN_SHOW_SCHEMA, KANBAN_UNBLOCK_SCHEMA)
+    KANBAN_SCHEDULE_SCHEMA, KANBAN_SHOW_SCHEMA, KANBAN_UNBLOCK_SCHEMA, KANBAN_PROMOTE_SCHEMA)
 
 logger = logging.getLogger(__name__)
 
@@ -427,7 +427,7 @@ _TASK_SUMMARY_FIELDS = tuple(
     "created_at started_at completed_at current_run_id model_override provider_override".split())
 _RUN_FIELDS = tuple("id profile status outcome summary error metadata started_at ended_at".split())
 _COMMENT_FIELDS = ("author", "body", "created_at")
-_EVENT_FIELDS = ("kind", "payload", "created_at", "run_id")
+_EVENT_FIELDS = ("id", "kind", "payload", "created_at", "run_id")
 _ATTACHMENT_FIELDS = tuple(
     "id filename content_type size uploaded_by stored_path created_at".split())
 _CREATED_FIELDS = ("status", "workspace_kind", "workspace_path", "project_id")
@@ -1261,6 +1261,8 @@ def _maybe_auto_subscribe(conn: Any, task_id: str) -> bool:
 def _handle_unblock(args: dict, **kw) -> str:
     """Transition a blocked task to ready, or todo while parents remain open."""
     _reject_delegated_child_mutation("kanban_unblock")
+    if _has_worker_move_identity():
+        return _handle_worker_board_move(args, "unblock")
     _require_orchestrator_tool("kanban_unblock")
     tid = args.get("task_id")
     _check(tid, "task_id is required")
@@ -1288,10 +1290,53 @@ def _handle_link(args: dict, **kw) -> str:
                    **({"gated_by": parent_id} if gated else {}))
 
 
+def _handle_worker_board_move(args: dict, move: str) -> str:
+    from hermes_cli.kanban_db_moves import _worker_pins, worker_board_move
+    _worker_pins(args.get("board"))
+    tid = args.get("task_id")
+    _check(isinstance(tid, str) and tid.strip(), "task_id is required")
+    with _board(args.get("board")) as (_kb, conn):
+        status = worker_board_move(
+            conn, tid.strip(), move=move, board=args.get("board"),
+            expected_blocked_event=args.get("expected_blocked_event"),
+            evidence=args.get("evidence"), reason=args.get("reason"))
+        return _ok(task_id=tid.strip(), status=status)
+
+
+@_kanban_handler("kanban_promote")
+def _handle_promote(args: dict, **kw) -> str:
+    _reject_delegated_child_mutation("kanban_promote")
+    if _has_worker_move_identity():
+        return _handle_worker_board_move(args, "promote")
+    _require_orchestrator_tool("kanban_promote")
+    tid = args.get("task_id")
+    _check(isinstance(tid, str) and tid.strip(), "task_id is required")
+    with _board(args.get("board")) as (kb, conn):
+        ok, reason = kb.promote_task(conn, tid.strip(), actor=_persisted_identity(),
+                                     reason=_redact_opt(args.get("reason")))
+        _check(ok, reason or "could not promote task")
+        return _ok(task_id=tid.strip(), status=kb.get_task(conn, tid.strip()).status)
+
+
+def _has_worker_move_identity() -> bool:
+    return any(os.environ.get(key) for key in (
+        "HERMES_KANBAN_TASK", "HERMES_KANBAN_RUN_ID", "HERMES_KANBAN_CLAIM_LOCK"))
+
+
+@no_cache_check_fn
+def _check_kanban_board_moves() -> bool:
+    if _has_worker_move_identity():
+        from hermes_cli.kanban_db_moves import worker_moves_visible
+        return worker_moves_visible()
+    if _delegation_ctx("is_delegated_child_process_context", True):
+        return False
+    return _check_kanban_orchestrator_mode()
+
+
 # --- Registration (order preserved: it is the order tools appear in the schema) ---
 
-# kanban_list / kanban_unblock route the board and are hidden from task workers.
-_ORCHESTRATOR_TOOLS = frozenset({"kanban_list", "kanban_unblock"})
+# Board discovery stays orchestrator-only; moves have their own strict opt-in gate.
+_ORCHESTRATOR_TOOLS = frozenset({"kanban_list"})
 _TOOLS = (
     ("kanban_show", KANBAN_SHOW_SCHEMA, _handle_show, "📋"),
     ("kanban_list", KANBAN_LIST_SCHEMA, _handle_list, "📋"),
@@ -1307,9 +1352,12 @@ _TOOLS = (
     ("kanban_attachments", KANBAN_ATTACHMENTS_SCHEMA, _handle_attachments, "📎"),
     ("kanban_create", KANBAN_CREATE_SCHEMA, _handle_create, "➕"),
     ("kanban_unblock", KANBAN_UNBLOCK_SCHEMA, _handle_unblock, "▶"),
+    ("kanban_promote", KANBAN_PROMOTE_SCHEMA, _handle_promote, "▶"),
     ("kanban_link", KANBAN_LINK_SCHEMA, _handle_link, "🔗"))
 
 for _name, _sch, _handler, _emoji in _TOOLS:
     _gate = _check_kanban_orchestrator_mode if _name in _ORCHESTRATOR_TOOLS else _check_kanban_mode
+    if _name in {"kanban_unblock", "kanban_promote"}:
+        _gate = _check_kanban_board_moves
     registry.register(name=_name, toolset="kanban", schema=_sch, handler=_handler, emoji=_emoji,
                       check_fn=_gate)

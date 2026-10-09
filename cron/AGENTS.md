@@ -110,7 +110,9 @@ zero outside a kanban task (footprint ladder rung 3).
   kanban_create, kanban_link,
   kanban_attach, kanban_attach_url, kanban_attachments`; platforms whose saved selection enables
   `kanban` (`hermes tools enable kanban --platform <p>`; default-off, in `CONFIGURABLE_TOOLSETS`) get
-  the full set plus `kanban_list`/`kanban_unblock` for board routing. The check_fn reads the schema
+  the full set plus `kanban_list`/`kanban_unblock`/`kanban_promote` for board routing.
+  Native dispatcher parent workers can opt into promote/unblock of other cards via
+  `kanban.worker_board_moves: true`; identity, board pins and target CAS are checked in one txn. The check_fn reads the schema
   build's own selection (`tools/kanban_toolset_context.py`), never the legacy top-level `toolsets`
   key alone.
 - **Dispatcher:** long-lived loop (default 60s) that reclaims stale claims, promotes ready tasks,

@@ -797,7 +797,9 @@ def test_link_running_child_allows_owner_but_rejects_foreign(monkeypatch, worker
 
 
 def test_unblock_happy_path(monkeypatch, worker_env):
-    monkeypatch.delenv("HERMES_KANBAN_TASK", raising=False)
+    # Drop all dispatcher identity when simulating an ordinary orchestrator.
+    for name in ("HERMES_KANBAN_TASK", "HERMES_KANBAN_RUN_ID", "HERMES_KANBAN_CLAIM_LOCK"):
+        monkeypatch.delenv(name, raising=False)
     from hermes_cli import kanban_db as kb
     from hermes_cli import kanban_db_connect as kbc
     conn = kbc.connect()
@@ -1001,13 +1003,7 @@ def test_worker_can_comment_on_foreign_task(worker_env):
 
 
 def test_worker_unblock_rejects_foreign_task_id(worker_env):
-    """A worker cannot unblock any task — kanban_unblock is orchestrator-only.
-
-    The check fires before the per-task ownership check, so the error
-    surface is the orchestrator-only refusal rather than the
-    cross-task-ownership refusal. Either is fine — the property we're
-    pinning is "worker cannot mutate foreign task via kanban_unblock".
-    """
+    """Default-off workers cannot unblock another card, even with an explicit task id."""
     from hermes_cli import kanban_db as kb
     from hermes_cli import kanban_db_connect as kbc
     conn = kbc.connect()
@@ -1021,7 +1017,7 @@ def test_worker_unblock_rejects_foreign_task_id(worker_env):
     out = kt._handle_unblock({"task_id": other})
     d = json.loads(out)
     err = d.get("error", "")
-    assert "orchestrator-only" in err or "refusing to mutate" in err, (
+    assert "kanban.worker_board_moves must be boolean true" in err, (
         f"expected worker-rejection error, got {err}"
     )
 

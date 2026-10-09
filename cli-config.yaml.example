@@ -401,6 +401,8 @@ model:
 # Disable this only when every review is performed manually from the dashboard.
 kanban:
   review_dispatch: true
+  # Native dispatcher parents only; delegated descendants stay fenced.
+  worker_board_moves: false
 
 # =============================================================================
 # Terminal Tool Configuration
