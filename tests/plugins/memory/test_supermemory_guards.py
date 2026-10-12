@@ -326,20 +326,20 @@ def test_gate_off_by_default_keeps_key_presence_semantics(home):
     assert SupermemoryMemoryProvider().is_available() is True
 
 
-def test_missing_proof_makes_provider_unavailable_and_drops_inherited_key(home):
+def test_missing_proof_makes_provider_unavailable_and_preserves_inherited_key(home):
     (home / "supermemory.json").write_text(json.dumps({"require_availability_proof": True}), encoding="utf-8")
     p = SupermemoryMemoryProvider()
     assert p.is_available() is False
-    assert "SUPERMEMORY_API_KEY" not in os.environ
+    assert os.environ.get("SUPERMEMORY_API_KEY") == KEY
     assert PROOF_ENV in p.unavailable_reason()
 
 
-def test_down_proof_makes_provider_unavailable_and_drops_inherited_key(home, monkeypatch):
+def test_down_proof_makes_provider_unavailable_and_preserves_inherited_key(home, monkeypatch):
     monkeypatch.setenv(PROOF_ENV, f"down:{os.getpid()}:port_closed")
     (home / "supermemory.json").write_text(json.dumps({"require_availability_proof": True}), encoding="utf-8")
     p = SupermemoryMemoryProvider()
     assert p.is_available() is False
-    assert "SUPERMEMORY_API_KEY" not in os.environ
+    assert os.environ.get("SUPERMEMORY_API_KEY") == KEY
     assert "port_closed" in p.unavailable_reason()
 
 
@@ -347,7 +347,7 @@ def test_proof_inherited_from_parent_process_is_stale(home, monkeypatch):
     monkeypatch.setenv(PROOF_ENV, _valid_proof(pid=os.getpid() + 1))
     (home / "supermemory.json").write_text(json.dumps({"require_availability_proof": True}), encoding="utf-8")
     assert SupermemoryMemoryProvider().is_available() is False
-    assert "SUPERMEMORY_API_KEY" not in os.environ
+    assert os.environ.get("SUPERMEMORY_API_KEY") == KEY
 
 
 def test_proof_for_a_different_key_is_rejected(home, monkeypatch):
@@ -432,13 +432,13 @@ def test_positive_control_live_provider_reaches_the_client(home, monkeypatch, us
 
 
 @pytest.mark.parametrize("use", sorted(USES))
-def test_down_after_initialize_blocks_every_client_use_and_drops_the_key(home, monkeypatch, use):
+def test_down_after_initialize_blocks_every_client_use_and_preserves_the_key(home, monkeypatch, use):
     p = _live_provider(home, monkeypatch)
     client = p._client
     monkeypatch.setenv(PROOF_ENV, f"down:{os.getpid()}:port_closed")
     USES[use](p)
     assert _client_calls(client) == []
-    assert p._client is None and p._api_key == "" and p._active is False
+    assert p._client is None and p._api_key == KEY and p._active is False
 
 
 def test_tool_call_after_down_is_a_loud_error_and_the_instance_stays_off(home, monkeypatch, caplog):
@@ -463,7 +463,7 @@ def test_key_swapped_in_scope_after_initialize_drops_the_client(home, monkeypatc
     monkeypatch.setenv("SUPERMEMORY_API_KEY", "synthetic-other-key-0003")
     monkeypatch.setenv(PROOF_ENV, _valid_proof(key="synthetic-other-key-0003"))
     assert "error" in json.loads(p.handle_tool_call("supermemory-search", {"query": "synthetic"}))
-    assert _client_calls(client) == [] and p._api_key == ""
+    assert _client_calls(client) == [] and p._api_key == KEY
 
 
 class TunnelOps:
@@ -518,7 +518,7 @@ def test_tunnel_lost_after_initialize_drops_client_and_key_at_the_next_use(home,
     break_tunnel(tunnel_ops)
     out = json.loads(p.handle_tool_call("supermemory-search", {"query": "synthetic"}))
     assert "disabled" in out["error"] and reason in out["error"]
-    assert _client_calls(client) == [] and p._client is None and p._api_key == ""
+    assert _client_calls(client) == [] and p._client is None and p._api_key == KEY
 
 
 def test_tunnel_down_at_start_keeps_the_provider_unavailable(home, monkeypatch, tunnel_ops):
@@ -546,13 +546,13 @@ def test_inconsistent_tunnel_settings_fail_closed(home, monkeypatch, tunnel_ops,
 
 
 def test_reason_survives_the_key_drop_across_calls_and_instances(home, monkeypatch, tunnel_ops):
-    """`hermes memory status` asks several provider instances in one process. The first failed gate drops the key; the
-    later ones must still name the real cause, not the missing key that drop left behind."""
+    """`hermes memory status` asks several provider instances in one process. The first failed gate preserves the key; the
+    later ones must still name the real cause."""
     monkeypatch.setenv(PROOF_ENV, _valid_proof())
     tunnel_ops.socket = ("socket_missing", None)
     (home / "supermemory.json").write_text(json.dumps(LIVE_TUNNEL), encoding="utf-8")
     assert SupermemoryMemoryProvider().is_available() is False
-    assert "SUPERMEMORY_API_KEY" not in os.environ
+    assert os.environ.get("SUPERMEMORY_API_KEY") == KEY
     assert "socket_missing" in SupermemoryMemoryProvider().unavailable_reason()
     assert "socket_missing" in SupermemoryMemoryProvider().get_status_config({})["summary"]
 
@@ -575,4 +575,80 @@ def test_recheck_reads_a_real_bound_secret_scope(home, monkeypatch):
     finally:
         secret_scope.reset_secret_scope(token)
     assert "disabled" in out["error"] and "port_closed" in out["error"]
-    assert _client_calls(client) == [] and p._client is None and p._api_key == ""
+    assert _client_calls(client) == [] and p._client is None and p._api_key == KEY
+
+
+def test_availability_failure_caches_5min_and_retries_successfully(home, monkeypatch):
+    """Failure is cached for 5 minutes, after which a good proof restores the client."""
+    p = _live_provider(home, monkeypatch)
+    # Simulate endpoint going down
+    monkeypatch.setenv(PROOF_ENV, f"down:{os.getpid()}:port_closed")
+    out = json.loads(p.handle_tool_call("supermemory-search", {"query": "synthetic"}))
+    assert "disabled" in out["error"]
+    assert p._client is None and p._disabled and p._disabled_until > 0
+
+    # Fix the endpoint immediately
+    monkeypatch.setenv(PROOF_ENV, _valid_proof())
+
+    # Within the 5-minute cache window, client remains disabled (not hammered)
+    assert p._live_client() is None
+
+    # Advance time past 5 minutes (300 seconds)
+    p._disabled_until = 1.0  # past timestamp
+    recovered_client = p._live_client()
+    assert recovered_client is not None
+    assert p._client is not None
+    assert p._active is True
+    assert p._disabled == ""
+    assert p._api_key == KEY
+
+
+def test_loud_warning_names_helper_command_without_leaking_key(home, monkeypatch, caplog):
+    p = _live_provider(home, monkeypatch)
+    monkeypatch.setenv(PROOF_ENV, f"down:{os.getpid()}:port_closed")
+    with caplog.at_level(logging.WARNING, logger="plugins.memory.supermemory"):
+        out = json.loads(p.handle_tool_call("supermemory-search", {"query": "synthetic"}))
+    assert "tunnel_key_helper.py" in out["error"]
+    assert "built-in memory" in out["error"]
+    assert "retry in 5 minutes" in out["error"]
+    assert KEY not in out["error"]
+    record = next(r for r in caplog.records if "Supermemory disabled" in r.getMessage())
+    assert "tunnel_key_helper.py" in record.getMessage()
+    assert "Falling back to built-in memory" in record.getMessage()
+    assert KEY not in record.getMessage()
+
+
+@pytest.mark.parametrize("retry", [False, True])
+@pytest.mark.parametrize("current_key", ["", "synthetic-replacement-key"])
+def test_current_scoped_key_removal_or_rotation_never_uses_cached_session_key(home, monkeypatch, retry, current_key):
+    from agent import secret_scope
+    p = _live_provider(home, monkeypatch)
+    client = p._client
+    if retry:
+        p._disable("synthetic transient endpoint failure")
+        p._disabled_until = 1.0
+    token = secret_scope.set_secret_scope({"SUPERMEMORY_API_KEY": current_key,
+                                           PROOF_ENV: _valid_proof(current_key)})
+    try:
+        assert p._live_client() is None
+    finally:
+        secret_scope.reset_secret_scope(token)
+    assert _client_calls(client) == []
+    assert p._client is None and p._api_key == KEY
+    assert p._disabled_until > 1.0
+
+
+def test_helper_hint_never_reads_or_logs_configured_command_arguments(home, monkeypatch, caplog):
+    import hermes_cli.config_effective as effective
+    inline_secret = "synthetic-inline-secret-never-log"
+    calls = []
+    def configured_command():
+        calls.append(True)
+        return {"secrets": {"command": {"command": f"helper --token {inline_secret}"}}}
+    monkeypatch.setattr(effective, "load_user_config_effective", configured_command)
+    p = _live_provider(home, monkeypatch)
+    with caplog.at_level(logging.WARNING, logger="plugins.memory.supermemory"):
+        p._disable("synthetic transient failure")
+    assert calls == []
+    assert "tunnel_key_helper.py" in caplog.text
+    assert inline_secret not in caplog.text and "--token" not in caplog.text

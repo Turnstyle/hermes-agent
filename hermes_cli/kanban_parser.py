@@ -149,17 +149,6 @@ _BOARD_SPECS = [
 
 # Top-level ``hermes kanban <action>`` records, in ``--help`` order.
 _SPECS = [
-    _cmd("board-ops", children=("board_ops_action", [
-        _cmd("control", [
-            _arg("--disable", action="store_true"),
-            _arg("--human", required=True), _arg("--provenance", required=True),
-        ]),
-        _cmd("grant", [_arg("contract", help="Grant contract JSON file")]),
-        _cmd("revoke", [_arg("grant_id")]),
-        _cmd("request", [_arg("request_file", help="Exact durable request JSON file")]),
-        _cmd("list"), _cmd("receipt", [_arg("correlation")]),
-        _cmd("tick", help="Admitted executor only; process pending durable requests once"),
-    ]), help="Owner-admitted node-local Board Ops (default off)"),
     _cmd("init", help="Create kanban.db if missing (idempotent)"),
     _cmd("boards", children=("boards_action", _BOARD_SPECS),
          help="Manage kanban boards (one board per project / workstream)",
@@ -351,6 +340,8 @@ _SPECS = [
         _bulk_ids("schedule"),
     ], help="Park one or more tasks in Scheduled (waiting on time, not human input)"),
     _cmd("unblock", [
+        _arg("--to-todo", action="store_true", help="Move a currently blocked card to todo without immediate promotion."),
+        _arg("--expected-blocked-event-id", type=int, help="Refuse unless latest blocked event matches this ID (0 asserts no blocked history)."),
         _reason("Reason/note (required for triage holds), recorded atomically with unblocking. Quote multi-word reasons."),
         _TASK_IDS,
     ], help="Resume blocked/scheduled tasks (parent-gated); clear triage holds without promotion"),

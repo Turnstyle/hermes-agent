@@ -22,7 +22,7 @@ from hermes_cli.config import cfg_get, load_config
 from tools.kanban_tools_schemas import (
     KANBAN_ATTACH_SCHEMA,
     KANBAN_ATTACH_URL_SCHEMA, KANBAN_ATTACHMENTS_SCHEMA, KANBAN_BLOCK_SCHEMA, KANBAN_COMMENT_SCHEMA,
-    KANBAN_COMPLETE_SCHEMA, KANBAN_CREATE_SCHEMA, KANBAN_HEARTBEAT_SCHEMA, KANBAN_LINK_SCHEMA,
+    KANBAN_COMPLETE_SCHEMA, KANBAN_CREATE_SCHEMA, KANBAN_ASSIGN_SCHEMA, KANBAN_EDIT_SCHEMA, KANBAN_HEARTBEAT_SCHEMA, KANBAN_LINK_SCHEMA,
     KANBAN_LIST_SCHEMA, KANBAN_REQUEST_CHANGES_SCHEMA, KANBAN_REQUEST_REVIEW_SCHEMA,
     KANBAN_SHOW_SCHEMA, KANBAN_UNBLOCK_SCHEMA)
 
@@ -643,6 +643,38 @@ def _handle_show(args: dict, **kw) -> str:
             "worker_context": kb.build_worker_context(conn, tid)})
 
 
+@_kanban_handler("kanban_assign")
+def _handle_assign(args: dict, **kw) -> str:
+    """Native assignment in the actual owner tool context; never a child shell."""
+    _reject_delegated_child_mutation("kanban_assign")
+    tid = _require_text(args, "task_id")
+    assignee = _require_text(args, "assignee")
+    _check(isinstance(tid, str) and tid == tid.strip(), "task_id must be a nonblank string without surrounding whitespace")
+    _check(isinstance(assignee, str) and assignee == assignee.strip(), "assignee must be a nonblank string without surrounding whitespace")
+    with _board(args.get("board")) as (kb, conn):
+        before = _existing_task(kb, conn, tid).assignee
+        _check(kb.assign_task(conn, tid, assignee), f"task {tid} not found")
+        after = _existing_task(kb, conn, tid)
+        return _ok(task_id=tid, assignee_before=before, assignee_after=after.assignee,
+                   tenant=after.tenant, changed=before != after.assignee)
+
+
+@_kanban_handler("kanban_edit")
+def _handle_edit(args: dict, **kw) -> str:
+    """Priority-only native mutation in the actual owner tool context."""
+    _reject_delegated_child_mutation("kanban_edit")
+    tid = str(_require_text(args, "task_id")).strip()
+    priority = args.get("priority")
+    _check(isinstance(priority, int) and not isinstance(priority, bool), "priority must be an integer")
+    with _board(args.get("board")) as (kb, conn):
+        before = _existing_task(kb, conn, tid).priority
+        changed = before != priority
+        if changed:
+            _check(kb.edit_task(conn, tid, priority=priority, board=args.get("board")), f"task {tid} not found")
+        after = _existing_task(kb, conn, tid).priority
+        return _ok(task_id=tid, priority_before=before, priority_after=after, changed=changed)
+
+
 @_kanban_handler("kanban_list")
 def _handle_list(args: dict, **kw) -> str:
     """Task summaries with the same core filters as the CLI."""
@@ -818,15 +850,16 @@ def _handle_request_review(args: dict, **kw) -> str:
     metadata = _stamp_worker_session_metadata(tid, metadata)
     # Reviewer is model-supplied free text stored durably on the event payload.
     reviewer = _redact_opt(args.get("reviewer") or None)
-    if reviewer:
-        from hermes_cli.profiles import list_profile_names, profile_exists
-
-        # A non-profile reviewer would park the card in `review` on an assignee
-        # the dispatcher can never spawn (#106163).
-        _check(profile_exists(reviewer),
-               f"reviewer profile {reviewer!r} is not installed. "
-               f"Installed profiles: {', '.join(list_profile_names())}")
     with _board(args.get("board")) as (kb, conn):
+        if reviewer:
+            from hermes_cli.profiles import list_profile_names, profile_exists
+            home_rows = []
+            if conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='fleet_kanban_assignee_homes'").fetchone():
+                home_rows = conn.execute("SELECT home_node FROM fleet_kanban_assignee_homes WHERE assignee=? LIMIT 2", (reviewer,)).fetchall()
+            remote_known = len(home_rows) == 1 and home_rows[0][0] in {'max','sheldon','turnerbook','snowdrop','rosie'}
+            _check(profile_exists(reviewer) or remote_known,
+                   f"reviewer profile {reviewer!r} is not installed or registered on exactly one fleet HOME. "
+                   f"Installed profiles: {', '.join(list_profile_names())}")
         _goal_gate("kanban_request_review", kb.get_task(conn, tid), tid, summary)
         try:
             ok, fail_reason = kb.request_review(
@@ -1162,7 +1195,10 @@ def _handle_unblock(args: dict, **kw) -> str:
     tid = str(tid)
     _enforce_worker_task_ownership(tid)
     with _board(args.get("board")) as (kb, conn):
-        _check(kb.unblock_task(conn, tid), f"could not unblock {tid} (not blocked or unknown)")
+        _check(kb.unblock_task(
+            conn, tid, to_todo=args.get("to_todo", False),
+            expected_blocked_event_id=args.get("expected_blocked_event_id"),
+        ), f"could not unblock {tid} (not blocked, stale evaluation, or unknown)")
         return _ok(task_id=tid, **_fields(kb.get_task(conn, tid), ("status",)))
 
 
@@ -1200,6 +1236,8 @@ _TOOLS = (
     ("kanban_attach_url", KANBAN_ATTACH_URL_SCHEMA, _handle_attach_url, "📎"),
     ("kanban_attachments", KANBAN_ATTACHMENTS_SCHEMA, _handle_attachments, "📎"),
     ("kanban_create", KANBAN_CREATE_SCHEMA, _handle_create, "➕"),
+    ("kanban_assign", KANBAN_ASSIGN_SCHEMA, _handle_assign, "↪"),
+    ("kanban_edit", KANBAN_EDIT_SCHEMA, _handle_edit, "✏"),
     ("kanban_unblock", KANBAN_UNBLOCK_SCHEMA, _handle_unblock, "▶"),
     ("kanban_link", KANBAN_LINK_SCHEMA, _handle_link, "🔗"))
 

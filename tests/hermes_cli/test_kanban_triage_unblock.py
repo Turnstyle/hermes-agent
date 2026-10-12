@@ -1,8 +1,8 @@
 """Triage hold release preserves the spec and requires an audited operator action."""
 
 import argparse
-from datetime import datetime, timezone
 from pathlib import Path
+import time
 
 import pytest
 
@@ -38,7 +38,7 @@ def _snapshot(conn, tid):
 
 def _held_task(conn, kind, *, title='Reviewed spec', body='Keep these instructions'):
     tid = kb.create_task(conn, title=title, body=body, triage=True)
-    stamp = int(datetime(2026, 10, 2, 12, 44, tzinfo=timezone.utc).timestamp())
+    stamp = int(time.time())
     conn.execute('UPDATE tasks SET created_at = ? WHERE id = ?', (stamp - 60, tid))
     conn.execute("UPDATE task_events SET created_at = ? WHERE task_id = ? AND kind = 'created'", (stamp - 60, tid))
     event_kind, payload = {
@@ -99,12 +99,10 @@ def test_triage_clear_then_keep_spec(kanban_home, kind, capsys):
         assert (task.title, task.body) == ('Reviewed spec', 'Keep these instructions')
 
 
-@pytest.mark.parametrize('refusal', ['title_marker', 'body_marker', 'no_hold', 'foreign', 'worker', 'delegate', 'audit_failure'])
+@pytest.mark.parametrize('refusal', ['no_hold', 'foreign', 'worker', 'delegate', 'audit_failure'])
 def test_triage_refusal_or_failure_writes_nothing(kanban_home, refusal, monkeypatch, capsys):
     with kbc.connect() as conn:
-        tid = _held_task(conn, 'none' if refusal == 'no_hold' else 'block_loop_detected',
-                         title='HOLD FOR TURNER' if refusal == 'title_marker' else 'Reviewed spec',
-                         body='HOLD FOR TURNER' if refusal == 'body_marker' else 'Keep these instructions')
+        tid = _held_task(conn, 'none' if refusal == 'no_hold' else 'block_loop_detected')
         if refusal == 'foreign':
             conn.executescript("""
                 CREATE TABLE fleet_kanban_issue_map (
@@ -137,7 +135,6 @@ def test_triage_refusal_or_failure_writes_nothing(kanban_home, refusal, monkeypa
             assert _cli('unblock', tid, '--reason', 'release') == 1
         error = capsys.readouterr().err
         expected = {
-            'title_marker': 'only Turner/owner', 'body_marker': 'only Turner/owner',
             'no_hold': 'triage-with-hold', 'foreign': 'foreign fleet mirror',
             'worker': 'orchestrator-only', 'delegate': 'delegate_task child contexts',
             'audit_failure': 'audit unavailable',
@@ -149,3 +146,15 @@ def test_triage_refusal_or_failure_writes_nothing(kanban_home, refusal, monkeypa
                 with pytest.raises(PermissionError):
                     kb.unblock_task(conn, tid, actor='owner', reason='release')
             assert _snapshot(conn, tid) == before
+
+
+@pytest.mark.parametrize("title, body", [
+    ("HOLD FOR TURNER", "Reviewed spec"),
+    ("Reviewed spec", "HOLD FOR TURNER"),
+])
+def test_marker_only_triage_has_no_hold_to_clear(kanban_home, title, body):
+    with kbc.connect() as conn:
+        tid = _held_task(conn, 'none', title=title, body=body)
+        before = _snapshot(conn, tid)
+        assert kb.unblock_task(conn, tid, actor='owner', reason='release') is False
+        assert _snapshot(conn, tid) == before

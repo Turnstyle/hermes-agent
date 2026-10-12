@@ -1471,7 +1471,7 @@ def test_unlink_tasks_triggers_recompute_ready(kanban_home):
 def test_turner_hold_in_todo_requires_explicit_release(
     kanban_home, hold, dependency_release, operator_release,
 ):
-    """Neither dependency-release path may promote a Turner-held todo card."""
+    """Text markers do not hold cards; fresh needs_input holds still require release."""
     with kbc.connect() as conn:
         parent = kb.create_task(conn, title="open-parent")
         title = "hOlD fOr TuRnEr: awaiting answer" if hold == "title_marker" else "held card"
@@ -1488,6 +1488,10 @@ def test_turner_hold_in_todo_requires_explicit_release(
             assert kb.unlink_tasks(conn, parent, held) is True
         else:
             assert kb.complete_task(conn, parent, result="done") is True
+        if hold == "title_marker":
+            kb.recompute_ready(conn)
+            assert kb.get_task(conn, held).status == "ready"
+            return
         assert kb.get_task(conn, held).status == "todo"
         kb.recompute_ready(conn)
         assert kb.get_task(conn, held).status == "todo"
@@ -2067,3 +2071,33 @@ def test_archive_non_running_task_does_not_attempt_termination(kanban_home):
             (t,),
         ).fetchone()
         assert row is None
+
+
+@pytest.mark.parametrize("release", ["expire", "unblock"])
+def test_needs_input_todo_hold_expires_or_releases(kanban_home, release):
+    """Fresh holds pause after parent completion; expiry warns once and unblock releases now."""
+    with kbc.connect() as conn:
+        parent = kb.create_task(conn, title="parent")
+        held = kb.create_task(conn, title="needs answer", parents=[parent])
+        with kb.write_txn(conn):
+            conn.execute("UPDATE tasks SET block_kind = 'needs_input' WHERE id = ?", (held,))
+            kb._append_event(conn, held, "blocked", {"kind": "needs_input"})
+        assert kb.complete_task(conn, parent, result="done")
+        assert kb.recompute_ready(conn) == 0
+        assert kb.get_task(conn, held).status == "todo"
+        if release == "expire":
+            with kb.write_txn(conn):
+                conn.execute(
+                    "UPDATE task_events SET created_at = created_at - 90000 "
+                    "WHERE task_id = ? AND kind = 'blocked'", (held,),
+                )
+            assert kb.recompute_ready(conn) == 1
+        else:
+            assert kb.unblock_task(conn, held)
+        assert kb.get_task(conn, held).status == "ready"
+        assert kb.recompute_ready(conn) == 0
+        comments = [c for c in kb.list_comments(conn, held) if "NEEDS-INPUT HOLD EXPIRED" in c.body]
+        assert len(comments) == (1 if release == "expire" else 0)
+        if comments:
+            assert comments[0].author == "dispatcher"
+            assert held in comments[0].body

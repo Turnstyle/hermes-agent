@@ -56,6 +56,22 @@ KANBAN_SHOW_SCHEMA = _schema(
     [],
 )
 
+KANBAN_ASSIGN_SCHEMA = _schema(
+    "kanban_assign",
+    "Assign an idle task to an actual profile through the native claim guard and HOME routing. Preserve its body, dependencies and lifecycle.",
+    {"task_id": _prop("string", "Exact native task id to assign."),
+     "assignee": _prop("string", "Actual existing profile; the native HOME registry must resolve it.")},
+    ["task_id", "assignee"],
+)
+
+KANBAN_EDIT_SCHEMA = _schema(
+    "kanban_edit",
+    "Set only a task's numeric priority using the native board API. Preserve its status, ownership, body and dependencies.",
+    {"task_id": _prop("string", "Exact native task id to reprioritize."),
+     "priority": _prop("integer", "Required numeric priority; higher values dispatch first.")},
+    ["task_id", "priority"],
+)
+
 KANBAN_LIST_SCHEMA = _schema(
     "kanban_list",
     (
@@ -515,6 +531,8 @@ KANBAN_UNBLOCK_SCHEMA = _schema(
     ),
     {
         "task_id": _prop("string", "Blocked task id to move to ready or parent-gated todo."),
+        "to_todo": _prop("boolean", "Move only a currently blocked card to todo, even when parents are done."),
+        "expected_blocked_event_id": _prop("integer", "Latest blocked event must match this nonnegative ID; 0 asserts no blocked history."),
     },
     ["task_id"],
 )

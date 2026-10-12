@@ -62,6 +62,8 @@ def diagnostic_event(ev) -> bool:
 # every 5 seconds forever. A genuinely dead chat still drops, just ~60s later — a fine trade for an
 # unattended gate where a false drop means silent work pileup.
 MAX_SEND_FAILURES = 12
+WAKE_MAX_FAILURES = 720
+_BUSY_WAKE_LOGGED = set()
 
 _LOCAL_PATH_RE = re.compile(r"(?<![\w:/])(?:/(?:Users|home|private|tmp|var|etc|workspace)/[^\s,;]+|" r"[A-Za-z]:\\[^\s,;]+)")
 
@@ -526,13 +528,16 @@ class _KanbanNotification:
 
     def clear_failures(self) -> None:
         self.sub_fail_counts.pop(self.sub_key, None)
+        _BUSY_WAKE_LOGGED.discard(self.sub_key)
 
-    async def delivery_failed(self, fmt: str, prefix: tuple, drop_fmt: str, exc: Exception, exc_info: bool) -> None:
+    async def delivery_failed(self, fmt: str, prefix: tuple, drop_fmt: str, exc: Exception, exc_info: bool,
+                              limit: int = MAX_SEND_FAILURES) -> None:
         """Bump the failure counter; drop the sub past the limit, else rewind the claim so the next tick retries."""
         fails = self.sub_fail_counts.get(self.sub_key, 0) + 1
         self.sub_fail_counts[self.sub_key] = fails
-        logger.warning(fmt, *prefix, fails, MAX_SEND_FAILURES, exc, exc_info=exc_info)
-        if fails >= MAX_SEND_FAILURES:
+        log = logger.warning if limit <= MAX_SEND_FAILURES or fails <= 3 or fails % 60 == 0 or fails >= limit else logger.debug
+        log(fmt, *prefix, fails, limit, exc, exc_info=exc_info)
+        if fails >= limit:
             logger.warning(drop_fmt, self.task_id, self.platform_str, fails)
             await self.unsub()
             self.clear_failures()
@@ -540,8 +545,11 @@ class _KanbanNotification:
             await self.rewind()
 
     async def _wake_failed(self, fmt: str, exc: Exception) -> None:
-        drop_fmt = "kanban notifier: dropping subscription %s on %s after %d consecutive wake failures"
-        await self.delivery_failed(fmt, (self.task_id,), drop_fmt, exc, True)
+        drop_fmt = (
+            "kanban notifier: dropping subscription %s on %s after %d consecutive wake failures; "
+            f"owner not woken for {self.task_id}: read it with `hermes kanban show {self.task_id}`"
+        )
+        await self.delivery_failed(fmt, (self.task_id,), drop_fmt, exc, True, limit=WAKE_MAX_FAILURES)
 
     # -- formatting --
 
@@ -778,6 +786,7 @@ class _KanbanNotification:
             self.d = {**self.d, "events": original_events}
         wake_kinds, is_push = self.wake_kinds, self.is_push_adapter
         from gateway.wake import WakeNotAccepted
+        from tools.bot_relay import TurnBusyError
 
         # A requested wake is required even when its passive ping already landed.
         if wake_payloads:
@@ -785,9 +794,14 @@ class _KanbanNotification:
                 for self.synth, self.wake_diagnostic, self.wake_kinds in wake_payloads:
                     await self.wake()
                 self.clear_failures()
-            except WakeNotAccepted:
-                # Startup / full queue is not a dead destination. Keep the durable
-                # subscription alive regardless of how long admission takes.
+            except (WakeNotAccepted, TurnBusyError):
+                # Busy / unaccepted admission is not a dead destination.
+                if self.sub_key not in _BUSY_WAKE_LOGGED:
+                    logger.info(
+                        "kanban notifier: wake for %s deferred: the bot is in a turn; "
+                        "trying again each tick; this is not a failure", self.task_id,
+                    )
+                    _BUSY_WAKE_LOGGED.add(self.sub_key)
                 await self.rewind()
                 return
             except Exception as _wk_err:

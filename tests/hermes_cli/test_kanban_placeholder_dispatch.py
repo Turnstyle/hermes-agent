@@ -507,6 +507,7 @@ async def test_gateway_watcher_mixed_held_and_failing_card_pages(kanban_home_wit
     """Mixed failure: one active_pr held card and one card failing lease must increment bad_ticks and page."""
     import asyncio
     import logging
+    import time
     from gateway.kanban_watchers import GatewayKanbanWatchersMixin
 
     caplog.set_level(logging.INFO)
@@ -518,6 +519,10 @@ async def test_gateway_watcher_mixed_held_and_failing_card_pages(kanban_home_wit
 
         # 2. Eligible card that fails lease
         tid_fail = kb.create_task(conn, title="failing lease task", assignee="sage")
+        # A late lease wait must page even when another card is policy-held.
+        monkeypatch.setitem(kbd._claim_fence, tid_fail, {
+            "kind": "lease_wait", "since": time.time() - 700, "last": 0,
+        })
 
         # Install SQLite trigger simulating execution lease refusal
         conn.execute(f"""
@@ -872,10 +877,9 @@ def test_dispatch_once_real_lease_fence_on_blocked_sync_pending_is_held(kanban_h
     assert kbd.eligible_work_stalled([res], ready_spawnable) is False
 
 
-def test_dispatch_once_real_lease_fence_non_held_card_still_eligible(kanban_home_with_profiles):
-    """Negative control: the same real fence on a card that is NOT
-    canonical-blocked/sync-pending must still be classified eligible, not held,
-    and must still count as a genuine stall.
+def test_dispatch_once_real_lease_fence_late_wait_still_eligible(kanban_home_with_profiles):
+    """A node-owned refusal is held during sync grace, then remains a genuine
+    stall when the lease is late rather than canonical-blocked/sync-pending.
     """
     with kbc.connect() as conn:
         tid_bad = kb.create_task(conn, title="genuinely refused task", assignee="sage")
@@ -902,6 +906,13 @@ def test_dispatch_once_real_lease_fence_non_held_card_still_eligible(kanban_home
 
         ready_spawnable = kbd.count_spawnable_ready(conn)
         assert ready_spawnable == 1
+
+        first = kbd.dispatch_once(conn, spawn_fn=_fake_spawn, dry_run=False)
+        assert [tid for tid, _ in first.held_claim_errors] == [tid_bad]
+        assert first.eligible_claim_errors == []
+        assert kbd.eligible_work_stalled([first], ready_spawnable) is False
+        kbd._claim_fence[tid_bad]["since"] -= 700
+        kbd._claim_fence[tid_bad]["last"] -= 300
 
         res = kbd.dispatch_once(conn, spawn_fn=_fake_spawn, dry_run=False)
 

@@ -4,7 +4,7 @@ Contract:
 - A profile lists gateway platforms in its OWN config.yaml under
   ``bot_mode.message_agent_platforms``; a session on that platform gets the tool.
 - Default (no key) is unchanged: only the canonical Bot Chat gets it.
-- cli/tui/cron/subagent/kanban/batch can never be opted in.
+- cli/tui/cron/subagent/batch cannot be opted in; dispatched kanban workers send one-way queued messages.
 - The install must still be Bot-Mode-managed and the protocol switch on.
 - Sender identity is the profile's own (home-derived), and the fleet message drain
   stays Bot-Chat-only.
@@ -103,12 +103,71 @@ def test_string_value_and_case_accepted(tmp_path):
     assert bot_mode_dm.message_agent_authorized(agent) is True
 
 
-@pytest.mark.parametrize("platform", ["cli", "tui", "cron", "subagent", "kanban", "batch", ""])
+@pytest.mark.parametrize("platform", ["cli", "tui", "cron", "subagent", "batch", ""])
 def test_never_list_cannot_be_opted_in(tmp_path, platform):
-    home = _install(tmp_path, platforms=[platform or "x", "cli", "tui", "cron", "subagent", "kanban", "batch"])
+    home = _install(tmp_path, platforms=[platform or "x", "cli", "tui", "cron", "subagent", "batch"])
     agent = _FakeAgent(home, platform=platform)
     assert bot_mode_dm.message_agent_authorized(agent) is False
     assert "cli" not in bot_mode_dm.message_agent_surfaces(home)
+
+
+def test_kanban_worker_authorized_without_opt_in(tmp_path):
+    agent = _FakeAgent(_install(tmp_path), platform="kanban")
+    agent.task_id = "t_test123"
+    assert bot_mode_dm.message_agent_authorized(agent) is True
+    assert bot_mode_dm.ensure_message_agent_tool(agent) is True
+    assert _names(agent) == ["message_agent"]
+    assert "message_agent" in agent.valid_tool_names
+
+
+def test_kanban_worker_queued_delivery(tmp_path, monkeypatch):
+    cos = _install(tmp_path)
+    agent = _FakeAgent(cos, platform="kanban")
+    agent.task_id = "t_card_abc123"
+
+    queued_calls = []
+    def fake_enqueue(*, sender, recipient, body, **kw):
+        queued_calls.append({"sender": sender, "recipient": recipient, "body": body})
+        return "fm_msg_999"
+
+    comment_calls = []
+    def fake_add_comment(conn, tid, author, body):
+        comment_calls.append({"tid": tid, "author": author, "body": body})
+        return 1
+
+    monkeypatch.setattr("tools.fleet_message_enqueue.enqueue_busy_dm", fake_enqueue)
+    from hermes_cli import kanban_db
+    monkeypatch.setattr(kanban_db, "add_comment", fake_add_comment)
+
+    out = json.loads(bot_mode_dm.message_agent_tool(target="coordinator", message="need help unblocking", agent=agent))
+    assert out["status"] == "queued"
+    assert out["message_id"] == "fm_msg_999"
+    assert out["reply_route"] == "t_card_abc123"
+    assert len(queued_calls) == 1
+    assert queued_calls[0]["sender"] == "t_card_abc123"
+    assert queued_calls[0]["recipient"] == "coordinator"
+    assert "need help unblocking" in queued_calls[0]["body"]
+    assert len(comment_calls) == 1
+    assert comment_calls[0]["tid"] == "t_card_abc123"
+    assert "coordinator" in comment_calls[0]["body"]
+    assert "fm_msg_999" in comment_calls[0]["body"]
+
+
+def test_kanban_worker_missing_card_id_rejected(tmp_path, monkeypatch):
+    monkeypatch.delenv("HERMES_KANBAN_TASK", raising=False)
+    agent = _FakeAgent(_install(tmp_path), platform="kanban")
+    out = json.loads(bot_mode_dm.message_agent_tool(target="coordinator", message="hello", agent=agent))
+    assert "error" in out
+    assert "lacks card id" in out["error"]
+
+
+def test_kanban_worker_system_prompt_gets_roster(tmp_path):
+    from agent import system_prompt
+
+    agent = _FakeAgent(_install(tmp_path), platform="kanban")
+    agent.task_id = "t_card_123"
+    parts = system_prompt._bot_mode_parts(agent)
+    assert parts and "message_agent" in parts[0] and "@coordinator" in parts[0]
 
 
 def test_unmanaged_install_still_refused(tmp_path):
@@ -204,3 +263,92 @@ def test_prompt_no_roster_without_opt_in(tmp_path):
 
     agent = _FakeAgent(_install(tmp_path), platform="slack")
     assert system_prompt._bot_mode_parts(agent) == []
+
+@pytest.mark.parametrize("platform", ["cron", "subagent", "batch", "tui"])
+def test_inherited_card_environment_does_not_authorize_other_runners(tmp_path, monkeypatch, platform):
+    monkeypatch.setenv("HERMES_KANBAN_TASK", "t_origin")
+    monkeypatch.setenv("HERMES_SESSION_SOURCE", "kanban")
+    agent = _FakeAgent(_install(tmp_path), platform=platform)
+    agent.task_id = "t_origin"
+    assert bot_mode_dm.message_agent_authorized(agent) is False
+
+
+def test_card_id_without_dispatcher_source_does_not_authorize_cli(tmp_path, monkeypatch):
+    monkeypatch.setenv("HERMES_KANBAN_TASK", "t_origin")
+    monkeypatch.delenv("HERMES_SESSION_SOURCE", raising=False)
+    agent = _FakeAgent(_install(tmp_path), platform="cli")
+    agent.task_id = "t_origin"
+    assert bot_mode_dm.message_agent_authorized(agent) is False
+
+
+def test_dispatcher_source_authorizes_actual_cli_worker(tmp_path, monkeypatch):
+    monkeypatch.setenv("HERMES_KANBAN_TASK", "t_origin")
+    monkeypatch.setenv("HERMES_SESSION_SOURCE", "kanban")
+    agent = _FakeAgent(_install(tmp_path), platform="cli")
+    assert bot_mode_dm.message_agent_authorized(agent) is True
+
+
+def test_worker_queue_payload_is_accepted_by_real_drain(tmp_path, monkeypatch):
+    from tools import fleet_message_enqueue as enqueue, fleet_message_drain as drain
+    from tests.tools.test_fleet_message_drain import MemoryStore
+    from hermes_cli import kanban_db
+
+    home = _install(tmp_path)
+    agent = _FakeAgent(home, platform="kanban")
+    agent.task_id = "t_origin_card"
+    board_path = str(tmp_path / "origin-board.db")
+    monkeypatch.setenv("HERMES_KANBAN_DB", board_path)
+    store = MemoryStore()
+
+    def writer(paths, collection, set_by):
+        assert collection == "fleet_messages_v1"
+        doc = json.loads(Path(paths[0]).read_text())
+        assert set_by == "t_origin_card"
+        store.seed(doc["message_id"], doc)
+        return 0
+
+    monkeypatch.setattr(enqueue, "_default_writer", writer)
+    monkeypatch.setattr(kanban_db, "add_comment", lambda *args, **kwargs: 1)
+    result = json.loads(bot_mode_dm.message_agent_tool(target="coordinator", message="help with this card", agent=agent))
+    assert result["status"] == "queued" and result["reply_relayed"] is False
+    assert result["delivery_owner_verified"] is False
+    assert "not confirmed delivery" in result["warning"]
+    assert drain.claim_next(store, "another-profile") is None
+    claimed = drain.claim_next(store, "coordinator")
+    assert claimed is not None and claimed.doc_id == result["message_id"]
+    assert claimed.fields["from"] == "t_origin_card"
+    text, author, metadata = drain.render_input(claimed)
+    assert "help with this card" in text and board_path in text and str(home) in text
+    assert "Reply route hint: card t_origin_card" in text
+    assert author["id"] == "bot:t_origin_card"
+    assert drain.claim_next(store, "coordinator") is None
+
+
+def test_worker_queue_error_does_not_expose_adapter_payload(tmp_path, monkeypatch, caplog):
+    from tools import fleet_message_enqueue as enqueue
+
+    agent = _FakeAgent(_install(tmp_path), platform="kanban")
+    agent.task_id = "t_origin_card"
+    def writer(*args, **kwargs):
+        raise RuntimeError("synthetic-sensitive-adapter-payload")
+    monkeypatch.setattr(enqueue, "_default_writer", writer)
+    output = bot_mode_dm.message_agent_tool(target="coordinator", message="help", agent=agent)
+    assert "FleetEnqueueError" in output and "Next step" in output
+    assert "synthetic-sensitive-adapter-payload" not in output + caplog.text
+
+def test_worker_known_local_drain_is_named_without_fleet_delivery_claim(tmp_path, monkeypatch):
+    from tools import fleet_message_enqueue as enqueue
+    from hermes_cli import kanban_db
+
+    home = _install(tmp_path)
+    recipient = home.parent / "coordinator"
+    (recipient / "config.yaml").write_text("fleet_messages:\n  drain_on_turn_end: true\n  target: live\n")
+    agent = _FakeAgent(home, platform="kanban")
+    agent.task_id = "t_origin"
+    monkeypatch.setenv("HERMES_KANBAN_DB", str(tmp_path / "board.db"))
+    monkeypatch.setattr(enqueue, "_default_writer", lambda *args, **kwargs: 0)
+    monkeypatch.setattr(kanban_db, "add_comment", lambda *args, **kwargs: 1)
+    result = json.loads(bot_mode_dm.message_agent_tool(target="coordinator", message="help", agent=agent))
+    assert result["status"] == "queued"
+    assert result["delivery_owner_verified"] is True and result["warning"] is None
+    assert result["reply_relayed"] is False

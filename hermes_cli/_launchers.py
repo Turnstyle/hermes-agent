@@ -362,10 +362,27 @@ def _publish_conveniences(root: Path, out_dir: Path, names, *, create: bool = Tr
     return published
 
 
+def _store_is_native(store_python: Path) -> bool:
+    """Fleet guard (7 Oct 2026): only the machine's own ~/.hermes store may re-mint the shared
+    install launchers. A run with a temporary HERMES_HOME re-minted them to its own Python and
+    every bot lost `hermes` when that folder was deleted (Max twice, Snowdrop once)."""
+    try:
+        from hermes_constants import _get_platform_default_hermes_home
+        Path(store_python).resolve().relative_to(_get_platform_default_hermes_home().resolve())
+        return True
+    except ValueError:
+        return False
+    except Exception:
+        return True
+
+
 def stage_launcher(name: str, repo_root: Path, out_dir: Path) -> Path | None:
     """Publish one launcher bound to store Python, or refuse missing tools."""
     repo_root = Path(repo_root)
     store_python = resolve_store_python(repo_root)
+    if store_python is not None and not _store_is_native(store_python):
+        existing = Path(out_dir) / name
+        return existing if existing.exists() else None
     if store_python is not None:
         path = mint_launcher(name, repo_root, out_dir, store_python, None)
         if path is not None and path.suffix == ".cmd":

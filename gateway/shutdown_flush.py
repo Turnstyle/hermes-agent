@@ -11,6 +11,7 @@ deletes each file on success), ``flush_agent_history_to_file`` (DB flush raised)
 
 from __future__ import annotations
 
+import asyncio
 import contextlib
 import itertools
 import json
@@ -28,6 +29,7 @@ logger = logging.getLogger(__name__)
 # See #78182.
 TRANSCRIPT_CAP_DROP_REASON = "transcript_cap_drop"
 GATEWAY_DRAINING_REASON = "gateway_draining"
+SERVED_PROFILE_REPLAY_DELAYS = (60, 300, 900, 3600)
 # Monotonic tiebreaker so same-second spool files replay in drop order.
 _TRANSCRIPT_SPOOL_SEQ = itertools.count()
 
@@ -261,8 +263,13 @@ async def recover_gateway_draining_session_chats(runner) -> int:
     dispatch = getattr(api, "dispatch_session_chat_turn", None)
     if not callable(dispatch):
         return 0
+    return await _replay_draining_spools(dispatch, _get_flush_dir())
+
+
+async def _replay_draining_spools(dispatch, flush_dir) -> int:
+    """Replay one folder sequentially; dispatch success is required before deleting a spool."""
     replayed = 0
-    for path in sorted(_get_flush_dir().glob("*.json")):
+    for path in sorted(flush_dir.glob("*.json")):
         try:
             payload = json.loads(path.read_text(encoding="utf-8-sig"))
         except Exception as exc:
@@ -280,6 +287,13 @@ async def recover_gateway_draining_session_chats(runner) -> int:
             )
             continue
         try:
+            ts = int(payload.get("ts") or 0)
+            if time.time() - ts > 600:
+                sent_at = time.strftime("%Y-%m-%d %H:%M:%S %Z", time.localtime(ts))
+                message = (
+                    f"Late delivery: this message was sent at {sent_at}. "
+                    "The gateway was restarting, so it can only be delivered now.\n\n" + message
+                )
             accepted = await dispatch(session_id=session_id, message=message)
         except Exception:
             logger.warning(
@@ -300,6 +314,64 @@ async def recover_gateway_draining_session_chats(runner) -> int:
         replayed += 1
     if replayed:
         logger.info("Replayed %d gateway-draining session chat turn(s) after restart", replayed)
+    return replayed
+
+
+async def recover_served_profile_draining_chats(runner) -> int:
+    """Replay served-profile drain spools in bounded passes, outside gateway startup."""
+    config = getattr(runner, "config", None)
+    if not getattr(config, "multiplex_profiles", False):
+        return 0
+    from gateway.config import Platform
+    from gateway.platforms.api_server import _api_request_profile
+    from gateway.run import _multiplex_profile_homes
+
+    api = (getattr(runner, "adapters", None) or {}).get(Platform.API_SERVER)
+    dispatch = getattr(api, "dispatch_session_chat_turn", None)
+    if not callable(dispatch):
+        return 0
+    launch_home = _get_flush_dir().parent.resolve()
+    homes = [(name, Path(home) / "pending_messages")
+             for name, home in _multiplex_profile_homes(config)
+             if Path(home).resolve() != launch_home]
+    replayed = 0
+    for delay in (0, *SERVED_PROFILE_REPLAY_DELAYS):
+        if delay:
+            await asyncio.sleep(delay)
+        pending = []
+        for name, flush_dir in homes:
+            if not flush_dir.is_dir():
+                continue
+            try:
+                with api._profile_scope(name):
+                    token = _api_request_profile.set(name)
+                    try:
+                        replayed += await _replay_draining_spools(dispatch, flush_dir)
+                    finally:
+                        _api_request_profile.reset(token)
+                # Other shutdown payloads have their own recovery path.
+                for path in flush_dir.glob("*.json"):
+                    try:
+                        payload = json.loads(path.read_text(encoding="utf-8-sig"))
+                        if payload.get("reason") != GATEWAY_DRAINING_REASON:
+                            continue
+                    except Exception:
+                        pass  # Unreadable spools remain available for manual recovery.
+                    pending.append((name, flush_dir))
+                    break
+            except Exception:
+                logger.warning("Served-profile drain replay failed for %s (%s); spool preserved",
+                               name, flush_dir, exc_info=True)
+                pending.append((name, flush_dir))
+        homes = pending
+        if not homes:
+            break
+    if homes:
+        logger.warning(
+            "Gateway-draining messages remain in %s. The text is still in that file. "
+            "Read it and send it to the bot again by hand.",
+            ", ".join(str(flush_dir) for _name, flush_dir in homes),
+        )
     return replayed
 
 

@@ -2231,6 +2231,10 @@ DEFAULT_CONFIG = {
             # response_store.db write several hundred KB. 0 = store tool outputs verbatim
             # (default: the capped text is what the model is replayed on the next turn).
             "history_tool_output_max_chars": 0,
+            # Accept host (default listener) API key for named profiles with a loud warning.
+            # When false (default), named profiles fail closed unless configured with their own
+            # profile-scoped API_SERVER_KEY.
+            "accept_host_key_for_profiles": False,
         },
     },
     # Real-time token streaming to messaging platforms (gateway; restart after enabling). Off by

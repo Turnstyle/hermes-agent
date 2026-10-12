@@ -160,6 +160,9 @@ JUDGE_SYSTEM_PROMPT = (
     "finishes.\n\n"
     "CONTINUE — not done, and there is a concrete next step the agent can "
     "take right now. This is the default when in doubt.\n\n"
+    "Default: when Jev is unavailable, record 'Jev unavailable' and proceed "
+    "on your own read with a warning; do not hold a card only for that "
+    "missing tool. Preserve other acceptance and security checks.\n\n"
     "Reply ONLY with a single JSON object on one line. Shapes:\n"
     '{"verdict": "done", "reason": "<one sentence>"}\n'
     '{"verdict": "blocked", "reason": "<one sentence>"}\n'
@@ -1606,6 +1609,7 @@ def run_kanban_goal_loop(
     log=None,
     block_reason_unchanged_fn=None,
     block_is_bookkeeping_fn=None,
+    handback_fn=None,
 ) -> Dict[str, Any]:
     """Drive a kanban worker through a Ralph-style goal loop.
 
@@ -1721,6 +1725,14 @@ def run_kanban_goal_loop(
 
         # Budget check BEFORE spending another turn.
         if turns_used >= max_turns:
+            if handback_fn is not None:
+                message = f"Goal-mode worker exhausted its turn budget ({turns_used}/{max_turns}); last judge verdict: {_truncate(reason, 300)}"
+                try:
+                    handed_back = handback_fn(message, last_response)
+                except Exception as exc:
+                    _log(f"kanban goal loop: hand-back failed ({exc}); stopping")
+                    return _result("stopped", "budget hand-back failed")
+                return _result("budget_handback" if handed_back else "stopped", "turn budget exhausted")
             _log(f"kanban goal loop: task {task_id} exhausted {turns_used}/{max_turns} turns; blocking")
             _block(
                 f"Goal-mode worker exhausted its turn budget "

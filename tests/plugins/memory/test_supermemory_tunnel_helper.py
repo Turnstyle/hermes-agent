@@ -186,7 +186,7 @@ def test_helper_output_satisfies_the_provider_gate(monkeypatch, tmp_path):
     down = helper.resolve(helper.parse_args(args), FakeOps(socket=("socket_missing", None)))
     monkeypatch.setenv("SUPERMEMORY_AVAILABILITY_PROOF", down[0].partition("=")[2])
     assert SupermemoryMemoryProvider().is_available() is False
-    assert "SUPERMEMORY_API_KEY" not in os.environ
+    assert "SUPERMEMORY_API_KEY" in os.environ
 
 
 # ---- independent checker reproductions (round 2), kept as regressions ----------------------------
@@ -635,4 +635,4 @@ def test_running_provider_drops_client_and_key_when_the_real_tunnel_dies(tunnel,
         time.sleep(0.05)
     out = json.loads(p.handle_tool_call("supermemory_search", {"query": "two"}))
     assert "disabled" in out["error"] and "socket_stale" in out["error"]
-    assert searches == ["one"] and p._client is None and p._api_key == ""
+    assert searches == ["one"] and p._client is None and p._api_key == KEY

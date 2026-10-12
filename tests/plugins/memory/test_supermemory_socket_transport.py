@@ -216,7 +216,7 @@ def test_lost_tunnel_never_falls_back_to_the_old_tcp_port(env, sock_dir, tunnels
         os.unlink(f"{sock_dir}/rosie.sock")
     out = _search(p)
     assert "disabled" in out["error"] and reason in out["error"]
-    assert p._client is None and p._api_key == ""
+    assert p._client is None and bool(p._api_key)
     assert tunnel.requests() == ["B"]
     assert tcp_listener.seen == []
 

@@ -5,7 +5,7 @@ Verifies:
 - zero model calls (monkeypatched _call_aux and specify_task)
 - wrong hash, concurrent edit race refusal (zero mutations/events)
 - non-triage tasks refusal
-- active holds refusal (block loop, sticky gave_up, explicit blocked, needs_input, HOLD FOR TURNER marker)
+- active holds refusal (block loop, sticky gave_up, explicit blocked, needs_input)
 - delegated worker fence refusal
 - parent gating (open parent -> todo, parent-free -> ready)
 - duplicate call refusal (no second release/audit)
@@ -369,35 +369,21 @@ def test_active_hold_sticky_block_refuses(kanban_home):
         assert snap_before2 == _snapshot_task_state(conn, tid2)
 
 
-def test_active_hold_turner_marker_refuses(kanban_home):
-    """HOLD FOR TURNER marker in title or body refuses promotion."""
-    # 1. HOLD FOR TURNER in title
+@pytest.mark.parametrize("title, body", [
+    ("Important HOLD FOR TURNER fix", "Details"),
+    ("Regular title", "Please hold for turner until reviewed"),
+])
+def test_turner_marker_text_is_ignored(kanban_home, title, body):
+    """Title/body markers cannot park a reviewed spec."""
     with kbc.connect() as conn:
-        tid1 = _create_triage(conn, title="Important HOLD FOR TURNER fix", body="Details")
+        tid = _create_triage(conn, title=title, body=body)
         conn.commit()
-        snap_before1 = _snapshot_task_state(conn, tid1)
-        h1 = kb.compute_task_sha256("Important HOLD FOR TURNER fix", "Details")
-
-    outcome1 = spec.keep_spec_task(tid1, expect_sha256=h1, author="author")
-    assert outcome1.ok is False
-    assert outcome1.committed is False
-    assert outcome1.reason == "task has active hold (block_kind or HOLD FOR TURNER)"
+    outcome = spec.keep_spec_task(tid, expect_sha256=kb.compute_task_sha256(title, body), author="author")
+    assert outcome.ok is True
+    assert outcome.committed is True
     with kbc.connect() as conn:
-        assert snap_before1 == _snapshot_task_state(conn, tid1)
-
-    # 2. HOLD FOR TURNER in body
-    with kbc.connect() as conn:
-        tid2 = _create_triage(conn, title="Regular title", body="Please hold for turner until reviewed")
-        conn.commit()
-        snap_before2 = _snapshot_task_state(conn, tid2)
-        h2 = kb.compute_task_sha256("Regular title", "Please hold for turner until reviewed")
-
-    outcome2 = spec.keep_spec_task(tid2, expect_sha256=h2, author="author")
-    assert outcome2.ok is False
-    assert outcome2.committed is False
-    assert outcome2.reason == "task has active hold (block_kind or HOLD FOR TURNER)"
-    with kbc.connect() as conn:
-        assert snap_before2 == _snapshot_task_state(conn, tid2)
+        assert kb.get_task(conn, tid).status == "ready"
+        assert (kb.get_task(conn, tid).title, kb.get_task(conn, tid).body) == (title, body)
 
 
 def test_active_hold_needs_input_refuses_and_unblocked_succeeds(kanban_home):
@@ -416,7 +402,7 @@ def test_active_hold_needs_input_refuses_and_unblocked_succeeds(kanban_home):
     outcome1 = spec.keep_spec_task(tid1, expect_sha256=h1, author="author")
     assert outcome1.ok is False
     assert outcome1.committed is False
-    assert outcome1.reason == "task has active hold (block_kind or HOLD FOR TURNER)"
+    assert outcome1.reason == "task has active hold (needs_input, younger than 24 h)"
     with kbc.connect() as conn:
         assert snap_before1 == _snapshot_task_state(conn, tid1)
 
@@ -433,7 +419,7 @@ def test_active_hold_needs_input_refuses_and_unblocked_succeeds(kanban_home):
     outcome2 = spec.keep_spec_task(tid2, expect_sha256=h2, author="author")
     assert outcome2.ok is False
     assert outcome2.committed is False
-    assert outcome2.reason == "task has active hold (block_kind or HOLD FOR TURNER)"
+    assert outcome2.reason == "task has active hold (needs_input, younger than 24 h)"
     with kbc.connect() as conn:
         assert snap_before2 == _snapshot_task_state(conn, tid2)
 

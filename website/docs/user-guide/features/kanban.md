@@ -409,7 +409,7 @@ clears an unreleased block-loop, sticky block, or `needs_input` hold. The CLI re
 the current profile as the actor; database callers must supply both actor and reason.
 The card stays in `triage`, with an audit comment and an `unblocked` event written
 atomically. Release the reviewed spec separately with `specify --keep-spec --expect-sha256`.
-A `HOLD FOR TURNER` title/body marker must be cleared by Turner/owner. Foreign fleet
+Title/body text never holds a card; `needs_input` holds on todo/triage cards expire after 24 hours. Foreign fleet
 mirrors, cards without a hold, and duplicate clears are refused without writes.
 
 If you unblock a task and it later shows up in **`triage`**, the unblock is not
@@ -1006,7 +1006,7 @@ hermes kanban gc [--event-retention-days N]            # workspaces + old events
 
 - **In-transaction verification**: The hash is verified inside the SQLite write transaction immediately before promoting to prevent race conditions.
 - **Hash encoding**: SHA-256 of the UTF-8 bytes of compact JSON [title,body] (ensure_ascii=False, separators (",",":"), no trailing newline; null body distinct from empty string).
-- **Active holds**: Refuses if the task is subject to an active hold (block loop breaker, sticky block, needs_input, or `HOLD FOR TURNER`).
+- **Active holds**: Refuses for a block loop breaker, sticky block, or `needs_input` hold younger than 24 hours. Title/body text never holds a card.
 - **Exit codes**: `0` on success, `1` on operational refusal / failure, `2` on command-line usage error (`--all` with `--keep-spec`, missing id, missing/invalid `--expect-sha256`, missing/blank `--author`).
 
 **Worked example: Computing the hash**:

@@ -33,7 +33,6 @@ from hermes_cli.kanban_ops import (
     _cmd_tail, _cmd_watch,
 )
 from hermes_cli.kanban_parser import build_parser  # noqa: F401  (re-exported: hermes_cli.main, run_slash)
-from hermes_cli.kanban_board_ops_cli import command as _cmd_board_ops
 
 
 # --- Flag parsing helpers ---
@@ -1068,10 +1067,32 @@ def _cmd_unblock(args: argparse.Namespace) -> int:
     author = _profile_author() if reason else None
     suffix = f": {reason}" if reason else ""
     with kbc.connect_closing() as conn:
+        statuses = {}
         def op(tid):
-            return kb.unblock_task(conn, tid, actor=author, reason=reason)
-        return _bulk_apply(ids, op, lambda tid: f"Unblocked {tid}{suffix}",
-                           lambda tid: f"cannot unblock {tid} (not blocked/scheduled or triage-with-hold?)")
+            changed = kb.unblock_task(
+                conn, tid, actor=author, reason=reason,
+                to_todo=getattr(args, "to_todo", False),
+                expected_blocked_event_id=getattr(args, "expected_blocked_event_id", None),
+            )
+            if not changed:
+                return False
+            task = kb.get_task(conn, tid)
+            statuses[tid] = task.status if task is not None else None
+            return task is not None
+        def ok_msg(tid):
+            status = statuses[tid]
+            if status == "triage":
+                return (f"Cleared hold for {tid}; status remains triage (not ready). "
+                        f"Use specify --keep-spec --expect-sha256 <reviewed-digest> "
+                        f"--author <actor> to release it{suffix}")
+            return f"Unblocked {tid}; status={status}{suffix}"
+
+        def fail_msg(tid):
+            if tid in statuses:
+                return f"Unblock changed {tid}, but status readback failed; verify with show before hand-back"
+            return f"cannot unblock {tid} (not blocked/scheduled or triage-with-hold?)"
+
+        return _bulk_apply(ids, op, ok_msg, fail_msg)
 
 
 def _cmd_request_review(args: argparse.Namespace) -> int:
@@ -1423,7 +1444,6 @@ def _cmd_decompose(args: argparse.Namespace) -> int:
 
 
 _HANDLERS = {
-    "board-ops": _cmd_board_ops,
     "init": _cmd_init, "create": _cmd_create, "swarm": _cmd_swarm,
     "list": _cmd_list, "ls": _cmd_list, "show": _cmd_show,
     "assign": _cmd_assign, "set-model": _cmd_set_model,

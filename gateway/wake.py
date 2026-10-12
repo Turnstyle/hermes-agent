@@ -240,7 +240,10 @@ async def _self_post_chat_completion(adapter: Any, *, text: str, session_id: str
                         logger.warning("%s; attempt %d/%d", last_err, attempt + 1, attempts)
                         continue
                     if resp.status >= 400:  # non-transient (auth/validation): fail immediately
-                        body = (await resp.text())[:300]
+                        body = await resp.text()
+                        if resp.status == 409 and "target_busy" in body:
+                            raise WakeNotAccepted(f"target_busy: wake for session {session_id} deferred")
+                        body = body[:300]
                         raise RuntimeError(
                             f"wake self-post failed for session {session_id}: HTTP {resp.status}: {body}"
                         )

@@ -208,3 +208,65 @@ def test_cli_refresh_uses_local_board_and_fake_gh(board, monkeypatch, capsys):
     assert kanban_command(args) == 0
     assert "refreshed=1" in capsys.readouterr().out
     assert state.read_cache()["owner/repo#51"]["state"] == "CLOSED"
+
+
+@pytest.mark.parametrize("age_seconds,expected", [(3600, "active_pr"), (10800, None)])
+def test_active_pr_hold_expires_after_two_hours(board, monkeypatch, age_seconds, expected):
+    now = 5_000_000
+    monkeypatch.setattr(kbd.time, "time", lambda: now - age_seconds)
+    with kbc.connect_closing() as conn:
+        task_id = _card(conn, 51)
+        monkeypatch.setattr(kbd.time, "time", lambda: now)
+        assert kbd.check_respawn_guard(conn, task_id) == expected
+
+
+def _guard_events(conn, task_id):
+    return [event.payload for event in kb.list_events(conn, task_id)
+            if event.kind == "respawn_guarded"]
+
+
+def _guard_tick(conn):
+    return kbd.dispatch_once(
+        conn, dry_run=False, spawn_fn=lambda *a, **k: pytest.fail("guarded card spawned"),
+    )
+
+
+def test_active_pr_guard_events_dedupe_and_name_next_step(board, all_assignees_spawnable):
+    with kbc.connect_closing() as conn:
+        task_id = _card(conn, 51)
+        for _ in range(3):
+            result = _guard_tick(conn)
+            assert result.respawn_guarded == [(task_id, "active_pr")]
+        events = _guard_events(conn, task_id)
+        assert len(events) == 1
+        assert events[0]["reason"] == "active_pr"
+        assert "2 hours" in events[0]["next_step"]
+        assert f"hermes kanban reassign {task_id}" in events[0]["next_step"]
+        assert "different profile" in events[0]["next_step"]
+
+
+def test_active_pr_guard_events_changed_reason_writes_event(board, all_assignees_spawnable):
+    with kbc.connect_closing() as conn:
+        task_id = _card(conn, 51)
+        _guard_tick(conn)
+        # Mirror-style comment insertion leaves the prior guard as the newest event.
+        with kb.write_txn(conn):
+            kb._insert_comment(conn, task_id, "ops", "Do not dispatch: archiving", int(time.time()))
+        _guard_tick(conn)
+        _guard_tick(conn)
+        assert [event["reason"] for event in _guard_events(conn, task_id)] == [
+            "active_pr", "explicit_do_not_dispatch",
+        ]
+
+
+def test_active_pr_guard_events_intervening_event_allows_new_guard(board, all_assignees_spawnable):
+    with kbc.connect_closing() as conn:
+        task_id = _card(conn, 51)
+        _guard_tick(conn)
+        with kb.write_txn(conn):
+            kb._append_event(conn, task_id, "diagnostic", {"note": "other event"})
+        _guard_tick(conn)
+        _guard_tick(conn)
+        assert [event["reason"] for event in _guard_events(conn, task_id)] == [
+            "active_pr", "active_pr",
+        ]
