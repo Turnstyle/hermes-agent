@@ -41,6 +41,63 @@ _SECRET_SOURCE_RESTORE_BY_HOME: dict[str, dict[str, str]] = {}
 # re-parse + ASCII sweep re-run each time (Bitwarden's own cache only saves the network call).
 _APPLIED_HOMES: set[str] = set()
 _SECRET_SOURCE_CACHE_LOCK = threading.RLock()
+_ONEPASSWORD_SKIP_LOGGED = False
+
+
+def _startup_onepassword_skip_reason() -> str:
+    """Do not open approval dialogs for work with no person to answer them.
+
+    Gateway/Desktop startup is deliberately unchanged pending its owner's review.
+    Their cron jobs and delegated children are NOT exempt, even in-process.
+    """
+    from agent.delegation_context import is_delegated_child_process_context
+    from gateway.session_context import get_session_env
+    from hermes_cli._parser import command_argv
+
+    if is_delegated_child_process_context():
+        return "delegated child"
+    for marker, reason in (("HERMES_KANBAN_TASK", "Kanban worker"),
+                           ("_HERMES_CRON_EXTERNAL_WORKER", "cron worker")):
+        if os.environ.get(marker):
+            return reason
+    if get_session_env("HERMES_CRON_SESSION", "").strip().lower() in {"1", "true", "yes", "on"}:
+        return "cron session"
+
+    command = command_argv(sys.argv[1:])
+    if command[:2] == ["gateway", "run"] or (
+        command[:1] in (["serve"], ["dashboard"])
+        and os.environ.get("HERMES_DESKTOP") == "1"
+    ):
+        return ""
+    xpc_service = os.environ.get("XPC_SERVICE_NAME", "").strip()
+    # GUI terminals inherit LaunchServices' application.* identity. A real TTY
+    # inside that application is still interactive, unlike a named launchd job.
+    if (xpc_service not in {"", "0"} and not xpc_service.startswith("application.")) or (
+        os.environ.get("HERMES_LAUNCHD_LABEL", "").strip() not in {"", "0"}
+    ):
+        return "launchd job"
+    try:
+        if sys.stdin is not None and sys.stdin.isatty():
+            return ""
+    except (AttributeError, OSError, ValueError):
+        pass  # closed/missing stdin cannot provide an interactive approval channel
+    return "no terminal on standard input"
+
+
+def _startup_secret_sources(cfg: dict) -> dict:
+    """Filter only startup 1Password mappings; explicit sync/browser vault stay separate."""
+    source = cfg.get("onepassword")
+    if not isinstance(source, dict) or source.get("enabled") is not True:
+        return cfg
+    reason = _startup_onepassword_skip_reason()
+    if not reason:
+        return cfg
+    global _ONEPASSWORD_SKIP_LOGGED
+    with _SECRET_SOURCE_CACHE_LOCK:
+        if not _ONEPASSWORD_SKIP_LOGGED:
+            print(f"1Password skipped: {reason}.", file=sys.stderr)
+            _ONEPASSWORD_SKIP_LOGGED = True
+    return {name: value for name, value in cfg.items() if name != "onepassword"}
 
 # What THIS process has published from dotenv files, per variable: (value before our first publish, or
 # None if absent; last value we published; load pass that published it). Reloads run per gateway turn and
@@ -116,6 +173,10 @@ def hydrate_profile_secret_sources(hermes_home: str | os.PathLike) -> dict[str, 
     turns to profiles that never ran the process-global dotenv path, so resolve against a private mapping
     seeded from that ``.env`` and record the per-home snapshot for ``build_profile_secret_scope()``.
     Fail-open / once-per-home like ``_apply_external_secret_sources``; never returns plaintext .env entries."""
+    from hermes_cli._early_recovery import _should_skip_external_secret_sources
+
+    if _should_skip_external_secret_sources():
+        return {}
     with _SECRET_SOURCE_CACHE_LOCK:
         return _hydrate_profile_secret_sources(Path(hermes_home))
 
@@ -132,7 +193,7 @@ def _hydrate_profile_secret_sources(home: Path) -> dict[str, str]:
     _SECRET_SOURCE_RESTORE_BY_HOME.pop(home_key, None)
 
     try:
-        cfg = _load_secrets_config(home)
+        cfg = _startup_secret_sources(_load_secrets_config(home))
     except Exception:  # noqa: BLE001 — external sources must not block routing
         return {}
     if not cfg:
@@ -531,7 +592,7 @@ def _apply_external_secret_sources(home_path: Path) -> None:
     # disable secret loading for this process, and an unmarked home picks up a config change on the next
     # load (the signature-cached read is cheap).
     try:
-        cfg = _load_secrets_config(home_path)
+        cfg = _startup_secret_sources(_load_secrets_config(home_path))
     except Exception:  # noqa: BLE001 — config errors must not block startup
         # See #40597.
         return
