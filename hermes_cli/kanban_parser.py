@@ -340,6 +340,8 @@ _SPECS = [
         _bulk_ids("schedule"),
     ], help="Park one or more tasks in Scheduled (waiting on time, not human input)"),
     _cmd("unblock", [
+        _arg("--to-todo", action="store_true", help="Move a currently blocked card to todo without immediate promotion."),
+        _arg("--expected-blocked-event-id", type=int, help="Refuse unless latest blocked event matches this ID (0 asserts no blocked history)."),
         _reason("Reason/note (required for triage holds), recorded atomically with unblocking. Quote multi-word reasons."),
         _TASK_IDS,
     ], help="Resume blocked/scheduled tasks (parent-gated); clear triage holds without promotion"),

@@ -1068,7 +1068,11 @@ def _cmd_unblock(args: argparse.Namespace) -> int:
     suffix = f": {reason}" if reason else ""
     with kbc.connect_closing() as conn:
         def op(tid):
-            return kb.unblock_task(conn, tid, actor=author, reason=reason)
+            return kb.unblock_task(
+                conn, tid, actor=author, reason=reason,
+                to_todo=getattr(args, "to_todo", False),
+                expected_blocked_event_id=getattr(args, "expected_blocked_event_id", None),
+            )
         return _bulk_apply(ids, op, lambda tid: f"Unblocked {tid}{suffix}",
                            lambda tid: f"cannot unblock {tid} (not blocked/scheduled or triage-with-hold?)")
 

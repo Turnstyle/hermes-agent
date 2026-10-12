@@ -4122,6 +4122,7 @@ def unblock_task(
     conn: sqlite3.Connection, task_id: str, *,
     actor: Optional[str] = None, reason: Optional[str] = None,
     to_todo: bool = False, expected_blocked_event_id: Optional[int] = None,
+    require_idle: bool = False, require_closed_parents: bool = False,
 ) -> bool:
     """``blocked``/``scheduled`` -> its resumable phase (parent re-gated; ``review``
     when that is where it left off), closing any leaked run first. A ``todo``
@@ -4130,14 +4131,27 @@ def unblock_task(
     Triage holds require actor/reason and stay in triage for separate spec release.
     to_todo accepts only currently blocked cards and lands in todo regardless of
     parent completion. Expected event 0 asserts absent blocked history; positive
-    IDs assert the latest blocked event; None leaves event history unguarded."""
+    IDs assert the latest blocked event; None leaves event history unguarded.
+    require_idle refuses outstanding run/claim/worker bookkeeping or any open run;
+    require_closed_parents refuses release while any parent is unfinished."""
     if expected_blocked_event_id is not None and expected_blocked_event_id < 0:
         raise ValueError("expected_blocked_event_id must be nonnegative")
     now = int(time.time())
     with write_txn(conn):
         hold_row = conn.execute(
-            "SELECT status, block_kind, title, body FROM tasks WHERE id = ?", (task_id,),
+            "SELECT status, block_kind, title, body, current_run_id, claim_lock, "
+            "claim_expires, worker_pid FROM tasks WHERE id = ?", (task_id,),
         ).fetchone()
+        if require_idle and hold_row is not None:
+            if any(hold_row[key] is not None for key in (
+                "current_run_id", "claim_lock", "claim_expires", "worker_pid",
+            )) or conn.execute(
+                "SELECT 1 FROM task_runs WHERE task_id = ? AND ended_at IS NULL LIMIT 1",
+                (task_id,),
+            ).fetchone() is not None:
+                return False
+        if require_closed_parents and unsatisfied_parents(conn, task_id):
+            return False
         if to_todo or expected_blocked_event_id is not None:
             if hold_row is None or hold_row["status"] != "blocked":
                 return False
