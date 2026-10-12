@@ -77,7 +77,12 @@ def _should_skip_external_secret_sources() -> bool:
     Profile flags are stripped before ``hermes_cli.main`` loads dotenv, so ``argv[1]`` is
     the authoritative subcommand.
     """
-    return _UPDATE_RETRY_RECOVERED or sys.argv[1:2] == ["update"]
+    # Metadata-only automation must not open interactive secret-manager sessions.
+    return (
+        os.environ.get("HERMES_SKIP_EXTERNAL_SECRET_SOURCES", "").strip() == "1"
+        or _UPDATE_RETRY_RECOVERED
+        or sys.argv[1:2] == ["update"]
+    )
 
 
 def _project_root() -> Path:
