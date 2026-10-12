@@ -1,4 +1,4 @@
-"""Bot-to-bot loop guard: ``_is_user_authorized`` refuses a chat in cooldown, ``_admit_bot_message`` counts.
+"""Bot traffic warnings preserve principal admission; the budget meters warning frequency.
 
 The scenarios set ``TELEGRAM_GROUP_ALLOWED_CHATS``: that allowlist admits a bot before the ``ALLOW_BOTS``
 block runs, which is the configuration that produced the incident.
@@ -86,8 +86,8 @@ def test_one_inbound_is_counted_once_however_often_the_verdict_is_asked(monkeypa
         assert [runner._is_user_authorized(bot) for _ in range(3)] == [True, True, True]
         assert runner._admit_bot_message(bot) is True
     assert runner._is_user_authorized(_bot(BOT_B)) is True
-    assert runner._admit_bot_message(_bot(BOT_B)) is False
-    assert runner._is_user_authorized(_bot(BOT_B)) is False
+    assert runner._admit_bot_message(_bot(BOT_B)) is True
+    assert runner._is_user_authorized(_bot(BOT_B)) is True
 
 
 @pytest.mark.asyncio
@@ -135,7 +135,7 @@ async def test_busy_path_counts_a_bot_message_once_before_steering(monkeypatch, 
     handled = [await runner._handle_active_session_busy_message(event, "session") for event in events]
 
     assert handled == [True, True, True]
-    assert steer.await_count == 1
+    assert steer.await_count == 3
 
     runner._scale_to_zero_note_real_inbound = lambda: None
     async def _passthrough_hook(event, source):  # the inbound path awaits the hook
@@ -183,7 +183,7 @@ async def test_routed_bot_traffic_is_metered_by_the_transport_profiles_policy(tm
     ([BOT_A, BOT_B, BOT_C], GROUP_CHAT, "group", True),
     ([BOT_A], "123", "dm", False),
 ], ids=["ping-pong of 40 turns", "three bots share one budget", "plain ALLOW_BOTS dm without a chat allowlist"])
-def test_admitted_bot_traffic_is_cut_at_the_budget(monkeypatch, runner, senders, chat_id, chat_type, group_allowlist):
+def test_admitted_bot_traffic_continues_at_the_budget(monkeypatch, runner, senders, chat_id, chat_type, group_allowlist):
     _incident_config(monkeypatch)
     if not group_allowlist:
         monkeypatch.delenv("TELEGRAM_GROUP_ALLOWED_CHATS")
@@ -191,7 +191,7 @@ def test_admitted_bot_traffic_is_cut_at_the_budget(monkeypatch, runner, senders,
     verdicts = [_inbound(runner, _bot(senders[i % len(senders)], chat_id, chat_type)) for i in range(40)]
 
     assert verdicts[:20] == [True] * 20
-    assert not any(verdicts[20:])
+    assert verdicts[20:] == [True] * 20
 
 
 def test_humans_are_never_metered_and_stay_authorized_during_cooldown(monkeypatch, runner, clock):
@@ -201,7 +201,7 @@ def test_humans_are_never_metered_and_stay_authorized_during_cooldown(monkeypatc
     assert runner._bot_loop_guard.tracked_conversations == 0
 
     _ping_pong(runner, 25)
-    assert runner._is_user_authorized(_bot(BOT_A)) is False
+    assert runner._is_user_authorized(_bot(BOT_A)) is True
     assert runner._is_user_authorized(_human()) is True
     clock.advance(5)
     assert runner._is_user_authorized(_human()) is True
@@ -210,7 +210,7 @@ def test_humans_are_never_metered_and_stay_authorized_during_cooldown(monkeypatc
 def test_budget_is_scoped_by_chat_and_platform(monkeypatch, runner):
     _incident_config(monkeypatch)
     _ping_pong(runner, 25)
-    assert runner._is_user_authorized(_bot(BOT_A)) is False
+    assert runner._is_user_authorized(_bot(BOT_A)) is True
 
     assert _inbound(runner, _bot(BOT_A, chat_id=OTHER_GROUP)) is True
     assert _inbound(runner, _bot(BOT_B, chat_id=OTHER_GROUP)) is True
@@ -222,11 +222,11 @@ def test_budget_is_scoped_by_chat_and_platform(monkeypatch, runner):
 def test_cooldown_expiry_readmits_with_a_fresh_budget(monkeypatch, runner, clock):
     _incident_config(monkeypatch)
     _ping_pong(runner, 21)
-    assert runner._is_user_authorized(_bot(BOT_A)) is False
+    assert runner._is_user_authorized(_bot(BOT_A)) is True
 
     clock.advance(61)
     assert all(_ping_pong(runner, 20))
-    assert _inbound(runner, _bot(BOT_A)) is False
+    assert _inbound(runner, _bot(BOT_A)) is True
 
 
 def test_disabled_via_config_admits_everything(monkeypatch, runner, settings):
@@ -249,13 +249,14 @@ def test_rejected_bot_messages_do_not_consume_budget(monkeypatch, runner):
 # --- BotLoopGuard unit ------------------------------------------------------
 
 
-def test_concurrent_admits_respect_the_budget(clock):
+def test_concurrent_admits_continue_with_one_warning(clock):
     guard = BotLoopGuard(settings=lambda: BotLoopGuardSettings(max_events=20, window_seconds=60, cooldown_seconds=60), clock=clock.now)
 
     with ThreadPoolExecutor(max_workers=8) as pool:
-        allowed = list(pool.map(lambda _: guard.admit("c")[0], range(80)))
+        results = list(pool.map(lambda _: guard.admit("c"), range(80)))
 
-    assert sum(allowed) == 20
+    assert sum(allowed for allowed, _ in results) == 80
+    assert sum(state == "tripped" for _, state in results) == 1
 
 
 # --- settings ---------------------------------------------------------------
@@ -272,3 +273,16 @@ def test_load_settings_reads_config_yaml(monkeypatch):
 
     monkeypatch.setattr(hermes_config, "load_config_readonly", boom)
     assert load_settings() == BotLoopGuardSettings()
+
+
+def test_warning_has_evaluation_and_decider_route_without_revoking_auth(monkeypatch, runner, caplog):
+    _incident_config(monkeypatch)
+    assert all(_ping_pong(runner, 50))
+    warnings = [record.message for record in caplog.records if "LOUD WARNING" in record.message]
+    assert len(warnings) == 1
+    assert "hermes jev evaluate --file" in warnings[0]
+    assert "Decider through the fleet handoff" in warnings[0]
+    assert GROUP_CHAT in warnings[0]
+    monkeypatch.delenv("TELEGRAM_GROUP_ALLOWED_CHATS")
+    monkeypatch.delenv("TELEGRAM_ALLOW_BOTS")
+    assert _inbound(runner, _bot(BOT_A, chat_id="123", chat_type="dm")) is False
