@@ -19,6 +19,7 @@ from typing import TYPE_CHECKING
 import contextlib
 
 from hermes_cli.worktree_ops import release_lsp_clients
+from hermes_cli.kanban_bundle_preserve import preservation_gate
 
 if TYPE_CHECKING:
     from hermes_cli.kanban_db import Task
@@ -158,7 +159,7 @@ def _cleanup_workspace(conn: sqlite3.Connection, task_id: str) -> None:
         # lingering worker never has its cwd deleted from under it.
         if kind == "worktree":
             _cleanup_worker_tmux(conn, task_id)
-            _cleanup_worktree_workspace(task_id, path, row["branch_name"])
+            _cleanup_worktree_workspace(task_id, path, row["branch_name"], conn=conn)
             _try_cleanup_parent_workspaces(conn, task_id)
             return
         wp = Path(path)
@@ -167,7 +168,7 @@ def _cleanup_workspace(conn: sqlite3.Connection, task_id: str) -> None:
             # ``workspace_kind='scratch'`` with a user path pointing at a real
             # source tree; without this, completion would rmtree the user's data.
             # See #28818.
-            if _is_managed_scratch_path(wp):
+            if _is_managed_scratch_path(wp) and preservation_gate(task_id, wp, conn=conn):
                 release_lsp_clients(str(wp))
                 shutil.rmtree(wp, ignore_errors=True)
                 _kb._log.debug("Removed scratch workspace: %s", wp)
@@ -189,7 +190,7 @@ def _cleanup_workspace(conn: sqlite3.Connection, task_id: str) -> None:
 
 
 def _cleanup_worktree_workspace(
-    task_id: str, path: str, branch_name: Optional[str] = None
+    task_id: str, path: str, branch_name: Optional[str] = None, *, conn=None
 ) -> None:
     """Remove a finished task's linked git worktree when it holds no work.
     Mirrors the CLI startup pruner (``cli._prune_stale_worktrees``): removal
@@ -240,6 +241,8 @@ def _cleanup_worktree_workspace(
                 return
         # No --force: git's own dirty guard re-verifies at removal time, so if
         # the tree became dirty since our check (TOCTOU) removal fails safe.
+        if not preservation_gate(task_id, wp, conn=conn):
+            return
         release_lsp_clients(str(worktree_path))
         result = _git(repo_root, "worktree", "remove", str(wp), timeout=60)
         if result.returncode != 0:
@@ -283,10 +286,10 @@ def _try_cleanup_parent_workspaces(conn: sqlite3.Connection, task_id: str) -> No
             ):
                 continue
             if row["workspace_kind"] == "worktree":
-                _cleanup_worktree_workspace(parent_id, row["workspace_path"], row["branch_name"])
+                _cleanup_worktree_workspace(parent_id, row["workspace_path"], row["branch_name"], conn=conn)
                 continue
             wp = Path(row["workspace_path"])
-            if wp.is_dir() and _is_managed_scratch_path(wp):
+            if wp.is_dir() and _is_managed_scratch_path(wp) and preservation_gate(parent_id, wp, conn=conn):
                 release_lsp_clients(str(wp))
                 shutil.rmtree(wp, ignore_errors=True)
                 _kb._log.debug("Deferred cleanup: removed parent %s scratch workspace: %s", parent_id, wp)

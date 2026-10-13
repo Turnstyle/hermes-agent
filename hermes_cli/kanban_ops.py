@@ -388,6 +388,8 @@ def _cmd_gc(args: argparse.Namespace) -> int:
         if row["workspace_kind"] != "scratch":
             continue
         path = Path(row["workspace_path"] or (scratch_root / row["id"]))
+        if path.is_symlink():
+            continue
         try:
             path = path.resolve()
         except OSError:
@@ -397,7 +399,7 @@ def _cmd_gc(args: argparse.Namespace) -> int:
         except ValueError:
             # Safety: never delete outside the scratch root.
             continue
-        if path.exists() and path.is_dir():
+        if path.exists() and path.is_dir() and path != scratch_root.resolve() and kbw.preservation_gate(row["id"], path):
             shutil.rmtree(path, ignore_errors=True)
             removed_ws += 1
 
