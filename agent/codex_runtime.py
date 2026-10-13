@@ -779,7 +779,7 @@ def _output_text_of(item: Any) -> str:
 class _CodexResponseAssembler:
     """Assemble a Response-shaped ``SimpleNamespace`` from raw Responses SSE events.
 
-    Only ``usage`` / ``status`` / ``id`` are read from the terminal frame — never ``response.output``. Output
+    ``usage`` / ``status`` / ``id`` / ``model`` are read from the terminal frame — never ``response.output``. Output
     items come from ``output_item.done``, or are synthesized from text deltas, or settled from function calls
     announced via ``output_item.added`` but never confirmed (some backends omit per-item done events on success)."""
 
@@ -795,6 +795,7 @@ class _CodexResponseAssembler:
 
     def __init__(self, *, model, on_text_delta, on_reasoning_delta, on_commentary_message, on_first_delta):
         self.model, self.on_text_delta, self.on_reasoning_delta = model, on_text_delta, on_reasoning_delta
+        self.observed_model = None
         self.on_commentary_message, self.on_first_delta = on_commentary_message, on_first_delta
         self.output_items: List[Any] = []
         # output_index / first-observed sequence per output item, in lockstep, so settled pending calls merge
@@ -910,6 +911,7 @@ class _CodexResponseAssembler:
         self.saw_terminal = True
         resp_obj = _event_field(event, "response")
         if resp_obj is not None:
+            self.observed_model = _event_field(resp_obj, "model")
             self.terminal_usage, self.terminal_response_id = _event_field(resp_obj, "usage"), _event_field(resp_obj, "id")
             rstatus = _event_field(resp_obj, "status")
             if isinstance(rstatus, str):
@@ -978,7 +980,7 @@ class _CodexResponseAssembler:
         return SimpleNamespace(
             output=output, output_text="".join(self.text_deltas), usage=self.terminal_usage, status=self.terminal_status,
             id=self.terminal_response_id, model=self.model, incomplete_details=self.terminal_incomplete_details,
-            error=self.terminal_error)
+            error=self.terminal_error, observed_model=self.observed_model)
 
 
 def _consume_codex_event_stream(
@@ -987,7 +989,7 @@ def _consume_codex_event_stream(
 ) -> SimpleNamespace:
     """Consume a Codex Responses SSE stream into a Response-shaped ``SimpleNamespace`` (see
     :class:`_CodexResponseAssembler`; ``status`` is ``completed`` when the stream ended with content but no
-    terminal frame; ``model`` comes from kwargs).
+    terminal frame; ``model`` comes from kwargs, ``observed_model`` from the terminal response or is None).
 
     Callbacks: ``on_text_delta`` per output_text delta, suppressed once a function_call is seen;
     ``on_reasoning_delta`` for reasoning and ``phase=analysis`` deltas (also commentary without a commentary
