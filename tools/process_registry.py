@@ -19,6 +19,8 @@ import threading
 import time
 import uuid
 from pathlib import Path
+from contextlib import contextmanager
+from contextvars import ContextVar
 
 _IS_WINDOWS = platform.system() == "Windows"
 # systemd transient scopes exist only on Linux; gate every scope-path branch on this
@@ -42,6 +44,21 @@ from tools.process_registry_checkpoint import ProcessCheckpointMixin
 from tools.process_registry_results import load_completed_results, save_completed_result
 
 logger = logging.getLogger(__name__)
+
+# Internal launch custody, not a terminal argument or model-facing permission.
+# Match the admitted command as well as the context so unrelated launches remain owned.
+_message_agent_delivery_command = ContextVar("message_agent_delivery_command", default=None)
+
+
+@contextmanager
+def _message_agent_delivery_scope(command: str):
+    """Protect an admitted local DM before any registry launch path publishes it."""
+    token = _message_agent_delivery_command.set(command)
+    try:
+        yield
+    finally:
+        _message_agent_delivery_command.reset(token)
+
 
 # Crash-recovery checkpoint (gateway only)
 CHECKPOINT_PATH = get_hermes_home() / "processes.json"
@@ -551,6 +568,7 @@ class ProcessSession:
     pid_scope: str = "host"                     # "host" for local/PTY PIDs, "sandbox" for env-local PIDs
     systemd_unit: str = ""                      # transient scope unit name when spawned under systemd-run
     handoff_note: str = ""                      # why a subagent handed this process to its parent (rides the notice)
+    message_agent_delivery: bool = False        # internal DM custody; survives sender agent close only
     # Watcher/notification routing (persisted for crash recovery)
     # systemd_unit: str = ""                      # transient scope unit name when spawned under systemd-run
     # (#70716)
@@ -624,6 +642,7 @@ _CHECKPOINT_FIELDS = (
     "started_at", "task_id", "owner_task_id", "session_key",
     *(f"watcher_{k}" for k in _WATCHER_ROUTE_KEYS), "watcher_interval",
     "parent_session_id", "receipt_home", "notify_on_complete", "completion_output_chars", "watch_patterns",
+    "message_agent_delivery",
     "heartbeat_seconds", "output_log_path", "exit_file_path", "log_offset_bytes")
 _CHECKPOINT_DEFAULTS = {
     f.name: ([] if f.name == "watch_patterns" else f.default)
@@ -1142,6 +1161,11 @@ class ProcessRegistry(ProcessCheckpointMixin):
     def _new_session(command, task_id, owner_task_id, session_key, cwd, **extra) -> ProcessSession:
         from gateway.session_context import get_session_env
 
+        # All local paths (pipe, PTY/fallback and foreground adoption) construct here,
+        # before _track_started makes the process visible to sender cleanup.
+        extra.setdefault("message_agent_delivery", bool(
+            _message_agent_delivery_command.get() == command
+            and extra.get("pid_scope", "host") == "host"))
         return ProcessSession(
             id=f"proc_{uuid.uuid4().hex[:12]}", command=command, task_id=task_id,
             owner_task_id=owner_task_id, session_key=session_key, cwd=cwd,

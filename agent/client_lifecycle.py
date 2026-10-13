@@ -114,6 +114,11 @@ class ClientLifecycleMixin:
             for process in process_registry.list_sessions():
                 if process["owner_task_id"] in owners and process["status"] == "running":
                     session = process_registry.get(process["session_id"])
+                    # An acknowledged DM is owned by its delivery runner, not the sender turn.
+                    # Do not generalize this to terminal notifications or command-name matching.
+                    if session is not None and session.message_agent_delivery:
+                        kept = True
+                        continue
                     if (getattr(self, "_preserve_notify_file_processes_on_close", False)
                             and session is not None and session.pid_scope == "host"
                             and session.output_log_path and session.notify_on_complete):

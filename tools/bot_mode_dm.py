@@ -4,8 +4,8 @@ Lets a Bot Mode agent message a teammate (a profile on this install, an agent on
 a registered peer gateway, or one on another Desktop-connected machine): the
 target is validated against the live roster, the attribution prefix is applied
 server-side, and the reply arrives later via the background-process completion
-notification (fire-and-forget). Containment: the schema is injected ONLY into a
-bot's canonical "Bot Chat" session on a Bot-Mode-managed install (same gate as
+notification (fire-and-forget). Containment: the schema is injected into managed
+Bot Chat / interactive sessions, dispatched Kanban workers and opted-in gateways (same gate as
 ``tools/bot_mode_probe.py``; never in the registry or any toolset), and dispatch
 re-checks that gate so a forged call returns a structured error. Transports:
 local → ``hermes -p <name> chat --in ~ -c "Bot Chat" --create-if-missing -Q
@@ -156,10 +156,10 @@ def is_canonical_bot_chat(agent: Any) -> bool:
 # Meet voice bridge, ...) carry message_agent. Key: ``bot_mode.message_agent_platforms`` in the
 # PROFILE's own config.yaml — a list of gateway platform names (``agent.platform``), e.g. [slack].
 _SURFACE_CFG_KEY = "message_agent_platforms"
-# Never widened by config: the local CLI/TUI already has a Bot Chat, and these surfaces are
-# internal runners whose sender identity / reply routing is not a human-facing chat.
+# Internal runners cannot opt in. Interactive local surfaces need no gateway opt-in.
 # Kanban workers are authorized separately for one-way queued messaging with card reply routing.
-_SURFACE_NEVER = frozenset({"", "cli", "tui", "cron", "subagent", "batch"})
+_SURFACE_NEVER = frozenset({"", "cron", "subagent", "batch"})
+_INTERACTIVE_SURFACES = frozenset({"cli", "tui", "desktop"})
 
 
 def is_kanban_worker(agent: Any) -> bool:
@@ -191,7 +191,7 @@ def message_agent_surfaces(home: str | os.PathLike | None) -> frozenset[str]:
 
 
 def _surface_authorized(agent: Any) -> bool:
-    """A non-Bot-Chat gateway session on a managed install whose profile opted its platform in.
+    """A managed interactive session, or a gateway session whose profile opted its platform in.
     Memoized on the agent so the tool list stays byte-stable for the session (prompt-cache safe):
     a config edit takes effect on the next new session / agent rebuild, not mid-session. The memo
     is keyed by the resolved home, so a call made before the gateway bound the profile home can
@@ -209,7 +209,7 @@ def _surface_authorized(agent: Any) -> bool:
         if platform and platform not in _SURFACE_NEVER and getattr(agent, "_bot_mode_protocol", True):
             from tools.bot_mode_probe import is_bot_mode_managed
 
-            ok = platform in message_agent_surfaces(home) and is_bot_mode_managed(home)
+            ok = (platform in _INTERACTIVE_SURFACES or platform in message_agent_surfaces(home)) and is_bot_mode_managed(home)
     except Exception:  # pragma: no cover — must never break a turn
         logger.debug("message_agent surface gate failed", exc_info=True)
         ok = False
@@ -223,13 +223,20 @@ def _surface_authorized(agent: Any) -> bool:
 
 def message_agent_authorized(agent: Any) -> bool:
     """The ``message_agent`` gate: the canonical Bot Chat (``is_canonical_bot_chat``),
-    a kanban worker (``is_kanban_worker``), or a gateway session whose platform the profile
+    a managed interactive CLI/TUI/Desktop session, a kanban worker (``is_kanban_worker``), or a gateway session whose platform the profile
     opted in via ``bot_mode.message_agent_platforms``.
     Session-stable, so it is prompt-cache safe to re-evaluate on every tool-snapshot rebuild.
     Never raises."""
     try:
         if not getattr(agent, "_bot_mode_protocol", True):
             return False
+        platform = str(getattr(agent, "platform", "") or "").strip().lower()
+        source = str(getattr(agent, "_session_source", "") or
+                     os.environ.get("HERMES_SESSION_SOURCE", "")).strip().lower()
+        if platform in {"cron", "subagent", "batch"} or source in {"cron", "subagent", "batch"}:
+            return False
+        if source == "kanban":
+            return is_kanban_worker(agent)
         return is_canonical_bot_chat(agent) or is_kanban_worker(agent) or _surface_authorized(agent)
     except Exception:  # pragma: no cover — must never break a turn
         logger.debug("message_agent_authorized failed", exc_info=True)
@@ -334,10 +341,11 @@ def _message_agent_tool(target: str = "", message: str = "", task_id: Optional[s
         from tools.bot_relay import BOT_CHAT_TURN_ARGS, _hermes_cli
 
         is_worker = is_kanban_worker(agent)
-        if _session_title(agent) != BOT_CHAT_TITLE and not _surface_authorized(agent) and not is_worker:
-            return _err("message_agent is only available in a Bot Mode 'Bot Chat' session "
-                        "(or a gateway platform listed in this profile's bot_mode.message_agent_platforms). "
-                        "This session is neither; do not retry.")
+        if not message_agent_authorized(agent):
+            return _err("message_agent is only available in a managed Bot Mode 'Bot Chat' or interactive "
+                        "CLI/TUI/Desktop session, an authorized Kanban worker, or a gateway platform listed "
+                        "in this profile's bot_mode.message_agent_platforms. "
+                        "Protocol-off and cron/subagent/batch sessions are excluded; do not retry.")
         if not is_bot_mode_managed(home):
             return _err("This install is not Bot-Mode-managed (no bot roster); "
                         "message_agent is unavailable. Do not retry.")
@@ -1243,9 +1251,14 @@ def _spawn_delivery(command: str, label: str, *, dm_file: Optional[str] = None, 
     try:
         from tools.terminal_tool import terminal_tool
 
-        raw = terminal_tool(command, background=True, notify_on_complete=True, task_id=task_id,
-                            workdir=str(Path(__file__).resolve().parent.parent), _host_local=True,
-                            _completion_output_chars=REPLY_COMPLETION_CHARS)
+        from tools.process_registry import _message_agent_delivery_scope
+
+        # Custody must exist at registration, not after terminal_tool returns: sender
+        # close can run while that call is still finishing its launch bookkeeping.
+        with _message_agent_delivery_scope(command):
+            raw = terminal_tool(command, background=True, notify_on_complete=True, task_id=task_id,
+                                workdir=str(Path(__file__).resolve().parent.parent), _host_local=True,
+                                _completion_output_chars=REPLY_COMPLETION_CHARS)
         try:
             parsed = json.loads(raw)
         except (ValueError, TypeError):
@@ -1261,7 +1274,7 @@ def _spawn_delivery(command: str, label: str, *, dm_file: Optional[str] = None, 
                                                     "command_allowlist) and send again." if dm_file else "."))
         if not proc_id:
             return _err(f"Delivery to {label} failed to start: no process id returned")
-        # From here the background runner owns the file (removed after the consumer finishes).
+        # From here the runner owns the file even if outcome routing later fails.
         transferred = True
         if parsed.get("notify_on_complete") is False:
             # This flag also covers one-shot and Kanban workers. Only API turns with an armed

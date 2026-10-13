@@ -3,8 +3,8 @@
 Contract:
 - A profile lists gateway platforms in its OWN config.yaml under
   ``bot_mode.message_agent_platforms``; a session on that platform gets the tool.
-- Default (no key) is unchanged: only the canonical Bot Chat gets it.
-- cli/tui/cron/subagent/batch cannot be opted in; dispatched kanban workers send one-way queued messages.
+- Managed interactive cli/tui/desktop and canonical Bot Chat need no gateway opt-in.
+- cron/subagent/batch cannot be opted in; dispatched kanban workers send one-way queued messages.
 - The install must still be Bot-Mode-managed and the protocol switch on.
 - Sender identity is the profile's own (home-derived), and the fleet message drain
   stays Bot-Chat-only.
@@ -103,12 +103,12 @@ def test_string_value_and_case_accepted(tmp_path):
     assert bot_mode_dm.message_agent_authorized(agent) is True
 
 
-@pytest.mark.parametrize("platform", ["cli", "tui", "cron", "subagent", "batch", ""])
+@pytest.mark.parametrize("platform", ["cron", "subagent", "batch", ""])
 def test_never_list_cannot_be_opted_in(tmp_path, platform):
     home = _install(tmp_path, platforms=[platform or "x", "cli", "tui", "cron", "subagent", "batch"])
     agent = _FakeAgent(home, platform=platform)
     assert bot_mode_dm.message_agent_authorized(agent) is False
-    assert "cli" not in bot_mode_dm.message_agent_surfaces(home)
+    assert "cron" not in bot_mode_dm.message_agent_surfaces(home)
 
 
 def test_kanban_worker_authorized_without_opt_in(tmp_path):
@@ -273,12 +273,14 @@ def test_inherited_card_environment_does_not_authorize_other_runners(tmp_path, m
     assert bot_mode_dm.message_agent_authorized(agent) is False
 
 
-def test_card_id_without_dispatcher_source_does_not_authorize_cli(tmp_path, monkeypatch):
+def test_card_id_without_dispatcher_source_does_not_authorize_cli_as_kanban(tmp_path, monkeypatch):
     monkeypatch.setenv("HERMES_KANBAN_TASK", "t_origin")
     monkeypatch.delenv("HERMES_SESSION_SOURCE", raising=False)
     agent = _FakeAgent(_install(tmp_path), platform="cli")
     agent.task_id = "t_origin"
-    assert bot_mode_dm.message_agent_authorized(agent) is False
+    assert bot_mode_dm.is_kanban_worker(agent) is False
+    # Interactive CLI now has its own managed-install permission, not card reply routing.
+    assert bot_mode_dm.message_agent_authorized(agent) is True
 
 
 def test_dispatcher_source_authorizes_actual_cli_worker(tmp_path, monkeypatch):
