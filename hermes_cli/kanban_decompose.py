@@ -341,12 +341,25 @@ def decompose_task(
     return _apply_fanout(task_id, parsed, routing, audit_author)
 
 
+def _held_by_block_loop(conn, task_id: str) -> bool:
+    """Do not restart a legacy breaker loop; fail closed on lookup errors."""
+    try:
+        return kb._has_unreleased_block_loop(conn, task_id)
+    except Exception:
+        logger.warning("block-loop hold lookup failed for %s; treating as held", task_id)
+        return True
+
+
 def list_triage_ids(*, tenant: Optional[str] = None) -> list[str]:
-    """Return task ids currently in the triage column."""
+    """Triage candidates excluding foreign mirrors and unreleased legacy loops."""
     with kbc.connect_closing() as conn:
         rows = kb.list_tasks(conn, status="triage", tenant=tenant, limit=1000)
         installed = kb._fleet_adapter_installed_node_id(conn)
-        return [row.id for row in rows if not kb._is_foreign_fleet_mirror(conn, row.id, installed)]
+        return [
+            row.id for row in rows
+            if not kb._is_foreign_fleet_mirror(conn, row.id, installed)
+            and not _held_by_block_loop(conn, row.id)
+        ]
 
 
 # ---- BEGIN PLUGIN-COMPAT (revert-scheduled; see COMPAT_MANIFEST.md) ----

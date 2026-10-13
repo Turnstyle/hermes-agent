@@ -2146,6 +2146,13 @@ _HOLD_RELEASE_EVENT_KINDS = ("unblocked", "promoted_manual")
 NEEDS_INPUT_TODO_HOLD_SECONDS = 2 * 3600  # A hold may not wait forever on a person.
 
 
+def _has_unreleased_block_loop(conn: sqlite3.Connection, task_id: str) -> bool:
+    """Legacy decompose hold; only an explicit unblock releases its event."""
+    return _newest_event_kind(
+        conn, task_id, ("block_loop_detected", "unblocked"),
+    ) == "block_loop_detected"
+
+
 def _needs_input_hold_state(conn, task_id, block_kind):
     """'active', 'expired' or None for a needs_input hold on a todo/triage card."""
     if block_kind != "needs_input":
@@ -4142,7 +4149,7 @@ def unblock_task(
     now = int(time.time())
     with write_txn(conn):
         hold_row = conn.execute(
-            "SELECT status, block_kind, title, body, current_run_id, claim_lock, "
+            "SELECT status, block_kind, block_recurrences, title, body, current_run_id, claim_lock, "
             "claim_expires, worker_pid FROM tasks WHERE id = ?", (task_id,),
         ).fetchone()
         if require_idle and hold_row is not None:
@@ -4167,6 +4174,29 @@ def unblock_task(
                 if latest_block_id != expected_blocked_event_id:
                     return False
         if hold_row is not None and hold_row["status"] == "triage":
+            # A real legacy breaker row retained its typed recurrence metadata.
+            # Bare advisory events are not operator holds (existing policy).
+            if (
+                hold_row["block_kind"] is not None
+                and hold_row["block_recurrences"] >= 2
+                and _has_unreleased_block_loop(conn, task_id)
+            ):
+                clean_actor = (actor or "").strip()
+                clean_reason = (reason or "").strip()
+                if not clean_actor or not clean_reason:
+                    raise ValueError("triage hold clear requires a non-empty actor and reason")
+                if _is_foreign_fleet_mirror(conn, task_id, _fleet_adapter_installed_node_id(conn)):
+                    raise ValueError("foreign fleet mirror cannot be unblocked locally")
+                _append_event(conn, task_id, "unblocked", {
+                    "status": "triage", "cleared_hold": "block_loop_detected",
+                    "actor": clean_actor, "reason": clean_reason,
+                })
+                _insert_comment(
+                    conn, task_id, clean_actor,
+                    f"UNBLOCK: {clean_reason} (cleared block_loop_detected by {clean_actor}; kept in triage).",
+                    now,
+                )
+                return True
             from hermes_cli.kanban_db_triage_unblock import clear_triage_hold
             return clear_triage_hold(
                 conn, task_id, hold_row, actor=actor, reason=reason, now=now,
