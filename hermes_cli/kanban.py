@@ -610,8 +610,17 @@ def _cmd_reclaim(args: argparse.Namespace) -> int:
 
 
 def _cmd_recover_ghost(args: argparse.Namespace) -> int:
-    from hermes_cli.kanban_recover_ghost import recover_ghost
-    return recover_ghost(args)
+    # Keep the existing nested CLI spelling, but never bypass plugin enablement.
+    from hermes_cli.plugins import discover_plugins, get_plugin_manager
+    try:
+        discover_plugins()
+        command = get_plugin_manager()._cli_commands.get("recover-ghost")
+    except Exception as exc:
+        return _err(f"kanban: recover-ghost plugin discovery failed: {exc}")
+    if not command or not callable(command.get("handler_fn")):
+        return _err("kanban: recover-ghost requires the recover-ghost plugin; "
+                    "run `hermes plugins enable recover-ghost`", 2)
+    return int(command["handler_fn"](args) or 0)
 
 
 def _cmd_reassign(args: argparse.Namespace) -> int:

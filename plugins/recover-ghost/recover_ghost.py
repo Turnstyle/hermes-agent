@@ -316,6 +316,12 @@ def _apply(conn: sqlite3.Connection, task_id: str, run_id: int, snapshot: dict,
 
 
 def recover_ghost(args) -> int:
+    # The top-level plugin command does not pass through kanban_command's fence.
+    # Refuse child contexts before any board or process probe, including dry runs.
+    from agent.delegation_context import is_delegated_child_process_context
+    if is_delegated_child_process_context():
+        print("kanban: delegate_task child contexts cannot recover Kanban tasks")
+        return 1
     slug = kb._normalize_board_slug(args.board) if args.board else kb.get_current_board()
     path = kb.kanban_db_path(slug)
     result = {"board": slug, "db_path": str(path), "task_id": args.task_id,

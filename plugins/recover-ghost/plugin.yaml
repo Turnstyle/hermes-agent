@@ -1,0 +1,5 @@
+name: recover-ghost
+version: "0.1.0"
+description: "Governed, compare-and-swap recovery of claimless Kanban attempts. Dry-run by default."
+provides_cli_commands:
+  - recover-ghost
