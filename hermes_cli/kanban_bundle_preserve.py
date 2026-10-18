@@ -27,10 +27,8 @@ def _strings(value):
     if isinstance(value, str):
         yield value
     elif isinstance(value, dict):
-        for key, v in value.items():
-            # Run custody metadata identifies a checkout, not a bundle artifact.
-            if key != "worktree":
-                yield from _strings(v)
+        for v in value.values():
+            yield from _strings(v)
     elif isinstance(value, (tuple, list)):
         for v in value:
             yield from _strings(v)
@@ -43,7 +41,8 @@ def _references(text):
         line = line.strip()
         if line.startswith(("/", "./", "../")) or (not re.search(r"\s", line) and "/" in line):
             yield line, line.startswith("/")
-            continue
+            if not re.search(r"\s", line):
+                continue
         for candidate in re.findall(r"(?:/|\./|\b)[\w./-]+\.[A-Za-z0-9]{1,12}\b", line):
             # Relative names may refer to a repo or branch, not this workspace.
             yield candidate, candidate.startswith("/")
@@ -85,7 +84,11 @@ def plan_bundle(conn, task_id: str, workspace: Path, *, max_bytes=MAX_BYTES):
     texts = [row["result"] or ""]
     for run in conn.execute("SELECT metadata, summary FROM task_runs WHERE task_id=?", (task_id,)):
         if run["metadata"]:
-            texts.extend(_strings(json.loads(run["metadata"])))
+            metadata = json.loads(run["metadata"])
+            if isinstance(metadata, dict):
+                # Run-level checkout custody is not a bundle artifact reference.
+                metadata = {key: value for key, value in metadata.items() if key != "worktree"}
+            texts.extend(_strings(metadata))
         texts.append(run["summary"] or "")
     for text in texts:
         for candidate, required in _references(text):

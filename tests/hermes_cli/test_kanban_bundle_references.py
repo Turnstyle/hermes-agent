@@ -111,3 +111,26 @@ def test_worktree_context_does_not_select_checkout(board):
     assert report["unresolved_refs"] == []
     assert root.exists()
     assert not kb.list_attachments(board, tid)
+
+
+def test_path_leading_prose_preserves_all_local_files(board):
+    tid, root = task(board, marker=False)
+    (root / "bundle").mkdir()
+    (root / "bundle" / "report.md").write_text("accepted report")
+    board.execute(
+        "UPDATE tasks SET result=? WHERE id=?", ("./accepted.patch and bundle/report.md", tid),
+    )
+    board.commit()
+    bp.preserve_bundle(board, tid, root)
+    assert contents(board, tid) == ["accepted.patch", "bundle/report.md"]
+
+
+def test_nested_worktree_key_still_selects_artifacts(board):
+    tid, root = task(board, marker=False)
+    board.execute(
+        "INSERT INTO task_runs(task_id,status,started_at,metadata) VALUES(?,'completed',0,?)",
+        (tid, json.dumps({"artifacts": {"worktree": str(root / "accepted.patch")}})),
+    )
+    board.commit()
+    report = bp.preserve_bundle(board, tid, root, dry_run=True)
+    assert [entry["path"] for entry in report["files"]] == ["accepted.patch"]
