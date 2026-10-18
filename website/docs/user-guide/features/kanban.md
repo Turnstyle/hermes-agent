@@ -325,6 +325,10 @@ kanban:
   review_dispatch: true            # default: spawn the assigned profile with
                                    # the bundled sdlc-review skill. Set false
                                    # for human-only review boards.
+  # review_lane: false             # per-profile opt-out: put this in the
+                                   # ASSIGNEE profile's config to skip only
+                                   # its automatic review claims. Default true;
+                                   # ready-lane work is unchanged.
   # dispatch_profiles: [sage]       # unset (key omitted): this home may claim
                                    # cards for any existing profile. Set to a
                                    # list (or comma-separated string) of profile
@@ -333,6 +337,17 @@ kanban:
                                    # or a bare `dispatch_profiles:` claims
                                    # nothing, and so does an unreadable config.
 ```
+
+An explicit boolean `kanban.review_lane: false` in the assigned profile's
+config prevents automatic review claims and spawns. The card stays in `review`
+for reassignment or a later config change. A missing key remains eligible;
+strings such as `"false"`, `0`, and `null` do not opt a profile out.
+An unreadable profile config defers review rather than silently ignoring an
+opt-out. The dispatcher emits a `review_lane_skipped` event with the assignee
+and reason at most once per five minutes per card/assignee/reason. Dry runs
+write no skip events. Ineligible reviews do not reserve ready-lane capacity
+or appear as spawnable in review health probes. This does not restrict manual
+claims or change ready-lane eligibility.
 
 Override the config flag at runtime via `HERMES_KANBAN_DISPATCH_IN_GATEWAY=0`
 for debugging. Standard gateway supervision applies: run `hermes gateway
@@ -412,11 +427,14 @@ hermes kanban block    t_abc "need input" --ids t_def t_hij
 ```
 
 :::note Where an unblocked task lands
-`unblock` restores the safe source phase: **`review`** for reviewer-origin work
-whose parents are complete, **`ready`** for implementation work whose parents
-are complete, or **`todo`** while any parent remains open. A `todo` task keeps
-its source-phase provenance and returns to `review` or `ready` automatically
-when the dependency gate clears. `unblock` never routes directly to `triage`.
+`unblock` returns work to **`ready`**, or **`todo`** while any parent remains
+open. It does not implicitly request another review, even if the card was
+blocked during review. To intentionally resume a blocked review-origin card
+in **`review`**, use `hermes kanban unblock <id> --restore-review` (or
+`restore_review: true` in the orchestrator tool). The flag preserves existing
+review provenance; it does not turn implementation or scheduled work into a
+review. Parent gating still applies, and a `todo` card remembers the explicit
+choice when its parents finish. `unblock` never routes directly to `triage`.
 
 If you unblock a task and it later shows up in **`triage`**, the unblock is not
 what put it there. A subsequent *re-block for the same reason* did: after a task
@@ -473,7 +491,7 @@ Dispatcher-owned workers receive their task lifecycle tools automatically.
 | `kanban_attachments` | List a task's attachments. | — |
 | `kanban_create` | (Orchestrators) fan out into child tasks with an `assignee`, optional `parents`, `skills`, etc. Returns `gated: true` + `gated_by` when an open parent parked the new card in `todo`. | `title`, `assignee` |
 | `kanban_link` | (Orchestrators) add a `parent_id → child_id` dependency edge after the fact. Returns `gated: true` when the child was `ready` and got demoted back to `todo` because the parent is not done — the child will only run after the parent completes. Refused with `child is already running` when the child is already claimed — an edge added after the claim cannot serialise the run (a worker may still link its *own* running card ahead of a `kind=dependency` block). | `parent_id`, `child_id` |
-| `kanban_unblock` | (Orchestrators) restore a blocked task to its source phase (`review` or `ready`), or `todo` while a parent remains open. | `task_id` |
+| `kanban_unblock` | (Orchestrators) return a blocked task to `ready`, or parent-gated `todo`. Only explicit `restore_review: true` resumes blocked review-origin work in `review`. | `task_id`, optional `restore_review` |
 
 A typical worker turn looks like:
 
