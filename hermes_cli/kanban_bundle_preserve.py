@@ -2,6 +2,22 @@
 
 No extraction occurs here. Archives contain only relative regular-file members.
 Existing workspaces may be inventoried with dry_run=True without writing blobs/DB.
+
+Removal is retain-by-default. Callers delete only when ``preservation_gate``
+returns true.
+
+- ``HOLD-WORKSPACE`` retains before planning, archive, or deletion whenever
+  the name exists. A no-follow probe error retains before preservation too.
+  It wins over ``KEEP-BUNDLE`` and over any worker-written file.
+- No workspace file authorizes an empty plan. A name that looks disposable
+  or like a versioned attestation is not removal authority. There is no
+  acceptance path for that kind of marker.
+- ``KEEP-BUNDLE`` selects the whole tree for the archive. It is not a hold
+  and it does not authorize an empty plan.
+- An empty plan retains. A symlink workspace root retains. A missing required
+  reference, or a failed copy, checksum, size, symlink, secret, or database
+  step retains. A preexisting unrelated attachment is not proof. Dry-run
+  never writes or deletes. This gate is not a universal delete barrier.
 """
 from __future__ import annotations
 
@@ -17,6 +33,9 @@ import tempfile
 MAX_BYTES = 500 * 1024 * 1024
 EXCLUDED_DIRS = {".git", ".venv", "venv", "node_modules", "__pycache__"}
 SECRET_NAME = re.compile(r"(?:^\.env(?:\.|$)|secret|credential|token|password|key.*\.json$|(?:^|[._-])auth(?:[._-]|$)|service[_-]?account|id_rsa|id_ed25519|\.pem$|\.key$)", re.I)
+SOURCE_SUFFIX = re.compile(r"(?::\d+(?:-\d+|:\d+)?|#[^/#]+)$")
+HOLD_MARKER = "HOLD-WORKSPACE"
+KEEP_MARKER = "KEEP-BUNDLE"
 
 
 def _unsafe(parts):
@@ -35,12 +54,28 @@ def _strings(value):
 
 
 def _references(text):
-    # Metadata commonly contains exact paths; prose contains delimited paths.
-    text = text.strip()
-    if text.startswith(("/", "./", "../")) or (" " not in text and "/" in text):
-        yield text, True
-    for candidate in re.findall(r"(?:/|\./|\b)[\w./-]+\.[A-Za-z0-9]{1,12}\b", text):
-        yield candidate, candidate.startswith(("/", "./", "../"))
+    # Markdown links name the destination, not a possibly filename-like label.
+    text = re.sub(r"\[[^\]\n]*\]\(([^()\n]+)\)", r"<\1>", text)
+    # Remove whole URL spans before filename extraction, including prose URLs.
+    text = re.sub(r"\b[\w+.-]+://[^\s`<>\"']+", "", text)
+    explicit = []
+
+    def consume(match):
+        # Preserve quoted identity, including spaces and terminal punctuation.
+        explicit.append(next(part for part in match.groups() if part is not None))
+        return " "
+
+    text = re.sub(r"(?<![\w/])(?:`([^`\n]+)`|\"([^\"\n]+)\"|'([^'\n]+)'|<([^<>\n]+)>)", consume, text)
+    for candidate in explicit:
+        yield candidate, candidate.startswith("/")
+    for token in text.split():
+        # Only outside prose boundaries are removed; never match a path prefix
+        # such as bundle/v1.0 within bundle/v1.0/README and select its siblings.
+        candidate = token.lstrip("([{*").rstrip(".,:;)]}*")
+        candidate = re.sub(r"^[A-Za-z_][\w-]*[=:]", "", candidate)
+        if "/" in candidate or re.fullmatch(r"[\w.-]+\.[A-Za-z0-9]{1,12}", SOURCE_SUFFIX.sub("", candidate)):
+            # Relative names may refer to a repo or branch, not this workspace.
+            yield candidate, candidate.startswith("/")
 
 
 def _open_regular(root: Path, rel: str):
@@ -61,6 +96,73 @@ def _open_regular(root: Path, rel: str):
     return os.fdopen(source, "rb")
 
 
+def _marker_status(root: Path, name: str) -> str:
+    """``absent``, ``present``, ``linked``, ``unsafe``, or ``unreadable``.
+
+    ``present`` is only a readable regular file opened without following links.
+    """
+    path = root / name
+    try:
+        info = path.lstat()
+    except FileNotFoundError:
+        return "absent"
+    except OSError:
+        return "unreadable"
+    if stat.S_ISLNK(info.st_mode):
+        return "linked"
+    if not stat.S_ISREG(info.st_mode):
+        return "unsafe"
+    try:
+        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
+    except OSError:
+        return "unreadable"
+    try:
+        os.read(fd, 1)
+    except OSError:
+        return "unreadable"
+    finally:
+        os.close(fd)
+    return "present"
+
+
+def _root_retention_reason(root: Path) -> str | None:
+    try:
+        if root.is_symlink() or not root.is_dir():
+            return "workspace root is missing or linked"
+    except OSError:
+        return "workspace root is missing or linked"
+    return None
+
+
+def _hold_probe(root: Path) -> str | None:
+    """Return a retention reason before any preservation walk.
+
+    The hold name existing is enough, including a link or a directory, and
+    the probe never follows a link. Any other probe error retains too.
+    """
+    path = root / HOLD_MARKER
+    try:
+        info = path.lstat()
+    except FileNotFoundError:
+        return None
+    except OSError:
+        return "hold probe failed before preservation"
+    if stat.S_ISLNK(info.st_mode) or not stat.S_ISREG(info.st_mode):
+        return "hold marker requires retention before archive or removal"
+    try:
+        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
+    except OSError:
+        return "hold probe failed before preservation"
+    try:
+        try:
+            os.read(fd, 1)
+        except OSError:
+            return "hold probe failed before preservation"
+    finally:
+        os.close(fd)
+    return "hold marker requires retention before archive or removal"
+
+
 def plan_bundle(conn, task_id: str, workspace: Path, *, max_bytes=MAX_BYTES):
     root = Path(os.path.abspath(workspace))
     row = conn.execute("SELECT status, result FROM tasks WHERE id=?", (task_id,)).fetchone()
@@ -68,41 +170,58 @@ def plan_bundle(conn, task_id: str, workspace: Path, *, max_bytes=MAX_BYTES):
         raise ValueError("workspace is not terminal")
     if root.is_symlink() or root.resolve() != root or not root.is_dir():
         raise ValueError("workspace root is missing or linked")
+    hold_reason = _hold_probe(root)
+    if hold_reason:
+        raise ValueError(hold_reason)
     selected = set()
     directories = set()
     skipped = set()
     unresolved_refs = set()
-    marker = root / "KEEP-BUNDLE"
-    if marker.is_symlink():
-        raise ValueError("KEEP-BUNDLE is linked")
-    keep_all = marker.is_file()
+    keep_all = _marker_status(root, KEEP_MARKER) == "present"
     texts = [row["result"] or ""]
     for run in conn.execute("SELECT metadata, summary FROM task_runs WHERE task_id=?", (task_id,)):
         if run["metadata"]:
-            texts.extend(_strings(json.loads(run["metadata"])))
+            metadata = json.loads(run["metadata"])
+            if isinstance(metadata, dict):
+                # Run-level checkout custody is not a bundle artifact reference.
+                metadata = {key: value for key, value in metadata.items() if key != "worktree"}
+            texts.extend(_strings(metadata))
         texts.append(run["summary"] or "")
     for text in texts:
         for candidate, required in _references(text):
-            candidate = candidate.rstrip(".,:;)")
             p = Path(candidate)
             if not p.is_absolute():
                 p = root / p
             p = Path(os.path.abspath(p))
+            if p == root:
+                # Workspace custody is context; only KEEP-BUNDLE selects all.
+                skipped.add(".")
+                continue
             if not p.is_relative_to(root):
                 continue
-            rel = p.relative_to(root)
-            if _unsafe(rel.parts):
-                raise ValueError("referenced member has a prohibited name")
             if p.resolve() != p:
                 raise ValueError("referenced member is linked")
+            if not p.exists():
+                # Source locations are aliases only when the literal is absent.
+                # Never shorten an existing path, or expand a directory prefix.
+                name = SOURCE_SUFFIX.sub("", p.name)
+                if name and name != p.name:
+                    target = p.with_name(name)
+                    if target.resolve() != target:
+                        raise ValueError("referenced member is linked")
+                    if not target.is_dir():
+                        p = target
+            rel = p.relative_to(root)
+            if not required and not p.exists():
+                unresolved_refs.add(rel.as_posix())
+                continue
+            if _unsafe(rel.parts):
+                raise ValueError("referenced member has a prohibited name")
             if p.is_dir():
                 directories.add(p)
                 continue
             if not p.is_file():
-                if required or p.exists():
-                    raise ValueError("referenced bundle member is missing")
-                unresolved_refs.add(rel.as_posix())
-                continue
+                raise ValueError("referenced bundle member is missing")
             selected.add(rel.as_posix())
     if keep_all:
         directories = {root}
@@ -256,27 +375,54 @@ def preserve_bundle(conn, task_id, workspace, *, dry_run=False, max_bytes=MAX_BY
         temp.with_suffix('.sha256').unlink(missing_ok=True)
 
 
-def preservation_gate(task_id, workspace, *, conn=None):
-    """Any copy/check/DB failure retains the workspace; callers own deletion."""
-    from hermes_cli import kanban_db_connect as kbc
+def _retain(task_id, conn, reason: str) -> bool:
+    """Record a stable reason and refuse removal. Never echo file contents."""
+    message = (
+        f"[kanban] Retained workspace {task_id}: {reason}. "
+        "Inspect bundle markers and retry cleanup after repair."
+    )
+    print(message, flush=True)
+    # A comment-write failure must not become permission to delete.
     try:
+        from hermes_cli import kanban_db as kb
+        from hermes_cli import kanban_db_connect as kbc
         if conn is not None:
-            preserve_bundle(conn, task_id, workspace)
+            kb.add_comment(conn, task_id, author="workspace_preservation", body=message)
         else:
             with kbc.connect_closing() as connection:
-                preserve_bundle(connection, task_id, workspace)
-        return True
+                kb.add_comment(connection, task_id, author="workspace_preservation", body=message)
+    except Exception:
+        pass
+    return False
+
+
+def preservation_gate(task_id, workspace, *, conn=None):
+    """True only when this workspace may be removed. Callers own deletion.
+
+    Hold presence and hold-probe errors return false before preservation.
+    An empty plan returns false. A worker-written marker file is not
+    authority. ``dry_run`` is not this function; ``preserve_bundle`` with
+    ``dry_run=True`` stays read-only.
+    """
+    from hermes_cli import kanban_db_connect as kbc
+
+    root = Path(os.path.abspath(workspace))
+    reason = _root_retention_reason(root) or _hold_probe(root)
+    if reason:
+        return _retain(task_id, conn, reason)
+    def _authorized(connection, report) -> bool:
+        if report.get("files"):
+            return True
+        return _retain(
+            task_id, connection, "empty preservation plan is not removal authorization",
+        )
+
+    try:
+        if conn is not None:
+            return _authorized(conn, preserve_bundle(conn, task_id, workspace))
+        with kbc.connect_closing() as connection:
+            return _authorized(connection, preserve_bundle(connection, task_id, workspace))
     except Exception as exc:
-        message = f"[kanban] Retained workspace {task_id}: bundle preservation failed ({type(exc).__name__}). Inspect bundle paths/cap and retry cleanup after repair."
-        print(message, flush=True)
-        # A DB failure must never turn the preservation failure into deletion.
-        try:
-            from hermes_cli import kanban_db as kb
-            if conn is not None:
-                kb.add_comment(conn, task_id, author="workspace_preservation", body=message)
-            else:
-                with kbc.connect_closing() as connection:
-                    kb.add_comment(connection, task_id, author="workspace_preservation", body=message)
-        except Exception:
-            pass
-        return False
+        return _retain(
+            task_id, conn, f"bundle preservation failed ({type(exc).__name__})",
+        )

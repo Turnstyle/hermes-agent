@@ -159,7 +159,10 @@ KANBAN_COMPLETE_SCHEMA = _schema(
                 "are not the deliverable. The path must exist "
                 "on disk at completion. Files inside a managed scratch "
                 "workspace are copied to durable task attachments before "
-                "cleanup; a missing declared scratch artifact keeps the "
+                "the preservation gate decides removal. Removal is "
+                "retain-by-default. An empty plan is not removal authorization, "
+                "and a file you write in the workspace is not permission to "
+                "delete it. A missing declared scratch artifact keeps the "
                 "task in-flight so you can fix the path and retry."
             ),
         },
@@ -264,7 +267,7 @@ KANBAN_REQUEST_REVIEW_SCHEMA = _schema(
                 "A review handoff is the last implementer "
                 "transition, so the kernel copies these into the "
                 "task's durable attachments before the reviewer's "
-                "completion cleans the scratch workspace up, and "
+                "completion reaches the retain-by-default preservation gate, and "
                 "the gateway notifier uploads them as native "
                 "attachments to the subscribed chat. A missing "
                 "declared scratch artifact keeps the task in place "

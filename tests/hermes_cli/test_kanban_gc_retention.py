@@ -59,8 +59,9 @@ def _archived_scratch_workspace(conn) -> Path:
     tid = kb.create_task(conn, title="archived with workspace")
     with kb.write_txn(conn):
         conn.execute(
-            "UPDATE tasks SET status='archived', workspace_kind='scratch' WHERE id=?",
-            (tid,),
+            "UPDATE tasks SET status='archived', workspace_kind='scratch', "
+            "result=? WHERE id=?",
+            ("`scratch.txt`", tid),
         )
     ws = kb.workspaces_root() / tid
     ws.mkdir(parents=True)

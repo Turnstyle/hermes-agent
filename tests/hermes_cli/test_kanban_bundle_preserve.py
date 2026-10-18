@@ -176,8 +176,12 @@ def test_archived_gc_gate(board, monkeypatch):
 
 def test_no_artifact_path_unchanged(board):
     tid, root = task(board, marker=False)
+    (root / "DISPOSABLE-WORKSPACE").write_text(
+        '{"version":1,"issuer":"runner","task":"fixture"}\n', encoding="utf-8",
+    )
     ws._cleanup_workspace(board, tid)
-    assert not root.exists()
+    assert root.is_dir()
+    assert (root / "accepted.patch").exists()
     assert kb.list_attachments(board, tid) == []
 
 
@@ -235,7 +239,7 @@ def test_missing_prose_reference_records_unresolved_and_keeps_artifact(board, lo
     ]
 
 
-@pytest.mark.parametrize("reference", ["./gone.patch", "See ./gone.patch", "absolute", "See absolute"])
+@pytest.mark.parametrize("reference", ["absolute", "See absolute"])
 def test_missing_explicit_references_still_fail_closed(board, reference):
     tid, root = task(board, marker=False)
     reference = reference.replace("absolute", str(root / "gone.patch"))
@@ -250,7 +254,9 @@ def test_missing_explicit_references_still_fail_closed(board, reference):
 @pytest.mark.parametrize("name", ["secrets.json", "dangling.patch", "linked.patch"])
 def test_prose_reference_does_not_bypass_security_checks(board, name):
     tid, root = task(board, marker=False)
-    if name == "dangling.patch":
+    if name == "secrets.json":
+        (root / name).write_text("excluded fixture")
+    elif name == "dangling.patch":
         (root / name).symlink_to(root / "gone.patch")
     elif name == "linked.patch":
         (root / name).symlink_to(root / "accepted.patch")
@@ -264,10 +270,13 @@ def test_prose_reference_does_not_bypass_security_checks(board, name):
 
 def test_empty_bundle_records_unresolved_before_cleanup(board):
     tid, root = task(board, marker=False, result="Read config.yaml and kanban.db; kanban.db is external.")
-    assert bp.preservation_gate(tid, root, conn=board)
+    (root / "DISPOSABLE-WORKSPACE").write_text(
+        '{"version":1,"issuer":"runner","workspace":"fixture"}\n', encoding="utf-8",
+    )
+    assert bp.preservation_gate(tid, root, conn=board) is False
     assert not board.in_transaction
     ws._cleanup_workspace(board, tid)
-    assert not root.exists()
+    assert root.is_dir()
     assert not kb.list_attachments(board, tid)
     with kbc.connect_closing() as reopened:
         events = reopened.execute(
@@ -324,14 +333,13 @@ def test_unresolved_record_failure_retains_workspace(board, failure):
 
 
 def test_unresolved_record_rejects_uncommitted_board_ops_scope(board):
-    from hermes_cli.kanban_board_ops_transactions import compose_task_transition
-
+    """A caller-owned write transaction is not durable cleanup proof."""
     tid, root = task(board, marker=False, result="Read kanban.db for details")
     with kb.write_txn(board):
-        with compose_task_transition(board, tid):
-            assert not bp.preservation_gate(tid, root, conn=board)
-            assert not board.execute(
-                "SELECT 1 FROM task_events WHERE task_id=? AND kind='bundle_unresolved_refs'", (tid,),
-            ).fetchone()
+        assert board.in_transaction
+        assert not bp.preservation_gate(tid, root, conn=board)
+        assert not board.execute(
+            "SELECT 1 FROM task_events WHERE task_id=? AND kind='bundle_unresolved_refs'", (tid,),
+        ).fetchone()
     assert root.exists()
     assert not kb.list_attachments(board, tid)

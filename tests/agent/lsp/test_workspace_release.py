@@ -91,8 +91,19 @@ def _linked_worktree(project: Path, tmp_path: Path) -> Path:
 
 # Production removal paths; each returns (root that goes away, sibling root that stays, remove()).
 def _kanban_worktree(project, tmp_path, monkeypatch):
+    from hermes_cli import kanban_db as kb
+    from hermes_cli import kanban_db_connect as kbc
     from hermes_cli import kanban_db_workspace as kbw
     wt = _linked_worktree(project, tmp_path)
+    kb.init_db()
+    with kbc.connect_closing() as conn:
+        created = kb.create_task(conn, title="selected fixture", workspace_kind="worktree")
+        with kb.write_txn(conn):
+            conn.execute(
+                "UPDATE tasks SET id=?, status='done', workspace_path=?, "
+                "branch_name=?, result=? WHERE id=?",
+                ("t1", str(wt), "wt/t1", "ship `x.py`", created),
+            )
     return wt, project, lambda: kbw._cleanup_worktree_workspace("t1", str(wt), "wt/t1")
 
 
@@ -132,7 +143,7 @@ def _kanban_scratch(project, tmp_path, monkeypatch):
 
     def remove():
         with kbc.connect() as conn:
-            assert kb.complete_task(conn, tid, result="ok")
+            assert kb.complete_task(conn, tid, result="ship `x.py`")
     return ws, project, remove
 
 
