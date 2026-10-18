@@ -41,7 +41,10 @@ class WorkerHeartbeat:
         # board sync, an integrity scan, or the default long busy timeout.
         with contextlib.closing(connect_tracked(
             self.path.as_uri() + "?mode=rw", connect_fn=sqlite3.connect,
-            uri=True, timeout=0.25, isolation_level=None,
+            # write_txn already retries busy boundaries with jitter. SQLite's
+            # own busy sleeps multiply that retry budget (and can oversleep
+            # badly on a loaded host). Liveness can skip a contended minute.
+            uri=True, timeout=0, isolation_level=None,
         )) as conn:
             conn.row_factory = sqlite3.Row
             row = conn.execute("SELECT worker_pid FROM tasks WHERE id = ?", (self.task_id,)).fetchone()
