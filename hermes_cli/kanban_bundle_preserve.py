@@ -39,19 +39,22 @@ def _references(text):
     text = re.sub(r"\[[^\]\n]*\]\(([^()\n]+)\)", r"<\1>", text)
     # Remove whole URL spans before filename extraction, including prose URLs.
     text = re.sub(r"\b[\w+.-]+://[^\s`<>\"']+", "", text)
-    for line in text.splitlines():
-        line = line.strip()
-        wrapped = re.fullmatch(r"`([^`]+)`|\"([^\"]+)\"|'([^']+)'|<([^<>]+)>", line)
-        if wrapped:
-            candidate = next(part for part in wrapped.groups() if part is not None)
-            # Standalone quoted paths can contain spaces or lack an extension.
-            yield candidate, candidate.startswith("/")
-            continue
-        if line.startswith(("/", "./", "../")) or (not re.search(r"\s", line) and "/" in line):
-            yield line, line.startswith("/")
-            if not re.search(r"\s", line):
-                continue
-        for candidate in re.findall(r"(?:/|\./|\b)[\w./-]+\.[A-Za-z0-9]{1,12}\b", line):
+    explicit = []
+
+    def consume(match):
+        # Preserve quoted identity, including spaces and terminal punctuation.
+        explicit.append(next(part for part in match.groups() if part is not None))
+        return " "
+
+    text = re.sub(r"(?<![\w/])(?:`([^`\n]+)`|\"([^\"\n]+)\"|'([^'\n]+)'|<([^<>\n]+)>)", consume, text)
+    for candidate in explicit:
+        yield candidate, candidate.startswith("/")
+    for token in text.split():
+        # Only outside prose boundaries are removed; never match a path prefix
+        # such as bundle/v1.0 within bundle/v1.0/README and select its siblings.
+        candidate = token.lstrip("([{*").rstrip(".,:;)]}*")
+        candidate = re.sub(r"^[A-Za-z_][\w-]*[=:]", "", candidate)
+        if "/" in candidate or re.fullmatch(r"[\w.-]+\.[A-Za-z0-9]{1,12}", candidate):
             # Relative names may refer to a repo or branch, not this workspace.
             yield candidate, candidate.startswith("/")
 
@@ -100,7 +103,6 @@ def plan_bundle(conn, task_id: str, workspace: Path, *, max_bytes=MAX_BYTES):
         texts.append(run["summary"] or "")
     for text in texts:
         for candidate, required in _references(text):
-            candidate = candidate.rstrip(".,:;)")
             p = Path(candidate)
             if not p.is_absolute():
                 p = root / p
