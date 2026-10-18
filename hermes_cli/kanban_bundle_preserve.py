@@ -12,8 +12,14 @@ returns true.
 - No workspace file authorizes an empty plan. A name that looks disposable
   or like a versioned attestation is not removal authority. There is no
   acceptance path for that kind of marker.
-- ``KEEP-BUNDLE`` selects the whole tree for the archive. It is not a hold
-  and it does not authorize an empty plan.
+- ``KEEP-BUNDLE`` does not select the whole tree when it is absent. Absence
+  leaves explicit references in charge, including an absolute path that
+  points inside the workspace. A present marker selects the whole tree only
+  when it is a regular file with the owner-read bit set, at most
+  ``KEEP_MARKER_MAX_BYTES`` bytes, opened without following a link. Contents
+  are not a document format. A link, directory, oversized file, missing
+  owner-read bit, or any probe error retains before archive registration.
+  It is not a hold and it does not authorize an empty plan.
 - An empty plan retains. A symlink workspace root retains. A missing required
   reference, or a failed copy, checksum, size, symlink, secret, or database
   step retains. A preexisting unrelated attachment is not proof. Dry-run
@@ -36,6 +42,8 @@ SECRET_NAME = re.compile(r"(?:^\.env(?:\.|$)|secret|credential|token|password|ke
 SOURCE_SUFFIX = re.compile(r"(?::\d+(?:-\d+|:\d+)?|#[^/#]+)$")
 HOLD_MARKER = "HOLD-WORKSPACE"
 KEEP_MARKER = "KEEP-BUNDLE"
+# Presence only. A larger file is not a selection decision.
+KEEP_MARKER_MAX_BYTES = 4096
 
 
 def _unsafe(parts):
@@ -96,33 +104,37 @@ def _open_regular(root: Path, rel: str):
     return os.fdopen(source, "rb")
 
 
-def _marker_status(root: Path, name: str) -> str:
-    """``absent``, ``present``, ``linked``, ``unsafe``, or ``unreadable``.
+def _keep_selects_all(root: Path) -> bool:
+    """Whether a present ``KEEP-BUNDLE`` adds the whole tree.
 
-    ``present`` is only a readable regular file opened without following links.
+    Absence returns ``False`` and does not select the tree. A regular file
+    with the owner-read bit, size at or under ``KEEP_MARKER_MAX_BYTES``,
+    opened with ``O_NOFOLLOW``, returns ``True``. Every other status or
+    probe error raises before archive registration. Contents are not parsed.
     """
-    path = root / name
+    path = root / KEEP_MARKER
     try:
         info = path.lstat()
     except FileNotFoundError:
-        return "absent"
-    except OSError:
-        return "unreadable"
-    if stat.S_ISLNK(info.st_mode):
-        return "linked"
-    if not stat.S_ISREG(info.st_mode):
-        return "unsafe"
+        return False
+    except OSError as exc:
+        raise ValueError("keep marker probe failed before preservation") from exc
+    if stat.S_ISLNK(info.st_mode) or not stat.S_ISREG(info.st_mode):
+        raise ValueError("keep marker probe failed before preservation")
+    if info.st_size > KEEP_MARKER_MAX_BYTES or (info.st_mode & stat.S_IRUSR) == 0:
+        raise ValueError("keep marker probe failed before preservation")
     try:
         fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
-    except OSError:
-        return "unreadable"
+    except OSError as exc:
+        raise ValueError("keep marker probe failed before preservation") from exc
     try:
-        os.read(fd, 1)
-    except OSError:
-        return "unreadable"
+        try:
+            os.read(fd, 1)
+        except OSError as exc:
+            raise ValueError("keep marker probe failed before preservation") from exc
     finally:
         os.close(fd)
-    return "present"
+    return True
 
 
 def _root_retention_reason(root: Path) -> str | None:
@@ -177,7 +189,7 @@ def plan_bundle(conn, task_id: str, workspace: Path, *, max_bytes=MAX_BYTES):
     directories = set()
     skipped = set()
     unresolved_refs = set()
-    keep_all = _marker_status(root, KEEP_MARKER) == "present"
+    keep_all = _keep_selects_all(root)
     texts = [row["result"] or ""]
     for run in conn.execute("SELECT metadata, summary FROM task_runs WHERE task_id=?", (task_id,)):
         if run["metadata"]:

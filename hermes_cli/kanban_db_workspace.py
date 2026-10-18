@@ -582,7 +582,10 @@ _SCRATCH_TIP_MESSAGE = (
     "before preservation, and a failed hold probe keeps it too. An empty plan "
     "is not removal authorization. A file written in the workspace, including "
     "one that looks like a versioned marker, is not removal authority. "
-    "KEEP-BUNDLE only selects the tree for the archive. "
+    "KEEP-BUNDLE does not select the tree when it is absent. A present "
+    "regular file of at most 4096 bytes, with the owner-read bit set and "
+    "opened without following a link, selects the tree. Any other probe "
+    "keeps the directory before archive. "
     "Use --workspace worktree: (git worktree) or --workspace dir:/abs/path "
     "(existing dir) when the worker needs a durable directory."
 )
