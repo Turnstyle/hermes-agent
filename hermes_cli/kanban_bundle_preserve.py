@@ -27,20 +27,26 @@ def _strings(value):
     if isinstance(value, str):
         yield value
     elif isinstance(value, dict):
-        for v in value.values():
-            yield from _strings(v)
+        for key, v in value.items():
+            # Run custody metadata identifies a checkout, not a bundle artifact.
+            if key != "worktree":
+                yield from _strings(v)
     elif isinstance(value, (tuple, list)):
         for v in value:
             yield from _strings(v)
 
 
 def _references(text):
-    # Metadata commonly contains exact paths; prose contains delimited paths.
-    text = text.strip()
-    if text.startswith(("/", "./", "../")) or (" " not in text and "/" in text):
-        yield text, True
-    for candidate in re.findall(r"(?:/|\./|\b)[\w./-]+\.[A-Za-z0-9]{1,12}\b", text):
-        yield candidate, candidate.startswith(("/", "./", "../"))
+    # Remove whole URL spans before filename extraction, including prose URLs.
+    text = re.sub(r"\b[\w+.-]+://[^\s`<>\"']+", "", text)
+    for line in text.splitlines():
+        line = line.strip()
+        if line.startswith(("/", "./", "../")) or (not re.search(r"\s", line) and "/" in line):
+            yield line, line.startswith("/")
+            continue
+        for candidate in re.findall(r"(?:/|\./|\b)[\w./-]+\.[A-Za-z0-9]{1,12}\b", line):
+            # Relative names may refer to a repo or branch, not this workspace.
+            yield candidate, candidate.startswith("/")
 
 
 def _open_regular(root: Path, rel: str):

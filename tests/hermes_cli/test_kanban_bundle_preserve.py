@@ -235,7 +235,7 @@ def test_missing_prose_reference_records_unresolved_and_keeps_artifact(board, lo
     ]
 
 
-@pytest.mark.parametrize("reference", ["./gone.patch", "See ./gone.patch", "absolute", "See absolute"])
+@pytest.mark.parametrize("reference", ["absolute", "See absolute"])
 def test_missing_explicit_references_still_fail_closed(board, reference):
     tid, root = task(board, marker=False)
     reference = reference.replace("absolute", str(root / "gone.patch"))
