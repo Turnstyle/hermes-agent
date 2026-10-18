@@ -17,6 +17,7 @@ import tempfile
 MAX_BYTES = 500 * 1024 * 1024
 EXCLUDED_DIRS = {".git", ".venv", "venv", "node_modules", "__pycache__"}
 SECRET_NAME = re.compile(r"(?:^\.env(?:\.|$)|secret|credential|token|password|key.*\.json$|(?:^|[._-])auth(?:[._-]|$)|service[_-]?account|id_rsa|id_ed25519|\.pem$|\.key$)", re.I)
+SOURCE_SUFFIX = re.compile(r"(?::\d+(?:-\d+|:\d+)?|#[^/#]+)$")
 
 
 def _unsafe(parts):
@@ -35,12 +36,28 @@ def _strings(value):
 
 
 def _references(text):
-    # Metadata commonly contains exact paths; prose contains delimited paths.
-    text = text.strip()
-    if text.startswith(("/", "./", "../")) or (" " not in text and "/" in text):
-        yield text, True
-    for candidate in re.findall(r"(?:/|\./|\b)[\w./-]+\.[A-Za-z0-9]{1,12}\b", text):
-        yield candidate, candidate.startswith(("/", "./", "../"))
+    # Markdown links name the destination, not a possibly filename-like label.
+    text = re.sub(r"\[[^\]\n]*\]\(([^()\n]+)\)", r"<\1>", text)
+    # Remove whole URL spans before filename extraction, including prose URLs.
+    text = re.sub(r"\b[\w+.-]+://[^\s`<>\"']+", "", text)
+    explicit = []
+
+    def consume(match):
+        # Preserve quoted identity, including spaces and terminal punctuation.
+        explicit.append(next(part for part in match.groups() if part is not None))
+        return " "
+
+    text = re.sub(r"(?<![\w/])(?:`([^`\n]+)`|\"([^\"\n]+)\"|'([^'\n]+)'|<([^<>\n]+)>)", consume, text)
+    for candidate in explicit:
+        yield candidate, candidate.startswith("/")
+    for token in text.split():
+        # Only outside prose boundaries are removed; never match a path prefix
+        # such as bundle/v1.0 within bundle/v1.0/README and select its siblings.
+        candidate = token.lstrip("([{*").rstrip(".,:;)]}*")
+        candidate = re.sub(r"^[A-Za-z_][\w-]*[=:]", "", candidate)
+        if "/" in candidate or re.fullmatch(r"[\w.-]+\.[A-Za-z0-9]{1,12}", SOURCE_SUFFIX.sub("", candidate)):
+            # Relative names may refer to a repo or branch, not this workspace.
+            yield candidate, candidate.startswith("/")
 
 
 def _open_regular(root: Path, rel: str):
@@ -79,30 +96,47 @@ def plan_bundle(conn, task_id: str, workspace: Path, *, max_bytes=MAX_BYTES):
     texts = [row["result"] or ""]
     for run in conn.execute("SELECT metadata, summary FROM task_runs WHERE task_id=?", (task_id,)):
         if run["metadata"]:
-            texts.extend(_strings(json.loads(run["metadata"])))
+            metadata = json.loads(run["metadata"])
+            if isinstance(metadata, dict):
+                # Run-level checkout custody is not a bundle artifact reference.
+                metadata = {key: value for key, value in metadata.items() if key != "worktree"}
+            texts.extend(_strings(metadata))
         texts.append(run["summary"] or "")
     for text in texts:
         for candidate, required in _references(text):
-            candidate = candidate.rstrip(".,:;)")
             p = Path(candidate)
             if not p.is_absolute():
                 p = root / p
             p = Path(os.path.abspath(p))
+            if p == root:
+                # Workspace custody is context; only KEEP-BUNDLE selects all.
+                skipped.add(".")
+                continue
             if not p.is_relative_to(root):
                 continue
-            rel = p.relative_to(root)
-            if _unsafe(rel.parts):
-                raise ValueError("referenced member has a prohibited name")
             if p.resolve() != p:
                 raise ValueError("referenced member is linked")
+            if not p.exists():
+                # Source locations are aliases only when the literal is absent.
+                # Never shorten an existing path, or expand a directory prefix.
+                name = SOURCE_SUFFIX.sub("", p.name)
+                if name and name != p.name:
+                    target = p.with_name(name)
+                    if target.resolve() != target:
+                        raise ValueError("referenced member is linked")
+                    if not target.is_dir():
+                        p = target
+            rel = p.relative_to(root)
+            if not required and not p.exists():
+                unresolved_refs.add(rel.as_posix())
+                continue
+            if _unsafe(rel.parts):
+                raise ValueError("referenced member has a prohibited name")
             if p.is_dir():
                 directories.add(p)
                 continue
             if not p.is_file():
-                if required or p.exists():
-                    raise ValueError("referenced bundle member is missing")
-                unresolved_refs.add(rel.as_posix())
-                continue
+                raise ValueError("referenced bundle member is missing")
             selected.add(rel.as_posix())
     if keep_all:
         directories = {root}
