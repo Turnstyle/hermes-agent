@@ -108,6 +108,10 @@ def plan_bundle(conn, task_id: str, workspace: Path, *, max_bytes=MAX_BYTES):
             if not p.is_absolute():
                 p = root / p
             p = Path(os.path.abspath(p))
+            if p == root:
+                # Workspace custody is context; only KEEP-BUNDLE selects all.
+                skipped.add(".")
+                continue
             if not p.is_relative_to(root):
                 continue
             if p.resolve() != p:

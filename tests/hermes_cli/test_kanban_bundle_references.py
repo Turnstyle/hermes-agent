@@ -136,3 +136,75 @@ def test_nested_worktree_key_still_selects_artifacts(board):
     board.commit()
     report = bp.preserve_bundle(board, tid, root, dry_run=True)
     assert [entry["path"] for entry in report["files"]] == ["accepted.patch"]
+
+
+@pytest.mark.parametrize("location", ["result", "summary", "metadata"])
+@pytest.mark.parametrize("reference", [
+    ".", "./", "`./`", "`.`", '"./"', "{root}", "{root}/",
+    "[workspace]({root}/)", "`bundle/..`", "../{name}/",
+])
+def test_workspace_root_context_does_not_select_bundle(board, location, reference):
+    tid, root = task(board, marker=False)
+    (root / "bundle").mkdir()
+    (root / "bundle" / "unmentioned.md").write_text("not an artifact")
+    (root / "secrets.json").write_text("excluded fixture")
+    (root / "unmentioned.md").write_text("not an artifact")
+    text = f"Workspace {reference.format(root=root, name=root.name)}; artifact accepted.patch"
+    if location == "result":
+        board.execute("UPDATE tasks SET result=? WHERE id=?", (text, tid))
+    else:
+        board.execute(
+            "INSERT INTO task_runs(task_id,status,started_at,summary,metadata) VALUES(?,'completed',0,?,?)",
+            (tid, text if location == "summary" else None,
+             json.dumps({"nested": {"context": text}}) if location == "metadata" else None),
+        )
+    board.commit()
+    report = bp.preserve_bundle(board, tid, root, dry_run=True)
+    assert [entry["path"] for entry in report["files"]] == ["accepted.patch"]
+    assert report["unresolved_refs"] == []
+    if reference != ".":
+        assert "." in report["excluded"]
+    assert root.exists()
+    assert not kb.list_attachments(board, tid)
+
+
+@pytest.mark.parametrize("marker", [False, True])
+@pytest.mark.parametrize("secret", [False, True])
+def test_root_context_keeps_explicit_marker_contract(board, marker, secret):
+    tid, root = task(board, marker=marker, result="Workspace ./; artifact accepted.patch")
+    (root / "unmentioned.md").write_text("marker-only artifact")
+    if secret:
+        (root / "secrets.json").write_text("excluded fixture")
+    if marker and secret:
+        with pytest.raises(ValueError, match="unsafe bundle file"):
+            bp.preserve_bundle(board, tid, root)
+        assert not kb.list_attachments(board, tid)
+    else:
+        bp.preserve_bundle(board, tid, root)
+        expected = ["KEEP-BUNDLE", "accepted.patch", "unmentioned.md"] if marker else ["accepted.patch"]
+        assert contents(board, tid) == expected
+    assert root.exists()
+
+
+@pytest.mark.parametrize("secret", [False, True])
+def test_root_context_keeps_explicit_subdirectory_contract(board, secret):
+    tid, root = task(board, marker=False, result="Workspace ./; artifact bundle/")
+    (root / "bundle").mkdir()
+    (root / "bundle" / "report.md").write_text("accepted report")
+    (root / "secrets.json").write_text("unselected fixture")
+    if secret:
+        (root / "bundle" / "secrets.json").write_text("excluded fixture")
+        with pytest.raises(ValueError, match="unsafe bundle file"):
+            bp.preserve_bundle(board, tid, root, dry_run=True)
+    else:
+        report = bp.preserve_bundle(board, tid, root, dry_run=True)
+        assert [entry["path"] for entry in report["files"]] == ["bundle/report.md"]
+    assert not kb.list_attachments(board, tid)
+
+
+def test_symlink_to_workspace_root_still_fails_closed(board):
+    tid, root = task(board, marker=False, result="Workspace ./; artifact linked/")
+    (root / "linked").symlink_to(root, target_is_directory=True)
+    with pytest.raises(ValueError, match="referenced member is linked"):
+        bp.preserve_bundle(board, tid, root, dry_run=True)
+    assert not kb.list_attachments(board, tid)
