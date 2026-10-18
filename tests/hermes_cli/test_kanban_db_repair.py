@@ -4,6 +4,7 @@ and the ``hermes kanban repair`` CLI verb."""
 from __future__ import annotations
 
 import json
+import os
 import sqlite3
 from pathlib import Path
 
@@ -93,10 +94,24 @@ def _integrity_messages(db_path: Path) -> list[str]:
 # Narrow auto-repair in the connect-time guard
 # ---------------------------------------------------------------------------
 
+def _fake_db_size(monkeypatch, db_path: Path, size: int) -> None:
+    original_stat = Path.stat
+
+    def stat(path, *args, **kwargs):
+        result = original_stat(path, *args, **kwargs)
+        if path == db_path:
+            fields = list(result)
+            fields[6] = size
+            return os.stat_result(fields)
+        return result
+
+    monkeypatch.setattr(Path, "stat", stat)
+
+
 def test_connect_above_integrity_ceiling_skips_full_check(tmp_path, monkeypatch, caplog):
     db_path = tmp_path / "kanban.db"
     _build_board_db(db_path, tasks=1)
-    monkeypatch.setenv("HERMES_KANBAN_INTEGRITY_CHECK_MAX_BYTES", "1")
+    _fake_db_size(monkeypatch, db_path, (2 << 30) + 1)
 
     def unexpected_full_check(conn):
         pytest.fail("large DB connect must not run full integrity_check")
@@ -109,18 +124,14 @@ def test_connect_above_integrity_ceiling_skips_full_check(tmp_path, monkeypatch,
             conn.close()
     skipped = [r for r in caplog.records if "skipped" in r.message and "integrity_check" in r.message]
     assert len(skipped) == 1
-    assert "scheduled PRAGMA quick_check" in skipped[0].message
+    assert "header + schema probe" in skipped[0].message
 
 
-@pytest.mark.parametrize("ceiling", [None, "0", "-1", "invalid", "equal"])
-def test_connect_below_or_disabled_integrity_ceiling_runs_full_check(tmp_path, monkeypatch, ceiling):
+@pytest.mark.parametrize("size", [(2 << 30) - 1, 2 << 30])
+def test_connect_at_or_below_integrity_ceiling_runs_full_check(tmp_path, monkeypatch, size):
     db_path = tmp_path / "kanban.db"
     _build_board_db(db_path, tasks=1)
-    if ceiling is None:
-        monkeypatch.delenv("HERMES_KANBAN_INTEGRITY_CHECK_MAX_BYTES", raising=False)
-    else:
-        monkeypatch.setenv("HERMES_KANBAN_INTEGRITY_CHECK_MAX_BYTES",
-                           str(db_path.stat().st_size) if ceiling == "equal" else ceiling)
+    _fake_db_size(monkeypatch, db_path, size)
     calls = []
     original = kbc._run_integrity_check
 
@@ -145,7 +156,7 @@ def test_connect_above_integrity_ceiling_fails_closed(tmp_path, monkeypatch, dam
         conn.execute("CREATE TABLE other (id INTEGER)")
         conn.close()
     before = db_path.read_bytes()
-    monkeypatch.setenv("HERMES_KANBAN_INTEGRITY_CHECK_MAX_BYTES", "1")
+    _fake_db_size(monkeypatch, db_path, (2 << 30) + 1)
     if damage == "header":
         # The pre-existing header preflight rejects before the health guard.
         with pytest.raises(sqlite3.DatabaseError, match="invalid SQLite header"):
@@ -159,14 +170,32 @@ def test_connect_above_integrity_ceiling_fails_closed(tmp_path, monkeypatch, dam
 
 
 @pytest.mark.parametrize("error_type", [sqlite3.OperationalError, sqlite3.DatabaseError])
-def test_connect_above_integrity_ceiling_probe_errors(tmp_path, monkeypatch, error_type):
+@pytest.mark.parametrize("stage", ["open", "schema_version", "sqlite_master"])
+def test_connect_above_integrity_ceiling_probe_errors(tmp_path, monkeypatch, error_type, stage):
     db_path = tmp_path / "kanban.db"
     _build_board_db(db_path, tasks=1)
-    monkeypatch.setenv("HERMES_KANBAN_INTEGRITY_CHECK_MAX_BYTES", "1")
+    _fake_db_size(monkeypatch, db_path, (2 << 30) + 1)
     error = error_type("database is locked" if error_type is sqlite3.OperationalError else "malformed")
+    original_connect = kbc._sqlite_connect
+    closed = []
+
+    class Probe:
+        def __init__(self, conn):
+            self.conn = conn
+
+        def execute(self, sql):
+            if stage in sql:
+                raise error
+            return self.conn.execute(sql)
+
+        def close(self):
+            self.conn.close()
+            closed.append(True)
 
     def failed_open(path):
-        raise error
+        if stage == "open":
+            raise error
+        return Probe(original_connect(path))
 
     monkeypatch.setattr(kbc, "_sqlite_connect", failed_open)
     if error_type is sqlite3.OperationalError:
@@ -178,6 +207,57 @@ def test_connect_above_integrity_ceiling_probe_errors(tmp_path, monkeypatch, err
         with pytest.raises(kbc.KanbanDbCorruptError) as excinfo:
             kbc.connect(db_path=db_path)
         assert excinfo.value.backup_path.exists()
+    assert closed == ([] if stage == "open" else [True])
+
+
+def test_initialized_connect_skips_health_probes(tmp_path, monkeypatch):
+    db_path = tmp_path / "kanban.db"
+    _build_board_db(db_path, tasks=1)
+    kbc.connect(db_path=db_path).close()
+
+    def unexpected_probe(*args):
+        pytest.fail("initialized connect must skip corruption probes")
+
+    monkeypatch.setattr(kbc, "_validate_sqlite_header", unexpected_probe)
+    monkeypatch.setattr(kbc, "_probe_connect_health", unexpected_probe)
+    monkeypatch.setattr(kbc, "_probe_for_corruption", unexpected_probe)
+    conn = kbc.connect(db_path=db_path)
+    try:
+        assert conn.execute("SELECT count(*) FROM tasks").fetchone()[0] == 1
+    finally:
+        conn.close()
+
+
+def test_small_page_corruption_still_fails_closed(tmp_path):
+    db_path = tmp_path / "kanban.db"
+    before = _write_page_corrupt_db(db_path)
+    with pytest.raises(kbc.KanbanDbCorruptError) as excinfo:
+        kbc.connect(db_path=db_path)
+    assert db_path.read_bytes() == before
+    assert excinfo.value.backup_path.read_bytes() == before
+    assert str(db_path.resolve()) not in kb._INITIALIZED_PATHS
+
+
+def test_explicit_repair_above_ceiling_still_scans_and_reindexes(tmp_path, monkeypatch):
+    db_path = tmp_path / "kanban.db"
+    _build_board_db(db_path, tasks=1)
+    _corrupt_index(db_path, "idx_tasks_status")
+    _fake_db_size(monkeypatch, db_path, (2 << 30) + 1)
+    original_check = kbc._run_integrity_check
+    scans = []
+
+    def full_check(conn):
+        scans.append(True)
+        return original_check(conn)
+
+    monkeypatch.setattr(kbc, "_run_integrity_check", full_check)
+    result = kbc.repair_db(db_path=db_path)
+    assert result.status == "repaired"
+    assert result.reindexed == ["idx_tasks_status"]
+    assert result.backup_path is not None
+    assert result.backup_path.exists()
+    assert result.post_repair_messages == ["ok"]
+    assert scans == [True, True]
 
 
 def test_connect_auto_repairs_index_only_corruption(tmp_path):

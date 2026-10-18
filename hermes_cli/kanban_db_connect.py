@@ -9,7 +9,6 @@ from __future__ import annotations
 
 import contextlib
 import hashlib
-import os
 import random
 import re
 import secrets
@@ -510,13 +509,7 @@ DEFAULT_INTEGRITY_CHECK_MAX_BYTES = 2 << 30  # 2 GiB, matching backup.py
 
 def _probe_connect_health(path: Path) -> tuple[Optional[list[str]], Optional[str]]:
     """Bound connect-time work; explicit repair still owns a full integrity scan."""
-    try:
-        ceiling = int(os.environ.get(
-            "HERMES_KANBAN_INTEGRITY_CHECK_MAX_BYTES", DEFAULT_INTEGRITY_CHECK_MAX_BYTES,
-        ))
-    except ValueError:
-        ceiling = DEFAULT_INTEGRITY_CHECK_MAX_BYTES
-    if ceiling <= 0 or path.stat().st_size <= ceiling:
+    if path.stat().st_size <= DEFAULT_INTEGRITY_CHECK_MAX_BYTES:
         return _probe_for_corruption(path)
 
     try:
@@ -539,9 +532,9 @@ def _probe_connect_health(path: Path) -> tuple[Optional[list[str]], Optional[str
         return None, f"sqlite structural probe failed: {exc}"
     _kb._log.info(
         "kanban DB %s exceeds integrity check ceiling (%s bytes); skipped full "
-        "PRAGMA integrity_check after header + schema probe; scheduled PRAGMA "
-        "quick_check is the owner path for ongoing integrity checks.",
-        path, ceiling,
+        "PRAGMA integrity_check after header + schema probe. "
+        "Use `hermes kanban repair` for a full integrity scan.",
+        path, DEFAULT_INTEGRITY_CHECK_MAX_BYTES,
     )
     return ["ok"], None
 
