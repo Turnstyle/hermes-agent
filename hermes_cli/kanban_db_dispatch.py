@@ -382,6 +382,8 @@ def heartbeat_worker(
     *,
     note: Optional[str] = None,
     expected_run_id: Optional[int] = None,
+    expected_claim_lock: Optional[str] = None,
+    min_interval_seconds: int = 0,
 ) -> bool:
     """Record a ``heartbeat`` event + touch ``last_heartbeat_at``.
 
@@ -391,6 +393,24 @@ def heartbeat_worker(
     """
     now = int(time.time())
     with _kb.write_txn(conn):
+        if expected_claim_lock is not None or min_interval_seconds:
+            row = conn.execute(
+                "SELECT t.status, t.current_run_id, t.claim_lock, t.last_heartbeat_at, "
+                "r.id AS active_run_id, r.ended_at "
+                "FROM tasks t LEFT JOIN task_runs r ON r.id = t.current_run_id WHERE t.id = ?",
+                (task_id,),
+            ).fetchone()
+            if (row is None or row["status"] != "running"
+                    or (expected_run_id is not None and row["current_run_id"] != expected_run_id)
+                    or (expected_claim_lock is not None and (
+                        row["claim_lock"] != expected_claim_lock or row["active_run_id"] is None
+                        or row["ended_at"] is not None))):
+                return False
+            # Automatic activity and timer beats share a DB-side rate limit, atomically.
+            # Explicit note-bearing heartbeats are never coalesced.
+            last = _kb._to_epoch(row["last_heartbeat_at"])
+            if not note and last is not None and 0 <= now - last < min_interval_seconds:
+                return True
         sql = "UPDATE tasks SET last_heartbeat_at = ? WHERE id = ? AND status = 'running'"
         params: tuple = (now, task_id)
         if expected_run_id is not None:

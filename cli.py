@@ -4386,6 +4386,8 @@ def _run_single_query_mode(cli, query, image, quiet, oneshot):
     os.environ["HERMES_SINGLE_QUERY_SESSION"] = "1"
     if not cli._claim_active_session("cli", stderr=bool(quiet)):
         sys.exit(1)
+    from hermes_cli.kanban_worker_heartbeat import start_worker_heartbeat
+    worker_heartbeat = start_worker_heartbeat()
     try:
         query, single_query_images = _collect_query_images(query, image)
         single_query_image_urls = _collect_kanban_task_images(single_query_images)
@@ -4416,6 +4418,8 @@ def _run_single_query_mode(cli, query, image, quiet, oneshot):
         cli.chat(query, images=single_query_images or None)
         cli._print_exit_summary(clear_screen=False)
     finally:
+        if worker_heartbeat is not None:
+            worker_heartbeat.stop()
         _finalize_single_query(cli)
 
 
