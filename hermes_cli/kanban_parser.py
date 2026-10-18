@@ -329,6 +329,8 @@ _SPECS = [
         _bulk_ids("schedule"),
     ], help="Park one or more tasks in Scheduled (waiting on time, not human input)"),
     _cmd("unblock", [
+        _arg("--restore-review", action="store_true",
+             help="Explicitly resume blocked review-origin work in review (parent-gated)."),
         _reason("Optional reason/note — recorded as a comment before unblocking. Quote multi-word reasons."),
         _TASK_IDS,
     ], help="Return blocked/scheduled tasks to ready, or todo while parents remain open"),

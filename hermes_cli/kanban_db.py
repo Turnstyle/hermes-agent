@@ -3578,14 +3578,19 @@ def _landing_status_after_parents(conn: sqlite3.Connection, task_id: str) -> str
     return "ready" if _parents_satisfied(conn, task_id) else "todo"
 
 
-def unblock_task(conn: sqlite3.Connection, task_id: str) -> bool:
-    """``blocked``/``scheduled`` -> its resumable phase (parent re-gated; ``review``
-    when that is where it left off), closing any leaked run first."""
+def unblock_task(
+    conn: sqlite3.Connection, task_id: str, *, restore_review: bool = False,
+) -> bool:
+    """``blocked``/``scheduled`` -> ``ready`` (parent re-gated), closing leaked runs.
+
+    Only explicit ``restore_review=True`` may resume a blocked review-origin
+    card in review. Unblocking alone is not a new request for review.
+    """
     now = int(time.time())
     with write_txn(conn):
         resume_status = (
             _resume_status_from_events(conn, task_id)
-            if _task_status(conn, task_id) == "blocked"
+            if restore_review is True and _task_status(conn, task_id) == "blocked"
             else "ready"
         )
         _reclaim_dangling_run(

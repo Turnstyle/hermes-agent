@@ -534,12 +534,14 @@ KANBAN_UNBLOCK_SCHEMA = _schema(
     "kanban_unblock",
     (
         "Unblock a Kanban task. It moves to ready when all parents are done, "
-        "or todo while any parent remains open. Orchestrator-only — only "
+        "or todo while any parent remains open. Only explicit restore_review "
+        "resumes blocked review-origin work in review. Orchestrator-only — only "
         "profiles with the kanban toolset can unblock routed work; "
         "dispatcher-spawned task workers never see this tool."
     ),
     {
         "task_id": _prop("string", "Blocked task id to move to ready or parent-gated todo."),
+        "restore_review": _prop("boolean", "Explicitly resume blocked review-origin work in review; default false. Still parent-gated."),
     },
     ["task_id"],
 )
