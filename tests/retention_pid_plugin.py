@@ -26,7 +26,9 @@ def _record(event, **fields):
 def pytest_sessionstart(session):
     global RECEIPT
     RECEIPT = session.config.getoption('--retention-receipt')
-    _record('start', args=[str(a) for a in session.config.args])
+    _record('start', args=[str(a) for a in session.config.args],
+            containment={key: os.environ.get(key) for key in
+                         ('HOME', 'USERPROFILE', 'GIT_CEILING_DIRECTORIES', 'TMPDIR')})
 
 def pytest_sessionfinish(session, exitstatus):
     escaped = {}
