@@ -35,10 +35,18 @@ def _strings(value):
 
 
 def _references(text):
+    # Markdown links name the destination, not a possibly filename-like label.
+    text = re.sub(r"\[[^\]\n]*\]\(([^()\n]+)\)", r"<\1>", text)
     # Remove whole URL spans before filename extraction, including prose URLs.
     text = re.sub(r"\b[\w+.-]+://[^\s`<>\"']+", "", text)
     for line in text.splitlines():
         line = line.strip()
+        wrapped = re.fullmatch(r"`([^`]+)`|\"([^\"]+)\"|'([^']+)'|<([^<>]+)>", line)
+        if wrapped:
+            candidate = next(part for part in wrapped.groups() if part is not None)
+            # Standalone quoted paths can contain spaces or lack an extension.
+            yield candidate, candidate.startswith("/")
+            continue
         if line.startswith(("/", "./", "../")) or (not re.search(r"\s", line) and "/" in line):
             yield line, line.startswith("/")
             if not re.search(r"\s", line):
