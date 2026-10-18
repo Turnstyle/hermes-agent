@@ -65,7 +65,9 @@ def test_relative_metadata_references_keep_safety_checks(board, name):
     tid, root = task(board, marker=False)
     (root / "bundle").mkdir()
     path = root / "bundle" / name
-    if name == "dangling.patch":
+    if name == "secrets.json":
+        path.write_text("excluded fixture")
+    elif name == "dangling.patch":
         path.symlink_to(root / "gone.patch")
     elif name == "linked.patch":
         path.symlink_to(root / "accepted.patch")

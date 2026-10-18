@@ -17,6 +17,7 @@ import tempfile
 MAX_BYTES = 500 * 1024 * 1024
 EXCLUDED_DIRS = {".git", ".venv", "venv", "node_modules", "__pycache__"}
 SECRET_NAME = re.compile(r"(?:^\.env(?:\.|$)|secret|credential|token|password|key.*\.json$|(?:^|[._-])auth(?:[._-]|$)|service[_-]?account|id_rsa|id_ed25519|\.pem$|\.key$)", re.I)
+SOURCE_SUFFIX = re.compile(r"(?::\d+(?:-\d+|:\d+)?|#[^/#]+)$")
 
 
 def _unsafe(parts):
@@ -54,7 +55,7 @@ def _references(text):
         # such as bundle/v1.0 within bundle/v1.0/README and select its siblings.
         candidate = token.lstrip("([{*").rstrip(".,:;)]}*")
         candidate = re.sub(r"^[A-Za-z_][\w-]*[=:]", "", candidate)
-        if "/" in candidate or re.fullmatch(r"[\w.-]+\.[A-Za-z0-9]{1,12}", candidate):
+        if "/" in candidate or re.fullmatch(r"[\w.-]+\.[A-Za-z0-9]{1,12}", SOURCE_SUFFIX.sub("", candidate)):
             # Relative names may refer to a repo or branch, not this workspace.
             yield candidate, candidate.startswith("/")
 
@@ -109,19 +110,29 @@ def plan_bundle(conn, task_id: str, workspace: Path, *, max_bytes=MAX_BYTES):
             p = Path(os.path.abspath(p))
             if not p.is_relative_to(root):
                 continue
-            rel = p.relative_to(root)
-            if _unsafe(rel.parts):
-                raise ValueError("referenced member has a prohibited name")
             if p.resolve() != p:
                 raise ValueError("referenced member is linked")
+            if not p.exists():
+                # Source locations are aliases only when the literal is absent.
+                # Never shorten an existing path, or expand a directory prefix.
+                name = SOURCE_SUFFIX.sub("", p.name)
+                if name and name != p.name:
+                    target = p.with_name(name)
+                    if target.resolve() != target:
+                        raise ValueError("referenced member is linked")
+                    if not target.is_dir():
+                        p = target
+            rel = p.relative_to(root)
+            if not required and not p.exists():
+                unresolved_refs.add(rel.as_posix())
+                continue
+            if _unsafe(rel.parts):
+                raise ValueError("referenced member has a prohibited name")
             if p.is_dir():
                 directories.add(p)
                 continue
             if not p.is_file():
-                if required or p.exists():
-                    raise ValueError("referenced bundle member is missing")
-                unresolved_refs.add(rel.as_posix())
-                continue
+                raise ValueError("referenced bundle member is missing")
             selected.add(rel.as_posix())
     if keep_all:
         directories = {root}

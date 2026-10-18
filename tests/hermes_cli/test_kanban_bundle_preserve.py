@@ -250,7 +250,9 @@ def test_missing_explicit_references_still_fail_closed(board, reference):
 @pytest.mark.parametrize("name", ["secrets.json", "dangling.patch", "linked.patch"])
 def test_prose_reference_does_not_bypass_security_checks(board, name):
     tid, root = task(board, marker=False)
-    if name == "dangling.patch":
+    if name == "secrets.json":
+        (root / name).write_text("excluded fixture")
+    elif name == "dangling.patch":
         (root / name).symlink_to(root / "gone.patch")
     elif name == "linked.patch":
         (root / name).symlink_to(root / "accepted.patch")
