@@ -18,6 +18,7 @@ from hermes_cli import kanban_db as kb
 from hermes_cli import kanban_db_connect as kbc
 from hermes_cli import kanban_db_dispatch as kbd
 from hermes_cli import kanban_db_workspace as kbw
+from hermes_cli.retention import RetentionRefused
 
 
 @pytest.fixture
@@ -684,7 +685,7 @@ def test_recompute_ready_honours_dispatcher_failure_limit(kanban_home):
 
 
 
-def test_delete_archived_task_removes_related_rows(kanban_home):
+def test_delete_archived_task_retains_related_rows(kanban_home):
     with kbc.connect() as conn:
         parent = kb.create_task(conn, title="parent")
         tid = kb.create_task(conn, title="child", parents=[parent], assignee="worker")
@@ -699,25 +700,23 @@ def test_delete_archived_task_removes_related_rows(kanban_home):
         )
         conn.commit()
 
-        assert kb.delete_archived_task(conn, tid) is True
-        assert kb.get_task(conn, tid) is None
-        assert conn.execute("SELECT COUNT(*) FROM task_links WHERE child_id = ? OR parent_id = ?", (tid, tid)).fetchone()[0] == 0
-        assert conn.execute("SELECT COUNT(*) FROM task_comments WHERE task_id = ?", (tid,)).fetchone()[0] == 0
-        assert conn.execute("SELECT COUNT(*) FROM task_events WHERE task_id = ?", (tid,)).fetchone()[0] == 0
-        assert conn.execute("SELECT COUNT(*) FROM task_runs WHERE task_id = ?", (tid,)).fetchone()[0] == 0
-        assert conn.execute("SELECT COUNT(*) FROM kanban_notify_subs WHERE task_id = ?", (tid,)).fetchone()[0] == 0
+        tables = ("tasks", "task_links", "task_comments", "task_events", "task_runs", "kanban_notify_subs")
+        before = {table: list(conn.execute(f"SELECT * FROM {table}")) for table in tables}
+        with pytest.raises(RetentionRefused):
+            kb.delete_archived_task(conn, tid)
+        assert {table: list(conn.execute(f"SELECT * FROM {table}")) for table in tables} == before
+        assert kb.get_task(conn, tid).status == "archived"
 
 
-def test_delete_task_removes_task_and_cascades(kanban_home):
+def test_delete_task_retains_task_and_lineage(kanban_home):
     with kbc.connect() as conn:
         t = kb.create_task(conn, title="to-delete", assignee="alice")
         kb.add_comment(conn, t, "user", "comment")
         kb.add_comment(conn, t, "user", "another")
-        assert kb.delete_task(conn, t)
-        assert kb.get_task(conn, t) is None
-        assert len(kb.list_comments(conn, t)) == 0
-        assert len(kb.list_events(conn, t)) == 0
-        assert len(kb.list_runs(conn, t)) == 0
+        before = (kb.get_task(conn, t), kb.list_comments(conn, t), kb.list_events(conn, t), kb.list_runs(conn, t))
+        with pytest.raises(RetentionRefused):
+            kb.delete_task(conn, t)
+        assert (kb.get_task(conn, t), kb.list_comments(conn, t), kb.list_events(conn, t), kb.list_runs(conn, t)) == before
 
 
 
@@ -832,7 +831,8 @@ def test_complete_task_persists_scratch_artifacts_before_cleanup(kanban_home):
         persisted = Path(completed.payload["artifacts"][0])
         run = kb.latest_run(conn, t)
 
-    assert not ws.exists(), "scratch workspace should still be cleaned up"
+    assert ws.exists(), "completion cannot authorize scratch removal"
+    assert artifact.read_bytes() == b"png-bytes"
     assert persisted.exists(), "artifact copy should survive scratch cleanup"
     assert persisted.parent == kb.task_attachments_dir(t)
     assert persisted.name == "chart.png"
@@ -844,7 +844,7 @@ def test_complete_task_persists_scratch_artifacts_before_cleanup(kanban_home):
         attachments = kb.list_attachments(conn, t)
     stored = {a.filename: a.stored_path for a in attachments}
     assert stored["chart.png"] == str(persisted.resolve())
-    assert any(name.endswith(".tgz") for name in stored)
+    assert not any(name.endswith(".tgz") for name in stored), "cleanup does not implicitly preserve or authorize removal"
 
 
 def test_review_bound_handoff_preserves_declared_artifacts(kanban_home):
@@ -867,13 +867,14 @@ def test_review_bound_handoff_preserves_declared_artifacts(kanban_home):
         assert kb.complete_task(conn, t, summary="approved `evidence.json`")
         attachments = kb.list_attachments(conn, t)
     persisted = Path(handoff.payload["artifacts"][0])
-    assert not ws.exists(), "scratch workspace should still be cleaned up"
+    assert ws.exists(), "review completion cannot authorize scratch removal"
+    assert artifact.read_bytes() == b'{"ok": true}'
     assert persisted.exists(), "staged copy must survive scratch cleanup"
     assert persisted.parent == kb.task_attachments_dir(t)
     assert persisted.read_bytes() == b'{"ok": true}'
     stored = {a.filename: a.stored_path for a in attachments}
     assert stored["evidence.json"] == str(persisted.resolve())
-    assert any(name.endswith(".tgz") for name in stored)
+    assert not any(name.endswith(".tgz") for name in stored), "preservation is an explicit separate operation"
 
 
 def test_request_review_rollback_discards_staged_copies(kanban_home):
@@ -937,9 +938,8 @@ def test_dir_child_completion_unblocks_deferred_scratch_parent(kanban_home, tmp_
 
         kb.complete_task(conn, child, result="built")
 
-    assert not parent_ws.exists(), (
-        "A 'dir' child completing must trigger the parent scratch sweep"
-    )
+    assert parent_ws.exists(), "a completed child cannot authorize parent removal"
+    assert (parent_ws / "handoff.txt").read_text() == "notes\n"
     assert child_dir.exists(), "Non-scratch 'dir' child workspace is never deleted"
 
 

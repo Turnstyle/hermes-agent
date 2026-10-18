@@ -40,14 +40,14 @@ def _list(worktree_gc, repo_root: str, args) -> int:
             print(f"{r.name[:32]:32} {r.age_days:>5.1f}d {_fmt_size(r.size_mb):>6} {r.verdict:13} {r.reason}")
         print(
             f"\n{len(records)} tree(s), {_fmt_size(total_mb)} total — "
-            f"{_fmt_size(reapable_mb)} reclaimable now via `hermes worktree prune`.")
+            f"{_fmt_size(reapable_mb)} eligible for removal while destructive authority is disabled.")
     if external:
         print(f"\n{len(external)} externally-registered worktree(s) (never touched by prune):")
         for e in external:
             state = "MISSING" if e.missing else ("locked" if e.locked else "ok")
             print(f"  {e.path}  [{e.branch or '?'}]  {state}")
         if any(e.missing and not e.locked for e in external):
-            print("  Stale registrations (MISSING) are cleaned by `hermes worktree prune` (metadata only).")
+            print("  Missing registrations are retained as recovery evidence.")
     deletable = [b for b in branch_records if b.verdict == "delete"]
     if deletable:
         print(f"{len(deletable)} local branch(es) fully merged/patch-equivalent upstream would also be deleted.")
@@ -84,7 +84,7 @@ def _prune(worktree_gc, repo_root: str, args) -> int:
     if actions:
         for line in actions:
             print(f"  {line}")
-        print(f"{len(actions)} action(s) {'planned' if dry_run else 'done'}.")
+        print(f"{len(actions)} retention decision(s); 0 objects removed.")
     else:
         print("Nothing to reclaim — all trees/branches carry real work or are in use.")
     return 0

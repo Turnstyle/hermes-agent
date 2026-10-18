@@ -7,7 +7,10 @@ import pytest
 from hermes_cli import kanban_bundle_preserve as bp
 from hermes_cli import kanban_db as kb
 from hermes_cli import kanban_db_workspace as ws
-from tests.hermes_cli.test_kanban_bundle_preserve import board, contents, task
+from tests.hermes_cli import test_kanban_bundle_preserve as fixtures
+from tests.hermes_cli.test_kanban_bundle_preserve import contents, task
+
+board = fixtures.board
 
 
 def _workspace(board, result="`accepted.patch`"):
@@ -31,14 +34,14 @@ def _assert_retained(board, tid, root):
 def _deny_keep(monkeypatch, kind):
     marker_name = bp.KEEP_MARKER
     if kind == "lstat":
-        real = os.lstat
+        real = os.stat
 
         def denied(path, *args, **kwargs):
             if str(path).endswith(marker_name):
                 raise PermissionError(13, "denied")
             return real(path, *args, **kwargs)
 
-        monkeypatch.setattr(os, "lstat", denied)
+        monkeypatch.setattr(os, "stat", denied)
         return
     if kind == "open":
         real = os.open
@@ -115,15 +118,17 @@ def test_failed_keep_does_not_partially_archive(board, monkeypatch, kind):
 def test_readable_keep_archives_whole_tree(board):
     tid, root = _workspace(board, result="`accepted.patch`")
     (root / bp.KEEP_MARKER).write_text("keep\n", encoding="utf-8")
+    bp.preserve_bundle(board, tid, root)
     ws._cleanup_workspace(board, tid)
-    assert not root.exists()
+    assert root.exists()
     assert contents(board, tid) == ["KEEP-BUNDLE", "accepted.patch", "other.txt"]
 
 
 def test_absent_keep_preserves_referenced_selection(board):
     tid, root = _workspace(board, result="`accepted.patch`")
+    bp.preserve_bundle(board, tid, root)
     ws._cleanup_workspace(board, tid)
-    assert not root.exists()
+    assert root.exists()
     assert contents(board, tid) == ["accepted.patch"]
 
 
@@ -162,6 +167,7 @@ def test_keep_at_exact_cap_archives_whole_tree(board):
     marker = root / bp.KEEP_MARKER
     marker.write_bytes(b"k" * limit)
     os.chmod(marker, 0o644)
+    bp.preserve_bundle(board, tid, root)
     ws._cleanup_workspace(board, tid)
-    assert not root.exists()
+    assert root.exists()
     assert contents(board, tid) == ["KEEP-BUNDLE", "accepted.patch", "other.txt"]

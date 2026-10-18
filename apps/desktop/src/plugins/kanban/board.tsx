@@ -134,10 +134,6 @@ function moveCard(board: KanbanBoard, id: string, toStatus: string): KanbanBoard
   }
 }
 
-function removeCard(board: KanbanBoard, id: string): KanbanBoard {
-  return { ...board, columns: board.columns.map(col => ({ ...col, tasks: col.tasks.filter(t => t.id !== id) })) }
-}
-
 // ── card ─────────────────────────────────────────────────────────────────────
 
 function Meta({ children, icon }: { children: ReactNode; icon: string }) {
@@ -1225,21 +1221,7 @@ export function KanbanBoardPage() {
 
   const deleteMut = useMutation({
     mutationFn: (id: string) => deleteTask(id),
-    onMutate: async id => {
-      await qc.cancelQueries({ queryKey: boardKey(scope, slug, archived) })
-      const previous = qc.getQueryData<KanbanBoard>(boardKey(scope, slug, archived))
-
-      if (previous) {
-        qc.setQueryData(boardKey(scope, slug, archived), removeCard(previous, id))
-      }
-
-      return { previous }
-    },
-    onError: (err, _id, context) => {
-      if (context?.previous) {
-        qc.setQueryData(boardKey(scope, slug, archived), context.previous)
-      }
-
+    onError: err => {
       host.notify({ kind: 'error', message: errText(err) })
     },
     onSettled: () => void qc.invalidateQueries({ queryKey: boardKeyPrefix(scope) })

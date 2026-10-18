@@ -437,18 +437,19 @@ def test_dashboard_reclaim_of_active_review_preserves_review_phase(client):
 def test_delete_task(client):
     t = client.post("/api/plugins/kanban/tasks", json={"title": "to-delete"}).json()["task"]
     r = client.delete(f"/api/plugins/kanban/tasks/{t['id']}")
-    assert r.status_code == 200
-    assert r.json()["deleted"] is True
-    assert r.json()["task_id"] == t["id"]
+    assert r.status_code == 409
+    assert r.json()["retained"] is True
+    assert r.json()["removed"] is False
+    assert isinstance(r.json()["detail"], str)
 
-    # Gone from board
+    # A refusal must not make the card disappear from its board.
     board = client.get("/api/plugins/kanban/board").json()
     all_ids = [tt["id"] for col in board["columns"] for tt in col["tasks"]]
-    assert t["id"] not in all_ids
+    assert t["id"] in all_ids
 
-    # Gone from detail
+    # Identity retrieval stays available.
     r = client.get(f"/api/plugins/kanban/tasks/{t['id']}")
-    assert r.status_code == 404
+    assert r.status_code == 200
 
 # ---------------------------------------------------------------------------
 # Comments + Links

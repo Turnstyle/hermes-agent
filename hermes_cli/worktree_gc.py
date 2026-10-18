@@ -1,13 +1,12 @@
-"""On-demand worktree + branch reclaim (``hermes worktree`` / ``/worktree prune``).
+"""Local worktree/branch audit with compatibility reclaim entry points.
 
-The startup pruner (``cli._prune_stale_worktrees``) is conservative and silent — clean, fully
-merged scratch past an age tier only. This module also reclaims trees whose only "dirt" is
-untracked scratch (archived first) and branches whose content is on upstream.
+Every reclaim request retains its objects while destructive authority is OFF.
+Ages and old classification records cannot enable removal. Audit entry points
+do not deepen history, contact remotes, copy files or save merge caches.
 """
 
 from __future__ import annotations
 
-import contextlib
 import logging
 import os
 import re
@@ -16,7 +15,7 @@ import subprocess
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import List, Optional
+from typing import Optional
 
 logger = logging.getLogger(__name__)
 
@@ -162,8 +161,8 @@ def audit_external_trees(repo_root: str) -> list[ExternalTreeRecord]:
     another tool) registered elsewhere. Those are someone else's state, so
     the reclaim paths never touch them — but hiding them entirely makes the
     audit lie about what the repo is carrying. Report them read-only, and
-    flag registrations whose directory has vanished (safe to
-    ``git worktree prune``).
+    flag registrations whose directory has vanished. Missing registrations
+    remain recovery evidence and are never automatically pruned.
     """
     result = _git(["worktree", "list", "--porcelain"], cwd=repo_root, timeout=10)
     if result.returncode != 0:
@@ -213,67 +212,28 @@ def audit_external_trees(repo_root: str) -> list[ExternalTreeRecord]:
 
 
 def prune_missing_registrations(repo_root: str, *, dry_run: bool = False) -> list[str]:
-    """Drop registrations whose directory no longer exists (any location).
-
-    The equivalent of a targeted ``git worktree prune``: purely
-    metadata-level, never removes files, so it is safe even for external
-    trees — a missing directory means there is nothing left to protect.
-    """
-    stale = [r for r in audit_external_trees(repo_root) if r.missing and not r.locked]
-    if not stale:
-        return []
-    if dry_run:
-        return [f"would prune stale registration {r.path}" for r in stale]
-    result = _git(["worktree", "prune"], cwd=repo_root, timeout=15)
-    if result.returncode != 0:
-        return [f"failed to prune stale registrations: {result.stderr.strip()}"]
-    return [f"pruned stale registration {r.path}" for r in stale]
+    """Missing directories do not authorize removing recovery registrations."""
+    return [f"retained registration {r.path} (destructive_authority_off)"
+            for r in audit_external_trees(repo_root) if r.missing]
 
 
 def audit_worktrees(repo_root: str, *, with_sizes: bool = True,
                     older_than_days: Optional[float] = None) -> list[TreeRecord]:
-    """Classify every tree under ``.worktrees/`` without mutating anything.
-
-    ``older_than_days`` only ever RESTRICTS: a reapable tree younger than the threshold is kept
-    ("too recent"). It never widens eligibility — age alone can't doom a tree carrying unmerged work.
-    """
-    from hermes_cli import worktree_ops as _ops
+    """List local trees read-only. No remote probes, archive copies or cache writes."""
     worktrees_dir = Path(repo_root) / ".worktrees"
-    if not worktrees_dir.exists():
+    if not worktrees_dir.is_dir():
         return []
-
-    if _ops._repo_is_shallow(repo_root):
-        _ops._deepen_shallow_repo(repo_root)
-
-    merge_cache = _ops._load_worktree_merge_cache()
-    cache_size_before = len(merge_cache)
-    # One ls-remote for the whole sweep; None (offline) degrades pushed-tier verdicts to keep.
-    remote_heads = _ops._fetch_remote_branch_heads(repo_root)
-
-    now = time.time()
-    records: list[TreeRecord] = []
+    records = []
     for entry in sorted(worktrees_dir.iterdir()):
         if not entry.is_dir():
             continue
         try:
-            age_days = (now - entry.stat().st_mtime) / 86400.0
-        except Exception:
-            continue
-        try:
-            branch = _git(["branch", "--show-current"], cwd=str(entry), timeout=5).stdout.strip()
-        except Exception:
-            branch = ""
-        verdict, reason, untracked = _classify_tree(_ops, repo_root, entry, merge_cache, remote_heads)
-        if older_than_days is not None and verdict in _REAP_VERDICTS and age_days < older_than_days:
-            verdict, reason, untracked = "keep", (
-                f"reapable but only {age_days:.1f}d old (--older-than {older_than_days:g})"), []
-        records.append(TreeRecord(
-            name=entry.name, path=str(entry), branch=branch,
-            age_days=age_days, size_mb=_tree_size_mb(entry) if with_sizes else None,
-            verdict=verdict, reason=reason, untracked=untracked))
-
-    if len(merge_cache) != cache_size_before:
-        _ops._save_worktree_merge_cache(merge_cache)
+            age = (time.time() - entry.stat().st_mtime) / 86400
+        except OSError:
+            age = 0.0
+        records.append(TreeRecord(entry.name, str(entry), "", age,
+                                  _tree_size_mb(entry) if with_sizes else None,
+                                  "keep", "destructive_authority_off; branch/status not inspected"))
     return records
 
 
@@ -283,133 +243,28 @@ _REAP_VERDICTS = {"reap", "reap-archive", "reap-keep-branch"}
 def reclaim_worktrees(
     repo_root: str, *, dry_run: bool = False, records: Optional[list[TreeRecord]] = None
 ) -> list[str]:
-    """Remove every reap-verdict tree from a frozen audit list — never re-globs inside the
-    destructive loop, so trees created by concurrent sessions after the audit are out of scope."""
+    """Retain even caller-supplied reap records; no frozen plan is authority."""
     if records is None:
         records = audit_worktrees(repo_root, with_sizes=False)
-    actions: list[str] = []
-    for record in records:
-        if record.verdict not in _REAP_VERDICTS:
-            continue
-        if dry_run:
-            actions.append(f"would remove {record.name} ({record.reason})")
-            continue
-
-        entry = Path(record.path)
-        if record.untracked:
-            archive = _archive_untracked(entry, record.untracked)
-            if archive is None:
-                actions.append(f"kept {record.name} (archive of untracked files failed)")
-                continue
-            actions.append(f"archived {len(record.untracked)} untracked file(s) → {archive}")
-
-        # Dead-pid locks must be unlocked or `remove --force` refuses.
-        with contextlib.suppress(Exception):
-            _git(["worktree", "unlock", record.path], cwd=repo_root, timeout=10)
-        try:
-            remove_result = _git(["worktree", "remove", record.path, "--force"], cwd=repo_root, timeout=30)
-            if remove_result.returncode != 0:
-                actions.append(f"failed to remove {record.name}: {remove_result.stderr.strip()}")
-                continue
-            if record.verdict == "reap-keep-branch":
-                actions.append(f"removed {record.name} (branch {record.branch} kept — pushed open-PR lane)")
-                continue
-            if record.branch and record.branch not in _PROTECTED_BRANCHES:
-                _git(["branch", "-D", record.branch], cwd=repo_root, timeout=10)
-            actions.append(f"removed {record.name}")
-        except Exception as exc:
-            actions.append(f"failed to remove {record.name}: {exc}")
-
-    if not dry_run:
-        with contextlib.suppress(Exception):
-            _git(["worktree", "prune"], cwd=repo_root, timeout=15)
-    return actions
+    return [f"retained {r.name} (destructive_authority_off)" for r in records]
 
 
 def audit_branches(repo_root: str) -> list[BranchRecord]:
-    """Classify EVERY local branch: deletable when fully merged OR every commit is patch-equivalent
-    upstream (``git cherry``) and not checked out. The gate is content reachability, not name."""
-    from hermes_cli import worktree_ops as _ops
-    if _ops._repo_is_shallow(repo_root):
-        _ops._deepen_shallow_repo(repo_root)
-
-    def _lines(result) -> list[str]:
-        return [b.strip() for b in result.stdout.splitlines() if b.strip()]
-
-    # No remote at all -> the local trunk; no trunk either -> nothing can be judged, report nothing.
-    try:
-        upstream = _ops._worktree_merge_base_ref(repo_root)
-    except Exception:
-        upstream = None
-    if upstream is None:
-        return []
-
+    """List local refs without network, merge-cache writes or deletion verdicts."""
     result = _git(["branch", "--format=%(refname:short)"], cwd=repo_root, timeout=10)
     if result.returncode != 0:
         return []
-    branches = _lines(result)
-
-    wt = _git(["worktree", "list", "--porcelain"], cwd=repo_root, timeout=10)
-    active = {
-        line.removeprefix("branch refs/heads/").strip()
-        for line in wt.stdout.splitlines() if line.startswith("branch refs/heads/")}
-    merged = set(_lines(_git(["branch", "--merged", upstream, "--format=%(refname:short)"], cwd=repo_root, timeout=15)))
-
-    def _classify_branch(branch: str) -> BranchRecord:
-        if branch in _PROTECTED_BRANCHES or branch in active:
-            return BranchRecord(branch, "keep", "protected or checked out")
-        if branch in merged:
-            return BranchRecord(branch, "delete", "fully merged into " + upstream)
-        # Rebase merges rewrite SHAs, so --merged misses them; cherry patch-equivalence catches
-        # the dominant leak. Bounded: a branch far ahead is a stale-base lane, keep it.
-        ahead = _git(["rev-list", "--count", f"{upstream}..{branch}"], cwd=repo_root, timeout=10)
-        try:
-            ahead_count = int(ahead.stdout.strip() or "0")
-        except ValueError:
-            ahead_count = _MAX_CHERRY_AHEAD + 1
-        if ahead_count == 0:
-            return BranchRecord(branch, "delete", "no commits beyond " + upstream)
-        if ahead_count > _MAX_CHERRY_AHEAD:
-            return BranchRecord(branch, "keep", f"{ahead_count} commits ahead (stale-base lane)")
-        cherry = _git(["cherry", upstream, branch], cwd=repo_root, timeout=30)
-        if cherry.returncode != 0:
-            return BranchRecord(branch, "keep", "could not verify (git cherry failed)")
-        lines = _lines(cherry)
-        if lines and all(ln.startswith("-") for ln in lines):
-            return BranchRecord(branch, "delete", "all commits patch-equivalent upstream")
-        unique = sum(1 for ln in lines if ln.startswith("+"))
-        return BranchRecord(branch, "keep", f"{unique} unique commit(s) not upstream")
-
-    # Read-only, so parallel: hundreds of local branches × ~0.2-1s cherry probes would be minutes.
-    import concurrent.futures
-    workers = max(1, min(8, (os.cpu_count() or 4), len(branches)))
-    if workers > 1:
-        try:
-            with concurrent.futures.ThreadPoolExecutor(max_workers=workers, thread_name_prefix="hermes-branch-gc") as pool:
-                return list(pool.map(_classify_branch, branches))
-        except Exception:
-            pass
-    return [_classify_branch(b) for b in branches]
+    return [BranchRecord(name.strip(), "keep", "destructive_authority_off")
+            for name in result.stdout.splitlines() if name.strip()]
 
 
 def reclaim_branches(
     repo_root: str, *, dry_run: bool = False, records: Optional[list[BranchRecord]] = None
 ) -> list[str]:
-    """Delete every delete-verdict branch from a frozen audit list."""
+    """Retain refs even when a stale caller supplies a delete verdict."""
     if records is None:
         records = audit_branches(repo_root)
-    actions: list[str] = []
-    for record in records:
-        if record.verdict != "delete":
-            continue
-        if dry_run:
-            actions.append(f"would delete branch {record.name} ({record.reason})")
-            continue
-        result = _git(["branch", "-D", record.name], cwd=repo_root, timeout=10)
-        actions.append(
-            f"deleted branch {record.name}" if result.returncode == 0
-            else f"failed to delete {record.name}: {result.stderr.strip()}")
-    return actions
+    return [f"retained branch {r.name} (destructive_authority_off)" for r in records]
 
 
 def worktrees_summary(repo_root: str) -> tuple[int, Optional[int]]:

@@ -190,6 +190,7 @@ echo "▶ launching test runner"
 exec env -i \
   PATH="$PATH" \
   HOME="$HOME" \
+  GIT_CEILING_DIRECTORIES="$REPO_ROOT/.." \
   ${WIN_ENV[@]+"${WIN_ENV[@]}"} \
   ${TEST_ENV[@]+"${TEST_ENV[@]}"} \
   TZ=UTC \

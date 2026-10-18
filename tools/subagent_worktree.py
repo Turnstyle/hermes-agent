@@ -3,7 +3,7 @@
 Git-only (outside a repo children share the parent's cwd); local terminal backend only (on
 docker/ssh/modal the host worktree is invisible in the sandbox, so isolation is skipped). One
 worktree per child under ``<repo>/.worktrees/subagent-<id>``, branch ``hermes-subagent/<id>``;
-pruned only on proof (zero commits AND clean, both probes ok), else kept + ``inspection_failed``.
+retained after finalization; failed inspection adds ``inspection_failed``.
 """
 
 from __future__ import annotations
@@ -106,7 +106,8 @@ def create_subagent_worktree(parent_cwd: Optional[str], subagent_id: Optional[st
 def _base_payload(info: dict[str, str]) -> dict[str, Any]:
     """Result-entry schema the parent expects (no creation-side internals)."""
     return {"path": info.get("path", ""), "branch": info.get("branch", ""),
-            "commits": 0, "dirty": False, "pruned": False}
+            "commits": 0, "dirty": False, "pruned": False,
+            "retained": True, "reason": "destructive_authority_off"}
 
 
 def mark_worktree_payload_unproven(payload: dict[str, Any], reason: str, *,
@@ -135,17 +136,16 @@ def unproven_worktree_payload(info: dict[str, str], reason: str) -> dict[str, An
 
 
 def finalize_subagent_worktree(info: dict[str, str], *, prune: bool = True) -> dict[str, Any]:
-    """Inspect (and possibly prune) a child worktree after the child finishes.
+    """Inspect a finished child's worktree, retaining it even when prune=True.
 
-    Prunes only when *prune*, commits==0, clean tree AND both git probes succeeded; otherwise
-    keeps it with ``inspection_failed`` + ``note`` (``commits``/``dirty`` then are defaults).
+    Failed probes keep inspection_failed and note; successful probes preserve
+    the established commits/dirty fields. pruned always stays False.
     """
     path, branch = info.get("path", ""), info.get("branch", "")
     base_commit = info.get("base_commit", "")
     payload = _base_payload(info)
     if not path or not os.path.isdir(path):
-        payload["pruned"] = True  # nothing on disk to review
-        return payload
+        return mark_worktree_payload_unproven(payload, "worktree path missing")
     # Without a base commit the count is an unproven default, and the prune
     # condition reads payload["commits"] — so it must not prune either.
     # See #88113.
@@ -176,20 +176,6 @@ def finalize_subagent_worktree(info: dict[str, str], *, prune: bool = True) -> d
     if failed:
         # Destructive cleanup requires affirmative proof; defaults prove nothing.
         return mark_worktree_payload_unproven(payload, "; ".join(failed), unmeasured="/".join(unmeasured))
-    if prune and payload["commits"] == 0 and not payload["dirty"]:
-        cwd = info.get("repo_root", "") or path
-        try:
-            from hermes_cli.worktree_ops import release_lsp_clients
-            release_lsp_clients(path)  # the child ran in-process: its language servers are ours
-            removed = _run_git(["worktree", "remove", "--force", path], cwd=cwd)
-            if removed.returncode == 0:
-                _run_git(["branch", "-D", branch], cwd=cwd)
-                payload["pruned"] = True
-                logger.info("subagent worktree pruned (no work): %s", path)
-            else:
-                logger.debug("subagent worktree: prune failed: %s", removed.stderr.strip())
-        except Exception as exc:
-            logger.debug("subagent worktree: prune failed: %s", exc)
     return payload
 
 
@@ -201,6 +187,6 @@ def build_worktree_context_note(info: dict[str, str]) -> str:
         f"Your dedicated branch is: {info.get('branch')}\n"
         "All file edits and shell commands must happen inside this worktree directory (your "
         "terminal already starts there). Do NOT cd to the main repository checkout. Commit your "
-        "changes to your branch when done; the parent agent will review and merge your branch. If "
-        "you make no commits and leave the tree clean, the worktree is discarded automatically."
+        "changes to your branch when done; the parent agent will review and merge your branch. The "
+        "worktree and branch are retained after the child finishes for review and recovery."
     )

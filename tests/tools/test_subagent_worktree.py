@@ -44,10 +44,25 @@ def _break_git_index(wt: Path) -> None:
     (git_dir / "index").write_bytes(b"not-a-valid-git-index\n")
 
 
-class SubagentWorktreeTests(unittest.TestCase):
+class _IsolatedGitTest(unittest.TestCase):
     def setUp(self):
-        self.tmp = Path(tempfile.mkdtemp(prefix="hermes-sw-test-"))
-        self.addCleanup(shutil.rmtree, self.tmp, True)
+        self.sandbox = Path(tempfile.mkdtemp(prefix="hermes-sw-test-"))
+        self.addCleanup(shutil.rmtree, self.sandbox, True)
+        self.tmp = self.sandbox / "fixture"
+        self.tmp.mkdir()
+        home = self.sandbox / "home"
+        home.mkdir()
+        # The approved scratch root may itself live inside a host repository.
+        # Both test classes must keep Git discovery and user state disposable.
+        isolation = mock.patch.dict(os.environ, {
+            "GIT_CEILING_DIRECTORIES": str(self.tmp.resolve()),
+            "HOME": str(home), "USERPROFILE": str(home),
+        })
+        isolation.start()
+        self.addCleanup(isolation.stop)
+
+
+class SubagentWorktreeTests(_IsolatedGitTest):
 
     # ── resolve_repo_root ──────────────────────────────────────────────
 
@@ -74,6 +89,33 @@ class SubagentWorktreeTests(unittest.TestCase):
         plain = self.tmp / "plain"
         plain.mkdir()
         self.assertIsNone(sw.create_subagent_worktree(str(plain), "abc"))
+
+    def test_create_non_git_fixture_does_not_write_to_parent_repo(self):
+        # Reproduce the incident with an unborn repo, never the operator's repo.
+        _git(["init", "-q"], self.sandbox)
+        self.assertEqual(
+            Path(_git(["rev-parse", "--show-toplevel"], self.sandbox).stdout.strip()).resolve(),
+            self.sandbox.resolve(),
+        )
+        plain = self.tmp / "plain"
+        plain.mkdir()
+
+        def outside_fixture_stats():
+            paths = [self.sandbox, *self.sandbox.rglob("*")]
+            return {
+                str(path.relative_to(self.sandbox)): (
+                    stat.st_dev, stat.st_ino, stat.st_mode, stat.st_size,
+                    stat.st_mtime_ns, stat.st_ctime_ns,
+                )
+                for path in paths if not path.is_relative_to(self.tmp)
+                for stat in [path.lstat()]
+            }
+
+        before = outside_fixture_stats()
+        info = sw.create_subagent_worktree(str(plain), "parent-repo-regression")
+        self.assertEqual(outside_fixture_stats(), before,
+                         "subagent worktree creation wrote outside the fixture root")
+        self.assertIsNone(info)
 
     def test_create_makes_isolated_worktree(self):
         repo = _make_repo(self.tmp)
@@ -102,18 +144,20 @@ class SubagentWorktreeTests(unittest.TestCase):
 
     # ── finalize_subagent_worktree ─────────────────────────────────────
 
-    def test_finalize_prunes_clean_worktree(self):
+    def test_finalize_retains_clean_worktree(self):
         repo = _make_repo(self.tmp)
         info = sw.create_subagent_worktree(str(repo), "clean1")
         assert info is not None
         payload = sw.finalize_subagent_worktree(info)
-        self.assertTrue(payload["pruned"])
+        self.assertFalse(payload["pruned"])
+        self.assertTrue(payload["retained"])
+        self.assertEqual(payload["reason"], "destructive_authority_off")
         self.assertEqual(payload["commits"], 0)
         self.assertFalse(payload["dirty"])
-        self.assertFalse(os.path.isdir(info["path"]))
-        # branch deleted too
+        self.assertTrue(os.path.isdir(info["path"]))
+        # Clean/zero commits does not grant authority to remove the branch.
         branches = _git(["branch", "--list", info["branch"]], repo).stdout
-        self.assertEqual(branches.strip(), "")
+        self.assertNotEqual(branches.strip(), "")
 
     def test_finalize_keeps_worktree_with_commits(self):
         repo = _make_repo(self.tmp)
@@ -282,12 +326,13 @@ class SubagentWorktreeTests(unittest.TestCase):
         branches = _git(["branch", "--list", info["branch"]], repo).stdout
         self.assertNotEqual(branches.strip(), "")
 
-    def test_finalize_missing_path_reports_pruned(self):
+    def test_finalize_missing_path_reports_unproven_retention(self):
         payload = sw.finalize_subagent_worktree(
             {"path": str(self.tmp / "gone"), "branch": "b", "repo_root": "",
              "base_commit": ""}
         )
-        self.assertTrue(payload["pruned"])
+        self.assertFalse(payload["pruned"])
+        self.assertTrue(payload["inspection_failed"])
 
     # ── local_backend_active ───────────────────────────────────────────
 
@@ -303,7 +348,7 @@ class SubagentWorktreeTests(unittest.TestCase):
         self.assertIn("hermes-subagent/subagent-1", note)
 
 
-class WorktreePayloadSchemaTests(unittest.TestCase):
+class WorktreePayloadSchemaTests(_IsolatedGitTest):
     """The parent agent reads ONE schema under ``entry["worktree"]``.
 
     Two producers write it: ``finalize_subagent_worktree`` and
@@ -311,10 +356,6 @@ class WorktreePayloadSchemaTests(unittest.TestCase):
     through the shared factory, so this compares the factory's real output
     against real finalize output — behavior, not source text.
     """
-
-    def setUp(self):
-        self.tmp = Path(tempfile.mkdtemp(prefix="hermes-sw-schema-"))
-        self.addCleanup(shutil.rmtree, self.tmp, True)
 
     def test_unproven_payload_matches_finalize_schema(self):
         repo = _make_repo(self.tmp)

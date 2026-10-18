@@ -1189,8 +1189,7 @@ class CLICommandsMixin(CLICommandsSessionToolsMixin):
         actions = worktree_gc.reclaim_worktrees(repo_root, dry_run=dry_run, records=tree_records)
         actions += worktree_gc.reclaim_branches(repo_root, dry_run=dry_run)
         if actions:
-            _pr(*(f"  {line}" for line in actions),
-                "  " + _t("worktree.actions_planned" if dry_run else "worktree.actions_done", count=len(actions)))
+            _pr(*(f"  {line}" for line in actions), "  Retention audit; 0 objects removed.")
         else:
             print(f"  {_t('worktree.nothing_to_reclaim')}")
         kept = [r for r in tree_records
@@ -1225,7 +1224,7 @@ class CLICommandsMixin(CLICommandsSessionToolsMixin):
         except OSError as e:
             print(f"  {_t('worktree.enter_failed', error=e)}")
         os.environ["TERMINAL_CWD"] = wt_info["path"]
-        # Same keep-if-unpushed cleanup as `hermes -w`. Only one tree is "active" per process;
+        # Same retain-on-exit cleanup as `hermes -w`. Only one tree is "active" per process;
         # an earlier one keeps its own atexit registration (explicit info arg).
         _cli._active_worktree = wt_info
         atexit.register(_cli._cleanup_worktree, wt_info)

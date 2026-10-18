@@ -20,6 +20,7 @@ import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
+from hermes_cli.retention import RetentionRefused
 from hermes_cli import kanban_db as kb
 from hermes_cli import kanban_db_connect as kbc
 
@@ -73,7 +74,7 @@ def test_add_list_get_delete_attachment(kanban_home, tmp_path):
     conn = kbc.connect()
     try:
         task_id = _make_task(conn)
-        # Write a real blob under the per-task dir so delete can unlink it.
+        # Write a real blob and verify refusal preserves both its bytes and row.
         dest_dir = kb.task_attachments_dir(task_id)
         dest_dir.mkdir(parents=True, exist_ok=True)
         blob = dest_dir / "source.pdf"
@@ -102,11 +103,11 @@ def test_add_list_get_delete_attachment(kanban_home, tmp_path):
         got = kb.get_attachment(conn, att_id)
         assert got is not None and got.id == att_id
 
-        removed = kb.delete_attachment(conn, att_id)
-        assert removed is not None and removed.id == att_id
-        assert kb.list_attachments(conn, task_id) == []
-        assert not blob.exists(), "delete should unlink the on-disk blob"
-        assert kb.get_attachment(conn, att_id) is None
+        with pytest.raises(RetentionRefused, match="Retained by default"):
+            kb.delete_attachment(conn, att_id)
+        assert [a.id for a in kb.list_attachments(conn, task_id)] == [att_id]
+        assert blob.read_bytes() == b"%PDF-1.4 fake"
+        assert kb.get_attachment(conn, att_id).id == att_id
     finally:
         conn.close()
 
@@ -143,7 +144,9 @@ def test_delete_attachment_keeps_blob_referenced_by_another_row(kanban_home):
             size=blob.stat().st_size,
         )
 
-        assert kb.delete_attachment(conn, first_id) is not None
+        with pytest.raises(RetentionRefused):
+            kb.delete_attachment(conn, first_id)
+        assert kb.get_attachment(conn, first_id) is not None
         assert blob.exists(), "a surviving attachment row must keep its shared blob"
         assert kb.get_attachment(conn, second_id) is not None
     finally:
@@ -230,13 +233,35 @@ def test_upload_list_download_delete_roundtrip(client):
     assert r.status_code == 200
     assert r.content == content
 
-    # Delete removes the row and the file
+    # Refusal leaves the download and discoverable row intact.
     r = client.delete(f"/api/plugins/kanban/attachments/{att_id}")
-    assert r.status_code == 200
-    assert client.get(f"/api/plugins/kanban/attachments/{att_id}").status_code == 404
+    assert r.status_code == 409
+    assert r.json()["reason"] == "destructive_authority_off"
+    assert r.json()["retained"] is True and r.json()["removed"] is False
+    assert isinstance(r.json()["detail"], str)
+    assert client.get(f"/api/plugins/kanban/attachments/{att_id}").content == content
     assert client.get(
         f"/api/plugins/kanban/tasks/{task_id}/attachments"
-    ).json()["attachments"] == []
+    ).json()["attachments"][0]["id"] == att_id
+
+
+def test_dashboard_upload_uses_durable_collision_safe_store(client):
+    task_id = _create_task_via_api(client)
+    attachments = []
+    for content in (b"first original", b"second original"):
+        response = client.post(
+            f"/api/plugins/kanban/tasks/{task_id}/attachments",
+            files={"file": ("same.txt", content, "text/plain")},
+        )
+        assert response.status_code == 200, response.text
+        attachments.append(response.json()["attachment"])
+    assert [a["filename"] for a in attachments] == ["same.txt", "same (1).txt"]
+    for attachment, expected in zip(attachments, (b"first original", b"second original")):
+        assert client.get(f"/api/plugins/kanban/attachments/{attachment['id']}").content == expected
+    with kbc.connect_closing() as conn:
+        path = Path(kb.get_attachment(conn, attachments[0]["id"]).stored_path)
+    journals = list((path.parent.parent / ".retention").glob("*.registered.json"))
+    assert len(journals) == 2
 
 
 def test_upload_sanitizes_traversal_filename(client):
@@ -317,9 +342,9 @@ def test_cli_attach_attachments_and_rm(kanban_home, tmp_path):
     assert "upload.txt" in listed
 
     removed = run_slash(f"attach-rm {att_id}")
-    assert "Deleted attachment" in removed
+    assert "Retained by default" in removed
     conn = kbc.connect()
     try:
-        assert kb.list_attachments(conn, task_id) == []
+        assert [a.id for a in kb.list_attachments(conn, task_id)] == [att_id]
     finally:
         conn.close()

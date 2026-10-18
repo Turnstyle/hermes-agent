@@ -73,7 +73,7 @@ def _archived_scratch_workspace(conn) -> Path:
     [
         pytest.param(-1, 2, True, id="negative-refuses"),
         pytest.param(0, 0, True, id="zero-disables"),
-        pytest.param(30, 0, False, id="positive-collects"),
+        pytest.param(30, 0, True, id="positive-retains"),
     ],
 )
 def test_cmd_gc_retention_bounds(board, days, expect_rc, expect_kept):
@@ -89,13 +89,13 @@ def test_cmd_gc_retention_bounds(board, days, expect_rc, expect_kept):
     with kbc.connect_closing() as conn:
         assert (_event_rows(conn, tid) > 0) is expect_kept
     assert log.exists() is expect_kept
-    assert (ws / "scratch.txt").exists() is (expect_rc != 0)
+    assert (ws / "scratch.txt").exists()
 
 @pytest.mark.parametrize(
     ("days", "expected"),
     [
         pytest.param("-1", "must be >= 0", id="negative-blocked"),
-        pytest.param("0", "GC complete", id="zero-disables"),
+        pytest.param("0", "GC audit complete", id="zero-disables"),
     ],
 )
 def test_slash_kanban_gc_retention_bounds(board, days, expected):

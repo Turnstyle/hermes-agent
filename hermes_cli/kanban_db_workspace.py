@@ -361,216 +361,48 @@ def _is_managed_scratch_path(p: Path) -> bool:
 
 
 def _cleanup_workspace(conn: sqlite3.Connection, task_id: str) -> None:
-    """Remove a task's scratch workspace dir and kill its stale tmux session.
-    Called from :func:`complete_task` after the transaction commits; best-effort
-    so cleanup never blocks completion. ``scratch`` is removed; ``worktree``
-    only when provably free of work (clean tree, every commit reachable from a
-    remote-tracking ref); ``dir`` is intentionally preserved."""
-    try:
-        row = conn.execute(_WORKSPACE_ROW_SQL, (task_id,)).fetchone()
-        if not row:
-            return
-        kind: Optional[str] = row["workspace_kind"]
-        path: Optional[str] = row["workspace_path"]
-        if kind not in _REMOVABLE_KINDS or not path:
-            # Not removable itself, but completing may still unblock a deferred
-            # parent scratch cleanup (e.g. a 'dir' child of a scratch parent).
-            # See #33774.
-            _try_cleanup_parent_workspaces(conn, task_id)
-            return
-        # Defer while any child is not yet terminal so it can still read
-        # handoff artifacts from this workspace.
-        if _has_active_children(conn, task_id):
-            _kb._log.debug(
-                "Deferring %s workspace cleanup for task %s: "
-                "active children still need workspace at %s",
-                kind, task_id, path,
-            )
-            return
-        # Kill the (dead) tmux worker session BEFORE removing a worktree so a
-        # lingering worker never has its cwd deleted from under it.
+    """Retain terminal scratch/worktree payload; workflow completion may persist."""
+    row = conn.execute(_WORKSPACE_ROW_SQL, (task_id,)).fetchone()
+    if not row:
+        return
+    kind, path = row["workspace_kind"], row["workspace_path"]
+    if _has_active_children(conn, task_id):
+        return
+    if kind in _REMOVABLE_KINDS and path and Path(path).is_dir():
         if kind == "worktree":
-            _cleanup_worker_tmux(conn, task_id)
             if not _defer_shared_worktree_cleanup(conn, task_id, path):
                 _cleanup_worktree_workspace(task_id, path, row["branch_name"], conn=conn)
-            _try_cleanup_parent_workspaces(conn, task_id)
-            return
-        wp = Path(path)
-        if wp.is_dir():
-            # Containment guard: a board's ``default_workdir`` can pair
-            # ``workspace_kind='scratch'`` with a user path pointing at a real
-            # source tree; without this, completion would rmtree the user's data.
-            # See #28818. Containment runs first so an unmanaged dir that is
-            # never removed does not pay for (or log) the shared-use scan.
-            # Sharing defer stays ahead of the preservation gate so a live
-            # sharer is recorded even when the plan would not authorize removal.
-            if not _is_managed_scratch_path(wp):
-                _kb._log.warning(
-                    "Refusing to remove out-of-scratch workspace for task %s: %s "
-                    "(workspace_kind='scratch' but path is outside any "
-                    "kanban-managed workspaces root)",
-                    task_id, wp,
-                )
-            elif _defer_shared_workspace_cleanup(conn, task_id, path):
-                pass
-            elif preservation_gate(task_id, wp, conn=conn):
-                release_lsp_clients(str(wp))
-                shutil.rmtree(wp, ignore_errors=True)
-                if not wp.exists():
-                    _kb._log.debug("Removed scratch workspace: %s", wp)
-        # Kill the owning worker's tmux session if it is now dead, then let any
-        # parent whose children are all done run its deferred cleanup.
-        _cleanup_worker_tmux(conn, task_id)
-        # After cleaning up this task's workspace, check if any parent tasks now have all children done —
-        # their deferred cleanup can proceed (#33774).
-        _try_cleanup_parent_workspaces(conn, task_id)
-    except Exception:
-        pass  # best-effort — never block completion
+        elif not _defer_shared_workspace_cleanup(conn, task_id, path):
+            preservation_gate(task_id, Path(path), conn=conn)
+    _try_cleanup_parent_workspaces(conn, task_id)
 
 
 def _cleanup_worktree_workspace(
     task_id: str, path: str, branch_name: Optional[str] = None, *, conn=None
 ) -> None:
-    """Remove a finished task's linked git worktree when it holds no work.
-    Mirrors the CLI startup pruner (``cli._prune_stale_worktrees``): removal
-    requires a clean tree AND every commit reachable from a remote-tracking
-    ref; any doubt (dirty, unpushed, unresolvable repo, failing git) preserves
-    it. The auto-generated ``wt/<task-id>`` branch is deleted with it; custom
-    branches are kept. Best-effort."""
-    try:
-        from hermes_cli.worktree_ops import _worktree_has_unpushed_commits, _worktree_is_dirty
-    except Exception:
-        return  # CLI safety predicates unavailable — preserve
-    try:
-        wp = Path(path).expanduser()
-        if not wp.is_dir():
-            return
-        common = _git_common_dir(wp)
-        if common is None or common.name != ".git":
-            return  # not a linked worktree of a normal repo — never guess
-        repo_root = common.parent
-        if _path_key(wp.resolve(strict=False)) == _path_key(repo_root.resolve(strict=False)):
-            return  # never remove the main checkout
-        if _worktree_is_dirty(str(wp), str(repo_root)) or _worktree_has_unpushed_commits(str(wp)):
-            _kb._log.info(
-                "Preserving worktree for task %s: dirty or unpushed work at %s",
-                task_id, wp,
-            )
-            return
-        # Windows cannot delete a directory while this process has its current
-        # directory inside it. Completed workers normally run from their own
-        # linked worktree, so move this process back to the main checkout
-        # before asking Git to remove the worktree.
-        worktree_path = wp.resolve(strict=False)
-        try:
-            cwd = Path.cwd().resolve(strict=False)
-        except OSError:
-            # cwd was already deleted (a scratch-kind child's own workspace is
-            # rmtree'd before this deferred parent cleanup runs, #33774). A
-            # dead cwd cannot hold the worktree open, so leaving it is safe.
-            cwd = None
-        if cwd is None or cwd == worktree_path or cwd.is_relative_to(worktree_path):
-            try:
-                os.chdir(repo_root)
-            except OSError as exc:
-                _kb._log.warning(
-                    "Preserving worktree for task %s: cannot leave %s for %s: %s",
-                    task_id, cwd or "<deleted cwd>", repo_root, exc,
-                )
-                return
-        # No --force: git's own dirty guard re-verifies at removal time, so if
-        # the tree became dirty since our check (TOCTOU) removal fails safe.
-        # Same retain-by-default gate as scratch and gc. Dirty/unpushed checks
-        # above still win, so a failed gate is not the only preservation path.
-        if not preservation_gate(task_id, wp, conn=conn):
-            return
-        release_lsp_clients(str(worktree_path))
-        result = _git(repo_root, "worktree", "remove", str(wp), timeout=60)
-        if result.returncode != 0:
-            # Windows can retain a directory handle briefly after cwd changes.
-            # Retry once without --force; Git still enforces its dirty guard.
-            time.sleep(0.1)
-            result = _git(repo_root, "worktree", "remove", str(wp), timeout=60)
-        if result.returncode != 0:
-            _kb._log.warning(
-                "git worktree remove failed for task %s at %s: %s",
-                task_id, wp, (result.stderr or result.stdout or "").strip(),
-            )
-            return
-        _kb._log.debug("Removed worktree workspace: %s", wp)
-        branch = (branch_name or "").strip() or f"wt/{task_id}"
-        if branch.startswith("wt/"):
-            _git(repo_root, "branch", "-D", branch, timeout=30)
-    except Exception:
-        pass  # best-effort — never block completion
+    """Retain the original tree, registration, lock and branch at this leaf seam."""
+    preservation_gate(task_id, Path(path), conn=conn)
 
 
 def _try_cleanup_parent_workspaces(conn: sqlite3.Connection, task_id: str) -> None:
-    """Run the deferred cleanup of any parent scratch/worktree workspace whose
-    children are now all done/archived/failed/cancelled (called after each
-    child completes).
-
-    See #33774.
-    """
-    try:
-        parents = conn.execute(
-            "SELECT parent_id FROM task_links WHERE child_id = ?",
-            (task_id,),
-        ).fetchall()
-        for (parent_id,) in parents:
-            row = conn.execute(_WORKSPACE_ROW_SQL, (parent_id,)).fetchone()
-            if (
-                not row
-                or row["workspace_kind"] not in _REMOVABLE_KINDS
-                or not row["workspace_path"]
-                or not _is_terminal_task(conn, parent_id)
-                or _has_active_children(conn, parent_id)
-            ):
-                continue
-            ws_path = row["workspace_path"]
-            if row["workspace_kind"] == "worktree":
-                if _defer_shared_worktree_cleanup(conn, parent_id, ws_path):
-                    continue
-                _cleanup_worktree_workspace(parent_id, ws_path, row["branch_name"], conn=conn)
-                continue
-            wp = Path(ws_path)
-            if not wp.is_dir() or not _is_managed_scratch_path(wp):
-                continue
-            if _defer_shared_workspace_cleanup(conn, parent_id, ws_path):
-                continue
-            if not preservation_gate(parent_id, wp, conn=conn):
-                continue
-            release_lsp_clients(str(wp))
-            shutil.rmtree(wp, ignore_errors=True)
-            if not wp.exists():
-                _kb._log.debug(
-                    "Deferred cleanup: removed parent %s scratch workspace: %s",
-                    parent_id, wp,
-                )
-    except Exception:
-        pass  # best-effort
+    """Visit deferred terminal parents without changing their recovery objects."""
+    parents = conn.execute("SELECT parent_id FROM task_links WHERE child_id = ?", (task_id,)).fetchall()
+    for (parent_id,) in parents:
+        row = conn.execute(_WORKSPACE_ROW_SQL, (parent_id,)).fetchone()
+        if (not row or row["workspace_kind"] not in _REMOVABLE_KINDS
+                or not row["workspace_path"] or not _is_terminal_task(conn, parent_id)
+                or _has_active_children(conn, parent_id)):
+            continue
+        if row["workspace_kind"] == "worktree":
+            if not _defer_shared_worktree_cleanup(conn, parent_id, row["workspace_path"]):
+                _cleanup_worktree_workspace(parent_id, row["workspace_path"], row["branch_name"], conn=conn)
+        elif not _defer_shared_workspace_cleanup(conn, parent_id, row["workspace_path"]):
+            preservation_gate(parent_id, Path(row["workspace_path"]), conn=conn)
 
 
 def _cleanup_worker_tmux(conn: sqlite3.Connection, task_id: str) -> None:
-    """Kill the tmux session associated with a task's assignee, if dead."""
-    try:
-        row = conn.execute(
-            "SELECT assignee FROM tasks WHERE id = ?", (task_id,)
-        ).fetchone()
-        if not row or not row["assignee"]:
-            return
-        # Workers named swarm1-12 use tmux sessions named swarm-swarm1 etc.
-        session = f"swarm-{row['assignee']}"
-        out = subprocess.run(
-            ["tmux", "list-panes", "-t", session, "-F", "#{pane_dead}"],
-            capture_output=True, text=True, encoding='utf-8', errors='replace', timeout=5,
-            check=False,
-        )
-        if out.stdout.strip() == "1":
-            subprocess.run(["tmux", "kill-session", "-t", session], capture_output=True, timeout=5, check=False)
-            _kb._log.debug("Killed stale tmux session: %s", session)
-    except Exception:
-        pass  # best-effort — never block completion
+    """Retain worker sessions at the direct cleanup seam while authority is OFF."""
+    _kb._log.debug("Worker session retained for %s: destructive_authority_off", task_id)
 
 
 _SCRATCH_TIP_SENTINEL_NAME = ".scratch_tip_shown"

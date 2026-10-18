@@ -647,6 +647,15 @@ def _run_one_file_once(
     # parent's cleanup of ``temproot`` removes them too instead of leaving them in /tmp.
     env["TMPDIR"] = temproot
 
+    # Git-touching tests must not discover an operator repo above the checkout
+    # or disposable fixtures, or read/write the operator's global Git state.
+    home = Path(temproot) / "home"
+    home.mkdir()
+    env["HOME"] = env["USERPROFILE"] = str(home)
+    env["GIT_CEILING_DIRECTORIES"] = os.pathsep.join(
+        (str(repo_root.resolve().parent), str(Path(temproot).resolve().parent))
+    )
+
     subproc_start = time.monotonic()
     # launch the pytest process
     proc = subprocess.Popen(
