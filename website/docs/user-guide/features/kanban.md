@@ -325,6 +325,10 @@ kanban:
   review_dispatch: true            # default: spawn the assigned profile with
                                    # the bundled sdlc-review skill. Set false
                                    # for human-only review boards.
+  # review_lane: false             # per-profile opt-out: put this in the
+                                   # ASSIGNEE profile's config to skip only
+                                   # its automatic review claims. Default true;
+                                   # ready-lane work is unchanged.
   # dispatch_profiles: [sage]       # unset (key omitted): this home may claim
                                    # cards for any existing profile. Set to a
                                    # list (or comma-separated string) of profile
@@ -333,6 +337,17 @@ kanban:
                                    # or a bare `dispatch_profiles:` claims
                                    # nothing, and so does an unreadable config.
 ```
+
+An explicit boolean `kanban.review_lane: false` in the assigned profile's
+config prevents automatic review claims and spawns. The card stays in `review`
+for reassignment or a later config change. A missing key remains eligible;
+strings such as `"false"`, `0`, and `null` do not opt a profile out.
+An unreadable profile config defers review rather than silently ignoring an
+opt-out. The dispatcher emits a `review_lane_skipped` event with the assignee
+and reason at most once per five minutes per card/assignee/reason. Dry runs
+write no skip events. Ineligible reviews do not reserve ready-lane capacity
+or appear as spawnable in review health probes. This does not restrict manual
+claims or change ready-lane eligibility.
 
 Override the config flag at runtime via `HERMES_KANBAN_DISPATCH_IN_GATEWAY=0`
 for debugging. Standard gateway supervision applies: run `hermes gateway

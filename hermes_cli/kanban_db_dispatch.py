@@ -27,6 +27,7 @@ from typing import Optional
 from typing import TYPE_CHECKING
 
 from hermes_cli.quiet_single_query import KANBAN_WORKER_EXIT_TRAILER
+from hermes_cli.kanban_review_lane import record_review_lane_skip, review_lane_block_reason
 
 if TYPE_CHECKING:
     from hermes_cli.kanban_db import Task
@@ -140,7 +141,8 @@ class DispatchResult:
     """Task ids reclaimed for no heartbeat within ``dispatch_stale_timeout_seconds``."""
     respawn_guarded: list[tuple[str, str]] = field(default_factory=list)
     """``(task_id, reason)`` skipped by the respawn guard: ``"blocker_auth"``
-    (quota/auth error — also auto-blocked), ``"recent_success"`` (completed run
+    (quota/auth error — also auto-blocked), ``"review_lane_disabled"`` /
+    ``"review_lane_config_error"`` (profile review eligibility), ``"recent_success"`` (completed run
     within guard window), ``"active_pr"`` (GitHub PR URL in a recent comment)."""
     rate_limited: list[str] = field(default_factory=list)
     """Task ids whose workers bailed on a provider rate-limit / quota wall
@@ -1767,10 +1769,11 @@ def _has_spawnable(conn: sqlite3.Connection, status: str) -> bool:
     if not rows:
         return False
     profile_exists = _profile_exists_fn()
-    if profile_exists is None:
-        # Can't introspect — assume spawnable, preserve legacy behavior.
-        return True
-    return any(profile_exists(row["assignee"]) for row in rows)
+    return any(
+        (profile_exists is None or profile_exists(row["assignee"]))
+        and (status != "review" or review_lane_block_reason(row["assignee"]) is None)
+        for row in rows
+    )
 
 
 def has_spawnable_ready(conn: sqlite3.Connection) -> bool:
@@ -2060,6 +2063,11 @@ def _dispatch_lane_task(
                         or last["payload"] != _kb._json_or_null({"assignee": assignee})):
                     _kb._append_event(conn, task_id, "skipped_nonspawnable", {"assignee": assignee})
         return False
+    if lane == "review" and (reason := review_lane_block_reason(assignee)) is not None:
+        result.respawn_guarded.append((task_id, reason))
+        if not dry_run:
+            record_review_lane_skip(conn, task_id, assignee, reason)
+        return False
     # Per-profile cap: one profile's local model / API quota / browser pool
     # must not be overwhelmed by a fan-out even with global headroom.
     if per_profile_cap is not None:
@@ -2296,6 +2304,8 @@ def _any_spawnable_review(
         if not assignee:
             continue
         if profile_exists is not None and not profile_exists(assignee):
+            continue
+        if review_lane_block_reason(assignee) is not None:
             continue
         if per_profile_cap is not None and running.get(assignee, 0) >= per_profile_cap:
             continue
