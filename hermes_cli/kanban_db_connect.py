@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import contextlib
 import hashlib
+import os
 import random
 import re
 import secrets
@@ -504,8 +505,49 @@ def _probe_for_corruption(resolved: Path) -> tuple[Optional[list[str]], Optional
     return messages, f"integrity_check returned {messages[0] if messages else '<no row>'!r}"
 
 
+DEFAULT_INTEGRITY_CHECK_MAX_BYTES = 2 << 30  # 2 GiB, matching backup.py
+
+
+def _probe_connect_health(path: Path) -> tuple[Optional[list[str]], Optional[str]]:
+    """Bound connect-time work; explicit repair still owns a full integrity scan."""
+    try:
+        ceiling = int(os.environ.get(
+            "HERMES_KANBAN_INTEGRITY_CHECK_MAX_BYTES", DEFAULT_INTEGRITY_CHECK_MAX_BYTES,
+        ))
+    except ValueError:
+        ceiling = DEFAULT_INTEGRITY_CHECK_MAX_BYTES
+    if ceiling <= 0 or path.stat().st_size <= ceiling:
+        return _probe_for_corruption(path)
+
+    try:
+        _validate_sqlite_header(path)
+        probe = _sqlite_connect(path)
+        try:
+            probe.execute("PRAGMA schema_version").fetchone()
+            # Do not use _schema_is_present: it swallows DatabaseError, including
+            # OperationalError, which must propagate without quarantine here.
+            row = probe.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='table' AND name='tasks' LIMIT 1"
+            ).fetchone()
+            if row is None:
+                raise sqlite3.DatabaseError("kanban schema is missing the tasks table")
+        finally:
+            probe.close()
+    except sqlite3.OperationalError:
+        raise
+    except sqlite3.DatabaseError as exc:
+        return None, f"sqlite structural probe failed: {exc}"
+    _kb._log.info(
+        "kanban DB %s exceeds integrity check ceiling (%s bytes); skipped full "
+        "PRAGMA integrity_check after header + schema probe; scheduled PRAGMA "
+        "quick_check is the owner path for ongoing integrity checks.",
+        path, ceiling,
+    )
+    return ["ok"], None
+
+
 def _guard_existing_db_is_healthy(path: Path) -> None:
-    """Run ``PRAGMA integrity_check`` on an existing non-empty DB file.
+    """Check an existing non-empty DB, using a structural probe above the size ceiling.
 
     Narrow auto-repair when the failure is ONLY index-scoped (table b-trees
     intact): content-addressed corrupt backup FIRST, REINDEX under the
@@ -523,7 +565,7 @@ def _guard_existing_db_is_healthy(path: Path) -> None:
         return
     if _missing_or_empty(resolved) or str(resolved) in _INITIALIZED_PATHS:
         return
-    messages, reason = _probe_for_corruption(resolved)
+    messages, reason = _probe_connect_health(resolved)
     if reason is None:
         return
     # Quarantine FIRST — both the repair and fail-closed paths preserve the
@@ -767,7 +809,7 @@ def connect(db_path: Optional[Path] = None, *, board: Optional[str] = None) -> s
         from hermes_state import preflight_db_writability
         preflight_db_writability(path, db_label=f"kanban.db ({path.name})")
         # Cheap byte-level header check before any sqlite connection, then the
-        # full integrity probe (cached per path via _INITIALIZED_PATHS).
+        # size-bounded health probe (cached per path via _INITIALIZED_PATHS).
         _validate_sqlite_header(path)
         _guard_existing_db_is_healthy(path)
         resolved = str(path.resolve())

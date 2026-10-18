@@ -93,6 +93,93 @@ def _integrity_messages(db_path: Path) -> list[str]:
 # Narrow auto-repair in the connect-time guard
 # ---------------------------------------------------------------------------
 
+def test_connect_above_integrity_ceiling_skips_full_check(tmp_path, monkeypatch, caplog):
+    db_path = tmp_path / "kanban.db"
+    _build_board_db(db_path, tasks=1)
+    monkeypatch.setenv("HERMES_KANBAN_INTEGRITY_CHECK_MAX_BYTES", "1")
+
+    def unexpected_full_check(conn):
+        pytest.fail("large DB connect must not run full integrity_check")
+
+    monkeypatch.setattr(kbc, "_run_integrity_check", unexpected_full_check)
+    with caplog.at_level("INFO", logger=kb._log.name):
+        for _ in range(2):
+            conn = kbc.connect(db_path=db_path)
+            assert conn.execute("SELECT count(*) FROM tasks").fetchone()[0] == 1
+            conn.close()
+    skipped = [r for r in caplog.records if "skipped" in r.message and "integrity_check" in r.message]
+    assert len(skipped) == 1
+    assert "scheduled PRAGMA quick_check" in skipped[0].message
+
+
+@pytest.mark.parametrize("ceiling", [None, "0", "-1", "invalid", "equal"])
+def test_connect_below_or_disabled_integrity_ceiling_runs_full_check(tmp_path, monkeypatch, ceiling):
+    db_path = tmp_path / "kanban.db"
+    _build_board_db(db_path, tasks=1)
+    if ceiling is None:
+        monkeypatch.delenv("HERMES_KANBAN_INTEGRITY_CHECK_MAX_BYTES", raising=False)
+    else:
+        monkeypatch.setenv("HERMES_KANBAN_INTEGRITY_CHECK_MAX_BYTES",
+                           str(db_path.stat().st_size) if ceiling == "equal" else ceiling)
+    calls = []
+    original = kbc._run_integrity_check
+
+    def full_check(conn):
+        calls.append(True)
+        return original(conn)
+
+    monkeypatch.setattr(kbc, "_run_integrity_check", full_check)
+    kbc.connect(db_path=db_path).close()
+    assert calls == [True]
+
+
+@pytest.mark.parametrize("damage", ["header", "pages", "missing_tasks"])
+def test_connect_above_integrity_ceiling_fails_closed(tmp_path, monkeypatch, damage):
+    db_path = tmp_path / "kanban.db"
+    if damage == "header":
+        db_path.write_bytes(b"not a sqlite header" * 100)
+    elif damage == "pages":
+        _write_page_corrupt_db(db_path)
+    else:
+        conn = sqlite3.connect(db_path)
+        conn.execute("CREATE TABLE other (id INTEGER)")
+        conn.close()
+    before = db_path.read_bytes()
+    monkeypatch.setenv("HERMES_KANBAN_INTEGRITY_CHECK_MAX_BYTES", "1")
+    if damage == "header":
+        # The pre-existing header preflight rejects before the health guard.
+        with pytest.raises(sqlite3.DatabaseError, match="invalid SQLite header"):
+            kbc.connect(db_path=db_path)
+        assert db_path.read_bytes() == before
+        return
+    with pytest.raises(kbc.KanbanDbCorruptError) as excinfo:
+        kbc.connect(db_path=db_path)
+    assert db_path.read_bytes() == before
+    assert excinfo.value.backup_path.read_bytes() == before
+
+
+@pytest.mark.parametrize("error_type", [sqlite3.OperationalError, sqlite3.DatabaseError])
+def test_connect_above_integrity_ceiling_probe_errors(tmp_path, monkeypatch, error_type):
+    db_path = tmp_path / "kanban.db"
+    _build_board_db(db_path, tasks=1)
+    monkeypatch.setenv("HERMES_KANBAN_INTEGRITY_CHECK_MAX_BYTES", "1")
+    error = error_type("database is locked" if error_type is sqlite3.OperationalError else "malformed")
+
+    def failed_open(path):
+        raise error
+
+    monkeypatch.setattr(kbc, "_sqlite_connect", failed_open)
+    if error_type is sqlite3.OperationalError:
+        with pytest.raises(sqlite3.OperationalError) as excinfo:
+            kbc.connect(db_path=db_path)
+        assert excinfo.value is error
+        assert not list(tmp_path.glob("*.bak"))
+    else:
+        with pytest.raises(kbc.KanbanDbCorruptError) as excinfo:
+            kbc.connect(db_path=db_path)
+        assert excinfo.value.backup_path.exists()
+
+
 def test_connect_auto_repairs_index_only_corruption(tmp_path):
     """Index-only integrity errors are REINDEXed and connect proceeds."""
     db_path = tmp_path / "kanban.db"
