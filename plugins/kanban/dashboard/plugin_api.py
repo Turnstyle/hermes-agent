@@ -25,7 +25,8 @@ from typing import Any, Callable, Iterator, Optional
 
 from fastapi import (
     APIRouter, File, Form, HTTPException, Query, UploadFile, WebSocket, WebSocketDisconnect, status as http_status)
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, JSONResponse
+from hermes_cli.retention import RetentionRefused
 from pydantic import BaseModel, Field
 
 from hermes_cli import kanban_db
@@ -36,7 +37,7 @@ from hermes_cli import kanban_db_notify as kbn
 from hermes_cli import kanban_db_dispatch as kbd
 from hermes_cli import kanban_db_workspace as kbw
 from hermes_cli import kanban_diagnostics as kd
-from hermes_cli.kanban_db import KANBAN_ATTACHMENT_MAX_BYTES, _collision_free_path, _safe_attachment_name
+from hermes_cli.kanban_db import KANBAN_ATTACHMENT_MAX_BYTES, _safe_attachment_name
 
 log = logging.getLogger(__name__)
 
@@ -290,6 +291,7 @@ def _link_tasks(conn: sqlite3.Connection, links: dict[str, list[str]]) -> list[d
 def get_board(
     tenant: Optional[str] = Query(None, description="Filter to a single tenant"),
     include_archived: bool = Query(False),
+    include_hidden: bool = Query(False),
     board: Optional[str] = _BOARD_Q,
     workflow_template_id: Optional[str] = Query(None, description="Restrict to tasks using this workflow template id"),
     current_step_key: Optional[str] = Query(None, description="Restrict to tasks at this workflow step key")):
@@ -297,7 +299,7 @@ def get_board(
     (``HERMES_KANBAN_BOARD`` env → on-disk ``current`` pointer → ``default``)."""
     with _board_conn(board) as (board, conn):
         tasks = kanban_db.list_tasks(
-            conn, tenant=tenant, include_archived=include_archived,
+            conn, tenant=tenant, include_archived=include_archived, include_hidden=include_hidden,
             workflow_template_id=workflow_template_id, current_step_key=current_step_key)
         # Link / comment / progress rollups are each one aggregate query rather than N per-task lookups.
         link_counts: dict[str, dict[str, int]] = {}
@@ -360,6 +362,7 @@ _read_board = coalesced_read(get_board)
 async def get_board_endpoint(
     tenant: Optional[str] = Query(None, description="Filter to a single tenant"),
     include_archived: bool = Query(False),
+    include_hidden: bool = Query(False),
     board: Optional[str] = _BOARD_Q,
     workflow_template_id: Optional[str] = Query(None, description="Restrict to tasks using this workflow template id"),
     current_step_key: Optional[str] = Query(None, description="Restrict to tasks at this workflow step key"),
@@ -368,6 +371,7 @@ async def get_board_endpoint(
     return await _read_board(
         tenant=tenant,
         include_archived=include_archived,
+        include_hidden=include_hidden,
         board=board or kanban_db.get_current_board(),
         workflow_template_id=workflow_template_id,
         current_step_key=current_step_key,
@@ -462,10 +466,10 @@ def create_task(payload: CreateTaskBody, board: Optional[str] = Query(None)):
 # dashboard, agent toolset, and CLI share one implementation.
 
 @router.get("/tasks/{task_id}/attachments")
-def list_task_attachments(task_id: str, board: Optional[str] = Query(None)):
+def list_task_attachments(task_id: str, board: Optional[str] = Query(None), include_hidden: bool = Query(False)):
     with _board_conn(board) as (board, conn):
         _require_task(conn, task_id)
-        return {"attachments": [_attachment_dict(a) for a in kanban_db.list_attachments(conn, task_id)]}
+        return {"attachments": [_attachment_dict(a) for a in kanban_db.list_attachments(conn, task_id, include_hidden=include_hidden)]}
 
 
 @router.post("/tasks/{task_id}/attachments")
@@ -479,25 +483,19 @@ async def upload_task_attachment(
     with _board_conn(board) as (board, conn), _value_error_400():
         _require_task(conn, task_id)
         safe_name = _safe_attachment_name(file.filename or "")
-        dest_dir = kanban_db.task_attachments_dir(task_id, board=board)
-        dest_dir.mkdir(parents=True, exist_ok=True)
-        dest_path = _collision_free_path(dest_dir, safe_name)  # foo.pdf → foo (1).pdf …
-        total = 0  # stream in chunks with a hard size cap so one upload can't fill the disk
+        chunks, total = [], 0
+        while chunk := await file.read(1024 * 1024):
+            total += len(chunk)
+            if total > KANBAN_ATTACHMENT_MAX_BYTES:
+                raise HTTPException(
+                    status_code=413, detail=f"attachment exceeds {KANBAN_ATTACHMENT_MAX_BYTES // (1024 * 1024)} MB limit")
+            chunks.append(chunk)
         try:
-            with open(dest_path, "wb") as out:  # noqa: ASYNC230 -- chunked local write of the upload stream; open() is non-blocking in practice
-                while chunk := await file.read(1024 * 1024):
-                    total += len(chunk)
-                    if total > KANBAN_ATTACHMENT_MAX_BYTES:
-                        out.close()
-                        dest_path.unlink(missing_ok=True)
-                        raise HTTPException(
-                            status_code=413, detail=f"attachment exceeds {KANBAN_ATTACHMENT_MAX_BYTES // (1024 * 1024)} MB limit")
-                    out.write(chunk)
+            att_id = kanban_db.store_attachment_bytes(
+                conn, task_id, safe_name, b"".join(chunks), board=board,
+                content_type=file.content_type, uploaded_by=(uploaded_by or "dashboard"))
         except OSError as exc:
             raise HTTPException(status_code=500, detail=f"failed to store attachment: {exc}")
-        att_id = kanban_db.add_attachment(
-            conn, task_id, filename=dest_path.name, stored_path=str(dest_path.resolve()),
-            content_type=file.content_type, size=total, uploaded_by=(uploaded_by or "dashboard"))
         att = kanban_db.get_attachment(conn, att_id)
         return {"attachment": _attachment_dict(att) if att else None}
 
@@ -523,9 +521,44 @@ def download_attachment(attachment_id: int, board: Optional[str] = Query(None)):
 @router.delete("/attachments/{attachment_id}")
 def remove_attachment(attachment_id: int, board: Optional[str] = Query(None)):
     with _board_conn(board) as (board, conn):
-        if kanban_db.delete_attachment(conn, attachment_id) is None:
-            raise HTTPException(status_code=404, detail="attachment not found")
+        try:
+            if kanban_db.delete_attachment(conn, attachment_id) is None:
+                raise HTTPException(status_code=404, detail="attachment not found")
+        except RetentionRefused as exc:
+            return JSONResponse(status_code=409, content={
+                "detail": str(exc), "reason": exc.reason, "retained": True, "removed": False,
+            })
         return {"ok": True, "id": attachment_id}
+
+
+class SoftHideBody(BaseModel):
+    actor: str
+    reason: str
+
+
+def _soft_hide(kind, identity, payload, board):
+    from hermes_cli import retention_tombstones as tombstones
+    operation = {'task': tombstones.hide_task, 'attachment': tombstones.hide_attachment}[kind]
+    with _board_conn(board) as (board, conn), _value_error_400():
+        try:
+            result = operation(conn, identity, actor=payload.actor, reason=payload.reason)
+        except RetentionRefused as exc:
+            return JSONResponse(status_code=409, content={
+                'detail': str(exc), 'reason': exc.reason, 'retained': True, 'removed': False,
+            })
+        if result is False or result is None:
+            raise HTTPException(status_code=404, detail=f'{kind} not found')
+        return result
+
+
+@router.post('/tasks/{task_id}/hide')
+def hide_task(task_id: str, payload: SoftHideBody, board: Optional[str] = Query(None)):
+    return _soft_hide('task', task_id, payload, board)
+
+
+@router.post('/attachments/{attachment_id}/hide')
+def hide_attachment(attachment_id: int, payload: SoftHideBody, board: Optional[str] = Query(None)):
+    return _soft_hide('attachment', attachment_id, payload, board)
 
 
 # --- PATCH /tasks/:id  and  POST /tasks/bulk ---------------------------------
@@ -719,8 +752,13 @@ def update_task(task_id: str, payload: UpdateTaskBody, board: Optional[str] = Qu
 @router.delete("/tasks/{task_id}")
 def delete_task(task_id: str, board: Optional[str] = Query(None)):
     with _board_conn(board) as (board, conn):
-        if not kanban_db.delete_task(conn, task_id):
-            raise HTTPException(status_code=404, detail=f"task {task_id} not found")
+        try:
+            if not kanban_db.delete_task(conn, task_id):
+                raise HTTPException(status_code=404, detail=f"task {task_id} not found")
+        except RetentionRefused as exc:
+            return JSONResponse(status_code=409, content={
+                "detail": str(exc), "reason": exc.reason, "retained": True, "removed": False,
+            })
         return {"deleted": True, "task_id": task_id}
 
 

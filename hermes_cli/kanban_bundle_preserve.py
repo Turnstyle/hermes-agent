@@ -3,8 +3,8 @@
 No extraction occurs here. Archives contain only relative regular-file members.
 Existing workspaces may be inventoried with dry_run=True without writing blobs/DB.
 
-Removal is retain-by-default. Callers delete only when ``preservation_gate``
-returns true.
+Removal is unconditionally disabled. ``preservation_gate`` always returns
+False. Explicit ``preserve_bundle`` planning/registration never grants authority.
 
 - ``HOLD-WORKSPACE`` retains before planning, archive, or deletion whenever
   the name exists. A no-follow probe error retains before preservation too.
@@ -16,14 +16,14 @@ returns true.
   leaves explicit references in charge, including an absolute path that
   points inside the workspace. A present marker selects the whole tree only
   when it is a regular file with the owner-read bit set, at most
-  ``KEEP_MARKER_MAX_BYTES`` bytes, opened without following a link. Contents
+  ``KEEP_MARKER_MAX_BYTES`` bytes, opened without following a link and read within the bound. Contents
   are not a document format. A link, directory, oversized file, missing
   owner-read bit, or any probe error retains before archive registration.
   It is not a hold and it does not authorize an empty plan.
 - An empty plan retains. A symlink workspace root retains. A missing required
   reference, or a failed copy, checksum, size, symlink, secret, or database
   step retains. A preexisting unrelated attachment is not proof. Dry-run
-  never writes or deletes. This gate is not a universal delete barrier.
+  never writes or deletes. All scoped cleanup callers retain independently of preservation success.
 """
 from __future__ import annotations
 
@@ -33,8 +33,6 @@ import os
 from pathlib import Path
 import re
 import stat
-import tarfile
-import tempfile
 
 MAX_BYTES = 500 * 1024 * 1024
 EXCLUDED_DIRS = {".git", ".venv", "venv", "node_modules", "__pycache__"}
@@ -88,16 +86,23 @@ def _references(text):
 
 def _open_regular(root: Path, rel: str):
     """Walk via no-follow directory descriptors, including the workspace root."""
+    from hermes_cli.retention_markers import _open_directory_chain
     parts = Path(rel).parts
-    fd = os.open(root, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    if not parts or Path(rel).is_absolute() or ".." in parts:
+        raise ValueError("unsafe bundle member locator")
+    descriptors = _open_directory_chain(Path(os.path.abspath(root)))
     try:
         for part in parts[:-1]:
-            next_fd = os.open(part, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=fd)
-            os.close(fd)
-            fd = next_fd
-        source = os.open(parts[-1], os.O_RDONLY | os.O_NOFOLLOW, dir_fd=fd)
+            descriptors.append(os.open(part, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW,
+                                       dir_fd=descriptors[-1]))
+        fd = descriptors[-1]
+        before = os.stat(parts[-1], dir_fd=fd, follow_symlinks=False)
+        if not stat.S_ISREG(before.st_mode):
+            raise ValueError("not a regular bundle member")
+        source = os.open(parts[-1], os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=fd)
     finally:
-        os.close(fd)
+        for descriptor in reversed(descriptors):
+            os.close(descriptor)
     if not stat.S_ISREG(os.fstat(source).st_mode):
         os.close(source)
         raise ValueError("not a regular bundle member")
@@ -105,36 +110,14 @@ def _open_regular(root: Path, rel: str):
 
 
 def _keep_selects_all(root: Path) -> bool:
-    """Whether a present ``KEEP-BUNDLE`` adds the whole tree.
-
-    Absence returns ``False`` and does not select the tree. A regular file
-    with the owner-read bit, size at or under ``KEEP_MARKER_MAX_BYTES``,
-    opened with ``O_NOFOLLOW``, returns ``True``. Every other status or
-    probe error raises before archive registration. Contents are not parsed.
-    """
-    path = root / KEEP_MARKER
-    try:
-        info = path.lstat()
-    except FileNotFoundError:
+    """Preserve the marker selection policy, with typed refusal before planning."""
+    from hermes_cli.retention_markers import MarkerStatus, RetainAll, inspect_keep_bundle
+    result = inspect_keep_bundle(root, max_bytes=KEEP_MARKER_MAX_BYTES)
+    if result.status is MarkerStatus.ABSENT:
         return False
-    except OSError as exc:
-        raise ValueError("keep marker probe failed before preservation") from exc
-    if stat.S_ISLNK(info.st_mode) or not stat.S_ISREG(info.st_mode):
-        raise ValueError("keep marker probe failed before preservation")
-    if info.st_size > KEEP_MARKER_MAX_BYTES or (info.st_mode & stat.S_IRUSR) == 0:
-        raise ValueError("keep marker probe failed before preservation")
-    try:
-        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
-    except OSError as exc:
-        raise ValueError("keep marker probe failed before preservation") from exc
-    try:
-        try:
-            os.read(fd, 1)
-        except OSError as exc:
-            raise ValueError("keep marker probe failed before preservation") from exc
-    finally:
-        os.close(fd)
-    return True
+    if result.status is MarkerStatus.PRESENT:
+        return True
+    raise RetainAll("keep marker probe failed before preservation: " + result.reason)
 
 
 def _root_retention_reason(root: Path) -> str | None:
@@ -147,49 +130,32 @@ def _root_retention_reason(root: Path) -> str | None:
 
 
 def _hold_probe(root: Path) -> str | None:
-    """Return a retention reason before any preservation walk.
-
-    The hold name existing is enough, including a link or a directory, and
-    the probe never follows a link. Any other probe error retains too.
-    """
-    path = root / HOLD_MARKER
+    """Any hold name or uncertain probe retains; no marker payload is read."""
     try:
-        info = path.lstat()
+        (root / HOLD_MARKER).lstat()
     except FileNotFoundError:
         return None
     except OSError:
         return "hold probe failed before preservation"
-    if stat.S_ISLNK(info.st_mode) or not stat.S_ISREG(info.st_mode):
-        return "hold marker requires retention before archive or removal"
-    try:
-        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
-    except OSError:
-        return "hold probe failed before preservation"
-    try:
-        try:
-            os.read(fd, 1)
-        except OSError:
-            return "hold probe failed before preservation"
-    finally:
-        os.close(fd)
     return "hold marker requires retention before archive or removal"
 
 
 def plan_bundle(conn, task_id: str, workspace: Path, *, max_bytes=MAX_BYTES):
+    from hermes_cli.retention_markers import RetainAll
     root = Path(os.path.abspath(workspace))
     row = conn.execute("SELECT status, result FROM tasks WHERE id=?", (task_id,)).fetchone()
     if not row or row["status"] not in {"done", "archived"}:
         raise ValueError("workspace is not terminal")
-    if root.is_symlink() or root.resolve() != root or not root.is_dir():
-        raise ValueError("workspace root is missing or linked")
     hold_reason = _hold_probe(root)
     if hold_reason:
-        raise ValueError(hold_reason)
+        raise RetainAll(hold_reason)
+    # The inspector pins the root and all ancestors before classifying the
+    # leaf. A missing/replaced ancestor cannot masquerade as marker absence.
+    keep_all = _keep_selects_all(root)
     selected = set()
     directories = set()
     skipped = set()
     unresolved_refs = set()
-    keep_all = _keep_selects_all(root)
     texts = [row["result"] or ""]
     for run in conn.execute("SELECT metadata, summary FROM task_runs WHERE task_id=?", (task_id,)):
         if run["metadata"]:
@@ -303,138 +269,48 @@ def _record_unresolved_refs(conn, task_id, refs):
 
 
 def preserve_bundle(conn, task_id, workspace, *, dry_run=False, max_bytes=MAX_BYTES):
-    from hermes_cli import kanban_db as kb
+    from hermes_cli.retention_bundle import publish_report
+    if conn.in_transaction:
+        raise ValueError("bundle preservation requires its own commit")
     report = plan_bundle(conn, task_id, Path(workspace), max_bytes=max_bytes)
     if dry_run:
         return report
     _record_unresolved_refs(conn, task_id, report["unresolved_refs"])
     if not report["files"]:
         return report
-    manifest = json.dumps(report["files"], sort_keys=True, indent=2).encode() + b"\n"
-    identity = hashlib.sha256(manifest).hexdigest()
-    db_file = conn.execute('PRAGMA database_list').fetchone()[2]
-    if Path(db_file).parent.parent.name == 'boards':
-        destination = Path(db_file).parent / 'attachments' / task_id
-    elif Path(db_file).resolve() == kb.kanban_db_path().resolve():
-        destination = kb.task_attachments_dir(task_id)
-    else:
-        raise ValueError('cannot establish attachment board for workspace')
-    if destination.is_symlink() or destination.resolve() != Path(os.path.abspath(destination)):
-        raise ValueError("attachment destination is linked")
-    destination.mkdir(parents=True, exist_ok=True)
-    if destination.resolve().is_relative_to(Path(workspace).resolve()):
-        raise ValueError("attachments must be outside workspace")
-    archive = destination / f"accepted-bundle-{identity}.tgz"
-    checksum = destination / f"accepted-bundle-{identity}.sha256.json"
-    fd, temporary = tempfile.mkstemp(prefix=".bundle-", dir=destination)
-    os.close(fd)
-    temp = Path(temporary)
-    try:
-        with tarfile.open(temp, "w:gz") as tar:
-            for entry in report["files"]:
-                with _open_regular(Path(workspace), entry["path"]) as source:
-                    info = tarfile.TarInfo(entry["path"])
-                    info.size = entry["bytes"]
-                    info.mode = 0o600
-                    tar.addfile(info, source)
-        # Verify compressed bytes by reopening; no extraction and no links.
-        with tarfile.open(temp, "r:gz") as tar:
-            members = tar.getmembers()
-            if [m.name for m in members] != [e["path"] for e in report["files"]]:
-                raise ValueError("archive inventory mismatch")
-            for member, entry in zip(members, report["files"]):
-                if not member.isfile() or member.size != entry["bytes"]:
-                    raise ValueError("archive member mismatch")
-                f = tar.extractfile(member)
-                if f is None:
-                    raise ValueError("archive member unreadable")
-                with f:
-                    hasher = hashlib.sha256()
-                    while chunk := f.read(1024 * 1024):
-                        hasher.update(chunk)
-                    digest = hasher.hexdigest()
-                if digest != entry["sha256"]:
-                    raise ValueError("archive checksum mismatch")
-        if plan_bundle(conn, task_id, Path(workspace), max_bytes=max_bytes) != report:
-            raise ValueError("bundle inventory changed while preserving")
-        os.replace(temp, archive)
-        # A partial checksum write is safe: registration/deletion is not reached.
-        checksum_temp = temp.with_suffix('.sha256')
-        with checksum_temp.open('xb') as out:
-            out.write(manifest)
-            out.flush()
-            os.fsync(out.fileno())
-        os.replace(checksum_temp, checksum)
-        if checksum.read_bytes() != manifest:
-            raise ValueError("checksum manifest verification failed")
-        with kb.write_txn(conn):
-            for p, content_type in ((archive, "application/gzip"), (checksum, "application/json")):
-                existing = conn.execute("SELECT id FROM task_attachments WHERE task_id=? AND stored_path=?", (task_id, str(p))).fetchone()
-                if not existing:
-                    size = p.stat().st_size
-                    conn.execute(
-                        "INSERT INTO task_attachments (task_id, filename, stored_path, content_type, size, uploaded_by, created_at) VALUES (?, ?, ?, ?, ?, ?, strftime('%s','now'))",
-                        (task_id, p.name, str(p), content_type, size, "workspace_preservation"),
-                    )
-                    kb._append_event(conn, task_id, "attached", {"filename": p.name, "size": size, "by": "workspace_preservation"})
-        registered = {r["stored_path"] for r in conn.execute("SELECT stored_path FROM task_attachments WHERE task_id=?", (task_id,))}
-        if not {str(archive), str(checksum)} <= registered:
-            raise ValueError("bundle attachment registration failed")
-        report["attachments"] = [str(archive), str(checksum)]
-        return report
-    finally:
-        temp.unlink(missing_ok=True)
-        temp.with_suffix('.sha256').unlink(missing_ok=True)
+    return publish_report(conn, task_id, workspace, report, max_bytes=max_bytes)
 
 
 def _retain(task_id, conn, reason: str) -> bool:
-    """Record a stable reason and refuse removal. Never echo file contents."""
+    """Record a stable refusal using only a supplied owning-board connection."""
     message = (
         f"[kanban] Retained workspace {task_id}: {reason}. "
-        "Inspect bundle markers and retry cleanup after repair."
+        "Destructive authority is disabled; preservation does not authorize removal."
     )
     print(message, flush=True)
-    # A comment-write failure must not become permission to delete.
+    if conn is None or conn.in_transaction:
+        return False
     try:
         from hermes_cli import kanban_db as kb
-        from hermes_cli import kanban_db_connect as kbc
-        if conn is not None:
+        existing = conn.execute(
+            "SELECT 1 FROM task_comments WHERE task_id=? AND author=? AND body=?",
+            (task_id, "workspace_preservation", message),
+        ).fetchone()
+        if not existing:
             kb.add_comment(conn, task_id, author="workspace_preservation", body=message)
-        else:
-            with kbc.connect_closing() as connection:
-                kb.add_comment(connection, task_id, author="workspace_preservation", body=message)
-    except Exception:
-        pass
+    except Exception as exc:
+        # Audit failure must remain refusal. Do not open an ambient board to
+        # manufacture provenance for an unknown owner.
+        import logging
+        logging.getLogger(__name__).warning("Retention audit unavailable: %s", type(exc).__name__)
     return False
 
 
 def preservation_gate(task_id, workspace, *, conn=None):
-    """True only when this workspace may be removed. Callers own deletion.
+    """Compatibility removal gate, always False while destructive authority is OFF.
 
-    Hold presence and hold-probe errors return false before preservation.
-    An empty plan returns false. A worker-written marker file is not
-    authority. ``dry_run`` is not this function; ``preserve_bundle`` with
-    ``dry_run=True`` stays read-only.
+    Use preserve_bundle explicitly to plan/register artifacts. Its success cannot
+    authorize scratch/worktree cleanup, including aliases that captured this gate.
     """
-    from hermes_cli import kanban_db_connect as kbc
-
-    root = Path(os.path.abspath(workspace))
-    reason = _root_retention_reason(root) or _hold_probe(root)
-    if reason:
-        return _retain(task_id, conn, reason)
-    def _authorized(connection, report) -> bool:
-        if report.get("files"):
-            return True
-        return _retain(
-            task_id, connection, "empty preservation plan is not removal authorization",
-        )
-
-    try:
-        if conn is not None:
-            return _authorized(conn, preserve_bundle(conn, task_id, workspace))
-        with kbc.connect_closing() as connection:
-            return _authorized(connection, preserve_bundle(connection, task_id, workspace))
-    except Exception as exc:
-        return _retain(
-            task_id, conn, f"bundle preservation failed ({type(exc).__name__})",
-        )
+    from hermes_cli.retention import removal_decision
+    return _retain(task_id, conn, removal_decision().reason)

@@ -31,7 +31,7 @@ def test_empty_plan_with_loose_file_retains(board):
     assert (root / "accepted.patch").exists()
     assert kb.list_attachments(board, tid) == []
     body = _comment(board, tid)
-    assert "empty preservation plan" in body
+    assert "destructive_authority_off" in body
     assert "keep the loose file" not in body
 
 
@@ -66,13 +66,15 @@ def test_hold_wins_over_runner_marker_and_keep_before_planning(board, monkeypatc
         planned["n"] += 1
         raise AssertionError("planned despite hold")
 
+    with pytest.raises(ValueError, match="hold marker"):
+        bp.plan_bundle(board, tid, root)
     monkeypatch.setattr(bp, "plan_bundle", boom)
     assert bp.preservation_gate(tid, root, conn=board) is False
     assert planned["n"] == 0
     ws._cleanup_workspace(board, tid)
     assert (root / "accepted.patch").read_text(encoding="utf-8") == "diff accepted\n"
     assert kb.list_attachments(board, tid) == []
-    assert "hold marker" in _comment(board, tid)
+    assert "destructive_authority_off" in _comment(board, tid)
 
 
 @pytest.mark.parametrize("setup", ["linked", "directory"])
@@ -84,18 +86,20 @@ def test_hold_presence_retains_before_planning(board, setup, monkeypatch):
         planned["n"] += 1
         raise AssertionError("planned despite hold")
 
-    monkeypatch.setattr(bp, "plan_bundle", boom)
     marker = root / bp.HOLD_MARKER
     if setup == "linked":
         marker.symlink_to(root / "accepted.patch")
     else:
         marker.mkdir()
+    with pytest.raises(ValueError, match="hold marker"):
+        bp.plan_bundle(board, tid, root)
+    monkeypatch.setattr(bp, "plan_bundle", boom)
     assert bp.preservation_gate(tid, root, conn=board) is False
     assert planned["n"] == 0
     ws._cleanup_workspace(board, tid)
     assert (root / "accepted.patch").read_text(encoding="utf-8") == "diff accepted\n"
     body = _comment(board, tid)
-    assert "hold marker" in body
+    assert "destructive_authority_off" in body
     assert "diff accepted" not in body
 
 
@@ -103,37 +107,28 @@ def test_hold_presence_retains_before_planning(board, setup, monkeypatch):
 def test_hold_probe_error_retains_before_planning(board, kind, monkeypatch):
     tid, root = task(board, marker=False, result="ship `accepted.patch`")
     (root / bp.HOLD_MARKER).write_text("hold\n", encoding="utf-8")
-    planned = {"n": 0}
-
-    def boom(*_args, **_kwargs):
-        planned["n"] += 1
-        raise AssertionError("planned despite probe error")
-
-    monkeypatch.setattr(bp, "plan_bundle", boom)
+    opened = []
     if kind == "lstat":
-        real_lstat = os.lstat
-
+        real_stat = os.stat
         def denied(path, *args, **kwargs):
             if str(path).endswith(bp.HOLD_MARKER):
                 raise OSError(13, "denied")
-            return real_lstat(path, *args, **kwargs)
-
-        monkeypatch.setattr(os, "lstat", denied)
+            return real_stat(path, *args, **kwargs)
+        monkeypatch.setattr(os, "stat", denied)
     else:
         real_open = os.open
-
         def denied(path, flags, *args, **kwargs):
             if not isinstance(path, int) and str(path).endswith(bp.HOLD_MARKER):
-                raise OSError(13, "denied")
+                opened.append(path)
+                raise AssertionError("hold contents must not be opened")
             return real_open(path, flags, *args, **kwargs)
-
         monkeypatch.setattr(os, "open", denied)
+    with pytest.raises(ValueError, match="hold"):
+        bp.plan_bundle(board, tid, root)
+    assert opened == []
     assert bp.preservation_gate(tid, root, conn=board) is False
-    assert planned["n"] == 0
     assert (root / "accepted.patch").read_text(encoding="utf-8") == "diff accepted\n"
-    body = _comment(board, tid)
-    assert "hold probe failed" in body
-    assert "diff accepted" not in body
+    assert "diff accepted" not in _comment(board, tid)
 
 
 def test_hold_dry_run_writes_nothing(board):
@@ -155,8 +150,9 @@ def test_hold_dry_run_writes_nothing(board):
 ])
 def test_referenced_forms_survive_cleanup(board, prose):
     tid, root = task(board, marker=False, result=prose)
+    bp.preserve_bundle(board, tid, root)
     ws._cleanup_workspace(board, tid)
-    assert not root.exists()
+    assert root.exists()
     assert contents(board, tid) == ["accepted.patch"]
 
 
@@ -173,7 +169,8 @@ def test_complete_and_archive_keep_durable_bytes(board):
     assert kb.list_attachments(board, ready) == []
     assert kb.claim_task(board, ready, claimer="fixture-worker")
     assert kb.complete_task(board, ready, result="ship `accepted.patch`")
-    assert not ready_root.exists()
+    assert ready_root.exists()
+    bp.preserve_bundle(board, ready, ready_root)
     assert contents(board, ready) == ["accepted.patch"]
 
     archived, archived_root = task(board, result="ship `accepted.patch`")
@@ -185,7 +182,8 @@ def test_complete_and_archive_keep_durable_bytes(board):
 
     clean, clean_root = task(board, marker=False, result="ship `accepted.patch`")
     assert kb.archive_task(board, clean)
-    assert not clean_root.exists()
+    assert clean_root.exists()
+    bp.preserve_bundle(board, clean, clean_root)
     assert contents(board, clean) == ["accepted.patch"]
 
 
@@ -202,8 +200,9 @@ def test_deferred_parent_and_gc_share_the_gate(board):
         "UPDATE tasks SET result=? WHERE id=?", ("ship `accepted.patch`", parent),
     )
     board.commit()
+    bp.preserve_bundle(board, parent, root)
     ws._try_cleanup_parent_workspaces(board, child)
-    assert not root.exists()
+    assert root.exists()
     assert contents(board, parent) == ["accepted.patch"]
 
     loose, loose_root = task(board, marker=False, status="archived")
@@ -215,7 +214,8 @@ def test_deferred_parent_and_gc_share_the_gate(board):
     )
     board.commit()
     assert kanban_ops._cmd_gc(Namespace(event_retention_days=0, log_retention_days=0)) == 0
-    assert not loose_root.exists()
+    assert loose_root.exists()
+    bp.preserve_bundle(board, loose, loose_root)
     names = contents(board, loose)
     assert names == ["loose.txt"]
 
@@ -300,7 +300,9 @@ def test_linked_worktree_removal_uses_the_same_gate(board, tmp_path):
     with kb.write_txn(board):
         board.execute("UPDATE tasks SET result=? WHERE id=?", ("ship `README.md`", tid))
     ws._cleanup_worktree_workspace(tid, str(wt), f"wt/{tid}", conn=board)
-    assert not wt.exists()
+    assert wt.exists()
+    bp.preserve_bundle(board, tid, wt)
+    assert contents(board, tid) == ["README.md"]
 
 
 def test_symlink_root_retains_without_secret_text(board):
@@ -314,5 +316,5 @@ def test_symlink_root_retains_without_secret_text(board):
     assert (root / "accepted.patch").read_text(encoding="utf-8") == "diff accepted\n"
     assert kb.list_attachments(board, tid) == []
     body = _comment(board, tid)
-    assert "workspace root is missing or linked" in body
+    assert "destructive_authority_off" in body
     assert "diff accepted" not in body

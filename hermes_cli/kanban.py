@@ -804,8 +804,12 @@ def _cmd_attachments(args: argparse.Namespace) -> int:
 
 
 def _cmd_attach_rm(args: argparse.Namespace) -> int:
-    with kbc.connect_closing() as conn:
-        removed = kb.delete_attachment(conn, args.attachment_id)
+    from hermes_cli.retention import RetentionRefused
+    try:
+        with kbc.connect_closing() as conn:
+            removed = kb.delete_attachment(conn, args.attachment_id)
+    except RetentionRefused as exc:
+        return _err(str(exc))
     if removed is None:
         return _err(f"no such attachment: {args.attachment_id}")
     print(f"Deleted attachment {args.attachment_id} ({removed.filename}) from {removed.task_id}")
@@ -1128,8 +1132,12 @@ def _cmd_archive(args: argparse.Namespace) -> int:
         return _err("at least one task_id is required")
     with kbc.connect_closing() as conn:
         if purge_ids:
-            return _bulk_apply(purge_ids, lambda tid: kb.delete_archived_task(conn, tid), lambda tid: f"Deleted {tid}",
-                               lambda tid: f"cannot delete {tid} (must already be archived)")
+            from hermes_cli.retention import RetentionRefused
+            try:
+                return _bulk_apply(purge_ids, lambda tid: kb.delete_archived_task(conn, tid), lambda tid: f"Deleted {tid}",
+                                   lambda tid: f"cannot delete {tid} (task not found)")
+            except RetentionRefused as exc:
+                return _err(str(exc))
         return _bulk_apply(ids, lambda tid: kb.archive_task(conn, tid),
                            lambda tid: f"Archived {tid}", lambda tid: f"cannot archive {tid}")
 

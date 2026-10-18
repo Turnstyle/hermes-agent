@@ -977,6 +977,26 @@ CREATE TABLE IF NOT EXISTS task_attachments (
     created_at   INTEGER NOT NULL
 );
 
+-- Soft hides retain every task/blob/reference. These records have no task FK
+-- or cascade; their audit identity survives removal of a task skeleton.
+CREATE TABLE IF NOT EXISTS retention_tombstones (
+    object_kind TEXT NOT NULL,
+    object_id TEXT NOT NULL,
+    operation_id TEXT NOT NULL UNIQUE,
+    original_state TEXT NOT NULL,
+    actor TEXT NOT NULL,
+    reason TEXT NOT NULL,
+    created_at INTEGER NOT NULL,
+    PRIMARY KEY (object_kind, object_id)
+);
+CREATE TABLE IF NOT EXISTS retention_audit (
+    operation_id TEXT PRIMARY KEY,
+    object_kind TEXT NOT NULL,
+    object_id TEXT NOT NULL,
+    payload TEXT NOT NULL,
+    created_at INTEGER NOT NULL
+);
+
 -- Subscription from a gateway source (platform + chat + thread) to a
 -- task. The gateway's kanban-notifier watcher tails task_events and
 -- pushes ``completed`` / ``blocked`` / ``spawn_auto_blocked`` events to
@@ -1449,12 +1469,14 @@ VALID_SORT_ORDERS: dict[str, str] = {
 def list_tasks(
     conn: sqlite3.Connection, *, assignee: Optional[str] = None, status: Optional[str] = None,
     tenant: Optional[str] = None, session_id: Optional[str] = None, include_archived: bool = False,
-    limit: Optional[int] = None, order_by: Optional[str] = None,
+    limit: Optional[int] = None, order_by: Optional[str] = None, include_hidden: bool = False,
     workflow_template_id: Optional[str] = None, current_step_key: Optional[str] = None,
 ) -> list[Task]:
     if status is not None and status not in VALID_STATUSES:
         raise ValueError(f"status must be one of {sorted(VALID_STATUSES)}")
     query = "SELECT * FROM tasks WHERE 1=1"
+    if not include_hidden:
+        query += " AND (status != 'archived' OR NOT EXISTS (SELECT 1 FROM retention_tombstones h WHERE h.object_kind='task' AND h.object_id=tasks.id))"
     params: list[Any] = []
     for col, val in (
         ("assignee", _canonical_assignee(assignee)), ("status", status), ("tenant", tenant),
@@ -1775,30 +1797,14 @@ def store_attachment_bytes(
     content_type: Optional[str] = None, uploaded_by: Optional[str] = None,
     board: Optional[str] = None, max_bytes: Optional[int] = None,
 ) -> int:
-    """Single attachment write path (dashboard, tools, CLI): size cap, safe
-    basename, collision-free blob under :func:`task_attachments_dir`, then the
-    metadata row. Raises :class:`AttachmentTooLarge` / ``ValueError``; a blob
-    whose row insert fails is removed before re-raising. Returns the new id."""
+    """Publish without overwrite, retain recovery intent, then register metadata."""
+    from hermes_cli.retention_store import publish_bytes
     if max_bytes is None:
         max_bytes = KANBAN_ATTACHMENT_MAX_BYTES
     if len(data) > max_bytes:
         raise AttachmentTooLarge(f"attachment exceeds {max_bytes // (1024 * 1024)} MB limit")
-    safe_name = _safe_attachment_name(filename)
-    dest_dir = task_attachments_dir(task_id, board=board)
-    dest_dir.mkdir(parents=True, exist_ok=True)
-    dest_path = _collision_free_path(dest_dir, safe_name)
-    dest_path.write_bytes(data)
-    try:
-        return add_attachment(
-            conn, task_id, filename=dest_path.name, stored_path=str(dest_path.resolve()),
-            content_type=content_type, size=len(data), uploaded_by=uploaded_by,
-        )
-    except Exception:
-        # Don't leave an orphan blob if the metadata insert fails (most
-        # commonly: the task id doesn't exist).
-        with contextlib.suppress(OSError):
-            dest_path.unlink(missing_ok=True)
-        raise
+    return publish_bytes(conn, task_id, filename, data, content_type=content_type,
+                         uploaded_by=uploaded_by, board=board)
 
 
 def add_attachment(
@@ -1826,8 +1832,12 @@ def add_attachment(
         return int(cur.lastrowid or 0)
 
 
-def list_attachments(conn: sqlite3.Connection, task_id: str) -> list[Attachment]:
-    return [Attachment.from_row(r) for r in _task_rows(conn, "task_attachments", task_id, "created_at ASC, id ASC")]
+def list_attachments(conn: sqlite3.Connection, task_id: str, *, include_hidden: bool = False) -> list[Attachment]:
+    query = "SELECT * FROM task_attachments WHERE task_id=?"
+    if not include_hidden:
+        query += " AND NOT EXISTS (SELECT 1 FROM retention_tombstones h JOIN tasks t ON t.id=task_attachments.task_id WHERE h.object_kind='attachment' AND h.object_id=CAST(task_attachments.id AS TEXT) AND t.status='archived')"
+    rows = conn.execute(query + " ORDER BY created_at ASC, id ASC", (task_id,)).fetchall()
+    return [Attachment.from_row(r) for r in rows]
 
 
 def get_attachment(conn: sqlite3.Connection, attachment_id: int) -> Optional[Attachment]:
@@ -1836,23 +1846,15 @@ def get_attachment(conn: sqlite3.Connection, attachment_id: int) -> Optional[Att
 
 
 def delete_attachment(conn: sqlite3.Connection, attachment_id: int) -> Optional[Attachment]:
-    """Delete the row (source of truth) and best-effort its blob; None when no row matched."""
-    with write_txn(conn):
-        att = get_attachment(conn, attachment_id)
-        if att is None:
-            return None
-        conn.execute("DELETE FROM task_attachments WHERE id = ?", (attachment_id,))
-        has_remaining_blob_reference = conn.execute(
-            "SELECT 1 FROM task_attachments WHERE stored_path = ? LIMIT 1",
-            (att.stored_path,),
-        ).fetchone() is not None
-        _append_event(conn, att.task_id, "attachment_removed", {"filename": att.filename})
-    if not has_remaining_blob_reference:
-        with contextlib.suppress(OSError):
-            p = Path(att.stored_path)
-            if p.is_file():
-                p.unlink()
-    return att
+    """Missing stays None; existing registrations and bytes raise RetentionRefused.
+
+    All attachments remain visible, including relabeled preservation objects.
+    Refusal cannot be mistaken for the legacy Attachment success return value.
+    """
+    from hermes_cli.retention import RetentionRefused
+    if get_attachment(conn, attachment_id) is None:
+        return None
+    raise RetentionRefused()
 
 
 def list_events(conn: sqlite3.Connection, task_id: str) -> list[Event]:
@@ -3858,32 +3860,25 @@ def archive_task(conn: sqlite3.Connection, task_id: str, *, signal_fn=None) -> b
 
 
 def _delete_task_relations(conn: sqlite3.Connection, task_id: str) -> None:
-    """Delete every row referencing ``task_id`` (schema has no ON DELETE CASCADE)."""
-    conn.execute("DELETE FROM task_links WHERE parent_id = ? OR child_id = ?", (task_id, task_id))
-    for table in ("task_comments", "task_events", "task_runs", "kanban_notify_subs"):
-        conn.execute(f"DELETE FROM {table} WHERE task_id = ?", (task_id,))
+    """Retain dependency, artifact and audit lineage even for direct callers."""
+    from hermes_cli.retention import RetentionRefused
+    raise RetentionRefused()
 
 
 def delete_archived_task(conn: sqlite3.Connection, task_id: str) -> bool:
-    """Hard-delete an ARCHIVED task (+ related rows); anything else must be
-    archived first so data loss takes two deliberate actions."""
-    with write_txn(conn):
-        if _task_status(conn, task_id) != "archived":
-            return False
-        _delete_task_relations(conn, task_id)
-        cur = conn.execute("DELETE FROM tasks WHERE id = ?", (task_id,))
-        return cur.rowcount == 1
+    """Missing stays False; existing tasks raise RetentionRefused without mutation."""
+    from hermes_cli.retention import RetentionRefused
+    if _task_status(conn, task_id) is None:
+        return False
+    raise RetentionRefused()
 
 
 def delete_task(conn: sqlite3.Connection, task_id: str) -> bool:
-    """Hard-delete a task and its related rows in one txn; False when not found."""
-    with write_txn(conn):
-        cur = conn.execute("DELETE FROM tasks WHERE id = ?", (task_id,))
-        if cur.rowcount != 1:
-            return False
-        _delete_task_relations(conn, task_id)
-    recompute_ready(conn)
-    return True
+    """Missing stays False; existing tasks raise RetentionRefused without mutation."""
+    from hermes_cli.retention import RetentionRefused
+    if _task_status(conn, task_id) is None:
+        return False
+    raise RetentionRefused()
 
 
 def schedule_task(
@@ -4223,38 +4218,15 @@ def _retention_seconds(older_than_seconds: int) -> int:
 
 
 def gc_events(conn: sqlite3.Connection, *, older_than_seconds: int = 30 * 24 * 3600) -> int:
-    """Prune old done/archived events, retaining decomposition identity until task deletion.
-
-    ``older_than_seconds=0`` means everything older than now; the CLI maps
-    ``--event-retention-days 0`` to "disabled" before calling this.
-    """
-    cutoff = int(time.time()) - _retention_seconds(older_than_seconds)
-    with write_txn(conn):
-        cur = conn.execute(
-            "DELETE FROM task_events WHERE created_at < ? AND kind != 'decomposed' AND task_id IN "
-            "(SELECT id FROM tasks WHERE status IN ('done', 'archived'))", (cutoff,),
-        )
-    return int(cur.rowcount or 0)
+    """Validate the audit filter; age never authorizes removal of event lineage."""
+    _retention_seconds(older_than_seconds)
+    return 0
 
 
 def gc_worker_logs(*, older_than_seconds: int = 30 * 24 * 3600, board: Optional[str] = None) -> int:
-    """Delete worker log files older than the cutoff on one board; returns the count.
-
-    ``older_than_seconds=0`` means everything older than now; the CLI maps
-    ``--log-retention-days 0`` to "disabled" before calling this.
-    """
-    older_than_seconds = _retention_seconds(older_than_seconds)
-    log_dir = worker_logs_dir(board=board)
-    if not log_dir.exists():
-        return 0
-    cutoff = time.time() - older_than_seconds
-    removed = 0
-    for p in log_dir.iterdir():
-        with contextlib.suppress(OSError):
-            if p.is_file() and p.stat().st_mtime < cutoff:
-                p.unlink()
-                removed += 1
-    return removed
+    """Validate the audit filter and retain all logs. Returns actual removed count."""
+    _retention_seconds(older_than_seconds)
+    return 0
 
 
 # --- Worker log accessor ---

@@ -231,8 +231,8 @@ def _relocate_imported_rows(conn: sqlite3.Connection, slug: str) -> tuple[dict[s
     """Re-anchor an imported board's rows to this machine; returns ``(stats, warnings)``.
 
     * Attachment rows are repointed at this board's tree; rows whose blob
-      did not travel (``--no-attachments``) are dropped, since a dangling row
-      breaks download in every UI.
+      did not travel (``--no-attachments``) retain provenance and an explicit
+      missing_on_import event. They are not destination-local proof.
     * Workspace paths are cleared. ``scratch`` regenerates on next claim;
       dispatchable ``dir``/``worktree`` tasks are parked in ``triage``,
       otherwise the dispatcher claims them, fails to build a workspace, and
@@ -246,17 +246,21 @@ def _relocate_imported_rows(conn: sqlite3.Connection, slug: str) -> tuple[dict[s
     with kb.write_txn(conn):
         _scrub_local_state(conn)
 
-        dropped = rehomed = 0
+        missing = rehomed = 0
         for row in conn.execute("SELECT id, task_id, stored_path FROM task_attachments").fetchall():
             landed = attachments_dir / row["task_id"] / Path(row["stored_path"]).name
             if landed.is_file():
                 conn.execute("UPDATE task_attachments SET stored_path = ? WHERE id = ?", (str(landed), row["id"]))
                 rehomed += 1
             else:
-                conn.execute("DELETE FROM task_attachments WHERE id = ?", (row["id"],))
-                dropped += 1
-        if dropped:
-            warnings.append(f"{dropped} attachment record(s) dropped — the files were not in the archive")
+                conn.execute("UPDATE task_attachments SET stored_path = ? WHERE id = ?", (str(landed), row["id"]))
+                kb._append_event(conn, row["task_id"], "attachment_missing_on_import", {
+                    "attachment_id": row["id"], "source_stored_path": row["stored_path"],
+                    "missing_on_import": True, "destination_local_proof": False,
+                })
+                missing += 1
+        if missing:
+            warnings.append(f"{missing} attachment record(s) retained as missing_on_import; source proof is not local proof")
 
         parked = [
             r["id"]

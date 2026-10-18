@@ -582,39 +582,14 @@ _active_worktree: Optional[dict[str, str]] = None
 
 
 def _cleanup_worktree(info: dict[str, str] | None = None) -> None:
-    """Remove a clean worktree and its branch on exit; preserve recoverable work."""
+    """Retain worktree, lock, branch and clients when a session exits."""
     global _active_worktree
     info = info or _active_worktree
     if not info:
         return
-
-    wt_path, branch, repo_root = info["path"], info["branch"], info["repo_root"]
-    if not Path(wt_path).exists():
-        return
     _active_worktree = None
-
-    if _worktree_is_dirty(wt_path, repo_root, timeout=10):
-        # Uncommitted work: say so, and don't hint at `remove --force`, which would destroy it.
-        _cprint(f"\n\033[33m{_t('cli.worktree.uncommitted_keeping', path=wt_path)}\033[0m")
-        return
-
-    if _worktree_has_unpushed_commits(wt_path, timeout=10):
-        if _repo_is_shallow(repo_root):
-            # Shallow boundary makes the unpushed verdict unreliable; the startup pruner reaps later.
-            _cprint(f"\n\033[33m{_t('cli.worktree.shallow_clone_keeping', path=wt_path)}\033[0m")
-            print(f"  {_t('cli.worktree.next_session_deepens')}")
-        else:
-            _cprint(f"\n\033[33m{_t('cli.worktree.unpushed_keeping', path=wt_path)}\033[0m")
-            print(f"  {_t('cli.worktree.clean_up_manually', path=wt_path)}")
-        return
-
-    # Release the tree's language servers while the path still exists, then unlock so `remove`
-    # isn't blocked by the lock placed at creation. Fail-soft.
-    release_lsp_clients(wt_path)
-    _git_quiet(["worktree", "unlock", wt_path], repo_root, log="git worktree unlock failed (non-fatal)")
-    _git_quiet(["worktree", "remove", wt_path, "--force"], repo_root, timeout=15, log="Failed to remove worktree")
-    _git_quiet(["branch", "-D", branch], repo_root, log=f"Failed to delete branch {branch}")
-    _cprint(f"\033[32m{_t('cli.worktree.cleaned_up', path=wt_path)}\033[0m")
+    from hermes_cli.retention import removal_decision
+    _cprint(f"Worktree retained at {info['path']}: {removal_decision().detail}")
 
 
 # Light/dark terminal detection (mirrors ui-tui/src/theme.ts detectLightMode()). Priority:
@@ -1626,7 +1601,6 @@ def _start_worktree_setup(list_tools, list_toolsets, worktree, w):
 
     def _worktree_maintenance(repo: str) -> None:
         _prune_stale_worktrees(repo)
-        _maintain_pack_health(repo)
 
     def _join_worktree() -> Optional[dict[str, str]]:
         _wt_thread.join(timeout=120)
@@ -1637,9 +1611,8 @@ def _start_worktree_setup(list_tools, list_toolsets, worktree, w):
         _active_worktree = info
         os.environ["TERMINAL_CWD"] = info["path"]
         atexit.register(_cleanup_worktree, info)
-        # GC stale worktrees AFTER _setup_worktree so they never race on git's worktree
-        # metadata (the new tree is immune: <24h age gate + live pid lock); then repack
-        # once refs are final so lookups stay fast on multi-agent boxes.
+        # Audit after creation so the requested worktree appears in the local
+        # inventory. This callback does not repack or reclaim any objects.
         _repo = _git_repo_root()
         if _repo:
             threading.Thread(target=_worktree_maintenance, args=(_repo,), name="worktree-prune", daemon=True).start()

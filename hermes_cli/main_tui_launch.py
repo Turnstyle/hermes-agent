@@ -326,19 +326,13 @@ def _apply_tui_python_env(env: dict) -> None:
 
 
 def _setup_tui_worktree() -> dict:
-    """Create the ``--worktree`` checkout for a TUI launch (prune + async pack maintenance); exits on failure."""
+    """Create the ``--worktree`` checkout for a TUI launch (local retention audit); exits on failure."""
     wt_info = None
     try:
-        from cli import _git_repo_root, _maintain_pack_health, _prune_stale_worktrees, _setup_worktree
+        from cli import _git_repo_root, _prune_stale_worktrees, _setup_worktree
         repo = _git_repo_root()
         if repo:
             _prune_stale_worktrees(repo)
-            # Repack on pack sprawl so `worktree add` never crawls on a
-            # multi-agent box; on a thread so it can't block launch.
-            import threading as _threading
-
-            _threading.Thread(
-                target=_maintain_pack_health, args=(repo,), name="pack-maintenance", daemon=True).start()
         wt_info = _setup_worktree()
     except Exception as exc:
         print(f"✗ Failed to create TUI worktree: {exc}", file=sys.stderr)

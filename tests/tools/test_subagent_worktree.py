@@ -48,6 +48,11 @@ class SubagentWorktreeTests(unittest.TestCase):
     def setUp(self):
         self.tmp = Path(tempfile.mkdtemp(prefix="hermes-sw-test-"))
         self.addCleanup(shutil.rmtree, self.tmp, True)
+        # The approved scratch root may itself live inside a host repository.
+        # Plain fixtures must not discover Git metadata above their own root.
+        ceiling = mock.patch.dict(os.environ, {"GIT_CEILING_DIRECTORIES": str(self.tmp.resolve())})
+        ceiling.start()
+        self.addCleanup(ceiling.stop)
 
     # ── resolve_repo_root ──────────────────────────────────────────────
 
@@ -102,18 +107,20 @@ class SubagentWorktreeTests(unittest.TestCase):
 
     # ── finalize_subagent_worktree ─────────────────────────────────────
 
-    def test_finalize_prunes_clean_worktree(self):
+    def test_finalize_retains_clean_worktree(self):
         repo = _make_repo(self.tmp)
         info = sw.create_subagent_worktree(str(repo), "clean1")
         assert info is not None
         payload = sw.finalize_subagent_worktree(info)
-        self.assertTrue(payload["pruned"])
+        self.assertFalse(payload["pruned"])
+        self.assertTrue(payload["retained"])
+        self.assertEqual(payload["reason"], "destructive_authority_off")
         self.assertEqual(payload["commits"], 0)
         self.assertFalse(payload["dirty"])
-        self.assertFalse(os.path.isdir(info["path"]))
-        # branch deleted too
+        self.assertTrue(os.path.isdir(info["path"]))
+        # Clean/zero commits does not grant authority to remove the branch.
         branches = _git(["branch", "--list", info["branch"]], repo).stdout
-        self.assertEqual(branches.strip(), "")
+        self.assertNotEqual(branches.strip(), "")
 
     def test_finalize_keeps_worktree_with_commits(self):
         repo = _make_repo(self.tmp)
@@ -282,12 +289,13 @@ class SubagentWorktreeTests(unittest.TestCase):
         branches = _git(["branch", "--list", info["branch"]], repo).stdout
         self.assertNotEqual(branches.strip(), "")
 
-    def test_finalize_missing_path_reports_pruned(self):
+    def test_finalize_missing_path_reports_unproven_retention(self):
         payload = sw.finalize_subagent_worktree(
             {"path": str(self.tmp / "gone"), "branch": "b", "repo_root": "",
              "base_commit": ""}
         )
-        self.assertTrue(payload["pruned"])
+        self.assertFalse(payload["pruned"])
+        self.assertTrue(payload["inspection_failed"])
 
     # ── local_backend_active ───────────────────────────────────────────
 

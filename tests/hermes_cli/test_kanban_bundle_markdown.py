@@ -34,8 +34,9 @@ def test_wrapped_artifact_survives_real_cleanup(board, wrapper, location, path_k
     report = bp.preserve_bundle(board, tid, root, dry_run=True)
     assert [entry["path"] for entry in report["files"]] == [name]
     assert report["unresolved_refs"] == []
+    bp.preserve_bundle(board, tid, root)
     ws._cleanup_workspace(board, tid)
-    assert not root.exists()
+    assert root.exists()
     assert contents(board, tid) == [name]
 
 

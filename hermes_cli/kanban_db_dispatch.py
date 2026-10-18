@@ -2461,29 +2461,12 @@ def _rotate_worker_log(
     max_bytes: int,
     backup_count: int = DEFAULT_LOG_BACKUP_COUNT,
 ) -> None:
-    """Rotate ``<log>`` when it exceeds ``max_bytes``: ``<log>`` → ``<log>.1``,
-    older generations shift up to ``backup_count``.
+    """Retain every generation while destructive authority is disabled.
+
+    The active append-only stream may grow beyond the configured threshold.
+    Neither a size limit nor backup_count=0 grants permission to discard logs.
     """
-    try:
-        if not log_path.exists() or log_path.stat().st_size <= max_bytes:
-            return
-        backup_count = _positive_int(backup_count, DEFAULT_LOG_BACKUP_COUNT, minimum=0)
-        if backup_count == 0:
-            log_path.unlink()
-            return
-        oldest = _rotated_log_path(log_path, backup_count)
-        with contextlib.suppress(OSError):
-            if oldest.exists():
-                oldest.unlink()
-        for generation in range(backup_count - 1, 0, -1):
-            src = _rotated_log_path(log_path, generation)
-            if not src.exists():
-                continue
-            with contextlib.suppress(OSError):
-                src.rename(_rotated_log_path(log_path, generation + 1))
-        log_path.rename(_rotated_log_path(log_path, 1))
-    except OSError:
-        pass
+    return
 
 
 def _module_hermes_argv() -> list[str]:

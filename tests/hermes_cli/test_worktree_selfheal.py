@@ -6,8 +6,8 @@ timed-out add left a partially-materialized worktree plus a LOCKED admin entry
 (lock pid = the live hermes process), poisoning every retry.
 
 Two behaviors:
-1. `_cleanup_failed_worktree_add` — removes the partial dir, the admin entry
-   (even when LOCKED), and the orphaned branch, so a failed add is atomic.
+1. `_cleanup_failed_worktree_add` retains partial files, registration and
+   branch for explicit recovery. A failed add is not deletion authority.
 2. `_maintain_pack_health` — repacks when *.pack count reaches the sprawl
    threshold; no-op below it.
 """
@@ -52,7 +52,7 @@ class TestCleanupFailedWorktreeAdd:
                 child.unlink()
         return wt
 
-    def test_sweeps_dir_admin_entry_and_branch(self, repo):
+    def test_retains_dir_admin_entry_and_branch(self, repo):
         from hermes_cli.worktree_ops import _cleanup_failed_worktree_add
 
         wt = self._simulate_timed_out_add(repo)
@@ -61,13 +61,13 @@ class TestCleanupFailedWorktreeAdd:
 
         _cleanup_failed_worktree_add(str(repo), wt, "hermes/hermes-dead00")
 
-        assert not wt.exists(), "partial worktree dir must be removed"
-        assert not admin.exists(), "LOCKED admin entry must be removed"
+        assert wt.exists(), "partial worktree dir must be retained"
+        assert admin.exists() and (admin / "locked").exists(), "manual lock and registration must survive"
         branches = _git(repo, "branch", "--list", "hermes/hermes-dead00").stdout
-        assert branches.strip() == "", "orphaned branch must be deleted"
+        assert branches.strip(), "recovery branch must survive"
 
-    def test_retry_succeeds_after_cleanup(self, repo):
-        """The whole point: the same worktree name is creatable again."""
+    def test_retry_cannot_replace_retained_partial_state(self, repo):
+        """A failed add must not discard original recovery state to reuse a name."""
         from hermes_cli.worktree_ops import _cleanup_failed_worktree_add
 
         wt = self._simulate_timed_out_add(repo)
@@ -76,7 +76,8 @@ class TestCleanupFailedWorktreeAdd:
         result = _git(
             repo, "worktree", "add", str(wt), "-b", "hermes/hermes-dead00", check=False
         )
-        assert result.returncode == 0, f"retry failed: {result.stderr}"
+        assert result.returncode != 0
+        assert wt.exists()
 
     def test_noop_when_nothing_exists(self, repo):
         """Fail-soft on an error path where git never created anything."""

@@ -94,26 +94,8 @@ def release_lsp_clients(wt_path: str) -> None:
 
 
 def _cleanup_failed_worktree_add(repo_root: str, wt_path: Path, branch_name: str) -> None:
-    """Sweep the leftovers of a failed/timed-out ``git worktree add`` (fail-soft).
-
-    ``worktree add`` is not transactional: killed mid-checkout it leaves the partial dir, a
-    LOCKED admin entry naming the *live* pid (immune to the pruner's dead-pid unlock) and
-    sometimes the branch, so any retry of the same name fails.
-    """
-    try:
-        # Unlock first: `worktree remove --force` refuses a locked tree.
-        _git_quiet(["worktree", "unlock", str(wt_path)], repo_root, timeout=15)
-        _git_quiet(["worktree", "remove", "--force", str(wt_path)], repo_root, timeout=15)
-        if wt_path.exists():
-            shutil.rmtree(wt_path, ignore_errors=True)
-        # `remove` needs the dir; `prune` drops the admin entry when it is already gone.
-        _git_quiet(["worktree", "prune"], repo_root, timeout=15,
-                   stdin=subprocess.DEVNULL, env=noninteractive_git_env())
-        # A ref update runs the repository's reference-transaction hook (core.hooksPath).
-        _git_quiet(["branch", "-D", branch_name], repo_root, timeout=15,
-                   stdin=subprocess.DEVNULL, env=noninteractive_git_env())
-    except Exception as e:
-        logger.debug("cleanup after failed worktree add: %s", e)
+    """Keep partial checkout, registration and branch for explicit recovery."""
+    logger.warning("Retained failed worktree add at %s (branch %s): destructive_authority_off", wt_path, branch_name)
 
 
 _PACK_SPRAWL_THRESHOLD = 15
@@ -202,9 +184,6 @@ def _maintain_pack_health(repo_root: str) -> None:
         clear_stale_tmp_packs(Path(repo_root))
         logger.info("git pack sprawl (%d packs) — repacking in background", packs)
         _run_bounded_repack(repo_root)
-        # Repacking can strand now-duplicated admin files; prune on the same pass.
-        _git(["worktree", "prune"], repo_root, timeout=60, check=False,
-             stdin=subprocess.DEVNULL, env=noninteractive_git_env())
     except Exception as e:
         logger.debug("pack maintenance skipped: %s", e)
 
@@ -378,7 +357,7 @@ def _copy_worktree_includes(repo_root: str, wt_path: Path) -> None:
 def _worktree_add(repo_root: str, wt_path: Path, branch_name: str, base_ref: str, base_label: str):
     """``git worktree add`` with a local-HEAD retry -> ``(base_ref, base_label)``, or None on failure.
 
-    Every failed attempt is swept with ``_cleanup_failed_worktree_add`` so the retry is not poisoned.
+    Failed/uncertain attempts retain their partial state for explicit recovery.
     """
     from hermes_cli._subprocess_compat import noninteractive_repo_git_env
 
@@ -397,17 +376,9 @@ def _worktree_add(repo_root: str, wt_path: Path, branch_name: str, base_ref: str
     try:
         result = _add(["-c", "checkout.workers=8", "-c", "checkout.thresholdForParallelism=100"])
         if result.returncode != 0:
-            if base_ref != "HEAD":
-                # A partial fetch can leave the remote ref unusable; never hard-fail on a sync hiccup.
-                logger.warning("worktree add from %s failed (%s); retrying from local HEAD",
-                               base_ref, result.stderr.strip())
-                _cleanup_failed_worktree_add(repo_root, wt_path, branch_name)
-                base_ref, base_label = "HEAD", "HEAD (fallback — remote base failed)"
-                result = _add([])
-            if result.returncode != 0:
-                _cleanup_failed_worktree_add(repo_root, wt_path, branch_name)
-                _cprint(f"\033[31m✗ Failed to create worktree: {result.stderr.strip()}\033[0m")
-                return None
+            _cleanup_failed_worktree_add(repo_root, wt_path, branch_name)
+            _cprint(f"\033[31m✗ Failed to create worktree; partial state retained: {result.stderr.strip()}\033[0m")
+            return None
     except Exception as e:
         _cleanup_failed_worktree_add(repo_root, wt_path, branch_name)
         _cprint(f"\033[31m✗ Failed to create worktree: {e}\033[0m")
@@ -577,15 +548,13 @@ def _worktree_is_dirty(worktree_path: str, repo_root, timeout: int = 10) -> bool
         return True
 
 
-def _repo_is_shallow(repo_path: str, timeout: int = 5) -> bool:
-    """Whether *repo_path* is a shallow clone (installer default). Fails toward False on unknown state.
-
-    Shallowness poisons connectivity verdicts: an old worktree HEAD misreports as unpushed forever.
-    """
+def _repo_is_shallow(repo_path: str, timeout: int = 5) -> Optional[bool]:
+    """Return None for unknown history, never a false complete-history verdict."""
     try:
-        return _git_out(["rev-parse", "--is-shallow-repository"], repo_path, timeout=timeout) == "true"
+        value = _git_out(["rev-parse", "--is-shallow-repository"], repo_path, timeout=timeout)
     except Exception:
-        return False
+        return None
+    return {"true": True, "false": False}.get(value)
 
 
 def _deepen_shallow_repo(repo_root: str, timeout: int = 600) -> bool:
@@ -593,8 +562,10 @@ def _deepen_shallow_repo(repo_root: str, timeout: int = 600) -> bool:
 
     Falls back to a plain ``--unshallow`` if the server rejects filters. Background paths only.
     """
-    if not _repo_is_shallow(repo_root):
+    if _repo_is_shallow(repo_root) is False:
         return True
+    if _repo_is_shallow(repo_root) is None:
+        return False
     try:
         remotes = _git_out(["remote"], repo_root)
         if not remotes:
@@ -624,7 +595,7 @@ def _deepen_shallow_repo(repo_root: str, timeout: int = 600) -> bool:
         logger.debug("Deepening shallow repo failed (non-fatal): %s", e)
         return False
 
-    deepened = not _repo_is_shallow(repo_root)
+    deepened = _repo_is_shallow(repo_root) is False
     if deepened:
         logger.info("Deepened shallow clone at %s so worktree cleanup can verify push state", repo_root)
     return deepened
@@ -923,151 +894,27 @@ _PRESERVE_REASONS = {"dirty": "uncommitted changes", "unpushed": "unpushed commi
 
 
 def _reap_prune_verdicts(repo_root: str, verdicts: list, stale_work_cutoff: float) -> tuple[list, set]:
-    """Phase 3, serial unlock / remove / branch -D -> ``(preserved_stale, kept_branches)``.
-
-    *kept_branches* must survive the orphaned-branch pass. Branch deletion is gated on
-    ``worktree remove`` succeeding so a failed removal never orphans reachable commits.
-    """
-    preserved_stale: list = []
-    kept_branches: set = set()
-    for entry, mtime, force, verdict, lock_state in verdicts:
-        reason = _PRESERVE_REASONS.get(verdict)
-        if reason:
-            if mtime <= stale_work_cutoff:
-                preserved_stale.append(f"{entry.name} ({reason})")
-            continue
-        if verdict == "locked-live":
-            logger.debug("Skipping live-locked worktree: %s", entry.name)
-            continue
-
-        if lock_state == "dead":
-            _git_quiet(["worktree", "unlock", str(entry)], repo_root,
-                       log=f"Failed to unlock dead worktree {entry.name}")
-
-        try:
-            branch = _git(["branch", "--show-current"], str(entry), timeout=5).stdout.strip()
-            remove_result = _git(["worktree", "remove", str(entry), "--force"], repo_root, timeout=15)
-            if remove_result.returncode != 0:
-                logger.debug("Failed to remove worktree %s: %s", entry.name, remove_result.stderr.strip())
-                continue
-            if branch and verdict == "reap-keep-branch":
-                kept_branches.add(branch)
-            elif branch:
-                # Unattended sweep: the repository's reference-transaction hook must not run.
-                _git(["branch", "-D", branch], repo_root,
-                     stdin=subprocess.DEVNULL, env=noninteractive_git_env())
-            logger.debug("Pruned stale worktree: %s (force=%s)", entry.name, force)
-        except Exception as e:
-            logger.debug("Failed to prune worktree %s: %s", entry.name, e)
-    return preserved_stale, kept_branches
+    """Retain every frozen verdict, including dead/foreign locks and pushed tips."""
+    return ([f"{entry.name} (destructive_authority_off)" for entry, *_ in verdicts], set())
 
 
 def _prune_stale_worktrees(repo_root: str, max_age_hours: int = 24) -> None:
-    """Remove stale worktrees and orphaned branches on startup.
-
-    Guards at every tier and age: dirty trees are never removed; unpushed commits are never
-    removed UNLESS patch-equivalent to upstream, the PR is MERGED on GitHub, or the head EXACTLY
-    matches origin (tree reaped, branch kept). Live-locked trees are skipped; dead locks are
-    unlocked first. Trees preserved >7 days are listed in one WARNING so work can't rot silently.
-    Phases: ``_prune_candidates`` -> ``_classify_prune_candidates`` -> ``_reap_prune_verdicts``
-    -> ``_prune_orphaned_branches``.
-    """
-    try:
-        _prune_stale_worktree_trees(repo_root, max_age_hours)
-    finally:
-        _reclaim_orphan_install_states()
+    """Startup/cron compatibility entry point: local read-only retention audit."""
+    _prune_stale_worktree_trees(repo_root, max_age_hours)
 
 
 def _reclaim_orphan_install_states() -> None:
-    """Trees removed by any path (the prune pass, `git worktree remove` by hand, `rm -rf` of a
-    scratch clone) leave their ~200 MB dependency state under <home>/installs/; reclaim it on
-    every pass, including the early returns where no tree is old enough to prune. Startup
-    maintenance must never block a launch; the traceback goes to the debug log."""
-    try:
-        from pm.environments import installs_root
-        from pm.install_states import collect_orphan_install_states
-
-        reclaimed = collect_orphan_install_states(installs_root())
-        if reclaimed:
-            logger.info("Reclaimed %d dependency state dir(s) of deleted checkouts", len(reclaimed))
-    except Exception:
-        logger.debug("Orphan install-state reclaim failed", exc_info=True)
+    """Retain install recovery state; never import or invoke the package collector."""
+    logger.debug("Install states retained: destructive_authority_off")
 
 
 def _prune_stale_worktree_trees(repo_root: str, max_age_hours: int) -> None:
-    worktrees_dir = Path(repo_root) / ".worktrees"
-    if not worktrees_dir.exists():
-        _prune_orphaned_branches(repo_root)
-        return
-
-    # Shallow clones make every aged tree read as unpushed forever; deepen once (fail-soft).
-    if _repo_is_shallow(repo_root):
-        _deepen_shallow_repo(repo_root)
-
-    now = time.time()
-    candidates = _prune_candidates(worktrees_dir, max_age_hours, now)
-    if not candidates:
-        _prune_orphaned_branches(repo_root)
-        return
-
-    verdicts = _classify_prune_candidates(repo_root, candidates)
-    preserved_stale, kept_branches = _reap_prune_verdicts(repo_root, verdicts, now - (7 * 24 * 3600))
-
-    if preserved_stale:
-        logger.warning("Preserving %d worktree(s) older than 7 days with unmerged work "
-                       "(run `hermes worktree prune` to review and reclaim): %s",
-                       len(preserved_stale), ", ".join(sorted(preserved_stale)))
-
-    _prune_orphaned_branches(repo_root, protect=kept_branches)
-
-    # The conservative startup pass accumulates trees it can never reclaim; say so once per launch.
-    try:
-        from hermes_cli.worktree_gc import worktrees_summary
-
-        count, size_mb = worktrees_summary(repo_root)
-        if count >= 10 or (size_mb or 0) >= 5120:
-            size_txt = f"{size_mb / 1024:.1f}GB" if size_mb else "unknown size"
-            logger.warning(".worktrees/ holds %d tree(s) (%s) — run `hermes worktree list` "
-                           "to audit and `hermes worktree prune` to reclaim safely.", count, size_txt)
-    except Exception:
-        logger.debug("worktree summary failed", exc_info=True)
+    """Ages are audit fields, never permission to remove or contact remotes."""
+    from hermes_cli.worktree_gc import audit_worktrees
+    for record in audit_worktrees(repo_root, with_sizes=False):
+        logger.debug("Retained %s: %s", record.path, record.reason)
 
 
 def _prune_orphaned_branches(repo_root: str, protect: Optional[set] = None) -> None:
-    """Delete local ``hermes/hermes-*`` and ``pr-*`` branches with no worktree, except *protect*."""
-    try:
-        listing = _git_out(["branch", "--format=%(refname:short)"], repo_root)
-        if listing is None:
-            return
-        all_branches = [b.strip() for b in listing.split("\n") if b.strip()]
-    except Exception:
-        return
-
-    active_branches: set = set()
-    try:
-        wt_result = _git(["worktree", "list", "--porcelain"], repo_root)
-        for line in wt_result.stdout.split("\n"):
-            if line.startswith("branch refs/heads/"):
-                active_branches.add(line.split("branch refs/heads/", 1)[-1].strip())
-    except Exception:
-        return  # can't determine active branches: bail
-
-    # Also protect the checked-out branch and main.
-    try:
-        current = _git(["branch", "--show-current"], repo_root, timeout=5).stdout.strip()
-        if current:
-            active_branches.add(current)
-    except Exception:
-        pass
-    active_branches.add("main")
-
-    orphaned = [b for b in all_branches if b not in active_branches and b not in (protect or ())
-                and (b.startswith("hermes/hermes-") or b.startswith("pr-"))]
-
-    if not orphaned:
-        return
-    for i in range(0, len(orphaned), 50):
-        _git_quiet(["branch", "-D"] + orphaned[i:i + 50], repo_root, timeout=30,
-                   log="Failed to prune orphaned branches",
-                   stdin=subprocess.DEVNULL, env=noninteractive_git_env())
-    logger.debug("Pruned %d orphaned branches", len(orphaned))
+    """Keep orphan refs even on repeated/empty maintenance passes."""
+    logger.debug("Orphan branches retained: destructive_authority_off")

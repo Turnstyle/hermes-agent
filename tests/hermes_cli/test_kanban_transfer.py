@@ -150,7 +150,7 @@ def test_attachment_blob_travels_and_is_readable(kanban_root, tmp_path):
     assert stored.read_bytes() == b"hello attachment"
 
 
-def test_export_without_attachments_drops_the_rows(kanban_root, tmp_path):
+def test_export_without_attachments_retains_missing_provenance(kanban_root, tmp_path):
     _seed_board()
     archive = kt.export_board(
         "alpha", str(tmp_path / "alpha"), include_attachments=False
@@ -159,9 +159,15 @@ def test_export_without_attachments_drops_the_rows(kanban_root, tmp_path):
     kanban_root("target")
     result = kt.import_board(archive)
 
-    # A row whose blob never travelled would be a broken download link in
-    # every UI that lists it, so it is dropped and reported.
-    assert result["counts"]["task_attachments"] == 0
+    # Preserve lineage without accepting source proof as destination-local bytes.
+    assert result["counts"]["task_attachments"] == 1
+    with kbc.connect_closing(board=result["board"]) as conn:
+        row = conn.execute("SELECT stored_path FROM task_attachments").fetchone()
+        assert not Path(row["stored_path"]).exists()
+        event = conn.execute("SELECT payload FROM task_events WHERE kind='attachment_missing_on_import'").fetchone()
+        payload = json.loads(event[0])
+        assert payload["missing_on_import"] is True
+        assert payload["destination_local_proof"] is False
     assert any("attachment" in w for w in result["warnings"])
 
 

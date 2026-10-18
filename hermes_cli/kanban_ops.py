@@ -303,57 +303,32 @@ def _cmd_watch(args: argparse.Namespace) -> int:
 
 
 def _cmd_gc(args: argparse.Namespace) -> int:
-    """Remove archived tasks' scratch workspaces, old events, and old worker logs."""
-    import shutil
+    """Audit archived workspaces; retain every original and all event/log lineage."""
     event_days = getattr(args, "event_retention_days", 30)
     log_days = getattr(args, "log_retention_days", 30)
     if event_days < 0 or log_days < 0:
         return _err("kanban gc: retention days must be >= 0 (0 disables that sweep)", 2)
-    scratch_root = kb.workspaces_root()
-    removed_ws = 0
+    retained = 0
     with kbc.connect_closing() as conn:
         rows = conn.execute(
-            "SELECT id, workspace_kind, workspace_path, branch_name FROM tasks "
-            "WHERE status = 'archived'"
+            "SELECT id, workspace_kind, workspace_path, branch_name FROM tasks WHERE status = 'archived'"
         ).fetchall()
         for row in rows:
+            if row["workspace_kind"] not in {"scratch", "worktree"}:
+                continue
+            path = row["workspace_path"] or str(kb.workspaces_root() / row["id"])
             if row["workspace_kind"] == "worktree":
-                # Backstop for worktrees that escaped the completion/archive hook.
-                # Same safety predicate: only clean, fully-pushed worktrees go.
-                wt_path = row["workspace_path"]
-                if wt_path and Path(wt_path).is_dir():
-                    if kbw._defer_shared_worktree_cleanup(conn, row["id"], wt_path):
-                        continue
-                    kbw._cleanup_worktree_workspace(
-                        row["id"], wt_path, row["branch_name"], conn=conn,
-                    )
-                    if not Path(wt_path).is_dir():
-                        removed_ws += 1
-                continue
-            if row["workspace_kind"] != "scratch":
-                continue
-            path = Path(row["workspace_path"] or (scratch_root / row["id"]))
-            # Same containment predicate as completion cleanup (#28818): strictly below a
-            # managed root, never the root itself (which holds every task's scratch dir).
-            # Cheap existence/symlink check first: most rows were already cleaned at
-            # completion, and rmtree refuses a symlink (so it must not be counted).
-            if not path.is_dir() or path.is_symlink() or not kbw._is_managed_scratch_path(path):
-                continue
-            if kbw._defer_shared_workspace_cleanup(conn, row["id"], path):
-                continue
-            if not kbw.preservation_gate(row["id"], path, conn=conn):
-                continue
-            shutil.rmtree(path, ignore_errors=True)
-            if not path.exists():
-                removed_ws += 1
-
-    removed_events = 0
-    if event_days:
-        with kbc.connect_closing() as conn:
-            removed_events = kb.gc_events(conn, older_than_seconds=event_days * 24 * 3600)
-    removed_logs = kb.gc_worker_logs(older_than_seconds=log_days * 24 * 3600) if log_days else 0
-    print(f"GC complete: {removed_ws} workspace(s), "
-          f"{removed_events} event row(s), {removed_logs} log file(s) removed")
+                if not kbw._defer_shared_worktree_cleanup(conn, row["id"], path):
+                    kbw._cleanup_worktree_workspace(row["id"], path, row["branch_name"], conn=conn)
+            elif not kbw._defer_shared_workspace_cleanup(conn, row["id"], path):
+                kbw.preservation_gate(row["id"], Path(path), conn=conn)
+            retained += 1
+        if event_days:
+            kb.gc_events(conn, older_than_seconds=event_days * 24 * 3600)
+    if log_days:
+        kb.gc_worker_logs(older_than_seconds=log_days * 24 * 3600)
+    print(f"GC audit complete: {retained} workspace(s) retained (destructive_authority_off); "
+          "0 workspace(s), 0 event row(s), 0 log file(s) removed")
     return 0
 
 

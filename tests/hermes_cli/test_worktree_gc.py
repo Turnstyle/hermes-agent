@@ -1,19 +1,4 @@
-"""Behavior contracts for hermes_cli.worktree_gc (attended reclaim).
-
-Each guard gets its own contract against a REAL git repo fixture (no mocks —
-the entire value of these tests is exercising actual git verdicts):
-
-- clean + fully merged tree        → reap
-- untracked-only dirt              → reap-archive (files archived, then removed)
-- tracked modifications            → keep, any age
-- unique unpushed commits          → keep
-- patch-equivalent commits (rebase/squash-merge leak) → reap
-- live-locked tree                 → keep
-- kanban t_<hex> tree              → keep (owned by kanban gc)
-- branch GC: merged branch deleted, unique-commit branch kept,
-  checked-out branch kept, protected names kept
-- reclaim operates ONLY on the frozen audit list (concurrent-session trap)
-"""
+"""Real disposable Git contracts: every attended reclaim retains while authority is OFF."""
 
 import os
 import subprocess
@@ -25,7 +10,7 @@ from hermes_cli import worktree_gc
 
 
 def _git(args, cwd, env=None):
-    e = dict(os.environ)
+    e = {"PATH": "/opt/homebrew/bin:/usr/bin:/bin", "HOME": str(cwd)}
     e.update({
         "GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@t",
         "GIT_COMMITTER_NAME": "t", "GIT_COMMITTER_EMAIL": "t@t",
@@ -90,10 +75,10 @@ def _verdict(records, name):
 
 
 class TestAuditVerdicts:
-    def test_clean_merged_tree_reaps(self, repo):
+    def test_clean_merged_tree_retained(self, repo):
         _add_worktree(repo, "hermes-clean")
         records = worktree_gc.audit_worktrees(str(repo), with_sizes=False)
-        assert _verdict(records, "hermes-clean").verdict == "reap"
+        assert _verdict(records, "hermes-clean").verdict == "keep"
 
     def test_tracked_modifications_keep(self, repo):
         tree, _ = _add_worktree(repo, "hermes-dirty")
@@ -101,15 +86,16 @@ class TestAuditVerdicts:
         records = worktree_gc.audit_worktrees(str(repo), with_sizes=False)
         record = _verdict(records, "hermes-dirty")
         assert record.verdict == "keep"
-        assert "tracked" in record.reason
+        assert "destructive_authority_off" in record.reason
 
-    def test_untracked_only_is_reap_archive(self, repo):
+    def test_untracked_only_retained_in_place(self, repo):
         tree, _ = _add_worktree(repo, "hermes-scratch")
         (tree / "PR_BODY_DRAFT.md").write_text("draft\n")
         records = worktree_gc.audit_worktrees(str(repo), with_sizes=False)
         record = _verdict(records, "hermes-scratch")
-        assert record.verdict == "reap-archive"
-        assert record.untracked == ["PR_BODY_DRAFT.md"]
+        assert record.verdict == "keep"
+        assert record.untracked == []
+        assert (tree / "PR_BODY_DRAFT.md").read_text() == "draft\n"
 
     def test_unique_unpushed_commits_keep(self, repo):
         tree, _ = _add_worktree(repo, "hermes-work")
@@ -119,10 +105,10 @@ class TestAuditVerdicts:
         records = worktree_gc.audit_worktrees(str(repo), with_sizes=False)
         record = _verdict(records, "hermes-work")
         assert record.verdict == "keep"
-        assert "unpushed" in record.reason
+        assert "destructive_authority_off" in record.reason
 
     def test_unique_commits_without_a_remote_keep_tree_and_branch(self, local_repo):
-        """No remote: unique commits are judged against the local trunk, never "merged/pushed"."""
+        """A local-only repository has no removal authority."""
         tree, branch = _add_worktree(local_repo, "hermes-local-work")
         (tree / "new.py").write_text("x = 1\n")
         _git(["add", "."], tree)
@@ -131,15 +117,13 @@ class TestAuditVerdicts:
         records = worktree_gc.audit_worktrees(str(local_repo), with_sizes=False)
         record = _verdict(records, "hermes-local-work")
         assert record.verdict == "keep"
-        assert "unpushed" in record.reason
-        assert worktree_gc.reclaim_worktrees(str(local_repo), records=records) == []
+        assert "destructive_authority_off" in record.reason
+        assert all("retained" in a for a in worktree_gc.reclaim_worktrees(str(local_repo), records=records))
         assert tree.exists()
         assert _git(["rev-parse", "--verify", branch], local_repo)
 
-    def test_without_a_remote_local_trunk_is_the_baseline(self, local_repo):
-        """Control for the no-remote guard: work merged into the local ``main`` still reclaims
-        (tree and squash-merged branch), while a branch holding unique commits — with or without
-        a worktree — is reported and kept by the branch audit instead of vanishing."""
+    def test_local_trunk_merge_does_not_authorize_removal(self, local_repo):
+        """Merge history does not grant destructive authority in a local-only repo."""
         clean_tree, _ = _add_worktree(local_repo, "hermes-clean")
         squashed_tree, _ = _add_worktree(local_repo, "hermes-squashed")
         (squashed_tree / "k.py").write_text("k = 1\n")
@@ -155,18 +139,18 @@ class TestAuditVerdicts:
         _git(["checkout", "-q", "main"], local_repo)
 
         records = worktree_gc.audit_worktrees(str(local_repo), with_sizes=False)
-        assert _verdict(records, "hermes-clean").verdict == "reap"
-        assert _verdict(records, "hermes-squashed").verdict == "reap"
+        assert _verdict(records, "hermes-clean").verdict == "keep"
+        assert _verdict(records, "hermes-squashed").verdict == "keep"
         worktree_gc.reclaim_worktrees(str(local_repo), records=records)
-        assert not clean_tree.exists() and not squashed_tree.exists()
+        assert clean_tree.exists() and squashed_tree.exists()
 
         by_name = {b.name: b for b in worktree_gc.audit_branches(str(local_repo))}
         assert by_name["orphan-unique"].verdict == "keep"
-        assert "unique" in by_name["orphan-unique"].reason
+        assert "destructive_authority_off" in by_name["orphan-unique"].reason
         assert by_name["main"].verdict == "keep"
-        assert "hermes/hermes-squashed" not in by_name  # branch -D ran only on merged work
+        assert "hermes/hermes-squashed" in by_name
 
-    def test_patch_equivalent_commits_reap(self, repo):
+    def test_patch_equivalent_commits_retained(self, repo):
         """The squash/rebase-merge leak: local commit unreachable from any
         remote ref but patch-equivalent to an upstream commit → merged work."""
         tree, _ = _add_worktree(repo, "hermes-merged")
@@ -181,7 +165,7 @@ class TestAuditVerdicts:
              env={"GIT_COMMITTER_NAME": "other", "GIT_COMMITTER_EMAIL": "o@o"})
         _git(["push", "origin", "main"], repo)
         records = worktree_gc.audit_worktrees(str(repo), with_sizes=False)
-        assert _verdict(records, "hermes-merged").verdict == "reap"
+        assert _verdict(records, "hermes-merged").verdict == "keep"
 
     def test_live_locked_tree_keeps(self, repo):
         tree, _ = _add_worktree(repo, "hermes-live")
@@ -190,32 +174,32 @@ class TestAuditVerdicts:
         records = worktree_gc.audit_worktrees(str(repo), with_sizes=False)
         record = _verdict(records, "hermes-live")
         assert record.verdict == "keep"
-        assert "in use" in record.reason
+        assert "destructive_authority_off" in record.reason
 
     def test_kanban_tree_untouched(self, repo):
         _add_worktree(repo, "t_deadbeef", branch="kanban/t_deadbeef")
         records = worktree_gc.audit_worktrees(str(repo), with_sizes=False)
         record = _verdict(records, "t_deadbeef")
         assert record.verdict == "keep"
-        assert "kanban" in record.reason
+        assert "destructive_authority_off" in record.reason
 
 
 class TestReclaim:
-    def test_reap_removes_tree_and_branch(self, repo):
+    def test_reclaim_retains_tree_and_branch(self, repo):
         tree, branch = _add_worktree(repo, "hermes-clean")
         records = worktree_gc.audit_worktrees(str(repo), with_sizes=False)
         actions = worktree_gc.reclaim_worktrees(str(repo), records=records)
-        assert any("removed hermes-clean" in a for a in actions)
-        assert not tree.exists()
+        assert any("retained hermes-clean" in a for a in actions)
+        assert tree.exists()
         probe = subprocess.run(
             ["git", "rev-parse", "--verify", "--quiet", branch],
             capture_output=True, text=True, cwd=str(repo),
             check=False,
         )
-        assert probe.returncode != 0, "branch should be gone with its tree"
+        assert probe.returncode == 0, "retained tree keeps its branch"
 
-    def test_untracked_files_archived_under_the_active_profile_home(self, repo, tmp_path, monkeypatch):
-        """The archive follows the active Hermes home (a named profile here), never ~/.hermes."""
+    def test_untracked_files_retained_without_archive_copy(self, repo, tmp_path, monkeypatch):
+        """Retention does not copy or purge untracked files under any profile."""
         native_home = tmp_path / "native"
         profile_home = tmp_path / "root" / "profiles" / "work"
         profile_home.mkdir(parents=True)
@@ -225,10 +209,10 @@ class TestReclaim:
         (tree / "NOTES.md").write_text("important scribbles\n")
         records = worktree_gc.audit_worktrees(str(repo), with_sizes=False)
         worktree_gc.reclaim_worktrees(str(repo), records=records)
-        assert not tree.exists()
+        assert tree.exists()
         archived = list((profile_home / "archive" / "worktree-prune").rglob("NOTES.md"))
-        assert archived, "untracked file must be archived under the profile home, not destroyed"
-        assert archived[0].read_text() == "important scribbles\n"
+        assert archived == []
+        assert (tree / "NOTES.md").read_text() == "important scribbles\n"
         assert not (native_home / ".hermes").exists()
 
     def test_dry_run_changes_nothing(self, repo):
@@ -237,7 +221,7 @@ class TestReclaim:
         actions = worktree_gc.reclaim_worktrees(
             str(repo), dry_run=True, records=records
         )
-        assert any("would remove" in a for a in actions)
+        assert any("retained" in a for a in actions)
         assert tree.exists()
 
     def test_frozen_list_ignores_trees_created_after_audit(self, repo):
@@ -249,30 +233,30 @@ class TestReclaim:
         worktree_gc.reclaim_worktrees(str(repo), records=records)
         assert late_tree.exists(), "tree created after the audit must survive"
 
-    def test_dead_locked_tree_is_unlocked_and_reaped(self, repo):
+    def test_dead_locked_tree_retains_lock_and_bytes(self, repo):
         tree, _ = _add_worktree(repo, "hermes-zombie")
         _git(["worktree", "lock", str(tree),
               "--reason", "hermes pid=999999999"], repo)
         records = worktree_gc.audit_worktrees(str(repo), with_sizes=False)
-        assert _verdict(records, "hermes-zombie").verdict == "reap"
+        assert _verdict(records, "hermes-zombie").verdict == "keep"
         worktree_gc.reclaim_worktrees(str(repo), records=records)
-        assert not tree.exists()
+        assert tree.exists()
+        assert "locked hermes pid=999999999" in _git(["worktree", "list", "--porcelain"], repo)
 
 
 class TestBranchGC:
-    def test_merged_branch_deleted_any_name(self, repo):
-        """Branch GC is content-gated, not name-gated: any fully-merged local
-        branch is safe to delete regardless of prefix."""
+    def test_merged_branch_retained_any_name(self, repo):
+        """Branch names and merged history cannot enable removal."""
         _git(["branch", "salv-12345", "main"], repo)
         _git(["branch", "feat/some-old-thing", "main"], repo)
         records = worktree_gc.audit_branches(str(repo))
         by_name = {record.name: record for record in records}
-        assert by_name["salv-12345"].verdict == "delete"
-        assert by_name["feat/some-old-thing"].verdict == "delete"
+        assert by_name["salv-12345"].verdict == "keep"
+        assert by_name["feat/some-old-thing"].verdict == "keep"
         worktree_gc.reclaim_branches(str(repo), records=records)
         out = _git(["branch", "--format=%(refname:short)"], repo)
-        assert "salv-12345" not in out
-        assert "feat/some-old-thing" not in out
+        assert "salv-12345" in out
+        assert "feat/some-old-thing" in out
 
     def test_unique_commit_branch_kept(self, repo):
         _git(["checkout", "-b", "feat/real-work"], repo)
@@ -283,9 +267,9 @@ class TestBranchGC:
         records = worktree_gc.audit_branches(str(repo))
         by_name = {record.name: record for record in records}
         assert by_name["feat/real-work"].verdict == "keep"
-        assert "unique" in by_name["feat/real-work"].reason
+        assert "destructive_authority_off" in by_name["feat/real-work"].reason
 
-    def test_patch_equivalent_branch_deleted(self, repo):
+    def test_patch_equivalent_branch_retained(self, repo):
         """Rebase-merged PR branch: SHAs differ from main but every commit is
         patch-equivalent — the dominant branch leak."""
         _git(["checkout", "-b", "fix/landed"], repo)
@@ -299,8 +283,8 @@ class TestBranchGC:
         _git(["push", "origin", "main"], repo)
         records = worktree_gc.audit_branches(str(repo))
         by_name = {record.name: record for record in records}
-        assert by_name["fix/landed"].verdict == "delete"
-        assert "patch-equivalent" in by_name["fix/landed"].reason
+        assert by_name["fix/landed"].verdict == "keep"
+        assert "destructive_authority_off" in by_name["fix/landed"].reason
 
     def test_checked_out_and_protected_kept(self, repo):
         _tree, branch = _add_worktree(repo, "hermes-active")
@@ -318,9 +302,9 @@ class TestOlderThanGate:
         )
         record = _verdict(records, "hermes-young")
         assert record.verdict == "keep"
-        assert "older-than" in record.reason
+        assert "destructive_authority_off" in record.reason
 
-    def test_aged_reapable_tree_still_reaps(self, repo):
+    def test_aged_tree_still_retained(self, repo):
         import os as _os
         import time as _time
 
@@ -330,11 +314,10 @@ class TestOlderThanGate:
         records = worktree_gc.audit_worktrees(
             str(repo), with_sizes=False, older_than_days=7,
         )
-        assert _verdict(records, "hermes-old").verdict == "reap"
+        assert _verdict(records, "hermes-old").verdict == "keep"
 
     def test_older_than_never_widens_eligibility(self, repo):
-        """A tree with real work stays keep at ANY age — the age gate only
-        restricts, it can never doom unmerged/dirty work."""
+        """Ages never grant removal authority."""
         import os as _os
         import time as _time
 
@@ -347,7 +330,7 @@ class TestOlderThanGate:
         )
         record = _verdict(records, "hermes-old-work")
         assert record.verdict == "keep"
-        assert "tracked" in record.reason
+        assert "destructive_authority_off" in record.reason
 
 
 class TestExternalTrees:
@@ -374,7 +357,7 @@ class TestExternalTrees:
         external = worktree_gc.audit_external_trees(str(repo))
         assert all("hermes-managed" not in r.path for r in external)
 
-    def test_missing_registration_flagged_and_pruned(self, repo, tmp_path):
+    def test_missing_registration_flagged_and_retained(self, repo, tmp_path):
         import shutil as _shutil
 
         ext = tmp_path / "vanished-tree"
@@ -393,9 +376,9 @@ class TestExternalTrees:
         )
 
         done = worktree_gc.prune_missing_registrations(str(repo))
-        assert any("pruned" in line for line in done)
-        assert all(
-            "vanished-tree" not in r.path
+        assert any("retained" in line for line in done)
+        assert any(
+            "vanished-tree" in r.path
             for r in worktree_gc.audit_external_trees(str(repo))
         )
 

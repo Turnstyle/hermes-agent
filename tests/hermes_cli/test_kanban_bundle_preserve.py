@@ -10,6 +10,7 @@ from hermes_cli import kanban_db as kb
 from hermes_cli import kanban_db_connect as kbc
 from hermes_cli import kanban_db_workspace as ws
 from hermes_cli import kanban_bundle_preserve as bp
+from hermes_cli import retention_bundle as bundles
 
 
 @pytest.fixture
@@ -58,7 +59,8 @@ def test_real_completion_marker(board):
     tid, root = task(board, status="ready")
     assert kb.claim_task(board, tid, claimer="fixture-worker")
     assert kb.complete_task(board, tid, summary="accepted marker bundle")
-    assert not root.exists()
+    assert root.exists()
+    bp.preserve_bundle(board, tid, root)
     assert "accepted.patch" in contents(board, tid)
 
 
@@ -75,8 +77,9 @@ def test_nested_metadata_reference(board):
     tid, root = task(board, marker=False)
     board.execute("INSERT INTO task_runs(task_id,status,started_at,metadata) VALUES(?,'completed',0,?)", (tid, json.dumps({"nested": {"bundle": str(root / "accepted.patch")}})))
     board.commit()
+    bp.preserve_bundle(board, tid, root)
     ws._cleanup_workspace(board, tid)
-    assert not root.exists()
+    assert root.exists()
     assert contents(board, tid) == ["accepted.patch"]
 
 
@@ -90,7 +93,8 @@ def test_nonterminal_and_deferred_parent(board):
     board.execute("UPDATE tasks SET status='done' WHERE id=?", (parent,))
     board.commit()
     ws._try_cleanup_parent_workspaces(board, child)
-    assert not root.exists()
+    assert root.exists()
+    bp.preserve_bundle(board, parent, root)
     assert "accepted.patch" in contents(board, parent)
 
 
@@ -136,17 +140,23 @@ def test_fail_closed(board, monkeypatch, kind):
         original = bp.plan_bundle
         monkeypatch.setattr(bp, "plan_bundle", lambda *a, **kw: original(*a, **{**kw, "max_bytes": 1}))
     if kind == "copy":
-        monkeypatch.setattr(bp.os, "replace", lambda *a: (_ for _ in ()).throw(OSError("fixture copy failure")))
+        monkeypatch.setattr(bp.os, "link", lambda *a, **kw: (_ for _ in ()).throw(OSError("fixture copy failure")))
     if kind == "db":
         board.execute("CREATE TRIGGER reject_attachment BEFORE INSERT ON task_attachments BEGIN SELECT RAISE(ABORT, 'fixture DB failure'); END")
         board.commit()
     if kind == "corrupt":
-        original = bp.tarfile.open
-        def corrupt(name, mode, *a, **kw):
+        original = bundles.tarfile.open
+        def corrupt(name=None, mode="r", *a, **kw):
             if mode == "r:gz":
-                Path(name).write_bytes(b"invalid fixture archive")
+                source = kw["fileobj"]
+                source.seek(0)
+                source.write(b"invalid fixture archive")
+                source.flush()
+                source.seek(0)
             return original(name, mode, *a, **kw)
-        monkeypatch.setattr(bp.tarfile, "open", corrupt)
+        monkeypatch.setattr(bundles.tarfile, "open", corrupt)
+    with pytest.raises((ValueError, OSError, sqlite3.Error, tarfile.TarError)):
+        bp.preserve_bundle(board, tid, root)
     ws._cleanup_workspace(board, tid)
     assert root.exists()
     assert kb.list_attachments(board, tid) == []
@@ -170,7 +180,8 @@ def test_archived_gc_gate(board, monkeypatch):
     from hermes_cli import kanban_ops
     tid, root = task(board, status="archived")
     assert kanban_ops._cmd_gc(Namespace(event_retention_days=0, log_retention_days=0)) == 0
-    assert not root.exists()
+    assert root.exists()
+    bp.preserve_bundle(board, tid, root)
     assert "accepted.patch" in contents(board, tid)
 
 
@@ -192,8 +203,9 @@ def test_directory_reference(board):
     (directory / 'report.md').write_text('accepted report')
     board.execute('UPDATE tasks SET result=? WHERE id=?', (str(directory), tid))
     board.commit()
+    bp.preserve_bundle(board, tid, root)
     ws._cleanup_workspace(board, tid)
-    assert not root.exists()
+    assert root.exists()
     assert contents(board, tid) == ['bundle/report.md']
 
 
@@ -228,7 +240,7 @@ def test_missing_prose_reference_records_unresolved_and_keeps_artifact(board, lo
     assert contents(board, tid) == ["blocked_all_parents_done.tsv"]
     assert root.exists()
     ws._cleanup_workspace(board, tid)
-    assert not root.exists()
+    assert root.exists()
     assert contents(board, tid) == ["blocked_all_parents_done.tsv"]
     events = board.execute(
         "SELECT payload FROM task_events WHERE task_id=? AND kind='bundle_unresolved_refs'",
@@ -273,6 +285,7 @@ def test_empty_bundle_records_unresolved_before_cleanup(board):
     (root / "DISPOSABLE-WORKSPACE").write_text(
         '{"version":1,"issuer":"runner","workspace":"fixture"}\n', encoding="utf-8",
     )
+    bp.preserve_bundle(board, tid, root)
     assert bp.preservation_gate(tid, root, conn=board) is False
     assert not board.in_transaction
     ws._cleanup_workspace(board, tid)
@@ -321,6 +334,8 @@ def test_unresolved_record_failure_retains_workspace(board, failure):
         )
         board.commit()
     try:
+        with pytest.raises((ValueError, sqlite3.Error)):
+            bp.preserve_bundle(board, tid, root)
         ws._cleanup_workspace(board, tid)
     finally:
         board.set_authorizer(None)
@@ -337,6 +352,8 @@ def test_unresolved_record_rejects_uncommitted_board_ops_scope(board):
     tid, root = task(board, marker=False, result="Read kanban.db for details")
     with kb.write_txn(board):
         assert board.in_transaction
+        with pytest.raises(ValueError, match="own commit"):
+            bp.preserve_bundle(board, tid, root)
         assert not bp.preservation_gate(tid, root, conn=board)
         assert not board.execute(
             "SELECT 1 FROM task_events WHERE task_id=? AND kind='bundle_unresolved_refs'", (tid,),

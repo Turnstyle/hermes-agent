@@ -37,8 +37,9 @@ def assert_cleanup_preserves(board, tid, root, expected):
     expected_hashes = {name: hashlib.sha256(payload.encode()).hexdigest()
                        for name, payload in expected.items()}
     assert {entry["path"]: entry["sha256"] for entry in report["files"]} == expected_hashes
+    bp.preserve_bundle(board, tid, root)
     ws._cleanup_workspace(board, tid)
-    assert not root.exists()
+    assert root.exists()
     # contents checks each archive member's bytes/hash against its manifest.
     assert contents(board, tid) == sorted(expected)
     manifest = next(Path(a.stored_path) for a in kb.list_attachments(board, tid)
@@ -240,9 +241,10 @@ def test_missing_relative_prohibited_hint_is_durable_unresolved(board, prose, ex
     assert board.total_changes == changes
     assert root.is_dir()
     assert not kb.list_attachments(board, tid)
+    bp.preserve_bundle(board, tid, root)
     ws._cleanup_workspace(board, tid)
     if artifact:
-        assert not root.exists()
+        assert root.exists()
         assert contents(board, tid) == ["accepted.patch"]
     else:
         assert root.is_dir()
