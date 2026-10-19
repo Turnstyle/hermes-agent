@@ -539,7 +539,8 @@ def _select_extensionless(workspace, candidate, required, checkout_raw, plan: _S
     Two recorded checkouts are not a root to infer.
     """
     if checkout_raw is _CONFLICTING_CHECKOUTS:
-        checkout_raw = None
+        plan.ambiguous.add(candidate)
+        return
     if _reject_parent_traversal(workspace, candidate, plan):
         return
     located = _workspace_generic_file(workspace, candidate)
@@ -590,6 +591,12 @@ def _consume_text(workspace, text, checkout_raw, artifact_namespace, plan: _Sele
         return
     for match in _URI.finditer(text):
         plan.non_path.add(_sanitized_uri(match.group(0)))
+    # An artifacts entry that is itself one absolute path keeps its spaces.
+    # Prose, URLs, and quoted names still go through the reference splitter.
+    raw = text.strip()
+    if artifact_namespace and raw and Path(raw).is_absolute() and "://" not in raw:
+        _route_candidate(workspace, raw, True, checkout_raw, True, plan)
+        return
     for candidate, required in _references(text):
         _route_candidate(workspace, candidate, required, checkout_raw, artifact_namespace, plan)
 
@@ -660,8 +667,12 @@ def plan_bundle(conn, task_id: str, workspace: Path, *, max_bytes=MAX_BYTES):
     unresolved_refs = plan.unresolved
     if keep_all:
         directories = {root}
+
+    def _raise_walk_error(error):
+        raise ValueError("bundle directory walk failed") from error
+
     for directory in sorted(directories):
-        for folder, dirs, files in os.walk(directory, followlinks=False):
+        for folder, dirs, files in os.walk(directory, followlinks=False, onerror=_raise_walk_error):
             parent = Path(folder).relative_to(root)
             for name in list(dirs):
                 rel = parent / name
