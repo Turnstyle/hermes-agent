@@ -18,6 +18,7 @@ from typing import Optional
 from typing import TYPE_CHECKING
 import contextlib
 
+from hermes_cli.kanban_bundle_preserve import preservation_gate
 from hermes_cli.worktree_ops import release_lsp_clients
 
 if TYPE_CHECKING:
@@ -391,7 +392,7 @@ def _cleanup_workspace(conn: sqlite3.Connection, task_id: str) -> None:
         if kind == "worktree":
             _cleanup_worker_tmux(conn, task_id)
             if not _defer_shared_worktree_cleanup(conn, task_id, path):
-                _cleanup_worktree_workspace(task_id, path, row["branch_name"])
+                _cleanup_worktree_workspace(task_id, path, row["branch_name"], conn=conn)
             _try_cleanup_parent_workspaces(conn, task_id)
             return
         wp = Path(path)
@@ -401,18 +402,22 @@ def _cleanup_workspace(conn: sqlite3.Connection, task_id: str) -> None:
             # source tree; without this, completion would rmtree the user's data.
             # See #28818. Containment runs first so an unmanaged dir that is
             # never removed does not pay for (or log) the shared-use scan.
-            if _is_managed_scratch_path(wp):
-                if not _defer_shared_workspace_cleanup(conn, task_id, path):
-                    release_lsp_clients(str(wp))
-                    shutil.rmtree(wp, ignore_errors=True)
-                    _kb._log.debug("Removed scratch workspace: %s", wp)
-            else:
+            # Sharing defer stays ahead of the preservation gate so a live
+            # sharer is recorded even when the plan would not authorize removal.
+            if not _is_managed_scratch_path(wp):
                 _kb._log.warning(
                     "Refusing to remove out-of-scratch workspace for task %s: %s "
                     "(workspace_kind='scratch' but path is outside any "
                     "kanban-managed workspaces root)",
                     task_id, wp,
                 )
+            elif _defer_shared_workspace_cleanup(conn, task_id, path):
+                pass
+            elif preservation_gate(task_id, wp, conn=conn):
+                release_lsp_clients(str(wp))
+                shutil.rmtree(wp, ignore_errors=True)
+                if not wp.exists():
+                    _kb._log.debug("Removed scratch workspace: %s", wp)
         # Kill the owning worker's tmux session if it is now dead, then let any
         # parent whose children are all done run its deferred cleanup.
         _cleanup_worker_tmux(conn, task_id)
@@ -424,7 +429,7 @@ def _cleanup_workspace(conn: sqlite3.Connection, task_id: str) -> None:
 
 
 def _cleanup_worktree_workspace(
-    task_id: str, path: str, branch_name: Optional[str] = None
+    task_id: str, path: str, branch_name: Optional[str] = None, *, conn=None
 ) -> None:
     """Remove a finished task's linked git worktree when it holds no work.
     Mirrors the CLI startup pruner (``cli._prune_stale_worktrees``): removal
@@ -475,6 +480,10 @@ def _cleanup_worktree_workspace(
                 return
         # No --force: git's own dirty guard re-verifies at removal time, so if
         # the tree became dirty since our check (TOCTOU) removal fails safe.
+        # Same retain-by-default gate as scratch and gc. Dirty/unpushed checks
+        # above still win, so a failed gate is not the only preservation path.
+        if not preservation_gate(task_id, wp, conn=conn):
+            return
         release_lsp_clients(str(worktree_path))
         result = _git(repo_root, "worktree", "remove", str(wp), timeout=60)
         if result.returncode != 0:
@@ -522,17 +531,22 @@ def _try_cleanup_parent_workspaces(conn: sqlite3.Connection, task_id: str) -> No
             if row["workspace_kind"] == "worktree":
                 if _defer_shared_worktree_cleanup(conn, parent_id, ws_path):
                     continue
-                _cleanup_worktree_workspace(parent_id, ws_path, row["branch_name"])
+                _cleanup_worktree_workspace(parent_id, ws_path, row["branch_name"], conn=conn)
                 continue
             wp = Path(ws_path)
-            if not wp.is_dir():
+            if not wp.is_dir() or not _is_managed_scratch_path(wp):
                 continue
-            if _is_managed_scratch_path(wp):
-                if _defer_shared_workspace_cleanup(conn, parent_id, ws_path):
-                    continue
-                release_lsp_clients(str(wp))
-                shutil.rmtree(wp, ignore_errors=True)
-                _kb._log.debug("Deferred cleanup: removed parent %s scratch workspace: %s", parent_id, wp)
+            if _defer_shared_workspace_cleanup(conn, parent_id, ws_path):
+                continue
+            if not preservation_gate(parent_id, wp, conn=conn):
+                continue
+            release_lsp_clients(str(wp))
+            shutil.rmtree(wp, ignore_errors=True)
+            if not wp.exists():
+                _kb._log.debug(
+                    "Deferred cleanup: removed parent %s scratch workspace: %s",
+                    parent_id, wp,
+                )
     except Exception:
         pass  # best-effort
 
@@ -563,9 +577,17 @@ _SCRATCH_TIP_SENTINEL_NAME = ".scratch_tip_shown"
 
 
 _SCRATCH_TIP_MESSAGE = (
-    "scratch workspaces are ephemeral — they're deleted when the task "
-    "completes. Use --workspace worktree: (git worktree) or "
-    "--workspace dir:/abs/path (existing dir) to preserve worker output."
+    "scratch workspaces are retained after the task completes unless the "
+    "preservation gate authorizes removal. HOLD-WORKSPACE keeps the directory "
+    "before preservation, and a failed hold probe keeps it too. An empty plan "
+    "is not removal authorization. A file written in the workspace, including "
+    "one that looks like a versioned marker, is not removal authority. "
+    "KEEP-BUNDLE does not select the tree when it is absent. A present "
+    "regular file of at most 4096 bytes, with the owner-read bit set and "
+    "opened without following a link, selects the tree. Any other probe "
+    "keeps the directory before archive. "
+    "Use --workspace worktree: (git worktree) or --workspace dir:/abs/path "
+    "(existing dir) when the worker needs a durable directory."
 )
 
 

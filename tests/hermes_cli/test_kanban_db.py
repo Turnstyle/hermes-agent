@@ -824,7 +824,7 @@ def test_complete_task_persists_scratch_artifacts_before_cleanup(kanban_home):
         assert kb.complete_task(
             conn,
             t,
-            result="ok",
+            result="ship `chart.png`",
             metadata={"artifacts": [str(artifact)]},
         )
 
@@ -842,9 +842,9 @@ def test_complete_task_persists_scratch_artifacts_before_cleanup(kanban_home):
     assert run.metadata["artifacts"] == [str(persisted)]
     with kbc.connect() as conn:
         attachments = kb.list_attachments(conn, t)
-    assert [(a.filename, a.stored_path) for a in attachments] == [
-        ("chart.png", str(persisted.resolve()))
-    ]
+    stored = {a.filename: a.stored_path for a in attachments}
+    assert stored["chart.png"] == str(persisted.resolve())
+    assert any(name.endswith(".tgz") for name in stored)
 
 
 def test_review_bound_handoff_preserves_declared_artifacts(kanban_home):
@@ -864,16 +864,16 @@ def test_review_bound_handoff_preserves_declared_artifacts(kanban_home):
             conn, t, summary="ready for review",
             metadata={"artifacts": [str(artifact)]}, expected_run_id=run_id)
         handoff = [e for e in kb.list_events(conn, t) if e.kind == "review_requested"][-1]
-        assert kb.complete_task(conn, t, summary="approved")
+        assert kb.complete_task(conn, t, summary="approved `evidence.json`")
         attachments = kb.list_attachments(conn, t)
     persisted = Path(handoff.payload["artifacts"][0])
     assert not ws.exists(), "scratch workspace should still be cleaned up"
     assert persisted.exists(), "staged copy must survive scratch cleanup"
     assert persisted.parent == kb.task_attachments_dir(t)
     assert persisted.read_bytes() == b'{"ok": true}'
-    assert [(a.filename, a.stored_path) for a in attachments] == [
-        ("evidence.json", str(persisted.resolve()))
-    ]
+    stored = {a.filename: a.stored_path for a in attachments}
+    assert stored["evidence.json"] == str(persisted.resolve())
+    assert any(name.endswith(".tgz") for name in stored)
 
 
 def test_request_review_rollback_discards_staged_copies(kanban_home):
@@ -930,8 +930,9 @@ def test_dir_child_completion_unblocks_deferred_scratch_parent(kanban_home, tmp_
         p_task = kb.get_task(conn, parent)
         parent_ws = kbw.resolve_workspace(p_task)
         kbw.set_workspace_path(conn, parent, parent_ws)
+        (parent_ws / "handoff.txt").write_text("notes\n", encoding="utf-8")
 
-        kb.complete_task(conn, parent, result="handoff")
+        kb.complete_task(conn, parent, result="`handoff.txt`")
         assert parent_ws.exists(), "deferred while dir child active"
 
         kb.complete_task(conn, child, result="built")

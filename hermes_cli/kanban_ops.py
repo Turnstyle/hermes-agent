@@ -324,7 +324,9 @@ def _cmd_gc(args: argparse.Namespace) -> int:
                 if wt_path and Path(wt_path).is_dir():
                     if kbw._defer_shared_worktree_cleanup(conn, row["id"], wt_path):
                         continue
-                    kbw._cleanup_worktree_workspace(row["id"], wt_path, row["branch_name"])
+                    kbw._cleanup_worktree_workspace(
+                        row["id"], wt_path, row["branch_name"], conn=conn,
+                    )
                     if not Path(wt_path).is_dir():
                         removed_ws += 1
                 continue
@@ -338,6 +340,8 @@ def _cmd_gc(args: argparse.Namespace) -> int:
             if not path.is_dir() or path.is_symlink() or not kbw._is_managed_scratch_path(path):
                 continue
             if kbw._defer_shared_workspace_cleanup(conn, row["id"], path):
+                continue
+            if not kbw.preservation_gate(row["id"], path, conn=conn):
                 continue
             shutil.rmtree(path, ignore_errors=True)
             if not path.exists():
