@@ -1879,7 +1879,7 @@ def _dispatch_once_locked(
     may_spawn, spawn_budget = _tick_spawn_budget(
         conn, result, max_spawn=max_spawn, max_in_progress=max_in_progress, board=board, dry_run=dry_run,
     )
-    if not may_spawn:
+    if not may_spawn or _kdf.launch_paused():
         return result
 
     ready_rows = _lane_rows(conn, "ready")

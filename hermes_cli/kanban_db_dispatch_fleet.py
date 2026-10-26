@@ -532,3 +532,11 @@ def fenced_claim(conn: sqlite3.Connection, task_id: str, claim, result: Dispatch
 from hermes_cli import kanban_db as _kb  # noqa: E402
 from hermes_cli import kanban_db_connect as _kbc  # noqa: E402
 from hermes_cli import kanban_db_dispatch as _kd  # noqa: E402
+
+
+def launch_paused() -> bool:
+    """Pre-claim ESTOP / drain gate (``kanban_launch.pause_reason``, fail closed): a paused host
+    claims nothing this tick. ``require_launch`` still re-checks just before ``Popen`` for a pause
+    that lands between the claim and the spawn."""
+    from hermes_cli.kanban_launch import pause_reason
+    return pause_reason() is not None

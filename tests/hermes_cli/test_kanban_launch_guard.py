@@ -53,6 +53,8 @@ def test_paused_dispatch_starts_no_waiter_and_charges_nothing(board, kind):
     assert launched == [] and result.spawned == []
     task = kb.get_task(conn, tid)
     assert (task.status, task.consecutive_failures, task.claim_lock) == ("ready", 0, None)
+    # Pre-claim: the paused tick never claimed the card, so no run was opened and released.
+    assert conn.execute("SELECT COUNT(*) FROM task_runs WHERE task_id = ?", (tid,)).fetchone()[0] == 0
 
 
 def test_paused_default_spawn_raises_host_level_deferral(board):
