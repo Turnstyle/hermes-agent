@@ -1,14 +1,18 @@
-"""K02: a spent goal-mode turn budget hands the run back neutrally, through the owner-managed run.
+"""K02: a spent goal-mode turn budget hands the run back neutrally, settled by the owner's receipt.
 
-Closing proof: the hand-back happens inside the owner's managed worker (``run_worker_turns``)
-while the owner's admission for the run is still active. The run closes as ``budget_handback``
-through ``kanban_db._end_run``, the card returns to its source phase with no failure charged and
-no block, the owner's admission receipt is left for the owner to settle, its ``worker_result``
-still lands on the closed run, and the reclaim fences agree that nothing is left to recover.
+Closing proof: inside the owner's managed worker (``run_worker_turns``) the bound interpreter
+records the hand-back only on its own ``worker_result`` receipt; the card and its run are not
+written by the turn and the owner's admission is the owner's to settle. Once the owner has settled
+and the submitter is gone, the native dead-worker sweep closes the run as ``budget_handback``,
+returns the card to its source phase with no failure charged and no block, and nothing is left to
+recover.
 """
 import json
 import os
 import sqlite3
+
+import subprocess
+import sys
 
 import psutil
 import pytest
@@ -18,7 +22,7 @@ from gateway import session_kanban
 from hermes_cli import goals
 from hermes_cli import kanban_db as kb
 from hermes_cli import kanban_db_dispatch as kbd
-from hermes_cli.kanban_budget_handback import handback_budget
+from hermes_cli.kanban_budget_handback import BUDGET_HANDBACK, KANBAN_BUDGET_HANDBACK_EXIT_CODE
 from hermes_cli.kanban_db_connect import connect_closing
 from hermes_cli.kanban_owner_recovery import owner_reclaim_blocked, owner_reclaim_paused
 from hermes_cli.process_identity import process_birth
@@ -76,38 +80,48 @@ def _events(conn, task_id):
         "SELECT kind, run_id FROM task_events WHERE task_id = ? ORDER BY id", (task_id,))]
 
 
-def test_spent_budget_hands_back_while_owner_admission_is_active(tmp_path, monkeypatch, judge_continues):
+def test_spent_budget_hands_back_through_the_owner_receipt(tmp_path, monkeypatch, judge_continues):
     path, ledger, context, frame = _frame(tmp_path, monkeypatch)
-    run_id = context["run_id"]
-    with connect_closing(path) as conn:
-        assert not owner_reclaim_paused(conn, context["task_id"])  # live owner, admission running
+    task_id, run_id = context["task_id"], context["run_id"]
 
     session_kanban.run_worker_turns(_Agent(), frame, [])
 
     with connect_closing(path) as conn:
-        task = kb.get_task(conn, context["task_id"])
-        assert (task.status, task.claim_lock, task.current_run_id) == ("ready", None, None)
-        assert task.consecutive_failures == 0
-        run = conn.execute("SELECT status, outcome, ended_at, summary FROM task_runs WHERE id = ?",
-                           (run_id,)).fetchone()
-        assert (run["status"], run["outcome"]) == ("budget_handback", "budget_handback")
-        assert run["ended_at"] is not None and "slice 2 progress" in run["summary"]
-        events = _events(conn, context["task_id"])
-        assert ("budget_handback", run_id) in events
-        assert not any(kind in ("blocked", "gave_up") for kind, _ in events)
-        # Owner receipts stay consistent: the admission marker and the worker's result both name
-        # the closed run; the admission row is the owner's to settle and was not touched.
-        assert ("owner_admitted", run_id) in events and ("worker_result", run_id) in events
-        assert session_kanban.worker_exit_code(path, context) == 0
-        # The reclaim fences agree there is nothing left to recover.
-        assert not owner_reclaim_paused(conn, context["task_id"])
-        assert not owner_reclaim_blocked(conn, context["task_id"], crash_sweep=True)
-        assert kbd.detect_crashed_workers(conn) == []
-        # The next attempt is a new run; the handed-back run's claim can never be admitted again.
-        again = kb.claim_task(conn, context["task_id"])
-        assert again.current_run_id != run_id
+        # The turn wrote only its receipt: the card stays on its run and claim until the sweep.
+        task = kb.get_task(conn, task_id)
+        assert (task.status, task.current_run_id, task.claim_lock) == ("running", run_id, context["claim_lock"])
+        assert not any(kind in ("blocked", "gave_up", BUDGET_HANDBACK) for kind, _ in _events(conn, task_id))
+        assert session_kanban.worker_exit_code(path, context) == KANBAN_BUDGET_HANDBACK_EXIT_CODE
+        assert session_kanban.worker_result(path, context)["handback"]["reason"]
     with sqlite3.connect(ledger) as store:
         assert store.execute("SELECT status FROM session_admissions").fetchone()[0] == "running"
+
+    # The owner settles its admission and the submitter exits: the native sweep books the run.
+    with sqlite3.connect(ledger) as store:
+        store.execute("UPDATE session_admissions SET status = 'terminal', outcome = 'completed'")
+    submitter = subprocess.Popen([sys.executable, "-c", "pass"])
+    submitter.wait()
+    monkeypatch.setenv("HERMES_KANBAN_CRASH_GRACE_SECONDS", "0")
+    with connect_closing(path) as conn:
+        with kb.write_txn(conn):
+            conn.execute("UPDATE tasks SET worker_pid = ? WHERE id = ?", (submitter.pid, task_id))
+        assert kbd.detect_crashed_workers(conn) == []
+        task = kb.get_task(conn, task_id)
+        assert (task.status, task.claim_lock, task.current_run_id) == ("ready", None, None)
+        assert task.consecutive_failures == 0
+        run = conn.execute("SELECT status, outcome, ended_at, error FROM task_runs WHERE id = ?",
+                           (run_id,)).fetchone()
+        assert (run["status"], run["outcome"]) == (BUDGET_HANDBACK, BUDGET_HANDBACK)
+        assert run["ended_at"] is not None and "slice 2 progress" in run["error"]
+        events = _events(conn, task_id)
+        assert (BUDGET_HANDBACK, run_id) in events
+        assert ("owner_admitted", run_id) in events and ("worker_result", run_id) in events
+        assert not any(kind in ("blocked", "gave_up", "crashed") for kind, _ in events)
+        assert not owner_reclaim_paused(conn, task_id)
+        assert not owner_reclaim_blocked(conn, task_id, crash_sweep=True)
+        # The next attempt is a new run; the handed-back run's claim can never be admitted again.
+        again = kb.claim_task(conn, task_id)
+        assert again.current_run_id != run_id
 
 
 def test_unbound_interpreter_cannot_hand_back_and_the_block_stands(tmp_path, monkeypatch, judge_continues):
@@ -130,15 +144,11 @@ def test_judged_unachievable_still_blocks(tmp_path, monkeypatch):
         assert kb.get_task(conn, context["task_id"]).status == "blocked"
 
 
-def test_stale_run_or_claim_hand_back_touches_nothing(tmp_path, monkeypatch):
-    path, _ledger, context, _frame_ = _frame(tmp_path, monkeypatch)
-    with connect_closing(path) as conn:
-        before = conn.total_changes
-        assert not handback_budget(conn, context["task_id"], expected_run_id=context["run_id"] + 1,
-                                   claim_lock=context["claim_lock"], reason="spent")
-        assert not handback_budget(conn, context["task_id"], expected_run_id=context["run_id"],
-                                   claim_lock="someone-else", reason="spent")
-        assert not handback_budget(conn, context["task_id"], expected_run_id=context["run_id"],
-                                   claim_lock=context["claim_lock"], reason="spent", owner_check=lambda _c: False)
-        assert conn.total_changes == before
-        assert kb.get_task(conn, context["task_id"]).status == "running"
+def test_a_hand_back_from_an_unbound_interpreter_leaves_no_receipt_flag(tmp_path, monkeypatch, judge_continues):
+    path, _ledger, context, frame = _frame(tmp_path, monkeypatch, bound_pid=os.getpid() + 1)
+
+    session_kanban.run_worker_turns(_Agent(), frame, [])
+
+    # The unbound interpreter cannot write the attempt's receipt at all, so the sweep has no
+    # hand-back to book and nothing about the card changed beyond its block.
+    assert session_kanban.worker_result(path, context) == {}

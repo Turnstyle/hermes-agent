@@ -386,6 +386,7 @@ def _book_dead_worker(conn, sweep, row, dead, board) -> bool:
 
 def reclaim_dead_workers(conn: sqlite3.Connection, board: Optional[str] = None, *, errors_out: Optional[list] = None):
     """See ``kanban_db_dispatch._reclaim_dead_workers``."""
+    from hermes_cli.kanban_budget_handback import BUDGET_HANDBACK, KANBAN_BUDGET_HANDBACK_EXIT_CODE, handback_dead_worker
     from hermes_cli.kanban_owner_recovery import managed_run_exit_code, owner_reclaim_blocked
 
     sweep = _kd._CrashSweep()
@@ -413,7 +414,11 @@ def reclaim_dead_workers(conn: sqlite3.Connection, board: Optional[str] = None, 
             pid = int(row["worker_pid"])
             # A managed run's authority-recorded exit (its bound interpreter's, under this claim).
             exit_code = managed_run_exit_code(conn, row["id"], pid, row["claim_lock"])
-            dead = _kd._classify_dead_worker(pid, row["claim_lock"], exit_code, task_id=row["id"], board=board)
+            if exit_code == KANBAN_BUDGET_HANDBACK_EXIT_CODE:
+                # The owner's receipt records a neutral turn-budget hand-back: same release, no crash.
+                dead = handback_dead_worker(conn, row["id"], pid, row["claim_lock"])
+            else:
+                dead = _kd._classify_dead_worker(pid, row["claim_lock"], exit_code, task_id=row["id"], board=board)
             try:
                 # Per-row savepoint: a lifecycle-fence refusal rolls back only this row, never
                 # the siblings already released in this sweep.
@@ -426,7 +431,7 @@ def reclaim_dead_workers(conn: sqlite3.Connection, board: Optional[str] = None, 
                 continue
             if dead.rate_limited:
                 sweep.rate_limited.append(row["id"])
-            else:
+            elif dead.kind != BUDGET_HANDBACK:
                 sweep.crashed.append(row["id"])
                 sweep.crash_details.append((row["id"], pid, row["claim_lock"], dead))
     return sweep

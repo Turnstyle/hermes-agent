@@ -280,6 +280,9 @@ def _run_worker_turns(agent, frame, history):
         result = _run_task_turns(agent, frame, history, context)
         code = turn_exit_code(result, kanban_worker=True)
         last_output = str(result.get('final_response') or '')[-500:] if isinstance(result, dict) else ''
+        if context.get('handback'):
+            from hermes_cli.kanban_budget_handback import KANBAN_BUDGET_HANDBACK_EXIT_CODE
+            code = KANBAN_BUDGET_HANDBACK_EXIT_CODE
         return result
     except Exception as exc:
         code = turn_exit_code(None, kanban_worker=True, **credential_failure_flags(exc))
@@ -309,7 +312,8 @@ def _record_worker_result(context, code, last_output):
             # result in the immutable attempt event stream instead.
             kb._append_event(conn, context['task_id'], 'worker_result',
                 {'pid': os.getpid(), 'claim_lock': context['claim_lock'], 'exit_code': code,
-                 'last_output': last_output}, run_id=context['run_id'])
+                 'last_output': last_output, **({'handback': context['handback']} if context.get('handback') else {})},
+                run_id=context['run_id'])
 
 
 def _bound_worker_matches(conn, context):
@@ -353,15 +357,16 @@ _TURN_BUDGET_SPENT = 'Goal-mode worker exhausted its turn budget'
 
 
 def _hand_back_budget(context, reason, result):
-    """Neutral hand-back (``kanban_budget_handback``) under this frame's exact run/claim, vouched
-    for by the owner's ``worker_bound`` receipt for this interpreter; False leaves the block path."""
-    from hermes_cli.kanban_budget_handback import handback_budget
+    """Neutral hand-back (``kanban_budget_handback``): only the interpreter the owner's
+    ``worker_bound`` receipt names under this claim may record it, on its own ``worker_result``;
+    the dead-worker sweep closes the run. False leaves the block path."""
     from hermes_cli.kanban_db_connect import connect_closing
-    summary = str(result.get('final_response') or '') if isinstance(result, dict) else ''
     with connect_closing(Path(context['db'])) as conn:
-        return handback_budget(conn, context['task_id'], expected_run_id=context['run_id'],
-                               claim_lock=context['claim_lock'], reason=reason, summary=summary,
-                               owner_check=lambda c: _bound_worker_matches(c, context))
+        if not _bound_worker_matches(conn, context):
+            return False
+    summary = str(result.get('final_response') or '') if isinstance(result, dict) else ''
+    context['handback'] = {'reason': reason, 'summary': summary[-3000:]}
+    return True
 
 
 def _run_task_turns(agent, frame, history, context):
