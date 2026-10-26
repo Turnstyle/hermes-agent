@@ -501,7 +501,7 @@ def test_dead_unmanaged_start_is_a_prompt_terminal_verdict(tmp_path, monkeypatch
     deadline, and never launch a second daemon."""
     from hermes_cli import gateway_runtime as runtime, gateway_runtime_service as service, gateway_runtime_start as start
 
-    home = tmp_path / "profile"
+    home = tmp_path / ".hermes"  # default home, independent of where the basetemp lives
     (home / "logs").mkdir(parents=True, mode=0o700)
     (home / "logs" / "gateway-stdio.log").write_text("OLD_RUN_TRACEBACK\n", encoding="utf-8")
     secret = "sk-proj-" + "A1b2C3d4E5f6G7h8I9j0K1l2M3n4"

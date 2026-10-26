@@ -413,7 +413,9 @@ def test_android_python_reaches_the_unmanaged_start(tmp_path, monkeypatch):
     sys.platform == "android". Ensure must start the gateway unmanaged, not refuse the platform."""
     from hermes_cli import gateway_runtime as runtime, gateway_runtime_service as service, gateway_runtime_start as start
 
-    home = tmp_path / "profile"
+    # A default home: a bare ``profile`` dir is classed by its ancestors, so a basetemp under a
+    # real ``.hermes/profiles/<name>`` tree would turn it into a multiplexed named profile.
+    home = tmp_path / ".hermes"
     home.mkdir(mode=0o700)
     spawned = []
     monkeypatch.setattr(service.sys, "platform", "android")
@@ -499,7 +501,7 @@ def test_windows_startup_folder_entry_still_restarts_a_stopped_owner(tmp_path, m
     from hermes_cli import gateway_runtime as runtime, gateway_runtime_service as service, gateway_runtime_start as start
     from hermes_cli import gateway_windows
 
-    home = tmp_path / "profile"
+    home = tmp_path / ".hermes"  # default home, independent of where the basetemp lives
     home.mkdir(mode=0o700)
     startup = tmp_path / "Startup"
     startup.mkdir()
