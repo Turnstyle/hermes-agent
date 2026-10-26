@@ -194,7 +194,12 @@ class _KanbanDispatcher:
             from hermes_cli import kanban_db as _kb
             with _kb.pin_first_board_resolution():
                 db_path = self.kb.kanban_db_path(slug)
-                conn = _kbc().connect(board=slug)
+                # One resolution for the tick, its connection and its keepalive: anchoring a
+                # second lookup could hold a different (default) DB's -wal/-shm instead.
+                conn = _kbc().connect(db_path, board=slug)
+                # After connect (which creates/migrates a fresh board) and before the tick or any
+                # observer reads: read-only openers need this board's WAL side files to exist.
+                _kbc().ensure_wal_keepalive(db_path=db_path, board=slug)
                 return _kbd().dispatch_once(conn, board=slug, **kwargs)
         except Exception as exc:
             if self.is_corrupt_board_db_error(exc):

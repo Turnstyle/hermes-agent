@@ -235,6 +235,9 @@ def test_policy_off_keeps_owner_helpers_and_pool(home):
 
 
 @pytest.mark.skipif(sys.platform != "darwin", reason="Legacy keychain behavior is macOS-specific")
+# Opt out of the suite-wide reader stub only: ``security`` itself stays mocked below, and the
+# ``home`` fixture still fails any other subprocess, so no real Keychain is ever touched.
+@pytest.mark.allow_macos_keychain
 def test_legacy_mode_preserves_existing_keychain_behavior(home):
     (home / "config.yaml").write_text("auth:\n  no_keychain: false\n")
     assert policy.no_keychain_enabled() is False

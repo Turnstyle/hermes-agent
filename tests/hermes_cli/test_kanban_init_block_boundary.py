@@ -86,9 +86,10 @@ def test_initialization_preserves_concurrent_imported_hold(old_board, monkeypatc
         assert kb.get_task(conn, "held").status == "blocked"
         assert kb.recompute_ready(conn) == 0
         assert kb.get_task(conn, "held").status == "blocked"
-        # Schema writers wait; after schema commit an importer can finish while
-        # connect() is still running migrations, protected by the new triggers.
-        assert locked == (pause_at != "PRAGMA table_info(tasks)")
+        # Every pause point is inside an IMMEDIATE write: the schema pass, then the atomic
+        # legacy-column migration whose PRAGMA reads run under its own write lock. The
+        # importer always waits, and its retry above lands behind the new triggers.
+        assert locked
         # Retrying after initialization is not a permanent hold: a newer release
         # still unlocks the card through the real recovery path.
         conn.execute(

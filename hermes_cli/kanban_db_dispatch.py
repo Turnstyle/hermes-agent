@@ -1528,11 +1528,17 @@ def dispatch_once(
         db_path = _kb.kanban_db_path(board=board)
     except Exception:
         # Must not lose the tick — fall through to an unguarded dispatch.
-        result = _locked_tick()
-        _kb._fire_dispatch_tick_hook(result, board=board, dry_run=dry_run)
+        result = DispatchResult(skipped_locked=True) if _kdf.launch_paused() else _locked_tick()
+        if not dry_run:
+            _kb._fire_dispatch_tick_hook(result, board=board, dry_run=dry_run)
         return result
     with _kbc._dispatch_tick_lock(db_path) as held:
         if not held:
+            result = DispatchResult(skipped_locked=True)
+        elif _kdf.launch_paused():
+            # ESTOP / drain holds the WHOLE tick before reclaim and capacity: a paused host neither
+            # probes nor rewrites any row, local or foreign. The next unpaused tick recovers through
+            # the same ownership fences; the K07 pre-claim gate below still covers direct callers.
             result = DispatchResult(skipped_locked=True)
         else:
             result = _locked_tick()
@@ -1541,7 +1547,9 @@ def dispatch_once(
                 _kbc._maybe_checkpoint_wal(conn, db_path)
     # Lock released. Fire the tick observer strictly OUTSIDE the critical
     # section: a slow subscriber must never stall a sibling dispatcher's tick.
-    _kb._fire_dispatch_tick_hook(result, board=board, dry_run=dry_run)
+    # A dry run is a side-effect-free diagnostic: no observer fires on any path.
+    if not dry_run:
+        _kb._fire_dispatch_tick_hook(result, board=board, dry_run=dry_run)
     return result
 
 

@@ -567,6 +567,9 @@ def test_respawn_guard_ignores_auth_words_in_crashed_worker_output(kanban_home):
         assert kbd.check_respawn_guard(conn, spawn_failed_id) == "blocker_auth"
 
 
+# The refusal is the real systemd restart-safe scope probe, which only exists on Linux: off Linux
+# ``restart_safe_gateway_child_argv`` is ``in_process`` by design, so the boundary never raises.
+@pytest.mark.platforms("linux")
 def test_infrastructure_spawn_refusal_never_charges_the_card(
     kanban_home, monkeypatch, all_assignees_spawnable,
 ):
