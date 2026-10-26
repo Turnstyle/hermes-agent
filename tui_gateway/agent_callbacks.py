@@ -375,19 +375,23 @@ def _sync_agent_fallback_with_config(sid: str, session: dict) -> None:
     a provider error with a healthy fallback configured (#95066). Same per-turn contract the messaging
     gateway applies to its cached agents (``GatewayRunner._refresh_fallback_model``): the config is
     read fail-closed, so a torn/invalid config.yaml keeps the agent's last known-good chain instead of
-    ``_load_cfg()``'s fail-open ``{}`` reading as "chain removed" and wiping it. Never blocks the turn.
+    ``_load_cfg()``'s fail-open ``{}`` reading as "chain removed" and wiping it. A torn read never
+    blocks the turn by itself, but a removed route a refused turn fenced is still refused against the
+    last known-good chain (X05): ``FallbackRouteUnavailableError`` reaches the turn's refusal path.
     """
     agent = session.get("agent")
     if agent is None:
         return
+    from gateway.run import GatewayRunner
     try:
-        from gateway.run import GatewayRunner
         from hermes_cli.config_effective import load_user_config_effective
         from hermes_cli.fallback_config import get_fallback_chain
         chain = get_fallback_chain(load_user_config_effective(_active_config_path(), fail_closed=True))
     except Exception as e:
         logger.warning("fallback chain sync skipped for %s (keeping current chain): %s", sid, e)
-        return
+        if getattr(agent, "_removed_fallback_route", None) is None:
+            return
+        chain = agent._fallback_chain
     GatewayRunner._apply_fallback_chain_to_agent(agent, chain)
 
 

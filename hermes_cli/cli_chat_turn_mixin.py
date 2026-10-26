@@ -34,16 +34,18 @@ class CLIChatTurnMixin:
     def _sync_fallback_chain_with_config(self, agent) -> None:
         """Adopt ``fallback_providers`` edits made while this chat is open (#95066) — the same
         per-turn, fail-closed contract as the Desktop/TUI and messaging gateways: a torn config.yaml
-        keeps the last known-good chain instead of reading as "chain removed"."""
+        keeps the last known-good chain instead of reading as "chain removed", and a removed route a
+        refused turn fenced is still refused against that chain (X05)."""
         from cli import logger
+        from gateway.run import GatewayRunner
         try:
-            from gateway.run import GatewayRunner
             from hermes_cli.config_effective import load_user_config_effective
             from hermes_cli.fallback_config import get_fallback_chain
             self._fallback_model = get_fallback_chain(load_user_config_effective(fail_closed=True))
         except Exception as e:
             logger.debug("fallback chain sync skipped (keeping current chain): %s", e)
-            return
+            if getattr(agent, "_removed_fallback_route", None) is None:
+                return
         GatewayRunner._apply_fallback_chain_to_agent(agent, self._fallback_model)
 
     def chat(self, message, images: list | None = None, voice_input: bool = False) -> Optional[str]:
