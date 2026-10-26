@@ -1293,6 +1293,9 @@ class TurnRunner(GatewayTurnProgressMixin, GatewaySessionAgentMixin):
         agent, reused_cached_agent = self._resolve_turn_agent(
             turn_route, platform_key, combined_ephemeral, max_iterations, reasoning_config, pr,
         )
+        # A pre-agent fallback runs this turn off the session's route with no in-agent activation:
+        # the session row must record a fallback, not adopt it as the session's model (#74349).
+        agent._pre_agent_fallback_active = bool(pending_fallback_notice)
         if pending_fallback_notice:
             # Reuse the in-agent one-shot notice so the pre-agent provider switch is user-visible too.
             agent._pending_fallback_notice = pending_fallback_notice

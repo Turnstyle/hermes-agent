@@ -29,6 +29,9 @@ DAEMON_STRIPPED_ENV = (
     # A terminal's shell under a systemd service (gnome-terminal-server, a user unit) carries these; the
     # unmanaged daemon would then identify as "systemd" and maintenance would refuse it as supervised.
     "INVOCATION_ID", "JOURNAL_STREAM",
+    # Same class from a supervised gateway's or launchd job's descendants (an agent shell, an app
+    # they opened): the unmanaged daemon would claim that supervisor and restart through its label.
+    "HERMES_SUPERVISED_CHILD", "HERMES_LAUNCHD_LABEL",
 )
 
 

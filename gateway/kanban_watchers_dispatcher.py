@@ -184,6 +184,7 @@ class _KanbanDispatcher:
         if not self._quarantine_lifted(slug, fingerprint):
             return None
         kwargs = {k: v for k, v in asdict(self.settings).items() if k != "interval"}
+        db_path = None
         try:
             # No explicit init_db(): connect() runs the migration once per
             # process (see the matching note in the notifier collector).
@@ -192,10 +193,15 @@ class _KanbanDispatcher:
             # file, or the dispatcher reads per-slug DBs nobody writes.
             from hermes_cli import kanban_db as _kb
             with _kb.pin_first_board_resolution():
+                db_path = self.kb.kanban_db_path(slug)
                 conn = _kbc().connect(board=slug)
                 return _kbd().dispatch_once(conn, board=slug, **kwargs)
         except Exception as exc:
             if self.is_corrupt_board_db_error(exc):
+                # The WAL keepalive reader would otherwise pin the quarantined file's inode
+                # (and its -wal/-shm) open until the gateway restarts.
+                if db_path is not None:
+                    _kbc().close_wal_keepalive(db_path=db_path, board=slug)
                 self.disabled_corrupt_boards[slug] = (fingerprint, time.monotonic())
                 logger.error(
                     "kanban dispatcher: board %s database %s is not a valid "
@@ -243,6 +249,34 @@ class _KanbanDispatcher:
                         with contextlib.suppress(Exception):
                             conn.close()
         return False
+
+    def ready_counts(self) -> dict[str, int]:
+        """Spawnable and placeholder ready (and, with review dispatch, review) counts across boards.
+
+        ``spawnable`` is the work this node would actually start (fleet mirrors, control-plane
+        lanes and placeholder assignees excluded); ``placeholder`` is a non-paging diagnostic.
+        """
+        kbd = _kbd()
+        review_probe = kbd.review_dispatch_enabled()
+        counts = {"spawnable": 0, "placeholder": 0}
+        from hermes_cli import kanban_db as _kb
+        with _kb.pin_first_board_resolution():
+            for slug in self._board_slugs():
+                conn = None
+                try:
+                    conn = _kbc().connect(board=slug)
+                    counts["spawnable"] += kbd.count_spawnable_ready(conn)
+                    counts["placeholder"] += kbd.count_placeholder_ready(conn)
+                    if review_probe:
+                        counts["spawnable"] += kbd.count_spawnable_review(conn)
+                        counts["placeholder"] += kbd.count_placeholder_review(conn)
+                except Exception:
+                    continue
+                finally:
+                    if conn is not None:
+                        with contextlib.suppress(Exception):
+                            conn.close()
+        return counts
 
     def auto_decompose_tick(self, auto_decompose_per_tick: int) -> int:
         """Auto-decompose up to N triage tasks across all boards into ready workgraphs.
@@ -326,20 +360,57 @@ def _default_profile_secret_scope():
         reset_secret_scope(token)
 
 
+# slug -> (placeholder-skipped count, last INFO epoch): the line repeats only on change or every 5 min.
+_LAST_PLACEHOLDER_LOG: dict[str, tuple[int, float]] = {}
+
+
+def _log_fence_refusals(slug: str, res: Any, now: float) -> None:
+    """Per-row claim/reclaim refusals (lifecycle fences, unverified ownership): WARNING once per
+    task per hour, otherwise debug — an expected fence must not page every tick."""
+    from hermes_cli.kanban_db_dispatch_fence import _fence_log_due
+    for step in ("claim", "reclaim"):
+        errors = getattr(res, f"{step}_errors", None) or []
+        if not errors:
+            continue
+        due = [(tid, err) for tid, err in errors if _fence_log_due(f"{step}-summary", tid, now)]
+        shown = due or errors
+        (logger.warning if due else logger.debug)(
+            "kanban dispatcher [%s]: %d %s refusal(s): %s",
+            slug, len(shown), step, "; ".join(f"{tid}: {err}" for tid, err in shown),
+        )
+
+
 def _log_spawn_results(results: Optional[list]) -> bool:
     """Log per-board spawn summaries; returns whether any board spawned."""
     any_spawned = False
+    now = time.time()
     for slug, res in (results or []):
-        if res is not None and getattr(res, "spawned", None):
+        if res is None:
+            continue
+        _log_fence_refusals(slug, res, now)
+        skipped_placeholder = getattr(res, "skipped_placeholder", None) or []
+        if getattr(res, "spawned", None):
             any_spawned = True
             # Quiet by default: an idle gateway stays silent.
             logger.info(
                 "kanban dispatcher [%s]: spawned=%d reclaimed=%d "
-                "crashed=%d timed_out=%d promoted=%d auto_blocked=%d",
+                "crashed=%d timed_out=%d promoted=%d auto_blocked=%d placeholder=%d",
                 slug, len(res.spawned), res.reclaimed,
                 len(res.crashed) if hasattr(res.crashed, "__len__") else 0,
                 len(res.timed_out) if hasattr(res.timed_out, "__len__") else 0,
                 res.promoted,
                 len(res.auto_blocked) if hasattr(res.auto_blocked, "__len__") else 0,
+                len(skipped_placeholder),
             )
+        elif skipped_placeholder:
+            last = _LAST_PLACEHOLDER_LOG.get(slug)
+            if last is None or last[0] != len(skipped_placeholder) or (now - last[1]) >= 300:
+                logger.info(
+                    "kanban dispatcher [%s]: %d placeholder-assigned task(s) skipped "
+                    "(non-paging, waiting for assignment)",
+                    slug, len(skipped_placeholder),
+                )
+                _LAST_PLACEHOLDER_LOG[slug] = (len(skipped_placeholder), now)
+        else:
+            _LAST_PLACEHOLDER_LOG.pop(slug, None)
     return any_spawned

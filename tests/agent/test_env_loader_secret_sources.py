@@ -594,6 +594,8 @@ def test_apply_external_secret_sources_records_onepassword_origin(tmp_path, monk
     ``_SECRET_SOURCES`` labeled ``onepassword``."""
 
     monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+    # This tests provenance, not unattended approval: authorize the mocked fetch.
+    monkeypatch.setenv("OP_SERVICE_ACCOUNT_TOKEN", "fixture-only-token")
     monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
     (tmp_path / "config.yaml").write_text(
         "secrets:\n"
@@ -651,6 +653,8 @@ def test_apply_external_secret_sources_bad_ttl_does_not_crash(tmp_path, monkeypa
     """A non-numeric cache_ttl_seconds must be coerced, not crash startup."""
 
     monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+    # This tests TTL coercion; tokenless unattended startup deliberately skips op.
+    monkeypatch.setenv("OP_SERVICE_ACCOUNT_TOKEN", "fixture-only-token")
     (tmp_path / "config.yaml").write_text(
         "secrets:\n"
         "  onepassword:\n"

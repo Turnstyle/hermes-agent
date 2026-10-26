@@ -812,6 +812,22 @@ class SessionCompressionMixin:
             ).fetchone()
         return float(row[0]) if row else None
 
+    def session_turn_lease_holder(self, session_id: str) -> Optional[str]:
+        """Current live holder of the conversation's turn lease, or None. Diagnostic only: a pure
+        read on the stable compression-root key that never acquires, renews or reclaims the lease
+        (an expired or dead holder reads as None; reclaiming it stays the acquirers' job)."""
+        if not session_id:
+            return None
+        from hermes_state import _compression_lock_holder_process_is_dead
+        with self._read_ctx() as conn:
+            row = conn.execute(
+                "SELECT holder, expires_at FROM session_turn_leases WHERE conversation_id = ?",
+                (self._session_turn_lease_key_on_conn(conn, session_id),)).fetchone()
+        if row is None or float(row[1]) <= time.time():
+            return None
+        holder = str(row[0])
+        return None if _compression_lock_holder_process_is_dead(holder) else holder
+
     def refresh_session_turn_lease(
         self, session_id: str, holder: str, *, ttl_seconds: float = 300.0, patience_s: Optional[float] = None,
     ) -> bool:

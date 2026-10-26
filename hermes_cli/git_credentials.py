@@ -60,6 +60,9 @@ def _env_github_token() -> Optional[str]:
 
 
 def _gh_cli_token() -> Optional[str]:
+    from agent.keychain_policy import keychain_access_forbidden
+    if keychain_access_forbidden():
+        return None
     gh = shutil.which("gh")
     if not gh:
         return None
@@ -87,6 +90,9 @@ def _github_token() -> Optional[str]:
 
 def _credential_fill(origin: str) -> Optional[tuple[str, str]]:
     """``(username, password)`` from the user's own git credential helpers, never prompting."""
+    from agent.keychain_policy import keychain_access_forbidden
+    if keychain_access_forbidden():
+        return None
     git = shutil.which("git")
     if not git:
         return None

@@ -144,6 +144,19 @@ class TestPathResolution:
         assert p == fresh_home / "kanban" / "boards" / "atm10-server" / "kanban.db"
         assert p != forced
 
+    def test_explicit_board_overrides_dispatcher_paths(self, fresh_home, tmp_path, monkeypatch):
+        """Path pins remain defaults; named targets route all board files together."""
+        for env, resolver, leaf in (
+            ("HERMES_KANBAN_DB", kb.kanban_db_path, "kanban.db"),
+            ("HERMES_KANBAN_WORKSPACES_ROOT", kb.workspaces_root, "workspaces"),
+            ("HERMES_KANBAN_ATTACHMENTS_ROOT", kb.attachments_root, "attachments"),
+        ):
+            forced = tmp_path / ("custom-" + leaf)
+            monkeypatch.setenv(env, str(forced))
+            assert resolver() == forced
+            assert resolver(board="sales") == fresh_home / "kanban" / "boards" / "sales" / leaf
+        assert kb.kanban_db_path(board="default") == fresh_home / "kanban.db"
+
 
 # ---------------------------------------------------------------------------
 # Current-board resolution

@@ -93,6 +93,8 @@ def _linked_worktree(project: Path, tmp_path: Path) -> Path:
 def _kanban_worktree(project, tmp_path, monkeypatch):
     from hermes_cli import kanban_db_workspace as kbw
     wt = _linked_worktree(project, tmp_path)
+    # No task row backs "t1"; the accepted-bundle gate would (fail closed) retain the tree.
+    monkeypatch.setattr(kbw, "preservation_gate", lambda *a, **k: True)
     return wt, project, lambda: kbw._cleanup_worktree_workspace("t1", str(wt), "wt/t1")
 
 

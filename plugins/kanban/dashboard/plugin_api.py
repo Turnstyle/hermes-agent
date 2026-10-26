@@ -17,7 +17,7 @@ import re
 import sqlite3
 import time
 from concurrent.futures import ThreadPoolExecutor
-from contextlib import closing, contextmanager
+from contextlib import ExitStack, closing, contextmanager
 from dataclasses import asdict
 from functools import partial
 from pathlib import Path
@@ -89,12 +89,10 @@ def _existing_board_slug(slug: str) -> str:
 
 
 def _conn(board: Optional[str] = None):
-    """Connect to the already-normalised ``board`` (``None`` = active). ``init_db`` is
-    idempotent; running it here lets a fresh install self-heal if POST /tasks arrives first."""
-    try:
-        kanban_db.init_db(board=board)
-    except Exception as exc:
-        log.warning("kanban init_db failed: %s", exc)
+    """Connect to the already-normalised ``board`` (``None`` = active). ``kbc.connect``
+    initialises the schema once per database path, so a fresh install still self-heals
+    when POST /tasks arrives first. Calling ``init_db`` here evicted the per-path cache
+    and re-ran the integrity probe and migrations under the init lock on every poll."""
     return kbc.connect(board=board)
 
 
@@ -103,6 +101,26 @@ def _board_conn(board: Optional[str]) -> Iterator[tuple[Optional[str], sqlite3.C
     """Resolve the ``board`` query param, open a connection, close it on exit."""
     board = _resolve_board(board)
     with closing(_conn(board=board)) as conn:
+        yield board, conn
+
+
+@contextmanager
+def _read_board_conn(board: Optional[str]) -> Iterator[tuple[Optional[str], sqlite3.Connection]]:
+    """Read an existing board without forcing migrations or an integrity scan.
+
+    Fresh installs retain the guarded initialization path. Mutations and
+    explicit maintenance still use the existing initialization safeguards.
+    Only connection admission is caught; errors in a handler never trigger init.
+    """
+    board = _resolve_board(board)
+    with ExitStack() as stack:
+        try:
+            conn = stack.enter_context(kbc.connect_readonly_closing(board=board))
+        except ValueError:
+            # Missing file or schema: initialize once, then reopen read-only.
+            with closing(_conn(board=board)):
+                pass
+            conn = stack.enter_context(kbc.connect_readonly_closing(board=board))
         yield board, conn
 
 
@@ -295,7 +313,9 @@ def get_board(
     current_step_key: Optional[str] = Query(None, description="Restrict to tasks at this workflow step key")):
     """Full board grouped by status column; omitting ``board`` uses the active board
     (``HERMES_KANBAN_BOARD`` env → on-disk ``current`` pointer → ``default``)."""
-    with _board_conn(board) as (board, conn):
+    with _read_board_conn(board) as (board, conn):
+        # The UI reconciles a stale board selection against the slug actually served.
+        resolved_board = board or kanban_db.get_current_board()
         tasks = kanban_db.list_tasks(
             conn, tenant=tenant, include_archived=include_archived,
             workflow_template_id=workflow_template_id, current_step_key=current_step_key)
@@ -349,6 +369,7 @@ def get_board(
         # which already uses this helper.
         assignees = [entry["name"] for entry in kanban_db.known_assignees(conn)]
         return {
+            "board": resolved_board,
             "columns": [{"name": name, "tasks": columns[name]} for name in columns], "tenants": tenants,
             "assignees": assignees, "latest_event_id": int(latest_event_id), "now": int(time.time())}
 
@@ -382,7 +403,7 @@ def get_task(
     board: Optional[str] = Query(None),
     run_state_type: Optional[str] = Query(None, description="With run_state_name: filter runs by column 'status' or 'outcome'"),
     run_state_name: Optional[str] = Query(None, description="With run_state_type: exact value for that run column")):
-    with _board_conn(board) as (board, conn):
+    with _read_board_conn(board) as (board, conn):
         if (run_state_type is None) ^ (run_state_name is None):
             raise HTTPException(status_code=400, detail="run_state_type and run_state_name must be passed together or omitted")
         if run_state_type not in (None, "status", "outcome"):
@@ -463,7 +484,7 @@ def create_task(payload: CreateTaskBody, board: Optional[str] = Query(None)):
 
 @router.get("/tasks/{task_id}/attachments")
 def list_task_attachments(task_id: str, board: Optional[str] = Query(None)):
-    with _board_conn(board) as (board, conn):
+    with _read_board_conn(board) as (board, conn):
         _require_task(conn, task_id)
         return {"attachments": [_attachment_dict(a) for a in kanban_db.list_attachments(conn, task_id)]}
 
@@ -504,7 +525,7 @@ async def upload_task_attachment(
 
 @router.get("/attachments/{attachment_id}")
 def download_attachment(attachment_id: int, board: Optional[str] = Query(None)):
-    with _board_conn(board) as (board, conn):
+    with _read_board_conn(board) as (board, conn):
         att = kanban_db.get_attachment(conn, attachment_id)
         if att is None:
             raise HTTPException(status_code=404, detail="attachment not found")
@@ -885,7 +906,7 @@ def list_diagnostics(
     severity: Optional[str] = Query(None, description="Filter by severity: warning|error|critical")):
     """Tasks with an active diagnostic, highest severity first then most recent; also
     consumed by ``hermes kanban diagnostics`` when the dashboard runs."""
-    with _board_conn(board) as (board, conn):
+    with _read_board_conn(board) as (board, conn):
         diags_by_task = _compute_task_diagnostics(conn, task_ids=None)
         if severity and diags_by_task:
             diags_by_task = {
@@ -921,7 +942,7 @@ except ImportError:
 def list_active_workers(board: Optional[str] = _BOARD_Q):
     """Every running worker: an open ``task_runs`` row with a ``worker_pid`` whose
     task is ``running``. Returns ``{workers, count, checked_at}``."""
-    with _board_conn(board) as (board, conn):
+    with _read_board_conn(board) as (board, conn):
         rows = conn.execute(
             "SELECT r.id AS run_id, r.task_id, t.title AS task_title, t.status AS task_status, "
             "t.assignee AS task_assignee, r.profile, r.worker_pid, r.started_at, r.claim_lock, "
@@ -936,7 +957,7 @@ def list_active_workers(board: Optional[str] = _BOARD_Q):
 @router.get("/runs/{run_id}")
 def get_run_endpoint(run_id: int, board: Optional[str] = _BOARD_Q):
     """``{run: {...}}`` with the same serialisation as ``GET /tasks/{id}``; 404 if unknown."""
-    with _board_conn(board) as (board, conn):
+    with _read_board_conn(board) as (board, conn):
         return {"run": asdict(_require_run(conn, run_id))}
 
 
@@ -944,7 +965,7 @@ def get_run_endpoint(run_id: int, board: Optional[str] = _BOARD_Q):
 def inspect_run_endpoint(run_id: int, board: Optional[str] = _BOARD_Q):
     """Live psutil stats for a run's worker; ``{alive: false, reason}`` when unavailable and
     access-denied reported inline rather than as a 500."""
-    with _board_conn(board) as (board, conn):
+    with _read_board_conn(board) as (board, conn):
         r = _require_run(conn, run_id)
 
     def _dead(reason: str, **extra) -> dict:
@@ -1200,7 +1221,7 @@ def get_home_channels(task_id: Optional[str] = Query(None), board: Optional[str]
     homes = _configured_home_channels()
     subscribed_homes: set[tuple[str, str, str]] = set()
     if task_id:
-        with _board_conn(board) as (board, conn):
+        with _read_board_conn(board) as (board, conn):
             subs = kbn.list_notify_subs(conn, task_id)
         subscribed_homes = {
             (str(sub.get("platform") or ""), str(sub.get("chat_id") or ""), str(sub.get("thread_id") or "")) for sub in subs}
@@ -1240,7 +1261,7 @@ def unsubscribe_home(task_id: str, platform: str, board: Optional[str] = Query(N
 @router.get("/stats")
 def get_stats(board: Optional[str] = Query(None)):
     """Per-status + per-assignee counts + oldest-ready age (HUD and router profiles)."""
-    with _board_conn(board) as (board, conn):
+    with _read_board_conn(board) as (board, conn):
         return kanban_db.board_stats(conn)
 
 
@@ -1248,7 +1269,7 @@ def get_stats(board: Optional[str] = Query(None)):
 def get_assignees(board: Optional[str] = Query(None)):
     """Union of on-disk profiles and assignees used on the board, so a fresh
     profile appears in the picker before it has any task."""
-    with _board_conn(board) as (board, conn):
+    with _read_board_conn(board) as (board, conn):
         return {"assignees": kanban_db.known_assignees(conn)}
 
 
@@ -1256,7 +1277,7 @@ def get_assignees(board: Optional[str] = Query(None)):
 def get_task_log(task_id: str, tail: Optional[int] = Query(None, ge=1, le=2_000_000), board: Optional[str] = Query(None)):
     """Worker stdout/stderr log. ``tail`` caps the response bytes; 404 if the
     task never spawned. On-disk log rotates at 2 MiB with one ``.log.1`` kept."""
-    with _board_conn(board) as (board, conn):
+    with _read_board_conn(board) as (board, conn):
         _require_task(conn, task_id)
     content = kanban_db.read_worker_log(task_id, tail_bytes=tail, board=board)
     log_path = kanban_db.worker_log_path(task_id, board=board)
@@ -1371,7 +1392,8 @@ def _board_counts(slug: str) -> dict[str, int]:
     try:
         if not kanban_db.kanban_db_path(board=slug).exists():
             return {}
-        with closing(kbc.connect(board=slug)) as conn:
+        # Read-only: listing boards must not initialize or migrate a stub board's DB.
+        with kbc.connect_readonly_closing(board=slug) as conn:
             rows = conn.execute("SELECT status, COUNT(*) AS n FROM tasks GROUP BY status").fetchall()
             return {r["status"]: int(r["n"]) for r in rows}
     except Exception:

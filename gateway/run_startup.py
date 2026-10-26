@@ -1556,9 +1556,14 @@ class GatewayStartupMixin:
         # Auto-resume restart-interrupted sessions (ledger-answered ones were cleared above); a failed
         # auto-resume stays visible on the next user message.
         self._schedule_resume_pending_sessions()
+        # Snapshot boot resume turns before _finish_startup_restore clears them: drain-spooled API
+        # session chats are admitted only after those resumes and native recovery (resume first).
+        resume_tasks = list(getattr(self, "_startup_restore_tasks", None) or [])
         await self._finish_startup_restore()
         from gateway.run_runtime import recover_gateway_native_sessions
         await recover_gateway_native_sessions(self)
+        from gateway.platforms.api_server_drain_spool import start_draining_session_chat_replay
+        start_draining_session_chat_replay(self, resume_tasks)
         # Surface state.db init failures to messaging platforms before the user loses data.
         # See #88235.
         await self._send_session_db_warning_notifications()
@@ -1605,6 +1610,10 @@ class GatewayStartupMixin:
             self._spawn_supervised(getattr(self, method), method[1:])
         from gateway.runtime_downgrade_exit import runtime_downgrade_watcher
         self._spawn_supervised(lambda: runtime_downgrade_watcher(self), "runtime_downgrade_watcher")
+        # Fleet DMs drain through the authority-owned Bot Chat boundary; without this watcher a
+        # served profile with fleet_messages.drain_on_turn_end never drains its queue.
+        from gateway.fleet_message_bridge import fleet_drain_watcher
+        self._spawn_supervised(lambda: fleet_drain_watcher(self), "fleet_message_drain_watcher")
         # Scale-to-zero watcher ONLY when opted in, messaging is relay-only/absent, and a wakeUrl exists.
         try:
             if self._scale_to_zero_should_arm():

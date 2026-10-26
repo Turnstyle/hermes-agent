@@ -615,6 +615,13 @@ def release_event_delivery(evt: dict[str, Any], claim_id: str) -> None:
     return_completion_offer(evt)
 
 
+def defer_event_delivery(evt: dict[str, Any], claim_id: str) -> None:
+    """Hand a claimed completion back to pending when its follow-up turn was never admitted (lease busy,
+    refused): the claim's attempt is refunded, and the row stays eligible for the orphan sweep."""
+    _event_delivery(defer_completion_delivery, evt, claim_id)
+    return_completion_offer(evt)
+
+
 def return_completion_offer(evt: dict[str, Any]) -> None:
     """Hand an offered completion back to the orphan sweep after its in-memory copy was discarded while
     the durable row stays pending, e.g. a TUI session that cannot prove it owns the event drops it (every

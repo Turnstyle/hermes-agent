@@ -17,6 +17,9 @@ from typing import Any
 RUNTIME_OFFLINE = "runtime_offline"
 QUEUED_EXPIRED = "queued_expired"
 DELIVERY_TIMEOUT = "delivery_timeout"
+# The target admitted the message (it WILL run; do not resend), but this ok reply is a queue
+# notice rather than the target's answer: the sender's reply waiter must not present it as one.
+REPLY_NOT_RELAYED = "reply_not_relayed"
 AGENT_BLOCKED = "agent_blocked"
 CANCELLED = "cancelled"
 
@@ -33,7 +36,7 @@ TARGET_SCOPE_UNRESOLVED = "target_scope_unresolved"
 UNKNOWN = "unknown"
 
 ALL_REASONS = frozenset({
-    RUNTIME_OFFLINE, QUEUED_EXPIRED, DELIVERY_TIMEOUT, AGENT_BLOCKED, CANCELLED,
+    RUNTIME_OFFLINE, QUEUED_EXPIRED, DELIVERY_TIMEOUT, REPLY_NOT_RELAYED, AGENT_BLOCKED, CANCELLED,
     PROVIDER_AUTH_OR_ACCESS, PROVIDER_QUOTA_LIMIT, PROVIDER_RATE_LIMIT,
     PROVIDER_SERVER_ERROR, CONTEXT_OVERFLOW, MISSING_CONFIG, MODEL_UNAVAILABLE,
     TARGET_SCOPE_UNRESOLVED, UNKNOWN,

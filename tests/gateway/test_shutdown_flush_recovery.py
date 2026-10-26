@@ -465,7 +465,9 @@ def test_boot_recovery_runs_before_resume_turns_and_queued_inbound(monkeypatch):
         _schedule_resume_pending_sessions=lambda: order.append("resume"),
         _finish_startup_restore=finish_startup_restore,
         _send_session_db_warning_notifications=noop, _spawn_supervised=lambda *a, **k: None,
+        # The restart-spooled API session-chat replay is scheduled only after the startup restore.
+        _retain_background_task=lambda task: order.append("drain-spool replay") or task,
     )
     asyncio.run(gateway_run.GatewayRunner._start_finish_wiring(runner, 0))
 
-    assert order == ["recover", "resume", "drain inbound"]
+    assert order == ["recover", "resume", "drain inbound", "drain-spool replay"]

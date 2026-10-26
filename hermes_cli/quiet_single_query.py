@@ -189,6 +189,17 @@ def quiet_notify_linger_seconds() -> float:
     return ProcessRegistry._oneshot_completion_wait_seconds()
 
 
+def follow_up_not_admitted(result: Any) -> bool:
+    """The session owner's typed "nothing was admitted" verdict for a follow-up turn
+    (``GatewayAgent`` ``session_busy``). Any other failure may have run, so it is not a refusal."""
+    return isinstance(result, dict) and result.get("failure_reason") == "session_busy"
+
+
+def _settle_deliveries(drained, settle) -> None:
+    for event, _text, claim in drained:
+        settle(event, claim)
+
+
 def continue_quiet_notify_completions(
     session_id: str,
     run_turn: Callable[[str], Any],
@@ -203,10 +214,12 @@ def continue_quiet_notify_completions(
     loop shares ONE linger budget (default: ``terminal.oneshot_completion_wait_seconds``) — a
     process that times out is waited on no further this run: after the current round's drained
     texts run, the loop stops (the finalize linger still covers it once, bounded, via the
-    budget handshake below).
+    budget handshake below). A completion's delivery is completed only once its follow-up turn
+    was admitted; one the session owner refused (``follow_up_not_admitted``) is deferred back to
+    pending and ends the loop, so a refused wake neither loses the completion nor replaces the answer.
     """
     from tools.process_registry import process_registry
-    from tools.async_delegation import claim_event_delivery, complete_event_delivery
+    from tools.async_delegation import claim_event_delivery, complete_event_delivery, defer_event_delivery
 
     last: Any = None
     key = session_id or ""
@@ -224,19 +237,28 @@ def continue_quiet_notify_completions(
             claim = claim_event_delivery(event, "cli-quiet")
             if claim is None:
                 continue
-            complete_event_delivery(event, claim)
-            drained.append((event, text))
+            drained.append((event, text, claim))
         # Every drained event type carries formatted text (completions, watch matches,
         # async_delegation results): drain_notifications POPS owned events off the queue,
         # so filtering by type here would consume-and-silently-drop owned
         # async_delegation results. Keep everything that rendered.
-        texts = [text for _event, text in drained if text]
+        texts = [text for _event, text, _claim in drained if text]
+        try:
+            follow = run_turn("\n\n".join(texts)) if texts else None
+        except BaseException:
+            _settle_deliveries(drained, complete_event_delivery)  # maybe admitted: never re-inject
+            raise
+        if texts and follow_up_not_admitted(follow):
+            # The owner admitted nothing: refund the claims so the completions stay pending for
+            # the session owner, and keep this run's answer (a refused wake is not a reply).
+            _settle_deliveries(drained, defer_event_delivery)
+            return last
+        _settle_deliveries(drained, complete_event_delivery)
         if texts:
-            follow = run_turn("\n\n".join(texts))
             # Same admission rule as the interactive CLI turn: a wake made ONLY of automatic
             # diagnostics (early failure / watch notices) still runs, but under suppression its
             # reply never displaces the requested one-shot answer on stdout.
-            if not _diagnostic_only_wake_muted([event for event, text in drained if text]):
+            if not _diagnostic_only_wake_muted([event for event, text, _claim in drained if text]):
                 last = follow
         if wait.get("timed_out"):
             break

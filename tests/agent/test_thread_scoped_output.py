@@ -185,3 +185,42 @@ def test_silence_survives_redirect_restoring_an_older_proxy(monkeypatch):
     finally:
         release.set()
         sys.stdout, sys.stderr = original_stdout, original_stderr
+
+
+def test_safe_stdio_and_thread_proxy_do_not_grow_unbounded_chain(monkeypatch):
+    """Alternating _install_safe_stdio() and thread_scoped_silence() must stay bounded.
+
+    Regression: each agent init wrapped the routing proxy in a _SafeWriter and each
+    execute_code call wrapped that writer in a new proxy, growing the chain by two
+    layers per round until attribute lookups raised RecursionError (delegate_task in
+    a long-lived Desktop backend).
+    """
+    from agent.process_bootstrap import _install_safe_stdio
+
+    base_out = io.StringIO()
+    monkeypatch.setattr(sys, "stdout", base_out)
+    monkeypatch.setattr(sys, "stderr", io.StringIO())
+    monkeypatch.setattr(thread_output, "_installed", {})
+    monkeypatch.setattr(thread_output, "_routing_states", {})
+
+    def depth(stream):
+        d = 0
+        while True:
+            name = type(stream).__name__
+            if name == "_SafeWriter":
+                stream = object.__getattribute__(stream, "_inner")
+            elif name == "_ThreadRoutingStream":
+                stream = stream.__dict__["_passthrough"]
+            else:
+                return d
+            d += 1
+
+    for _ in range(1500):
+        _install_safe_stdio()
+        with thread_scoped_silence():
+            print("silenced")
+    assert depth(sys.stdout) <= 2
+    _ = sys.stdout.encoding  # attribute delegation must not recurse
+    print("visible")
+    assert "visible" in base_out.getvalue()
+    assert "silenced" not in base_out.getvalue()

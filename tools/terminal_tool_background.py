@@ -206,10 +206,11 @@ def spawn_background_process(
             logger.warning("background proc %s: %s", proc_session.id, conflict_note)
             result_data["watch_patterns_ignored"] = conflict_note
         if notify_on_complete:
-            proc_session.notify_on_complete = True
-            result_data["notify_on_complete"] = True
+            # Sized before the flag flips: an exit racing this block publishes with the flag set.
             if completion_output_chars:
                 proc_session.completion_output_chars = int(completion_output_chars)
+            proc_session.notify_on_complete = True
+            result_data["notify_on_complete"] = True
             if proc_session.watcher_platform:
                 _register_completion_watcher(process_registry, proc_session, session_key)
             from agent.delegation_context import is_delegated_child_context

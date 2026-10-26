@@ -610,7 +610,13 @@ class GatewayTurnPersistenceMixin:
         turn once, and build the sanitized user-facing error reply."""
         # Retain Slack thread/workspace routing so a failed turn cannot leave its status visible.
         await self._hmwa_stop_typing_for_turn(event, source)
-        logger.exception("Agent error in session %s", session_key)
+        from agent.fallback_chain_refresh import FallbackRouteUnavailableError
+        route_refused = isinstance(e, FallbackRouteUnavailableError)
+        if route_refused:
+            # Refused before anything was staged or sent: no unknown tool effects, nothing to trace.
+            logger.info("Pre-send fallback route refused in session %s", session_key)
+        else:
+            logger.exception("Agent error in session %s", session_key)
         status_code = getattr(e, "status_code", None)
         if status_code in {400, 500} and len(prepared.history) > 50:
             # Context overflow / payload too large: a deterministic rejection (#107567), and the same
@@ -628,10 +634,15 @@ class GatewayTurnPersistenceMixin:
                     await self.async_session_store.append_to_transcript(
                         session_entry.session_id, self._hmwa_user_transcript_entry(event, prepared, time.time()),
                     )
-                # Tool effects are unknown after an exception.
-                await self._hmwa_close_failed_turn(session_entry.session_id, PARTIAL_FAILED_TURN_NOTICE)
+                # Tool effects are unknown after an exception; a pre-send refusal ran none, and its
+                # user row stays so the unsent text can be resent.
+                await self._hmwa_close_failed_turn(
+                    session_entry.session_id, e.user_message if route_refused else PARTIAL_FAILED_TURN_NOTICE)
         except Exception:
             logger.debug("Failed to persist inbound user message after agent exception", exc_info=True)
+        if route_refused:
+            from gateway.session_results import record_unexecuted_failure
+            return record_unexecuted_failure(e.user_message)
         # Never expose raw exception types/messages to end users (info-leakage risk).
         _hint_key = self._STATUS_HINTS.get(status_code)
         status_hint = t(_hint_key) if _hint_key and status_code != 401 else ""

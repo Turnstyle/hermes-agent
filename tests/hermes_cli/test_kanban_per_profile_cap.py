@@ -22,6 +22,9 @@ def isolated_kanban_home_with_profiles(monkeypatch):
         os.makedirs(os.path.join(test_home, "profiles", prof), exist_ok=True)
         with open(os.path.join(test_home, "profiles", prof, "config.yaml"), "w") as fh:
             fh.write("{}\n")  # identity marker: a bare dir is not a profile
+    # Fleet dispatch is opt-in per profile: name every assignee this suite spawns.
+    with open(os.path.join(test_home, "config.yaml"), "w") as fh:
+        fh.write("kanban:\n  dispatch_profiles:\n    - alpha\n    - beta\n    - default\n")
     monkeypatch.setenv("HERMES_HOME", test_home)
     for mod in list(sys.modules.keys()):
         if mod.startswith("hermes_cli") or mod.startswith("hermes_state") or mod == "hermes_constants":

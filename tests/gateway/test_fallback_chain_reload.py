@@ -48,28 +48,50 @@ def test_refresh_fallback_model_rereads_config(tmp_path, monkeypatch):
     assert runner._fallback_model == updated
 
 
-def test_apply_fallback_chain_skips_while_cooldown_holds_fallback():
-    """Do not clobber a live fallback activation during its cooldown window."""
+def test_apply_fallback_chain_keeps_live_activation_during_cooldown():
+    """A cooldown-time edit keeps a still-configured live fallback and its cooldown, and re-points
+    the walk past it, instead of skipping the edit entirely."""
     from gateway.run import GatewayRunner
 
-    live = [{"provider": "deepseek", "model": "deepseek-v4-flash"}]
+    live = {"provider": "deepseek", "model": "deepseek-v4-flash"}
+    deadline = time.monotonic() + 30
     agent = SimpleNamespace(
-        _fallback_chain=live,
-        _fallback_model=live[0],
-        _fallback_index=1,
-        _fallback_activated=True,
-        _rate_limited_until=time.monotonic() + 30,
+        provider="deepseek", model="deepseek-v4-flash", base_url="https://api.deepseek.com/v1",
+        _fallback_chain=[live], _fallback_model=live, _fallback_index=1,
+        _fallback_activated=True, _rate_limited_until=deadline,
     )
-    GatewayRunner._apply_fallback_chain_to_agent(
-        agent,
-        [{"provider": "openrouter", "model": "anthropic/claude-sonnet-4.6"}],
-    )
+    added = {"provider": "openrouter", "model": "anthropic/claude-sonnet-4.6"}
+    GatewayRunner._apply_fallback_chain_to_agent(agent, [added, live])
 
-    assert agent._fallback_chain == live
-    assert agent._fallback_index == 1
+    assert agent._fallback_chain == [added, live]
+    assert agent._fallback_index == 2
     assert agent._fallback_activated is True
+    assert agent._rate_limited_until == deadline
 
 
+def test_apply_fallback_chain_refuses_removed_live_route_during_cooldown():
+    """A removed live fallback is never kept just because the primary is cooling down."""
+    import pytest
+
+    from agent.fallback_chain_refresh import FallbackRouteUnavailableError
+    from gateway.run import GatewayRunner
+
+    live = {"provider": "deepseek", "model": "deepseek-v4-flash"}
+    deadline = time.monotonic() + 30
+    calls = []
+    agent = SimpleNamespace(
+        provider="deepseek", model="deepseek-v4-flash", base_url="https://api.deepseek.com/v1",
+        _fallback_chain=[live], _fallback_model=live, _fallback_index=1,
+        _fallback_activated=True, _rate_limited_until=deadline,
+        _restore_primary_runtime=lambda: calls.append("restore") or False,
+        _try_activate_fallback=lambda: calls.append("walk") or False,
+    )
+    with pytest.raises(FallbackRouteUnavailableError):
+        GatewayRunner._apply_fallback_chain_to_agent(agent, None)
+
+    assert calls == ["restore", "walk"]
+    assert agent._fallback_chain == []
+    assert agent._rate_limited_until == deadline
 
 
 def test_load_fallback_model_static_unchanged_contract(tmp_path, monkeypatch):

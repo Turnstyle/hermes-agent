@@ -289,6 +289,11 @@ def _claim_launch_home():
 
 
 def main():
+    # A Desktop-owned backend launched from a one-shot/cron/supervised shell must not run its
+    # sessions in that mode. Only Desktop-owned processes are scrubbed, and the delegated-child
+    # board fence is never a session marker, so it survives.
+    from hermes_cli.process_identity import is_desktop_owned_backend, strip_inherited_session_markers
+    strip_inherited_session_markers(desktop_owned=is_desktop_owned_backend())
     home = _claim_launch_home()
     if home is None:
         _log_exit(f"refused: {server._launch_home()} is owned by a running gateway; attach to it instead")

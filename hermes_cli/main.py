@@ -810,7 +810,7 @@ from hermes_cli.main_platform_setup import (
     cmd_whatsapp,
     cmd_whatsapp_cloud,
 )
-from hermes_cli.process_identity import is_desktop_owned_backend as _is_desktop_owned_backend
+from hermes_cli.process_identity import is_desktop_owned_backend as _is_desktop_owned_backend, strip_inherited_session_markers as _strip_inherited_session_markers
 from hermes_cli.main_dashboard import (
     _attach_to_host_backend,
     _finalize_update_output,
@@ -2527,21 +2527,19 @@ def _dashboard_validate_serve_args(args, headless_backend, token_file):
 def _dashboard_sanitize_desktop_env(headless_backend) -> None:
     """Strip Desktop-inherited env that hijacks a standalone launch.
 
-    Desktop Electron spawns its backend with HERMES_DESKTOP=1 plus
-    HERMES_WEB_DIST=<packaged app.asar[/unpacked]/dist> (and often
-    HERMES_SERVE_HEADLESS=1). A shell inheriting those then running
-    `hermes dashboard` would serve the desktop renderer ("Desktop IPC bridge
-    is unavailable", #52945) or disable the SPA. Only Electron-packaged
-    WEB_DIST contamination is stripped from browser dashboards — caller-managed
-    overrides (dev / custom builds) must still work, while headless `serve`
-    keeps the packaged path used by the Desktop backend. Headless `serve`
-    re-sets HERMES_SERVE_HEADLESS itself.
+    Desktop Electron spawns its backend with HERMES_DESKTOP=1 plus HERMES_WEB_DIST=<packaged
+    app.asar[/unpacked]/dist> (and often HERMES_SERVE_HEADLESS=1). A shell inheriting those then
+    running `hermes dashboard` would serve the desktop renderer ("Desktop IPC bridge is
+    unavailable", #52945) or disable the SPA. Only Electron-packaged WEB_DIST contamination is
+    stripped from browser dashboards — caller-managed overrides (dev / custom builds) must still
+    work, while headless `serve` keeps the packaged path used by the Desktop backend. Headless
+    `serve` re-sets HERMES_SERVE_HEADLESS itself.
 
-    The Desktop's legacy fallback spawn (`dashboard --no-open`, taken when the
-    `serve --help` probe times out on a cold host) is not headless yet must keep
-    its packaged dist: it is told apart by the per-spawn
-    HERMES_DASHBOARD_SESSION_TOKEN, which the terminal pane never receives and
-    the terminal tool's env policy strips from agent children.
+    The Desktop's legacy fallback spawn (`dashboard --no-open`, taken when the `serve --help` probe
+    times out on a cold host) is not headless yet must keep its packaged dist: it is told apart by
+    the per-spawn HERMES_DASHBOARD_SESSION_TOKEN, which the terminal pane never receives and the
+    terminal tool's env policy strips from agent children. That owned backend also drops one-shot/
+    cron/supervisor markers its launcher shell exported (the delegated-child fence stays).
     """
     desktop_owned_child = _is_desktop_owned_backend()
     if (
@@ -2552,6 +2550,7 @@ def _dashboard_sanitize_desktop_env(headless_backend) -> None:
         os.environ.pop("HERMES_WEB_DIST", None)
     if not headless_backend:
         os.environ.pop("HERMES_SERVE_HEADLESS", None)
+    _strip_inherited_session_markers(desktop_owned=desktop_owned_child)
 
 
 def _require_dashboard_web_deps() -> None:

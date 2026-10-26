@@ -348,6 +348,22 @@ def worker_exit_code(path, params):
     return worker_result(path, params).get('exit_code', 1)
 
 
+# ``hermes_cli.goals.run_kanban_goal_loop``'s block reason when the card's turn budget runs out.
+_TURN_BUDGET_SPENT = 'Goal-mode worker exhausted its turn budget'
+
+
+def _hand_back_budget(context, reason, result):
+    """Neutral hand-back (``kanban_budget_handback``) under this frame's exact run/claim, vouched
+    for by the owner's ``worker_bound`` receipt for this interpreter; False leaves the block path."""
+    from hermes_cli.kanban_budget_handback import handback_budget
+    from hermes_cli.kanban_db_connect import connect_closing
+    summary = str(result.get('final_response') or '') if isinstance(result, dict) else ''
+    with connect_closing(Path(context['db'])) as conn:
+        return handback_budget(conn, context['task_id'], expected_run_id=context['run_id'],
+                               claim_lock=context['claim_lock'], reason=reason, summary=summary,
+                               owner_check=lambda c: _bound_worker_matches(c, context))
+
+
 def _run_task_turns(agent, frame, history, context):
     from agent.skill_commands import build_preloaded_skills_prompt
     skills, loaded, missing = build_preloaded_skills_prompt(context['skills'], task_id=agent.session_id)
@@ -378,6 +394,9 @@ def _run_task_turns(agent, frame, history, context):
         with connect_closing() as conn:
             return kb.goal_run_status(conn, context['task_id'], context['run_id'])
     def block(reason):
+        # A spent turn budget is a slice, not a verdict: the bound worker hands its run back.
+        if reason.startswith(_TURN_BUDGET_SPENT) and _hand_back_budget(context, reason, result):
+            return
         with connect_closing() as conn:
             kb.block_task(conn, context['task_id'], reason=reason, expected_run_id=context['run_id'])
     def turn(prompt):

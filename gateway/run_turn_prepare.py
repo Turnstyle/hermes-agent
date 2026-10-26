@@ -259,7 +259,8 @@ class GatewayTurnPrepareMixin:
         if not model:
             return
         runtime = {k: getattr(agent, k, None) for k in ("provider", "base_url", "api_mode")}
-        runtime["fallback_active"] = bool(getattr(agent, "_fallback_activated", False))
+        runtime["fallback_active"] = bool(
+            getattr(agent, "_fallback_activated", False) or getattr(agent, "_pre_agent_fallback_active", False))
         runtime = {k: v for k, v in runtime.items() if v not in (None, "")}
         try:
             db = self._session_db._db

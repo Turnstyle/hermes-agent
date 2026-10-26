@@ -27,6 +27,9 @@ def _init_fallback_chain(agent, fallback_model):
 
     # Ordered backups tried when the primary is exhausted (legacy single-dict or list).
     agent._fallback_chain = _fallback_entries(fallback_model)
+    # An owner's own chain (scoped_fallback_chain markers: delegated child, cron job) is never
+    # replaced by a live profile refresh; the normalized list above drops the marker.
+    agent._fallback_chain_pinned = bool(getattr(fallback_model, "_pinned", False))
     agent._fallback_index = 0
     agent._fallback_activated = getattr(agent, "_fallback_activated", False)
     # Legacy attribute kept for backward compat (tests, external callers)

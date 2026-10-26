@@ -219,6 +219,11 @@
     const resolverRef = React.useRef(null);
 
     const request = React.useCallback(function (req) {
+      if (resolverRef.current) {
+        const prevResolve = resolverRef.current;
+        resolverRef.current = null;
+        prevResolve({ confirmed: false });
+      }
       return new Promise(function (resolve) {
         resolverRef.current = resolve;
         setDialogState(req);
@@ -258,7 +263,7 @@
       };
     }, [dialogState, t, onConfirm, onCancel]);
 
-    return { dialogState: dialogState, dialogProps: dialogProps, request: request };
+    return { dialogState: dialogState, dialogProps: dialogProps, request: request, cancel: onCancel };
   }
 
   const API = "/api/plugins/kanban";
@@ -275,29 +280,43 @@
   // can inspect any board without shifting the CLI's active board out
   // from under a terminal they left open.
   const LS_BOARD_KEY = "hermes.kanban.selectedBoard";
+  const LS_BOARD_BASE_KEY = "hermes.kanban.selectedBoardBase";
 
-  function readSelectedBoard() {
+  function readSelectedBoardBase() {
     try {
-      const v = window.localStorage.getItem(LS_BOARD_KEY);
+      const v = window.localStorage.getItem(LS_BOARD_BASE_KEY);
       return (v || "").trim() || null;
     } catch (_e) { return null; }
   }
 
-  function writeSelectedBoard(slug) {
+  function readSelectedBoard() {
     try {
-      // Persist the user's dashboard-side board pin even for "default".
-      // Previously this stripped "default" to keep localStorage empty,
-      // but the fetch layer read that absence as "no opinion" and fell
-      // through to the server-side ``current`` file — which the board
-      // switcher also writes. Result: selecting the default tab after
-      // creating a new board with "switch" checked showed the new
-      // board's (wrong) data because the URL omitted ``?board=`` and
-      // the backend happily returned whichever board was "current".
-      // Persisting every selection keeps the dashboard's board opinion
-      // independent of the CLI's active board, which was the original
-      // design intent. Regression: #20879.
-      if (slug) window.localStorage.setItem(LS_BOARD_KEY, slug);
-      else window.localStorage.removeItem(LS_BOARD_KEY);
+      const v = (window.localStorage.getItem(LS_BOARD_KEY) || "").trim() || null;
+      // Older fallback paths wrote a bare "default" without recording the
+      // server-current board it overrode, trapping browsers on "default" after
+      // the active board switched to a named board (e.g. "fleet").
+      if (v === "default" && !readSelectedBoardBase()) {
+        window.localStorage.removeItem(LS_BOARD_KEY);
+        return null;
+      }
+      return v;
+    } catch (_e) { return null; }
+  }
+
+  function writeSelectedBoard(slug, baseSlug) {
+    try {
+      // Persist explicit user board overrides (including "default" when the
+      // server's active board is another slug — see #20879) paired with the
+      // server's current board at the time of selection, and clear storage
+      // when following the server's active board.
+      if (slug) {
+        window.localStorage.setItem(LS_BOARD_KEY, slug);
+        if (baseSlug) window.localStorage.setItem(LS_BOARD_BASE_KEY, baseSlug);
+        else window.localStorage.removeItem(LS_BOARD_BASE_KEY);
+      } else {
+        window.localStorage.removeItem(LS_BOARD_KEY);
+        window.localStorage.removeItem(LS_BOARD_BASE_KEY);
+      }
     } catch (_e) { /* ignore quota / private mode */ }
   }
 
@@ -662,17 +681,124 @@
     // own task's counter so it reloads itself on live events instead of
     // showing stale data.
     const [taskEventTick, setTaskEventTick] = useState({});
+    const [wsReconnecting, setWsReconnecting] = useState(false);
 
     const cursorRef = useRef(0);
+    const serverCurrentRef = useRef(null);
     const reloadTimerRef = useRef(null);
     const wsRef = useRef(null);
     const wsBackoffRef = useRef(1000);
     const wsClosedRef = useRef(false);
+    const transportRef = useRef(null);
+    if (!transportRef.current) {
+      transportRef.current = {
+        epoch: 0,
+        boardRunId: 0,
+        reqSeq: 0,
+        board: board,
+        initialResolvedBoard: null,
+        selectedTaskId: selectedTaskId,
+        byBoard: Object.create(null),
+        cursorBound: false,
+        hasBoardData: false,
+        unmounted: false,
+        loadBoard: null,
+        scheduleReload: null,
+        sameBoard: function (reqBoard) {
+          return (
+            reqBoard === this.board ||
+            (reqBoard === null && this.board !== null && this.board === this.initialResolvedBoard)
+          );
+        },
+        getBoardState: function (slug) {
+          const key =
+            slug == null
+              ? (this.initialResolvedBoard || "__initial__")
+              : (slug || "default");
+          let st = this.byBoard[key];
+          if (!st) {
+            st = {
+              cursor: 0,
+              snapshotCursor: 0,
+              seenIds: new Set(),
+              latestReqId: 0,
+              inFlight: 0,
+              needsReload: false,
+            };
+            this.byBoard[key] = st;
+          }
+          return st;
+        },
+        resetBoardState: function (slug) {
+          if (!slug) return;
+          delete this.byBoard[slug];
+        },
+        clearReloadTimer: function () {
+          if (reloadTimerRef.current) {
+            clearTimeout(reloadTimerRef.current);
+            reloadTimerRef.current = null;
+          }
+        },
+      };
+    }
+    const transport = transportRef.current;
+    transport.selectedTaskId = selectedTaskId;
+    if (!transport.cursorBound) {
+      transport.cursorBound = true;
+      Object.defineProperty(cursorRef, "current", {
+        configurable: true,
+        get: function () {
+          return transport.getBoardState(transport.board).cursor;
+        },
+        set: function (val) {
+          if (val === 0) {
+            transport.epoch += 1;
+            transport.clearReloadTimer();
+            wsClosedRef.current = true;
+            try { wsRef.current && wsRef.current.close(); } catch (_e) { /* noop */ }
+            return;
+          }
+          const st = transport.getBoardState(transport.board);
+          const n = Number(val) || 0;
+          if (n > st.cursor) st.cursor = n;
+        },
+      });
+    }
+    if (transport.board !== board) {
+      if (
+        transport.board === null &&
+        board !== null &&
+        ((boardData && boardData.board === board) || (!boardData && board === "default"))
+      ) {
+        if (transport.byBoard["__initial__"] && !transport.byBoard[board]) {
+          transport.byBoard[board] = transport.byBoard["__initial__"];
+        }
+        delete transport.byBoard["__initial__"];
+        transport.initialResolvedBoard = board;
+        transport.board = board;
+      } else {
+        delete transport.byBoard["__initial__"];
+        transport.board = board;
+        transport.initialResolvedBoard = null;
+        transport.epoch += 1;
+        transport.boardRunId += 1;
+        transport.clearReloadTimer();
+        if (boardData && boardData.board && board && boardData.board !== board) {
+          setBoardData(null);
+          if (!loading) setLoading(true);
+        }
+        if (error) setError(null);
+        if (wsReconnecting) setWsReconnecting(false);
+        if (kanbanDialogs.dialogState) kanbanDialogs.cancel();
+      }
+    }
 
     // --- load config once ---------------------------------------------------
     useEffect(function () {
-      SDK.fetchJSON(withBoard(`${API}/config`, board))
+      transport.unmounted = false;
+      SDK.fetchJSON(withBoard(`${API}/config`, transport.board))
         .then(function (c) {
+          if (transport.unmounted) return;
           setConfig(c);
           if (!configApplied) {
             if (c.default_tenant) setTenantFilter(c.default_tenant);
@@ -681,75 +807,259 @@
             setConfigApplied(true);
           }
         })
-        .catch(function () { setConfig({ render_markdown: true }); });
+        .catch(function () {
+          if (!transport.unmounted) setConfig({ render_markdown: true });
+        });
+      return function () {
+        transport.unmounted = true;
+        transport.epoch += 1;
+        transport.clearReloadTimer();
+      };
     }, []);  // eslint-disable-line react-hooks/exhaustive-deps
 
     // --- fetch full board ---------------------------------------------------
     const loadBoard = useCallback(() => {
+      const reqEpoch = transport.epoch;
+      const reqBoard = transport.board;
+      if (transport.unmounted || !transport.sameBoard(reqBoard)) return Promise.resolve();
+      const st = transport.getBoardState(reqBoard);
+      const reqId = ++transport.reqSeq;
+      st.latestReqId = reqId;
+      st.inFlight += 1;
+      st.needsReload = false;
       const qs = new URLSearchParams();
       if (tenantFilter) qs.set("tenant", tenantFilter);
       if (includeArchived) qs.set("include_archived", "true");
       const url = qs.toString() ? `${API}/board?${qs}` : `${API}/board`;
-      return SDK.fetchJSON(withBoard(url, board))
+      return SDK.fetchJSON(withBoard(url, reqBoard))
         .then(function (data) {
+          if (transport.unmounted || reqEpoch !== transport.epoch || !transport.sameBoard(reqBoard) || reqId !== st.latestReqId) {
+            return;
+          }
+          if (!data || !Array.isArray(data.columns)) {
+            throw new Error(
+              (data && (data.detail || data.error || data.message)) || "Invalid board response"
+            );
+          }
+          if (reqBoard === null && data.board && transport.board && data.board !== transport.board) {
+            transport.initialResolvedBoard = null;
+            transport.loadBoard();
+            return;
+          }
+          const prevSnapshotCursor = st.snapshotCursor;
+          const prevCursor = st.cursor;
+          const snapCursor = Number(data.latest_event_id) || 0;
+          if (snapCursor > st.snapshotCursor) st.snapshotCursor = snapCursor;
+          if (snapCursor > st.cursor) st.cursor = snapCursor;
+          if (st.snapshotCursor > 0 && st.seenIds.size > 0) {
+            st.seenIds.forEach(function (seenId) {
+              if (seenId <= st.snapshotCursor) st.seenIds.delete(seenId);
+            });
+          }
+          if (snapCursor >= st.cursor && !st.needsReload) {
+            transport.clearReloadTimer();
+          }
+          const presentIds = new Set();
+          for (const col of data.columns) {
+            for (const tk of (col && col.tasks) || []) {
+              if (tk && tk.id) presentIds.add(tk.id);
+            }
+          }
+          setSelectedIds(function (prev) {
+            if (!prev || prev.size === 0) return prev;
+            let changed = false;
+            const next = new Set();
+            prev.forEach(function (id) {
+              if (presentIds.has(id)) next.add(id);
+              else changed = true;
+            });
+            return changed ? next : prev;
+          });
+          setFailedIds(function (prev) {
+            if (!prev || prev.size === 0) return prev;
+            let changed = false;
+            const next = new Set();
+            prev.forEach(function (id) {
+              if (presentIds.has(id)) next.add(id);
+              else changed = true;
+            });
+            return changed ? next : prev;
+          });
+          setLastSelectedId(function (prev) {
+            return prev && !presentIds.has(prev) ? null : prev;
+          });
+          setDraggingTaskId(function (prev) {
+            return prev && !presentIds.has(prev) ? null : prev;
+          });
+          const openTaskId = transport.selectedTaskId;
+          if (openTaskId && prevSnapshotCursor > 0 && snapCursor > prevCursor) {
+            setTaskEventTick(function (prev) {
+              const next = Object.assign({}, prev);
+              next[openTaskId] = (next[openTaskId] || 0) + 1;
+              return next;
+            });
+          }
           setBoardData(data);
-          cursorRef.current = data.latest_event_id || 0;
+          if (!transport.board && data && data.board) setBoard(data.board);
           setError(null);
         })
         .catch(function (err) {
-          setError(String(err && err.message ? err.message : err));
+          if (transport.unmounted || reqEpoch !== transport.epoch || !transport.sameBoard(reqBoard) || reqId !== st.latestReqId) {
+            return;
+          }
+          const msg = String(err && err.message ? err.message : err);
+          if (transport.board && ((err && err.status === 404) || /^404\b/.test(msg))) {
+            const staleBoard = transport.board;
+            const fallbackBoard =
+              serverCurrentRef.current && serverCurrentRef.current !== staleBoard
+                ? serverCurrentRef.current
+                : null;
+            transport.resetBoardState(staleBoard);
+            writeSelectedBoard(null);
+            setBoardData(null);
+            cursorRef.current = 0;
+            setLoading(true);
+            setError(null);
+            setWsReconnecting(false);
+            setSelectedTaskId(null);
+            setDraggingTaskId(null);
+            setSelectedIds(new Set());
+            setLastSelectedId(null);
+            setFailedIds(new Set());
+            if (kanbanDialogs.dialogState) kanbanDialogs.cancel();
+            setBoard(fallbackBoard);
+            return;
+          }
+          setError(msg);
         })
-        .finally(function () { setLoading(false); });
-    }, [tenantFilter, includeArchived, board]);
+        .finally(function () {
+          if (st.inFlight > 0) st.inFlight -= 1;
+          if (transport.unmounted || reqEpoch !== transport.epoch || !transport.sameBoard(reqBoard)) {
+            return;
+          }
+          if (reqId === st.latestReqId) {
+            setLoading(false);
+          }
+          if (st.needsReload && st.inFlight === 0 && !reloadTimerRef.current) {
+            st.needsReload = false;
+            transport.scheduleReload();
+          }
+        });
+    }, [tenantFilter, includeArchived, transport.boardRunId]);
 
     // --- load list of boards for the switcher ------------------------------
     const loadBoardList = useCallback(function () {
-      return SDK.fetchJSON(withBoard(`${API}/boards`, board))
+      const reqBoard = transport.board;
+      return SDK.fetchJSON(withBoard(`${API}/boards`, reqBoard))
         .then(function (data) {
+          if (transport.unmounted || !transport.sameBoard(reqBoard)) return;
           const boards = (data && data.boards) || [];
+          const presentSlugs = new Set(
+            boards.map(function (b) { return b && b.slug; }).filter(Boolean)
+          );
+          Object.keys(transport.byBoard).forEach(function (k) {
+            if (k !== "__initial__" && k !== "default" && !presentSlugs.has(k)) {
+              delete transport.byBoard[k];
+            }
+          });
+          const serverCurrent = (data && data.current) || "default";
+          serverCurrentRef.current = serverCurrent;
           const storedBoard = readSelectedBoard();
+          const currentBoard = transport.board;
           setBoardList(boards);
-          if (!storedBoard && !board && data && data.current) {
-            setBoard(data.current);
+          if (!storedBoard) {
+            if (currentBoard !== serverCurrent) setBoard(serverCurrent);
             return;
           }
           // If the stored slug isn't in the list any longer (board was
           // deleted in the CLI while dashboard was open), fall back to
-          // default so the UI doesn't hang on a 404.
-          if (board && board !== "default" && !boards.find(function (b) { return b.slug === board; })) {
-            setBoard("default");
-            writeSelectedBoard("default");
+          // the server's active board so the UI doesn't hang on a 404 or
+          // pin a stale "default" override.
+          const target = currentBoard || storedBoard;
+          if (target && !presentSlugs.has(target)) {
+            transport.resetBoardState(target);
+            setBoardData(null);
+            cursorRef.current = 0;
+            setLoading(true);
+            setError(null);
+            setWsReconnecting(false);
+            setSelectedTaskId(null);
+            setDraggingTaskId(null);
+            setSelectedIds(new Set());
+            setLastSelectedId(null);
+            setFailedIds(new Set());
+            setSearch("");
+            setTenantFilter("");
+            setAssigneeFilter("");
+            setIncludeArchived(false);
+            if (kanbanDialogs.dialogState) kanbanDialogs.cancel();
+            writeSelectedBoard(null);
+            setBoard(serverCurrent);
+          } else if (!currentBoard && storedBoard) {
+            setBoard(storedBoard);
           }
         })
         .catch(function () { /* non-fatal */ });
-    }, [board]);
+    }, [transport.boardRunId]);
 
     useEffect(function () { loadBoardList(); }, [loadBoardList]);
 
     const scheduleReload = useCallback(function () {
-      if (reloadTimerRef.current) return;
+      if (transport.unmounted || reloadTimerRef.current) return;
+      const timerEpoch = transport.epoch;
+      const timerBoard = transport.board;
       reloadTimerRef.current = setTimeout(function () {
         reloadTimerRef.current = null;
-        loadBoard();
+        if (transport.unmounted || timerEpoch !== transport.epoch || !transport.sameBoard(timerBoard)) return;
+        transport.loadBoard();
       }, 250);
-    }, [loadBoard]);
+    }, [transport.boardRunId]);
+    transport.loadBoard = loadBoard;
+    transport.scheduleReload = scheduleReload;
+    transport.hasBoardData = !!boardData;
 
     useEffect(function () {
       loadBoard();
       return function () {
-        if (reloadTimerRef.current) {
-          clearTimeout(reloadTimerRef.current);
-          reloadTimerRef.current = null;
-        }
+        transport.clearReloadTimer();
       };
     }, [loadBoard]);
 
     // --- WebSocket ---------------------------------------------------------
     useEffect(function () {
-      if (!boardData) return undefined;
+      if (!boardData && loading) return undefined;
+      let closed = false;
+      let activeWs = null;
+      let reconnectTimer = null;
+      let hadDisconnect = false;
+      const wsEpoch = transport.epoch;
+      const wsBoard = transport.board;
+      const st = transport.getBoardState(wsBoard);
       wsClosedRef.current = false;
+      wsBackoffRef.current = 1000;
+
+      function clearReconnect() {
+        if (reconnectTimer) {
+          clearTimeout(reconnectTimer);
+          reconnectTimer = null;
+        }
+      }
+
+      function scheduleReconnect() {
+        if (closed || transport.unmounted || wsEpoch !== transport.epoch || !transport.sameBoard(wsBoard)) return;
+        hadDisconnect = true;
+        setWsReconnecting(true);
+        clearReconnect();
+        const delay = Math.min(wsBackoffRef.current, 30000);
+        wsBackoffRef.current = Math.min(wsBackoffRef.current * 2, 30000);
+        reconnectTimer = setTimeout(function () {
+          reconnectTimer = null;
+          openWs();
+        }, delay);
+      }
+
       function openWs() {
-        if (wsClosedRef.current) return;
+        if (closed || transport.unmounted || wsEpoch !== transport.epoch || !transport.sameBoard(wsBoard)) return;
         // Build the WS URL via the host SDK so the correct auth param is used
         // in BOTH modes: single-use ?ticket= in gated OAuth mode, ?token= in
         // loopback. Reading window.__HERMES_SESSION_TOKEN__ directly (the old
@@ -757,62 +1067,114 @@
         // also applies the dashboard base-path prefix for reverse-proxied
         // deployments, which the old inline URL did not. It's async (gated
         // mode mints a fresh ticket per connect), so resolve then open.
-        const wsParams = { since: String(cursorRef.current || 0) };
+        const wsParams = { since: String(st.cursor || 0) };
         // Pin the WS stream to the currently-selected board so events
         // from other boards don't bleed in. Includes "default" so the
         // dashboard's own board pin always wins over the server-side
         // ``current`` file — same rationale as ``withBoard()`` above.
         // Regression: #20879.
-        if (board) wsParams.board = board;
+        const effectiveWsBoard = transport.board || wsBoard;
+        if (effectiveWsBoard) wsParams.board = effectiveWsBoard;
         SDK.buildWsUrl(`${API}/events`, wsParams).then(function (url) {
-          if (wsClosedRef.current) return;
+          if (closed || transport.unmounted || wsEpoch !== transport.epoch || !transport.sameBoard(wsBoard)) return;
           let ws;
-          try { ws = new WebSocket(url); } catch (_e) { return; }
+          try { ws = new WebSocket(url); } catch (_e) {
+            scheduleReconnect();
+            return;
+          }
+          activeWs = ws;
           wsRef.current = ws;
-          ws.onopen = function () { wsBackoffRef.current = 1000; };
+          ws.onopen = function () {
+            if (closed || transport.unmounted || activeWs !== ws || wsEpoch !== transport.epoch || !transport.sameBoard(wsBoard)) return;
+            wsBackoffRef.current = 1000;
+            setWsReconnecting(false);
+            if (hadDisconnect || !transport.hasBoardData) {
+              hadDisconnect = false;
+              transport.loadBoard();
+            }
+          };
           ws.onmessage = function (ev) {
+            if (closed || transport.unmounted || activeWs !== ws || wsEpoch !== transport.epoch || !transport.sameBoard(wsBoard)) return;
             try {
               const msg = JSON.parse(ev.data);
-              if (msg && Array.isArray(msg.events) && msg.events.length > 0) {
-                cursorRef.current = msg.cursor || cursorRef.current;
+              if (!msg || typeof msg !== "object") return;
+              const events = Array.isArray(msg.events) ? msg.events : [];
+              const frameCursor = Number(msg.cursor) || 0;
+              const changedTasks = [];
+              let maxEventId = 0;
+              for (const e of events) {
+                if (!e || typeof e !== "object" || !e.task_id) continue;
+                const eid = Number(e.id) || 0;
+                if (eid > 0) {
+                  if (eid <= st.snapshotCursor || st.seenIds.has(eid)) continue;
+                  st.seenIds.add(eid);
+                  if (eid > maxEventId) maxEventId = eid;
+                }
+                if (changedTasks.indexOf(e.task_id) === -1) {
+                  changedTasks.push(e.task_id);
+                }
+              }
+              const nextCursor = Math.max(st.cursor, maxEventId, frameCursor);
+              const cursorAdvancedBeyondSnapshot =
+                frameCursor > st.cursor && frameCursor > st.snapshotCursor;
+              if (changedTasks.length > 0) {
+                st.cursor = nextCursor;
                 // Stamp per-task signal so the TaskDrawer can reload itself.
                 setTaskEventTick(function (prev) {
                   const next = Object.assign({}, prev);
-                  for (const e of msg.events) {
-                    if (e && e.task_id) next[e.task_id] = (next[e.task_id] || 0) + 1;
+                  for (const taskId of changedTasks) {
+                    next[taskId] = (next[taskId] || 0) + 1;
                   }
                   return next;
                 });
-                scheduleReload();
+                if (st.inFlight > 0) st.needsReload = true;
+                transport.scheduleReload();
+              } else if (cursorAdvancedBeyondSnapshot) {
+                st.cursor = nextCursor;
+                if (transport.selectedTaskId) {
+                  const openTaskId = transport.selectedTaskId;
+                  setTaskEventTick(function (prev) {
+                    const next = Object.assign({}, prev);
+                    next[openTaskId] = (next[openTaskId] || 0) + 1;
+                    return next;
+                  });
+                }
+                if (st.inFlight > 0) st.needsReload = true;
+                transport.scheduleReload();
               }
             } catch (_e) { /* ignore */ }
           };
           ws.onclose = function (ev) {
-            if (wsClosedRef.current) return;
+            if (closed || transport.unmounted || activeWs !== ws || wsEpoch !== transport.epoch || !transport.sameBoard(wsBoard)) return;
             if (ev && ev.code === 1008) {
+              setWsReconnecting(false);
               setError(tx(t, "wsAuthFailed",
                 "WebSocket auth failed — reload the page to refresh the session token."));
               return;
             }
-            const delay = Math.min(wsBackoffRef.current, 30000);
-            wsBackoffRef.current = Math.min(wsBackoffRef.current * 2, 30000);
-            setTimeout(openWs, delay);
+            scheduleReconnect();
           };
         }).catch(function () {
           // Ticket mint / URL build failed (e.g. session expired). Back off
           // and retry; a hard auth failure surfaces via the 1008 close path.
-          if (wsClosedRef.current) return;
-          const delay = Math.min(wsBackoffRef.current, 30000);
-          wsBackoffRef.current = Math.min(wsBackoffRef.current * 2, 30000);
-          setTimeout(openWs, delay);
+          if (closed || transport.unmounted || wsEpoch !== transport.epoch || !transport.sameBoard(wsBoard)) return;
+          scheduleReconnect();
         });
       }
       openWs();
       return function () {
+        closed = true;
         wsClosedRef.current = true;
-        try { wsRef.current && wsRef.current.close(); } catch (_e) { /* noop */ }
+        clearReconnect();
+        if (activeWs) {
+          activeWs.onopen = null;
+          activeWs.onmessage = null;
+          activeWs.onclose = null;
+          try { activeWs.close(); } catch (_e) { /* noop */ }
+          activeWs = null;
+        }
       };
-    }, [!!boardData, board, scheduleReload]);
+    }, [!!boardData || !loading, transport.boardRunId]);
 
     // --- filtering ----------------------------------------------------------
     const filteredBoard = useMemo(function () {
@@ -845,11 +1207,16 @@
     //           — ignored when count >  1 (bulk endpoint uses selectedIds)
     //   summary — completion summary string, or null/undefined to skip
     const performMoveTask = useCallback(function (taskId, newStatus, count, summary) {
+      const reqEpoch = transport.epoch;
+      const reqBoard = transport.board;
+      if (transport.unmounted || !transport.sameBoard(reqBoard)) return;
       const patch = { status: newStatus };
       const finalPatch = summary
         ? Object.assign({}, patch, { result: summary, summary: summary })
         : patch;
       if (count > 1) {
+        const ids = Array.from(selectedIds);
+        const idSet = new Set(ids);
         // Bulk path: optimistic UI prepends all moved tasks to dest column.
         setBoardData(function (b) {
           if (!b) return b;
@@ -857,7 +1224,7 @@
           const columns = b.columns.map(function (col) {
             const kept = [];
             for (const tk of col.tasks) {
-              if (selectedIds.has(tk.id)) moved.push(Object.assign({}, tk, { status: newStatus }));
+              if (idSet.has(tk.id)) moved.push(Object.assign({}, tk, { status: newStatus }));
               else kept.push(tk);
             }
             return Object.assign({}, col, { tasks: kept });
@@ -866,12 +1233,12 @@
           if (dest) dest.tasks = moved.concat(dest.tasks);
           return Object.assign({}, b, { columns });
         });
-        const ids = Array.from(selectedIds);
-        SDK.fetchJSON(withBoard(`${API}/tasks/bulk`, board), {
+        SDK.fetchJSON(withBoard(`${API}/tasks/bulk`, reqBoard), {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify(Object.assign({ ids: ids }, finalPatch)),
         }).then(function (res) {
+          if (transport.unmounted || reqEpoch !== transport.epoch || !transport.sameBoard(reqBoard)) return;
           const failed = (res.results || []).filter(function (r) { return !r.ok; });
           if (failed.length > 0) {
             setError(`Bulk move: ${failed.length} of ${res.results.length} failed`);
@@ -883,8 +1250,9 @@
           setLastSelectedId(null);
           loadBoard();
         }).catch(function (err) {
+          if (transport.unmounted || reqEpoch !== transport.epoch || !transport.sameBoard(reqBoard)) return;
           setError(`Move failed: ${err.message || err}`);
-          setFailedIds(new Set(selectedIds));
+          setFailedIds(new Set(ids));
           loadBoard();
         });
         return;
@@ -906,11 +1274,12 @@
         }
         return Object.assign({}, b, { columns });
       });
-      SDK.fetchJSON(withBoard(`${API}/tasks/${encodeURIComponent(taskId)}`, board), {
+      SDK.fetchJSON(withBoard(`${API}/tasks/${encodeURIComponent(taskId)}`, reqBoard), {
         method: "PATCH",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(finalPatch),
       }).catch(function (err) {
+        if (transport.unmounted || reqEpoch !== transport.epoch || !transport.sameBoard(reqBoard)) return;
         setError(tx(t, "moveFailed", "Move failed: ") + parseApiErrorMessage(err));
         loadBoard();
       });
@@ -963,20 +1332,22 @@
     // Single-task card move. Drives confirmation + completion summary
     // dialogs via the hook, then dispatches via performMoveTask.
     const moveTask = useCallback(function (taskId, newStatus) {
+      const reqEpoch = transport.epoch;
+      const reqBoard = transport.board;
       requestMoveConfirm(newStatus, 1)
         .then(function (r1) {
-          if (!r1.confirmed) return null;
+          if (!r1.confirmed || transport.unmounted || reqEpoch !== transport.epoch || !transport.sameBoard(reqBoard)) return null;
           if (newStatus !== "done") {
             performMoveTask(taskId, newStatus, 1, null);
             return null;
           }
           return requestCompletionSummary(1).then(function (r2) {
-            if (!r2.confirmed) return null;
+            if (!r2.confirmed || transport.unmounted || reqEpoch !== transport.epoch || !transport.sameBoard(reqBoard)) return null;
             performMoveTask(taskId, newStatus, 1, r2.summary || null);
           });
         })
         .catch(function () { /* dialog cancelled */ });
-    }, [requestMoveConfirm, requestCompletionSummary, performMoveTask]);
+    }, [board, requestMoveConfirm, requestCompletionSummary, performMoveTask]);
 
     const clearSelected = useCallback(function () {
       setSelectedIds(new Set());
@@ -985,29 +1356,36 @@
     }, []);
     const moveSelected = useCallback(function (newStatus) {
       if (selectedIds.size === 0) return;
+      const reqEpoch = transport.epoch;
+      const reqBoard = transport.board;
       const count = selectedIds.size;
       const taskId = Array.from(selectedIds)[0]; // representative id for performMoveTask's single-task branch
       requestMoveConfirm(newStatus, count)
         .then(function (r1) {
-          if (!r1.confirmed) return null;
+          if (!r1.confirmed || transport.unmounted || reqEpoch !== transport.epoch || !transport.sameBoard(reqBoard)) return null;
           if (newStatus !== "done") {
             performMoveTask(taskId, newStatus, count, null);
             return null;
           }
           return requestCompletionSummary(count).then(function (r2) {
-            if (!r2.confirmed) return null;
+            if (!r2.confirmed || transport.unmounted || reqEpoch !== transport.epoch || !transport.sameBoard(reqBoard)) return null;
             performMoveTask(taskId, newStatus, count, r2.summary || null);
           });
         })
         .catch(function () { /* dialog cancelled */ });
-    }, [selectedIds, requestMoveConfirm, requestCompletionSummary, performMoveTask]);
+    }, [board, selectedIds, requestMoveConfirm, requestCompletionSummary, performMoveTask]);
 
     const createTask = useCallback(function (body) {
-      return SDK.fetchJSON(withBoard(`${API}/tasks`, board), {
+      const reqEpoch = transport.epoch;
+      const reqBoard = transport.board;
+      return SDK.fetchJSON(withBoard(`${API}/tasks`, reqBoard), {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(body),
       }).then(function (res) {
+        if (transport.unmounted) return res;
+        loadBoardList();  // refresh counts in the switcher
+        if (reqEpoch !== transport.epoch || !transport.sameBoard(reqBoard)) return res;
         // Surface dispatcher-presence warnings (e.g. "no gateway is
         // running") via the existing error banner channel. Not fatal —
         // the task was created successfully — but the user should know
@@ -1016,7 +1394,6 @@
           setError(tx(t, "taskCreatedWarning", "Task created, but: ") + res.warning);
         }
         loadBoard();
-        loadBoardList();  // refresh counts in the switcher
         return res;
       });
     }, [loadBoard, loadBoardList, board, t]);
@@ -1097,10 +1474,14 @@
 
     const applyBulk = useCallback(function (patch, confirmMsg) {
       if (selectedIds.size === 0) return;
-      const count = selectedIds.size;
+      const reqEpoch = transport.epoch;
+      const reqBoard = transport.board;
+      const ids = Array.from(selectedIds);
+      const idSet = new Set(ids);
       const run = function () {
+        if (transport.unmounted || reqEpoch !== transport.epoch || !transport.sameBoard(reqBoard)) return;
         const finalPatch = patch;
-        const body = Object.assign({ ids: Array.from(selectedIds) }, finalPatch);
+        const body = Object.assign({ ids: ids }, finalPatch);
         // Optimistic UI for status moves (same pattern as moveSelected).
         if (finalPatch.status) {
           setBoardData(function (b) {
@@ -1109,7 +1490,7 @@
             const columns = b.columns.map(function (col) {
               const kept = [];
               for (const t of col.tasks) {
-                if (selectedIds.has(t.id)) moved.push(Object.assign({}, t, { status: finalPatch.status }));
+                if (idSet.has(t.id)) moved.push(Object.assign({}, t, { status: finalPatch.status }));
                 else kept.push(t);
               }
               return Object.assign({}, col, { tasks: kept });
@@ -1119,12 +1500,13 @@
             return Object.assign({}, b, { columns });
           });
         }
-        SDK.fetchJSON(withBoard(`${API}/tasks/bulk`, board), {
+        SDK.fetchJSON(withBoard(`${API}/tasks/bulk`, reqBoard), {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify(body),
         })
           .then(function (res) {
+            if (transport.unmounted || reqEpoch !== transport.epoch || !transport.sameBoard(reqBoard)) return;
             const failed = (res.results || []).filter(function (r) { return !r.ok; });
             if (failed.length > 0) {
               setError(tx(t, "bulkFailed", "Bulk: ") +
@@ -1139,8 +1521,9 @@
             loadBoard();
           })
           .catch(function (e) {
+            if (transport.unmounted || reqEpoch !== transport.epoch || !transport.sameBoard(reqBoard)) return;
             setError(String(e.message || e));
-            setFailedIds(new Set(selectedIds));
+            setFailedIds(new Set(ids));
             loadBoard();
           });
       };
@@ -1160,23 +1543,34 @@
     }, [selectedIds, loadBoard, board, t, kanbanDialogs]);
 
     // --- board switching ----------------------------------------------------
-    const switchBoard = useCallback(function (nextSlug) {
-      if (!nextSlug || nextSlug === board) return;
+    const switchBoard = useCallback(function (nextSlug, nextServerCurrent) {
+      if (!nextSlug || nextSlug === transport.board) return;
+      const effectiveCurrent = nextServerCurrent || serverCurrentRef.current;
+      if (nextServerCurrent) serverCurrentRef.current = nextServerCurrent;
       // Optimistic UI: clear the current grid + show loading, reset the
       // event cursor so the WS reopens aligned to the new board's
       // latest_event_id on the next loadBoard.
+      if (kanbanDialogs.dialogState) kanbanDialogs.cancel();
       setBoardData(null);
       cursorRef.current = 0;
       setLoading(true);
+      setError(null);
+      setWsReconnecting(false);
+      setSelectedTaskId(null);
+      setDraggingTaskId(null);
       setBoard(nextSlug);
-      writeSelectedBoard(nextSlug);
+      if (effectiveCurrent && nextSlug === effectiveCurrent) {
+        writeSelectedBoard(null);
+      } else {
+        writeSelectedBoard(nextSlug, effectiveCurrent || nextSlug);
+      }
       // Reset filters so stale search/tenant/assignee don't persist across boards.
       setSearch("");
       setTenantFilter("");
       setAssigneeFilter("");
       setIncludeArchived(false);
       clearSelected();
-    }, [board, clearSelected]);
+    }, [board, clearSelected, kanbanDialogs]);
 
     const createNewBoard = useCallback(function (payload) {
       return SDK.fetchJSON(`${API}/boards`, {
@@ -1184,9 +1578,11 @@
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(payload),
       }).then(function (res) {
-        loadBoardList();
         const slug = res && res.board && res.board.slug;
-        if (slug && payload.switch) switchBoard(slug);
+        if (slug) transport.resetBoardState(slug);
+        loadBoardList();
+        const nextCurrent = (res && res.current) || (payload.switch ? slug : null);
+        if (slug && payload.switch) switchBoard(slug, nextCurrent);
         return res;
       });
     }, [loadBoardList, switchBoard, board]);
@@ -1209,13 +1605,18 @@
       if (!slug || slug === "default") return Promise.resolve();
       return SDK.fetchJSON(`${API}/boards/${encodeURIComponent(slug)}`, {
         method: "DELETE",
-      }).then(function () {
+      }).then(function (res) {
+        transport.resetBoardState(slug);
+        const candidateCurrent = (res && res.current) || serverCurrentRef.current;
+        const nextCurrent = (candidateCurrent && candidateCurrent !== slug) ? candidateCurrent : "default";
         loadBoardList();
-        if (board === slug) switchBoard("default");
+        if (transport.board === slug) switchBoard(nextCurrent, res && res.current);
       });
     }, [board, loadBoardList, switchBoard]);
 
    const deleteTask = useCallback(function (taskId) {
+     const reqEpoch = transport.epoch;
+     const reqBoard = transport.board;
      return kanbanDialogs.request({
        kind: "confirm",
        title: tx(t, "trash.confirmTitle", "Delete task?"),
@@ -1223,37 +1624,57 @@
        confirmLabel: tx(t, "common.delete", "Delete"),
        destructive: true,
      }).then(function (r) {
-       if (!r.confirmed) return null;
-       return SDK.fetchJSON(`${API}/tasks/${encodeURIComponent(taskId)}`, {
+       if (!r.confirmed || transport.unmounted || reqEpoch !== transport.epoch || !transport.sameBoard(reqBoard)) return null;
+       return SDK.fetchJSON(withBoard(`${API}/tasks/${encodeURIComponent(taskId)}`, reqBoard), {
          method: "DELETE",
        }).then(function () {
-         loadBoard();
+         if (transport.unmounted || reqEpoch !== transport.epoch || !transport.sameBoard(reqBoard)) return;
+         setSelectedTaskId(function (prev) { return prev === taskId ? null : prev; });
          setSelectedIds(function (prev) {
            const next = new Set(prev);
            next.delete(taskId);
            return next;
          });
-       }).catch(function (e) { setError(String(e.message || e)); });
+         setFailedIds(function (prev) {
+           if (!prev.has(taskId)) return prev;
+           const next = new Set(prev);
+           next.delete(taskId);
+           return next;
+         });
+         loadBoard();
+       }).catch(function (e) {
+         if (transport.unmounted || reqEpoch !== transport.epoch || !transport.sameBoard(reqBoard)) return;
+         setError(String(e.message || e));
+       });
      }).catch(function () { /* cancelled */ });
    }, [board, loadBoard, t, kanbanDialogs]);
 
     const deleteSelected = useCallback(function (count) {
       if (selectedIds.size === 0) return Promise.resolve();
-      kanbanDialogs.request({
+      const reqEpoch = transport.epoch;
+      const reqBoard = transport.board;
+      const ids = Array.from(selectedIds);
+      return kanbanDialogs.request({
         kind: "confirm",
         title: tx(t, "trash.confirmManyTitle", "Delete {n} tasks?", { n: count }),
         description: tx(t, "trash.confirmMany", "Permanently delete {n} selected tasks? This cannot be undone.", { n: count }),
         confirmLabel: tx(t, "common.delete", "Delete"),
         destructive: true,
       }).then(function (r) {
-        if (!r.confirmed) return null;
-        const ids = Array.from(selectedIds);
+        if (!r.confirmed || transport.unmounted || reqEpoch !== transport.epoch || !transport.sameBoard(reqBoard)) return null;
         setSelectedIds(new Set());
+        setLastSelectedId(null);
+        setFailedIds(new Set());
+        setSelectedTaskId(function (prev) { return prev && ids.indexOf(prev) !== -1 ? null : prev; });
         return Promise.all(ids.map(function (id) {
-          return SDK.fetchJSON(`${API}/tasks/${encodeURIComponent(id)}`, { method: "DELETE" });
+          return SDK.fetchJSON(withBoard(`${API}/tasks/${encodeURIComponent(id)}`, reqBoard), { method: "DELETE" });
         })).then(function () {
+          if (transport.unmounted || reqEpoch !== transport.epoch || !transport.sameBoard(reqBoard)) return;
           loadBoard();
-        }).catch(function (e) { setError(String(e.message || e)); });
+        }).catch(function (e) {
+          if (transport.unmounted || reqEpoch !== transport.epoch || !transport.sameBoard(reqBoard)) return;
+          setError(String(e.message || e));
+        });
       }).catch(function () { /* cancelled */ });
     }, [selectedIds, board, loadBoard, t, kanbanDialogs]);
 
@@ -1286,8 +1707,13 @@
           onNewClick: function () { setShowNewBoard(true); },
           onSettingsClick: function () { setShowBoardSettings(true); },
           onUnbindProject: function () {
-            updateBoard(board, { project_id: "" })
-              .catch(function (e) { setError(String(e.message || e)); });
+            const reqEpoch = transport.epoch;
+            const reqBoard = transport.board;
+            updateBoard(reqBoard, { project_id: "" })
+              .catch(function (e) {
+                if (transport.unmounted || reqEpoch !== transport.epoch || !transport.sameBoard(reqBoard)) return;
+                setError(String(e.message || e));
+              });
           },
           onDeleteBoard: deleteBoard,
           requestDialog: function (req) { return kanbanDialogs.request(req); },
@@ -1319,9 +1745,17 @@
           laneByProfile, setLaneByProfile,
           search, setSearch,
           onNudgeDispatch: function () {
-            SDK.fetchJSON(withBoard(`${API}/dispatch?max=8`, board), { method: "POST" })
-              .then(loadBoard)
-              .catch(function (e) { setError(String(e.message || e)); });
+            const reqEpoch = transport.epoch;
+            const reqBoard = transport.board;
+            SDK.fetchJSON(withBoard(`${API}/dispatch?max=8`, reqBoard), { method: "POST" })
+              .then(function () {
+                if (transport.unmounted || reqEpoch !== transport.epoch || !transport.sameBoard(reqBoard)) return;
+                loadBoard();
+              })
+              .catch(function (e) {
+                if (transport.unmounted || reqEpoch !== transport.epoch || !transport.sameBoard(reqBoard)) return;
+                setError(String(e.message || e));
+              });
           },
           onRefresh: loadBoard,
         }),
@@ -1334,6 +1768,8 @@
          onDelete: deleteSelected,
        }) : null,
         error ? h("div", { className: "text-xs text-destructive px-2" }, error) : null,
+        wsReconnecting ? h("div", { className: "text-xs text-muted-foreground px-2" },
+          tx(t, "wsReconnecting", "Live updates disconnected — showing cached board (stale) while reconnecting…")) : null,
         h(KanbanDialogs, {
           dialogProps: kanbanDialogs.dialogProps,
           dialogState: kanbanDialogs.dialogState,
@@ -1359,6 +1795,7 @@
           allTasks: boardData.columns.reduce(function (acc, c) { return acc.concat(c.tasks); }, []),
         }),
         selectedTaskId ? h(TaskDrawer, {
+          key: `${board || "default"}:${selectedTaskId}`,
           taskId: selectedTaskId,
           boardSlug: board,
           onClose: function () { setSelectedTaskId(null); },
@@ -2118,8 +2555,11 @@
   function BoardSwitcher(props) {
     const { t } = useI18n();
     const list = props.boardList || [];
-    const current = list.find(function (b) { return b.slug === props.board; });
-    const currentName = current && current.name ? current.name : props.board;
+    const current = (props.board && list.find(function (b) { return b.slug === props.board; }))
+      || list.find(function (b) { return b.is_current; })
+      || null;
+    const activeSlug = props.board || (current && current.slug) || "default";
+    const currentName = current && current.name ? current.name : activeSlug;
     const currentTotal = current ? current.total : 0;
     const hasMultipleBoards = list.length > 1;
 
@@ -2159,7 +2599,7 @@
             tx(t, "board", "Board")),
           h("div", { className: "flex items-center gap-2" },
             h(Select, Object.assign({
-              value: props.board,
+              value: activeSlug,
               className: "h-8 min-w-[220px]",
               "aria-label": "Switch kanban board",
               title: "Boards are independent work streams. Each board has its own tasks, tenants, and assignees.",
@@ -2191,7 +2631,7 @@
           className: "h-8",
           title: "Create a new board. Useful when you want an unrelated work stream (different project, different team, isolated scratch area).",
         }, tx(t, "newBoard", "+ New board")),
-        props.board !== "default"
+        activeSlug !== "default"
           ? h(Button, {
             onClick: function () {
               const msg = tx(t, "archiveBoardConfirm",
@@ -2206,10 +2646,10 @@
                   confirmLabel: tx(t, "archive", "Archive"),
                   destructive: true,
                 }).then(function (r) {
-                  if (r.confirmed) props.onDeleteBoard(props.board);
+                  if (r.confirmed) props.onDeleteBoard(activeSlug);
                 }).catch(function () { /* cancelled */ });
               } else if (window.confirm(msg)) {
-                props.onDeleteBoard(props.board);
+                props.onDeleteBoard(activeSlug);
               }
             },
             size: "sm",
@@ -3540,27 +3980,146 @@
     const [homeChannels, setHomeChannels] = useState([]);
     const [homeBusy, setHomeBusy] = useState({});
     const boardSlug = props.boardSlug;
+    const drawerRef = useRef(null);
+    if (!drawerRef.current) {
+      drawerRef.current = {
+        reqSeq: 0,
+        homeReqSeq: 0,
+        taskId: props.taskId,
+        boardSlug: boardSlug,
+        hasCurrentData: false,
+        unmounted: false,
+      };
+    }
+    const drawerState = drawerRef.current;
+    if (drawerState.taskId !== props.taskId || drawerState.boardSlug !== boardSlug) {
+      drawerState.taskId = props.taskId;
+      drawerState.boardSlug = boardSlug;
+      drawerState.reqSeq += 1;
+      drawerState.homeReqSeq += 1;
+      drawerState.hasCurrentData = false;
+      if (data !== null) setData(null);
+      if (!loading) setLoading(true);
+      if (err !== null) setErr(null);
+      if (patchErr !== null) setPatchErr(null);
+      if (editing) setEditing(false);
+      if (newComment !== "") setNewComment("");
+      if (uploadBusy) setUploadBusy(false);
+      if (uploadErr !== null) setUploadErr(null);
+      if (homeChannels.length > 0) setHomeChannels([]);
+      if (Object.keys(homeBusy).length > 0) setHomeBusy({});
+    }
+    const currentTaskData =
+      data && data.task && (!data.task.id || data.task.id === props.taskId) ? data : null;
+    drawerState.hasCurrentData = !!currentTaskData;
+    const isCurrentTarget = function (reqTaskId, reqBoard) {
+      return (
+        !drawerState.unmounted &&
+        reqTaskId === drawerState.taskId &&
+        reqBoard === drawerState.boardSlug
+      );
+    };
+    const reportActionError = function (msg) {
+      if (drawerState.hasCurrentData) setPatchErr(msg);
+      else setErr(msg);
+    };
 
     const load = useCallback(function () {
-      return SDK.fetchJSON(withBoard(`${API}/tasks/${encodeURIComponent(props.taskId)}`, boardSlug))
-        .then(function (d) { setData(d); setErr(null); setPatchErr(null); })
-        .catch(function (e) { setErr(String(e.message || e)); })
-        .finally(function () { setLoading(false); });
+      const reqTaskId = props.taskId;
+      const reqBoard = boardSlug;
+      if (!reqTaskId || drawerState.unmounted) return Promise.resolve();
+      const reqId = ++drawerState.reqSeq;
+      return SDK.fetchJSON(withBoard(`${API}/tasks/${encodeURIComponent(reqTaskId)}`, reqBoard))
+        .then(function (d) {
+          if (
+            drawerState.unmounted ||
+            reqId !== drawerState.reqSeq ||
+            reqTaskId !== drawerState.taskId ||
+            reqBoard !== drawerState.boardSlug
+          ) {
+            return;
+          }
+          if (!d || !d.task || (d.task.id && d.task.id !== reqTaskId)) {
+            throw new Error((d && (d.detail || d.error || d.message)) || "Invalid task detail response");
+          }
+          drawerState.hasCurrentData = true;
+          setData(d);
+          setErr(null);
+          setPatchErr(null);
+        })
+        .catch(function (e) {
+          if (
+            drawerState.unmounted ||
+            reqId !== drawerState.reqSeq ||
+            reqTaskId !== drawerState.taskId ||
+            reqBoard !== drawerState.boardSlug
+          ) {
+            return;
+          }
+          const msg = String(e && e.message ? e.message : e);
+          if (drawerState.hasCurrentData) setPatchErr(msg);
+          else setErr(msg);
+        })
+        .finally(function () {
+          if (
+            drawerState.unmounted ||
+            reqId !== drawerState.reqSeq ||
+            reqTaskId !== drawerState.taskId ||
+            reqBoard !== drawerState.boardSlug
+          ) {
+            return;
+          }
+          setLoading(false);
+        });
     }, [props.taskId, boardSlug]);
 
     const loadHomeChannels = useCallback(function () {
-      const qs = new URLSearchParams({ task_id: props.taskId });
-      const url = withBoard(`${API}/home-channels?${qs}`, boardSlug);
+      const reqTaskId = props.taskId;
+      const reqBoard = boardSlug;
+      if (!reqTaskId || drawerState.unmounted) return Promise.resolve();
+      const reqId = ++drawerState.homeReqSeq;
+      const qs = new URLSearchParams({ task_id: reqTaskId });
+      const url = withBoard(`${API}/home-channels?${qs}`, reqBoard);
       return SDK.fetchJSON(url)
-        .then(function (d) { setHomeChannels(d.home_channels || []); })
+        .then(function (d) {
+          if (
+            drawerState.unmounted ||
+            reqId !== drawerState.homeReqSeq ||
+            reqTaskId !== drawerState.taskId ||
+            reqBoard !== drawerState.boardSlug
+          ) {
+            return;
+          }
+          setHomeChannels((d && d.home_channels) || []);
+        })
         .catch(function () { /* silent — endpoint optional on older gateways */ });
     }, [props.taskId, boardSlug]);
 
     // Reload when the WS stream reports new events for this task id
     // (completion, block, crash, etc. — anything that'd make the drawer
     // show stale data if we only loaded on mount).
-    useEffect(function () { load(); }, [load, props.eventTick]);
-    useEffect(function () { loadHomeChannels(); }, [loadHomeChannels]);
+    useEffect(function () {
+      drawerState.unmounted = false;
+      return function () {
+        drawerState.unmounted = true;
+        drawerState.reqSeq += 1;
+        drawerState.homeReqSeq += 1;
+      };
+    }, []);
+    useEffect(function () {
+      drawerState.unmounted = false;
+      load();
+      return function () {
+        drawerState.reqSeq += 1;
+      };
+    }, [load, props.eventTick]);
+    useEffect(function () {
+      drawerState.unmounted = false;
+      loadHomeChannels();
+      return function () {
+        drawerState.homeReqSeq += 1;
+      };
+    }, [loadHomeChannels]);
     useEffect(function () {
       function onKey(e) { if (e.key === "Escape" && !editing) props.onClose(); }
       window.addEventListener("keydown", onKey);
@@ -3570,15 +4129,21 @@
     const handleComment = function () {
       const body = newComment.trim();
       if (!body) return;
-      SDK.fetchJSON(withBoard(`${API}/tasks/${encodeURIComponent(props.taskId)}/comments`, boardSlug), {
+      const reqTaskId = props.taskId;
+      const reqBoard = boardSlug;
+      SDK.fetchJSON(withBoard(`${API}/tasks/${encodeURIComponent(reqTaskId)}/comments`, reqBoard), {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ body }),
       }).then(function () {
+        if (!isCurrentTarget(reqTaskId, reqBoard)) return;
         setNewComment("");
         load();
         props.onRefresh();
-      }).catch(function (e) { setErr(String(e.message || e)); });
+      }).catch(function (e) {
+        if (!isCurrentTarget(reqTaskId, reqBoard)) return;
+        reportActionError(String(e.message || e));
+      });
     };
 
     // File upload uses raw fetch (not SDK.fetchJSON, which JSON-encodes)
@@ -3587,9 +4152,11 @@
     const handleUpload = function (fileList) {
       const files = Array.prototype.slice.call(fileList || []);
       if (!files.length) return;
+      const reqTaskId = props.taskId;
+      const reqBoard = boardSlug;
       setUploadBusy(true);
       setUploadErr(null);
-      const url = withBoard(`${API}/tasks/${encodeURIComponent(props.taskId)}/attachments`, boardSlug);
+      const url = withBoard(`${API}/tasks/${encodeURIComponent(reqTaskId)}/attachments`, reqBoard);
       // Upload sequentially so a partial failure leaves a clear state.
       let chain = Promise.resolve();
       files.forEach(function (f) {
@@ -3611,19 +4178,31 @@
         });
       });
       chain.then(function () {
+        if (!isCurrentTarget(reqTaskId, reqBoard)) return;
         load();
         props.onRefresh();
       }).catch(function (e) {
+        if (!isCurrentTarget(reqTaskId, reqBoard)) return;
         setUploadErr(String(e.message || e));
       }).finally(function () {
+        if (!isCurrentTarget(reqTaskId, reqBoard)) return;
         setUploadBusy(false);
       });
     };
 
     const handleDeleteAttachment = function (attachmentId) {
-      return SDK.fetchJSON(withBoard(`${API}/attachments/${attachmentId}`, boardSlug), { method: "DELETE" })
-        .then(function () { load(); props.onRefresh(); })
-        .catch(function (e) { setUploadErr(String(e.message || e)); });
+      const reqTaskId = props.taskId;
+      const reqBoard = boardSlug;
+      return SDK.fetchJSON(withBoard(`${API}/attachments/${attachmentId}`, reqBoard), { method: "DELETE" })
+        .then(function () {
+          if (!isCurrentTarget(reqTaskId, reqBoard)) return;
+          load();
+          props.onRefresh();
+        })
+        .catch(function (e) {
+          if (!isCurrentTarget(reqTaskId, reqBoard)) return;
+          setUploadErr(String(e.message || e));
+        });
     };
 
     // doPatch is invoked by the side-drawer's StatusActions (block / unblock
@@ -3641,6 +4220,8 @@
     //    site. The prompt body, validation copy, and requirement are
     //    unchanged from the pre-migration implementation.
     const doPatch = function (patch, opts) {
+      const reqTaskId = props.taskId;
+      const reqBoard = boardSlug;
       if (opts && opts.confirm && props.requestDialog) {
         return props.requestDialog({
           kind: "confirm",
@@ -3649,7 +4230,7 @@
           confirmLabel: opts.confirmLabel || tx(t, "common.confirm", "Confirm"),
           destructive: !!opts.destructive,
         }).then(function (r) {
-          if (!r.confirmed) return null;
+          if (!r.confirmed || !isCurrentTarget(reqTaskId, reqBoard)) return null;
           return applyPatch(patch);
         });
       }
@@ -3659,15 +4240,22 @@
       return applyPatch(patch);
 
       function applyPatch(patch) {
+        if (!isCurrentTarget(reqTaskId, reqBoard)) return Promise.resolve();
         const finalPatch = withCompletionSummary(patch);
         if (!finalPatch) return Promise.resolve();
         setPatchErr(null);
-        return SDK.fetchJSON(withBoard(`${API}/tasks/${encodeURIComponent(props.taskId)}`, boardSlug), {
+        return SDK.fetchJSON(withBoard(`${API}/tasks/${encodeURIComponent(reqTaskId)}`, reqBoard), {
           method: "PATCH",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify(finalPatch),
-        }).then(function () { load(); props.onRefresh(); })
-          .catch(function (e) { setPatchErr(parseApiErrorMessage(e)); });
+        }).then(function () {
+          if (!isCurrentTarget(reqTaskId, reqBoard)) return;
+          load();
+          props.onRefresh();
+        }).catch(function (e) {
+          if (!isCurrentTarget(reqTaskId, reqBoard)) return;
+          setPatchErr(parseApiErrorMessage(e));
+        });
       }
     };
 
@@ -3699,16 +4287,20 @@
     // comment — or fail with a human-readable reason that the UI
     // surfaces inline without treating it as an HTTP error).
     const doSpecify = function () {
+      const reqTaskId = props.taskId;
+      const reqBoard = boardSlug;
       return SDK.fetchJSON(
-        withBoard(`${API}/tasks/${encodeURIComponent(props.taskId)}/specify`, boardSlug),
+        withBoard(`${API}/tasks/${encodeURIComponent(reqTaskId)}/specify`, reqBoard),
         {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({}),
         }
       ).then(function (res) {
-        load();
-        props.onRefresh();
+        if (isCurrentTarget(reqTaskId, reqBoard)) {
+          load();
+          props.onRefresh();
+        }
         return res;
       });
     };
@@ -3718,50 +4310,90 @@
     // Refreshes both the drawer (so the user sees the root flip to
     // todo) and the board (so the new children appear in the columns).
     const doDecompose = function () {
+      const reqTaskId = props.taskId;
+      const reqBoard = boardSlug;
       return SDK.fetchJSON(
-        withBoard(`${API}/tasks/${encodeURIComponent(props.taskId)}/decompose`, boardSlug),
+        withBoard(`${API}/tasks/${encodeURIComponent(reqTaskId)}/decompose`, reqBoard),
         {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({}),
         }
       ).then(function (res) {
-        load();
-        props.onRefresh();
+        if (isCurrentTarget(reqTaskId, reqBoard)) {
+          load();
+          props.onRefresh();
+        }
         return res;
       });
     };
 
     const addLink = function (parentId) {
-      return SDK.fetchJSON(withBoard(`${API}/links`, boardSlug), {
+      const reqTaskId = props.taskId;
+      const reqBoard = boardSlug;
+      return SDK.fetchJSON(withBoard(`${API}/links`, reqBoard), {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ parent_id: parentId, child_id: props.taskId }),
-      }).then(function () { load(); props.onRefresh(); })
-        .catch(function (e) { setErr(String(e.message || e)); });
+        body: JSON.stringify({ parent_id: parentId, child_id: reqTaskId }),
+      }).then(function () {
+        if (!isCurrentTarget(reqTaskId, reqBoard)) return;
+        load();
+        props.onRefresh();
+      }).catch(function (e) {
+        if (!isCurrentTarget(reqTaskId, reqBoard)) return;
+        reportActionError(String(e.message || e));
+      });
     };
     const removeLink = function (parentId) {
-      const qs = new URLSearchParams({ parent_id: parentId, child_id: props.taskId });
-      return SDK.fetchJSON(withBoard(`${API}/links?${qs}`, boardSlug), { method: "DELETE" })
-        .then(function () { load(); props.onRefresh(); })
-        .catch(function (e) { setErr(String(e.message || e)); });
+      const reqTaskId = props.taskId;
+      const reqBoard = boardSlug;
+      const qs = new URLSearchParams({ parent_id: parentId, child_id: reqTaskId });
+      return SDK.fetchJSON(withBoard(`${API}/links?${qs}`, reqBoard), { method: "DELETE" })
+        .then(function () {
+          if (!isCurrentTarget(reqTaskId, reqBoard)) return;
+          load();
+          props.onRefresh();
+        })
+        .catch(function (e) {
+          if (!isCurrentTarget(reqTaskId, reqBoard)) return;
+          reportActionError(String(e.message || e));
+        });
     };
     const addChild = function (childId) {
-      return SDK.fetchJSON(withBoard(`${API}/links`, boardSlug), {
+      const reqTaskId = props.taskId;
+      const reqBoard = boardSlug;
+      return SDK.fetchJSON(withBoard(`${API}/links`, reqBoard), {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ parent_id: props.taskId, child_id: childId }),
-      }).then(function () { load(); props.onRefresh(); })
-        .catch(function (e) { setErr(String(e.message || e)); });
+        body: JSON.stringify({ parent_id: reqTaskId, child_id: childId }),
+      }).then(function () {
+        if (!isCurrentTarget(reqTaskId, reqBoard)) return;
+        load();
+        props.onRefresh();
+      }).catch(function (e) {
+        if (!isCurrentTarget(reqTaskId, reqBoard)) return;
+        reportActionError(String(e.message || e));
+      });
     };
     const removeChild = function (childId) {
-      const qs = new URLSearchParams({ parent_id: props.taskId, child_id: childId });
-      return SDK.fetchJSON(withBoard(`${API}/links?${qs}`, boardSlug), { method: "DELETE" })
-        .then(function () { load(); props.onRefresh(); })
-        .catch(function (e) { setErr(String(e.message || e)); });
+      const reqTaskId = props.taskId;
+      const reqBoard = boardSlug;
+      const qs = new URLSearchParams({ parent_id: reqTaskId, child_id: childId });
+      return SDK.fetchJSON(withBoard(`${API}/links?${qs}`, reqBoard), { method: "DELETE" })
+        .then(function () {
+          if (!isCurrentTarget(reqTaskId, reqBoard)) return;
+          load();
+          props.onRefresh();
+        })
+        .catch(function (e) {
+          if (!isCurrentTarget(reqTaskId, reqBoard)) return;
+          reportActionError(String(e.message || e));
+        });
     };
 
     const toggleHomeSubscription = function (platform, currentlySubscribed) {
+      const reqTaskId = props.taskId;
+      const reqBoard = boardSlug;
       // Optimistic flip + busy flag to keep double-clicks idempotent.
       setHomeBusy(function (b) { return Object.assign({}, b, { [platform]: true }); });
       setHomeChannels(function (list) {
@@ -3773,12 +4405,16 @@
       });
       const method = currentlySubscribed ? "DELETE" : "POST";
       const url = withBoard(
-        `${API}/tasks/${encodeURIComponent(props.taskId)}/home-subscribe/${encodeURIComponent(platform)}`,
-        boardSlug,
+        `${API}/tasks/${encodeURIComponent(reqTaskId)}/home-subscribe/${encodeURIComponent(platform)}`,
+        reqBoard,
       );
       return SDK.fetchJSON(url, { method: method })
-        .then(function () { return loadHomeChannels(); })
+        .then(function () {
+          if (!isCurrentTarget(reqTaskId, reqBoard)) return;
+          return loadHomeChannels();
+        })
         .catch(function (e) {
+          if (!isCurrentTarget(reqTaskId, reqBoard)) return;
           // Revert optimistic flip on failure.
           setHomeChannels(function (list) {
             return list.map(function (h) {
@@ -3787,9 +4423,10 @@
                 : h;
             });
           });
-          setErr(String(e.message || e));
+          reportActionError(String(e.message || e));
         })
         .finally(function () {
+          if (!isCurrentTarget(reqTaskId, reqBoard)) return;
           setHomeBusy(function (b) {
             const next = Object.assign({}, b);
             delete next[platform];
@@ -3812,15 +4449,16 @@
             title: tx(t, "close", "Close (Esc)"),
           }, "×"),
         ),
-        loading ? h("div", { className: "p-4 text-sm text-muted-foreground" },
-          tx(t, "loadingDetail", "Loading…")) :
-        err ? h("div", { className: "p-4 text-sm text-destructive" }, err) :
-        data ? h(TaskDetail, {
-          data, editing, setEditing,
+        loading && !currentTaskData ? h("div", { className: "p-4 text-sm text-muted-foreground" },
+          tx(t, "loadingDetail", "Loading…")) : null,
+        (err || patchErr) ? h("div", { className: "p-4 text-sm text-destructive" }, err || patchErr) : null,
+        currentTaskData ? h(TaskDetail, {
+          data: currentTaskData, editing, setEditing,
           renderMarkdown: props.renderMarkdown,
           allTasks: props.allTasks,
           assignees: props.assignees || [],
           boardSlug: boardSlug,
+          eventTick: props.eventTick,
           onPatch: doPatch,
           onSpecify: doSpecify,
           onDecompose: doDecompose,
@@ -3842,7 +4480,7 @@
           },
                     requestDialog: props.requestDialog,
         }) : null,
-        data ? h("div", { className: "hermes-kanban-drawer-comment-foot" },
+        currentTaskData ? h("div", { className: "hermes-kanban-drawer-comment-foot" },
           h("div", {
             className: "hermes-kanban-comment-hint text-xs text-muted-foreground",
             title: tx(t, "commentHintTitle",
@@ -4199,7 +4837,7 @@
           );
         }),
       ),
-      h(WorkerLogSection, { taskId: t.id, boardSlug: props.boardSlug }),
+      h(WorkerLogSection, { taskId: t.id, boardSlug: props.boardSlug, eventTick: props.eventTick }),
       h(RunHistorySection, { runs: props.data.runs || [] }),
     );
   }
@@ -4279,23 +4917,88 @@
   function WorkerLogSection(props) {
     const { t } = useI18n();
     const [state, setState] = useState({ loading: false, data: null, err: null });
+    const logRef = useRef(null);
+    if (!logRef.current) {
+      logRef.current = {
+        reqSeq: 0,
+        taskId: props.taskId,
+        boardSlug: props.boardSlug,
+        hasCurrentData: false,
+        unmounted: false,
+      };
+    }
+    const logState = logRef.current;
+    if (logState.taskId !== props.taskId || logState.boardSlug !== props.boardSlug) {
+      logState.taskId = props.taskId;
+      logState.boardSlug = props.boardSlug;
+      logState.reqSeq += 1;
+      logState.hasCurrentData = false;
+      if (state.data !== null || state.err !== null || !state.loading) {
+        setState({ loading: true, data: null, err: null });
+      }
+    }
     const load = useCallback(function () {
-      setState({ loading: true, data: null, err: null });
-      SDK.fetchJSON(withBoard(`${API}/tasks/${encodeURIComponent(props.taskId)}/log?tail=100000`, props.boardSlug))
-        .then(function (d) { setState({ loading: false, data: d, err: null }); })
-        .catch(function (e) { setState({ loading: false, data: null, err: String(e.message || e) }); });
+      const reqTaskId = props.taskId;
+      const reqBoard = props.boardSlug;
+      if (!reqTaskId || logState.unmounted) return Promise.resolve();
+      const reqId = ++logState.reqSeq;
+      setState(function (prev) {
+        return {
+          loading: !logState.hasCurrentData,
+          data: logState.hasCurrentData ? prev.data : null,
+          err: null,
+        };
+      });
+      return SDK.fetchJSON(withBoard(`${API}/tasks/${encodeURIComponent(reqTaskId)}/log?tail=100000`, reqBoard))
+        .then(function (d) {
+          if (
+            logState.unmounted ||
+            reqId !== logState.reqSeq ||
+            reqTaskId !== logState.taskId ||
+            reqBoard !== logState.boardSlug
+          ) {
+            return;
+          }
+          logState.hasCurrentData = true;
+          setState({ loading: false, data: d, err: null });
+        })
+        .catch(function (e) {
+          if (
+            logState.unmounted ||
+            reqId !== logState.reqSeq ||
+            reqTaskId !== logState.taskId ||
+            reqBoard !== logState.boardSlug
+          ) {
+            return;
+          }
+          const msg = String(e && e.message ? e.message : e);
+          setState(function (prev) {
+            return {
+              loading: false,
+              data: logState.hasCurrentData ? prev.data : null,
+              err: msg,
+            };
+          });
+        });
     }, [props.taskId, props.boardSlug]);
 
-    // Auto-load when the section mounts; the user opened the drawer so the
-    // cost is one small HTTP round-trip.
-    useEffect(function () { load(); }, [load]);
+    // Auto-load when the section mounts or when a live task event arrives;
+    // the user opened the drawer so the cost is one small HTTP round-trip.
+    useEffect(function () {
+      logState.unmounted = false;
+      load();
+      return function () {
+        logState.unmounted = true;
+        logState.reqSeq += 1;
+      };
+    }, [load, props.eventTick]);
 
     const data = state.data;
     let body;
-    if (state.loading) {
+    if (state.loading && !data) {
       body = h("div", { className: "text-xs text-muted-foreground" },
         tx(t, "loadingLog", "Loading log…"));
-    } else if (state.err) {
+    } else if (state.err && !data) {
       body = h("div", { className: "text-xs text-destructive" }, state.err);
     } else if (!data || !data.exists) {
       body = h("div", { className: "text-xs text-muted-foreground italic" },
@@ -4317,6 +5020,7 @@
           title: "Refresh log",
         }, "refresh"),
       ),
+      state.err && data ? h("div", { className: "text-xs text-destructive mb-1" }, state.err) : null,
       body,
       data && data.truncated
         ? h("div", { className: "text-xs text-muted-foreground" },

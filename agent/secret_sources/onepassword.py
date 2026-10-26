@@ -34,8 +34,8 @@ _OP_RUN_TIMEOUT = 30
 _DEFAULT_TOKEN_ENV = "OP_SERVICE_ACCOUNT_TOKEN"
 
 # Minimal allowlisted child env (never the full post-dotenv os.environ, which
-# holds every provider credential). OP_SESSION_* and the token are added
-# dynamically in _op_child_env().
+# holds every provider credential). OP_SESSION_* (tokenless reads only) and the
+# token are added dynamically in _op_child_env().
 _OP_ENV_ALLOWLIST = (
     "PATH", "HOME", "USERPROFILE", "APPDATA", "LOCALAPPDATA", "SystemRoot",
     "TMPDIR", "TMP", "TEMP", "XDG_CONFIG_HOME", "XDG_RUNTIME_DIR", "OP_CONFIG_DIR",
@@ -127,12 +127,22 @@ def _scrub(text: str) -> str:
     return strip_ansi(text).replace("\x1b", "").strip()
 
 
+# A service-account read must authenticate with the token alone: op prefers Connect over a
+# service account, and an inherited account/session selector or desktop-app integration can
+# route the read to a 1Password approval prompt that an unattended process cannot answer.
+_SERVICE_ACCOUNT_STRIPPED_ENV = ("OP_ACCOUNT", "OP_CONNECT_HOST", "OP_CONNECT_TOKEN")
+
+
 def _op_child_env(token_value: str) -> dict[str, str]:
     source_env = get_source_environment()
     env = {k: source_env[k] for k in _OP_ENV_ALLOWLIST if k in source_env}
-    env.update((k, v) for k, v in source_env.items() if k.startswith("OP_SESSION_"))
     if token_value:
+        for name in _SERVICE_ACCOUNT_STRIPPED_ENV:
+            env.pop(name, None)
         env["OP_SERVICE_ACCOUNT_TOKEN"] = token_value
+        env["OP_LOAD_DESKTOP_APP_SETTINGS"] = "false"
+    else:
+        env.update((k, v) for k, v in source_env.items() if k.startswith("OP_SESSION_"))
     env["NO_COLOR"] = "1"
     return env
 

@@ -180,23 +180,23 @@ def test_notify_wake_failure_retries_without_repeating_ping(tmp_path, monkeypatc
 
 
 def test_wake_only_failure_cap_drops_subscription(tmp_path, monkeypatch):
-    """After MAX_SEND_FAILURES consecutive wake failures the sub is dropped."""
+    """Wake failures use the longer wake limit; passive pings keep their own limit."""
     monkeypatch.setenv("HERMES_KANBAN_DB", str(tmp_path / "wake-cap.db"))
     kb.init_db()
     tid = _make_completed_task("wake")
 
     adapter = FailingWakeAdapter()
     runner = _make_runner(adapter)
-    # Simulate 11 prior consecutive failures (MAX_SEND_FAILURES = 12).
+    monkeypatch.setattr("gateway.kanban_watchers_notifier.WAKE_MAX_FAILURES", 3, raising=False)
+    # Simulate two prior wake failures at the shortened test limit.
     runner._kanban_sub_fail_counts = {
-        (tid, "telegram", "chat-1", ""): 11,
+        (tid, "telegram", "chat-1", ""): 2,
     }
     asyncio.run(_run_one_notifier_tick(monkeypatch, runner))
 
     assert len(adapter.handled) == 1
     assert _subs(tid) == [], (
-        "subscription must drop after MAX_SEND_FAILURES consecutive "
-        "wake-only delivery failures, like text sends do"
+        "subscription must drop at the configured wake failure limit"
     )
     assert runner._kanban_sub_fail_counts == {}, (
         "counter entry must clear when the subscription is dropped"

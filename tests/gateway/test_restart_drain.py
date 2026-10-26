@@ -63,8 +63,10 @@ def test_load_busy_text_mode_follows_input_mode_and_honors_legacy(tmp_path, monk
     monkeypatch.delenv("HERMES_GATEWAY_BUSY_TEXT_MODE", raising=False)
     monkeypatch.delenv("HERMES_GATEWAY_BUSY_INPUT_MODE", raising=False)
 
-    # No knobs set → follows busy_input_mode, which defaults to interrupt.
-    assert gateway_run.GatewayRunner._load_busy_text_mode() == "interrupt"
+    # No knobs set → follows busy_input_mode, which defaults to queue: a mid-turn message never
+    # kills the running turn unless interrupt is chosen explicitly.
+    assert gateway_run.GatewayRunner._load_busy_input_mode() == "queue"
+    assert gateway_run.GatewayRunner._load_busy_text_mode() == "queue"
 
     # busy_input_mode=queue propagates to text handling (single source of truth).
     (tmp_path / "config.yaml").write_text(

@@ -719,6 +719,39 @@ def test_default_spawn_does_not_auto_load_any_skill(kanban_home, monkeypatch):
     assert env.get("HERMES_PROFILE") == "some-profile"
 
 
+def test_owner_admission_does_not_auto_load_any_skill(tmp_path, monkeypatch):
+    """The no-auto-load rule now lives where the worker's policy is decided: the
+    owner admits a claim with exactly the task's own skills, so a card that
+    names none starts with none (the dispatcher argv carries no policy)."""
+    import json
+    from contextlib import closing
+    from types import SimpleNamespace
+
+    from gateway.session_contract import Principal
+    from gateway.session_kanban import build_kanban_policy
+
+    monkeypatch.setenv("HERMES_KANBAN_HOME", str(tmp_path))
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    monkeypatch.delenv("HERMES_KANBAN_DB", raising=False)
+    monkeypatch.setattr("hermes_cli.profiles.resolve_profile_env",
+                        lambda name: str(tmp_path) if name == "default" else str(tmp_path / name))
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    kb.create_board("owned")
+    with closing(kbc.connect(board="owned")) as conn:
+        tid = kb.create_task(conn, title="no skills", assignee="default",
+                             workspace_kind="dir", workspace_path=str(workspace))
+        task = kb.claim_task(conn, tid)
+    connection = SimpleNamespace(
+        authority=SimpleNamespace(profile_id=str(tmp_path)), native_owner=True,
+        actor=Principal("owner", str(tmp_path), frozenset({"session:create"}), "transport"))
+    params = dict(board="owned", task_id=task.id, run_id=task.current_run_id, claim_lock=task.claim_lock)
+    config = {"model": {"default": "m", "provider": "custom"}, "platform_toolsets": {"cli": ["terminal"]}}
+    policy, _secrets = build_kanban_policy(connection, params, config)
+    assert json.loads(policy.kanban_json)["skills"] == []
+
+
 # ---------------------------------------------------------------------------
 # Per-task force-loaded skills
 # ---------------------------------------------------------------------------

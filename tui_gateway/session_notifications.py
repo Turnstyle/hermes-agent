@@ -624,6 +624,12 @@ def _notif_handle_event(sid, session, evt, emitted, registry, fmt, deferred, com
         return True
     if evt_type == "completion" and registry.is_completion_consumed(evt.get("session_id", "")):
         return True
+    # The idle raw queue obeys the same policy as the post-turn and CLI drains: subagent-owned
+    # process noise follows the owning profile's opt-in instead of waking this session.
+    from tools.process_registry_notifications import should_surface_notification
+    with _session_profile_runtime_scope(session):
+        if not should_surface_notification(evt):
+            return True
     text = fmt(evt)
     if not text:
         return True

@@ -41,7 +41,7 @@ into a small graph of concrete child tasks and route each one to the best-
 matching profile from the available roster.
 
 You will be given:
-  - The original task title and body
+  - The original task title, current owner (assignee), and body
   - The list of available profiles (each with name + description)
   - The fallback "default_assignee" used when no profile fits
 
@@ -53,13 +53,41 @@ Output a single JSON object with this exact shape:
     "tasks": [
       {
         "title": "<concrete task title, imperative voice, <= 80 chars>",
-        "body":  "<detailed spec for the worker on this child task>",
+        "body":  "<structured spec for the worker on this child task, see structure below>",
         "assignee": "<profile name from the roster, or null for default>",
         "parents": [<int>, ...]
       },
       ...
     ]
   }
+
+Every task "body" (each child task in "tasks", or the single "body" when
+"fanout" is false) MUST include these sections in this order, separated by a
+blank line (\\n\\n), using these exact bold markdown headings:
+
+  **Purpose** — 1-2 plain-language sentences on why this task exists and the
+      user- or system-facing outcome.
+  **Work** — 2-5 concise plain-language bullets on what the worker will do.
+  **Owner** — mirror the routing that will actually be applied. For each
+      child in "tasks", use the valid roster profile chosen in "assignee",
+      or default_assignee when "assignee" is null. Do not inherit the root's
+      current owner for a child. For "fanout": false, keep Current owner
+      (assignee) if known, regardless of the proposed "assignee"; only when
+      unassigned use the valid chosen profile or default_assignee. If that
+      assignment is unknown, write "unknown"; never invent an owner.
+  **Done when** — Acceptance criteria:
+      checklist of concrete, verifiable conditions that prove completion
+      (keep "Acceptance criteria:" on the heading line for downstream
+      extractors).
+  **Blocker** — any current blocker, hold, or dependency prerequisite; if
+      none is stated or known, write "unknown" (never invent a blocker).
+  **Proof** — the concrete verification command, test run, or readback
+      receipt required to prove the work succeeded; if not known from the
+      input, write "unknown" (never fabricate proof).
+  **Supporting details** — exact technical identifiers preserved verbatim
+      from the input (file paths, function/symbol names, task/card IDs,
+      profile names, config keys, CLI commands/flags, commit SHAs, error
+      codes) plus any explicit out-of-scope boundaries.
 
 Rules:
   - "parents" is a list of INDICES (0-based) into this same "tasks" list,
@@ -73,7 +101,15 @@ Rules:
     DESCRIPTION (not just the name). When nothing matches well, use null
     and the system will route to the default_assignee.
   - Each child task body is what a fresh worker will read with no other
-    context — be specific about goal, approach, and acceptance criteria.
+    context — write the card face (Purpose, Work, Owner, Done when,
+    Blocker, Proof) in concise plain language with proper spaces (a blank
+    line between every section, and a space after every bullet marker,
+    colon, and sentence period).
+  - Keep dense technical identifiers in Supporting details and preserve every
+    exact technical identifier from the input verbatim (never alter, re-case,
+    or drop paths, IDs, profile names, config keys, SHAs, or commands).
+  - Owner must reflect the actual assignment; unknown owner, blocker, or
+    proof must be stated explicitly as "unknown", never invented.
 
 When the task is genuinely a single unit of work (no useful decomposition),
 return:
@@ -82,7 +118,7 @@ return:
     "fanout": false,
     "rationale": "<one sentence>",
     "title": "<tightened title>",
-    "body":  "<concrete spec for a single worker>",
+    "body":  "<structured spec for a single worker using the required sections above>",
     "assignee": "<profile name from the roster, or null for default>"
   }
 
@@ -96,6 +132,7 @@ No preamble, no closing remarks, no code fences. Output only the JSON object.
 
 _USER_TEMPLATE = """Task id: {task_id}
 Title: {title}
+Current owner (assignee): {owner}
 Body:
 {body}
 
@@ -312,6 +349,11 @@ def decompose_task(
     task, reason = _load_triage_task(task_id)
     if task is None:
         return DecomposeOutcome(task_id, False, reason)
+    with kbc.connect_closing() as conn:
+        installed = kb._fleet_adapter_installed_node_id(conn)
+        if kb._is_foreign_fleet_mirror(conn, task_id, installed):
+            logger.debug("decompose: skipping foreign Fleet mirror %s", task_id)
+            return DecomposeOutcome(task_id, False, "foreign Fleet mirror owned by another node")
 
     routing = _load_routing(root_assignee=task.assignee)
     raw, reason = _call_aux(
@@ -340,4 +382,5 @@ def list_triage_ids(*, tenant: Optional[str] = None) -> list[str]:
     """Return task ids currently in the triage column."""
     with kbc.connect_closing() as conn:
         rows = kb.list_tasks(conn, status="triage", tenant=tenant, limit=1000)
-    return [row.id for row in rows]
+        installed = kb._fleet_adapter_installed_node_id(conn)
+        return [row.id for row in rows if not kb._is_foreign_fleet_mirror(conn, row.id, installed)]

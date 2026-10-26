@@ -34,6 +34,7 @@ from agent.error_classifier import (
     is_reasoning_required_rejection,
 )
 from agent.auxiliary_managed_local import _is_managed_local_endpoint
+from agent.auxiliary_stream_error import raise_on_error_frame
 from agent.auxiliary_reasoning_floor import remember_reasoning_floor, with_reasoning_floor
 from agent.auxiliary_structured_output import _route_key, _without_structured_output_format, remember_structured_output_rejection
 from agent.codex_headers import (
@@ -7177,11 +7178,9 @@ class _ChatStreamAccumulator:
         # llama-server prompt reading doesn't count toward the ceiling (``local_prompt_progress``).
         self._prompt_reading = PromptReadingClock(self._started)
         self._total_ceiling = total_ceiling
-        # Absolute instant the waiting host gives up; checked alongside (not instead of) the
-        # ceiling, and unaffected by pre-construction dispatch/TTFT.
-        # Checked as well as (not instead of) the ceiling above: the ceiling still bounds callers with no
-        # host deadline, and the host deadline is absolute, so it is unaffected by however long dispatch and
-        # TTFT took before this accumulator was constructed. See #99692.
+        # Absolute instant the waiting host gives up. Checked as well as (not instead of) the ceiling: the
+        # ceiling still bounds callers with no host deadline, and the host deadline is absolute, so it is
+        # unaffected by however long dispatch and TTFT took before this accumulator was constructed. See #99692.
         self._host_deadline = host_deadline
         self.content_parts: list[str] = []
         self.reasoning_parts: list[str] = []
@@ -7249,6 +7248,7 @@ class _ChatStreamAccumulator:
         # Count the reading before the deadline check it extends.
         read_more = progress is not None and self._prompt_reading.tick(progress)
         self._check_deadlines()
+        raise_on_error_frame(chunk)  # never an empty "successful" completion from an error frame
         self.resp_id = getattr(chunk, "id", None) or self.resp_id
         self.resp_model = getattr(chunk, "model", None) or self.resp_model
         chunk_usage = getattr(chunk, "usage", None)

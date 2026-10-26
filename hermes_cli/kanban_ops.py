@@ -1,6 +1,6 @@
 """Dispatcher and maintenance verbs for ``hermes kanban``: ``dispatch``,
 ``daemon`` (deprecated standalone loop), ``tail``/``watch`` event streaming,
-``gc`` and ``repair``.
+``gc``, ``repair`` and ``refresh-pr-state``.
 """
 
 from __future__ import annotations
@@ -57,10 +57,13 @@ def _cmd_tail(args: argparse.Namespace) -> int:
     return _poll_loop(args.interval, tick)
 
 
-def _cmd_dispatch(args: argparse.Namespace) -> int:
-    # Honour kanban.default_assignee, kanban.max_in_progress,
-    # kanban.max_in_progress_per_profile and kanban.max_spawn with the same
-    # semantics as the gateway dispatch path.
+def _dispatch_settings(args: argparse.Namespace) -> tuple:
+    """``(default_assignee, max_in_progress_per_profile, max_in_progress, max_spawn)``.
+
+    Honour kanban.default_assignee, kanban.max_in_progress,
+    kanban.max_in_progress_per_profile and kanban.max_spawn with the same
+    semantics as the gateway dispatch path.
+    """
     try:
         from hermes_cli.config import load_config
         _cfg = load_config()
@@ -81,7 +84,15 @@ def _cmd_dispatch(args: argparse.Namespace) -> int:
     except Exception:
         default_assignee = max_in_progress_per_profile = max_in_progress = None
         max_spawn = getattr(args, "max", None)
-    with kbc.connect_closing() as conn:
+    return default_assignee, max_in_progress_per_profile, max_in_progress, max_spawn
+
+
+def _cmd_dispatch(args: argparse.Namespace) -> int:
+    default_assignee, max_in_progress_per_profile, max_in_progress, max_spawn = _dispatch_settings(args)
+    # --dry-run is a diagnostic: a read-only handle makes "no writes" a property of
+    # the connection, not a promise every dispatcher phase must keep.
+    connection = kbc.connect_readonly_closing if args.dry_run else kbc.connect_closing
+    with connection() as conn:
         res = kbd.dispatch_once(
             conn,
             dry_run=args.dry_run,
@@ -92,30 +103,46 @@ def _cmd_dispatch(args: argparse.Namespace) -> int:
             max_in_progress_per_profile=max_in_progress_per_profile,
         )
     if getattr(args, "json", False):
-        _print_json({
-            **{k: getattr(res, k)
-               for k in ("reclaimed", "crashed", "timed_out", "stale", "auto_blocked", "promoted",
-                         "reaped_terminal_workers")},
-            "spawned": [
-                {"task_id": tid, "assignee": who, "workspace": ws} for (tid, who, ws) in res.spawned
-            ],
-            "skipped_unassigned": res.skipped_unassigned,
-            "skipped_nonspawnable": res.skipped_nonspawnable,
-            "skipped_per_profile_capped": [
-                {"task_id": tid, "assignee": who, "current": current}
-                for (tid, who, current) in res.skipped_per_profile_capped
-            ],
-            "auto_assigned_default": res.auto_assigned_default,
-            "respawn_guarded": [
-                {"task_id": tid, "reason": reason}
-                for (tid, reason) in res.respawn_guarded
-            ],
-            "rate_limited": res.rate_limited,
-            "skipped_locked": res.skipped_locked,
-            "memory_pressure": res.memory_pressure,
-        }, ascii=True)
+        _print_json(_dispatch_json(res, args.dry_run), ascii=True)
         return 0
+    _print_dispatch_progress(res, args.dry_run, default_assignee)
+    _print_dispatch_skips(res)
+    _print_dispatch_holds(res)
+    return 0
+
+
+_DISPATCH_SCALAR_FIELDS = (
+    "reclaimed", "crashed", "timed_out", "stale", "auto_blocked", "promoted",
+    "reaped_terminal_workers", "skipped_unassigned", "skipped_nonspawnable",
+    "auto_assigned_default", "rate_limited", "profile_busy", "skipped_locked",
+    "memory_pressure", "capacity_held",
+)
+# DispatchResult tuple lists -> the JSON object keys of each tuple.
+_DISPATCH_TUPLE_FIELDS = (
+    ("spawned", ("task_id", "assignee", "workspace")),
+    ("skipped_placeholder", ("task_id", "assignee")),
+    ("owner_unavailable", ("task_id", "assignee")),
+    ("skipped_per_profile_capped", ("task_id", "assignee", "current")),
+    ("respawn_guarded", ("task_id", "reason")),
+    ("respawn_guard_lifted", ("task_id", "reason")),
+    ("reclaim_errors", ("task_id", "error")),
+    ("claim_errors", ("task_id", "error")),
+)
+
+
+def _dispatch_json(res, dry_run: bool) -> dict:
+    out = {name: getattr(res, name) for name in _DISPATCH_SCALAR_FIELDS}
+    if dry_run:
+        out["reclaim_phase"] = res.reclaim_phase
+    for name, keys in _DISPATCH_TUPLE_FIELDS:
+        out[name] = [dict(zip(keys, item)) for item in getattr(res, name)]
+    return out
+
+
+def _print_dispatch_progress(res, dry_run: bool, default_assignee) -> None:
     print(f"Reclaimed:    {res.reclaimed}")
+    if dry_run:
+        print(f"Reclaim phase: {res.reclaim_phase}")
     if res.reaped_terminal_workers:
         print(f"Reaped workers of finished tasks: {', '.join(res.reaped_terminal_workers)}")
     for label, items in (
@@ -129,7 +156,7 @@ def _cmd_dispatch(args: argparse.Namespace) -> int:
             print(f"  {', '.join(items)}")
     print(f"Promoted:     {res.promoted}")
     print(f"Spawned:      {len(res.spawned)}")
-    tag = " (dry)" if args.dry_run else ""
+    tag = " (dry)" if dry_run else ""
     for tid, who, ws in res.spawned:
         print(f"  - {tid}  ->  {who}  @ {ws or '-'}{tag}")
     if res.auto_assigned_default:
@@ -139,21 +166,58 @@ def _cmd_dispatch(args: argparse.Namespace) -> int:
         )
     if res.skipped_unassigned:
         print(f"Skipped (unassigned): {', '.join(res.skipped_unassigned)}")
+
+
+def _print_dispatch_skips(res) -> None:
+    """Capped and non-spawnable cards. A missing owner or a placeholder assignee is
+    named on its own line, never folded into the intentional terminal-lane skip."""
     for tid, who, current in res.skipped_per_profile_capped:
         print(f"Deferred ({who} at per-profile cap, {current} running): {tid}")
-    if res.skipped_nonspawnable:
+    flagged = {tid for tid, _who in res.owner_unavailable} | {tid for tid, _who in res.skipped_placeholder}
+    quiet = [tid for tid in res.skipped_nonspawnable if tid not in flagged]
+    if quiet:
         print(
             f"Skipped (non-spawnable assignee — terminal lane, OK): "
-            f"{', '.join(res.skipped_nonspawnable)}"
+            f"{', '.join(quiet)}"
         )
+    if res.skipped_placeholder:
+        holders = [f"{tid} ({who})" for tid, who in res.skipped_placeholder]
+        print(
+            f"Skipped (placeholder assignee — non-paging, waiting for assignment): "
+            f"{', '.join(holders)}"
+        )
+    for tid, who in res.owner_unavailable:
+        print(f"Owner unavailable (no profile {who!r} on this home; reassign to recover): {tid}")
+
+
+def _print_dispatch_holds(res) -> None:
     for tid, reason in res.respawn_guarded:
         print(f"Guarded ({reason}): {tid}")
+    for tid, reason in res.respawn_guard_lifted:
+        print(f"Guard lifted ({reason}): {tid}")
     if res.rate_limited:
         print(f"Rate-limited (released to ready, no failure counted): {', '.join(res.rate_limited)}")
+    if res.profile_busy:
+        print(f"Profile busy (session slot held; released with backoff, no failure counted): "
+              f"{', '.join(res.profile_busy)}")
     if res.skipped_locked:
         print("Skipped: another dispatcher holds this board's lock (no writes this tick)")
     if res.memory_pressure:
         print(f"Memory pressure {res.memory_pressure}: new workers restricted this tick")
+    if res.capacity_held:
+        print(f"Held ({res.capacity_held}): no new workers this tick")
+    for tid, err in res.reclaim_errors:
+        print(f"Reclaim refused ({tid}): {err}")
+    for tid, err in res.claim_errors:
+        print(f"Claim refused ({tid}): {err}")
+
+
+def _cmd_refresh_pr_state(args: argparse.Namespace) -> int:
+    from hermes_cli.kanban_pr_state import refresh_pr_state
+
+    with kbc.connect_readonly_closing() as conn:
+        counts = refresh_pr_state(conn, max_prs=args.max_prs, timeout=args.timeout)
+    print("PR state cache: " + ", ".join(f"{key}={value}" for key, value in counts.items()))
     return 0
 
 
@@ -204,18 +268,19 @@ def _cmd_daemon(args: argparse.Namespace) -> int:
     HEALTH_WINDOW = 6  # ticks (default 30s at interval=5)
     health_state = {"bad_ticks": 0, "last_warn_at": 0}
 
-    def _ready_queue_nonempty() -> bool:
-        """Is there a ready+assigned+unclaimed task the dispatcher would spawn for?
+    def _ready_queue_spawnable_count() -> int:
+        """Count unclaimed ready tasks whose assignee has dispatch enabled.
         Control-plane lanes pulled via ``claim_task`` are correctly idle, not stuck."""
         try:
             with kbc.connect_closing() as conn:
-                return kbd.has_spawnable_ready(conn)
+                return kbd.count_spawnable_ready(conn)
         except Exception:
-            return False
+            return 0
 
     def _on_tick(res):
-        ready_pending = bool(res.skipped_unassigned) or _ready_queue_nonempty()
-        if ready_pending and not res.spawned:
+        ready_spawnable = _ready_queue_spawnable_count()
+        stalled = kbd.eligible_work_stalled([res], ready_spawnable)
+        if stalled:
             health_state["bad_ticks"] += 1
         else:
             health_state["bad_ticks"] = 0
@@ -225,10 +290,15 @@ def _cmd_daemon(args: argparse.Namespace) -> int:
             if now - health_state["last_warn_at"] >= 300:
                 held = kbd.describe_suppression([res])
                 held = f" Last tick held back: {held}." if held else ""
+                spawn_msg = (
+                    "eligible tasks failing despite active spawns"
+                    if bool(getattr(res, "spawned", None))
+                    else "0 workers spawned successfully"
+                )
                 print(
                     f"[{_fmt_ts(now)}] WARN dispatcher stuck: ready queue non-empty for "
-                    f"{health_state['bad_ticks']} consecutive ticks but 0 workers spawned "
-                    f"successfully.{held} Check profile health (venv, PATH, credentials) and `hermes "
+                    f"{health_state['bad_ticks']} consecutive ticks but {spawn_msg}.{held} "
+                    f"Check profile health (venv, PATH, credentials) and `hermes "
                     f"kanban list --status ready` / `hermes kanban list --status blocked` for "
                     f"recent spawn_failed tasks.",
                     file=sys.stderr, flush=True,
@@ -324,7 +394,7 @@ def _cmd_gc(args: argparse.Namespace) -> int:
                 if wt_path and Path(wt_path).is_dir():
                     if kbw._defer_shared_worktree_cleanup(conn, row["id"], wt_path):
                         continue
-                    kbw._cleanup_worktree_workspace(row["id"], wt_path, row["branch_name"])
+                    kbw._cleanup_worktree_workspace(row["id"], wt_path, row["branch_name"], conn=conn)
                     if not Path(wt_path).is_dir():
                         removed_ws += 1
                 continue
@@ -336,6 +406,8 @@ def _cmd_gc(args: argparse.Namespace) -> int:
             # Cheap existence/symlink check first: most rows were already cleaned at
             # completion, and rmtree refuses a symlink (so it must not be counted).
             if not path.is_dir() or path.is_symlink() or not kbw._is_managed_scratch_path(path):
+                continue
+            if not kbw.preservation_gate(row["id"], path, conn=conn):
                 continue
             if kbw._defer_shared_workspace_cleanup(conn, row["id"], path):
                 continue

@@ -9,6 +9,7 @@ import logging
 import os
 import sys
 import threading
+from collections.abc import Mapping
 from pathlib import Path
 
 # Kept at module level on purpose: importing this module must fail when the dotenv install is
@@ -63,6 +64,79 @@ _SECRET_SOURCE_WRITES_BY_HOME: dict[str, dict[str, tuple[str, str, str | None]]]
 # re-parse + ASCII sweep re-run each time (Bitwarden's own cache only saves the network call).
 _APPLIED_HOMES: set[str] = set()
 _SECRET_SOURCE_CACHE_LOCK = threading.RLock()
+_ONEPASSWORD_SKIP_LOGGED = False
+
+
+def _startup_onepassword_skip_reason() -> str:
+    """Why a tokenless startup 1Password read must not run here, or "" when a person can approve it.
+
+    Without a service-account token, ``op`` falls back to the desktop app, which raises a Touch ID /
+    approval dialog that unattended work (cron, Kanban, delegated children, launchd jobs, a headless
+    stdin, the Desktop-spawned backend) can never answer. A foreground or service ``gateway run``
+    keeps resolving at startup (owner decision), but a detached ``gateway ensure`` daemon, its cron
+    jobs and delegated children are NOT exempt, even in-process.
+    """
+    from agent.delegation_context import is_delegated_child_process_context
+    from gateway.session_context import get_session_env
+    from hermes_cli._parser import command_argv
+
+    if is_delegated_child_process_context():
+        return "delegated child"
+    for marker, reason in (("HERMES_KANBAN_TASK", "Kanban worker"),
+                           ("_HERMES_CRON_EXTERNAL_WORKER", "cron worker")):
+        if os.environ.get(marker):
+            return reason
+    if get_session_env("HERMES_CRON_SESSION", "").strip().lower() in {"1", "true", "yes", "on"}:
+        return "cron session"
+
+    command = command_argv(sys.argv[1:])
+    # The Desktop-spawned backend has no approval channel: its startup mappings come from .env,
+    # a command source or a service account, never the desktop app's biometric prompt.
+    if command[:1] in (["serve"], ["dashboard"]) and os.environ.get("HERMES_DESKTOP") == "1":
+        return "Desktop backend"
+    if command[:2] == ["gateway", "run"]:
+        # Desktop (and chat/TUI clients) start the backend through ``gateway ensure``, whose
+        # detached daemon (stdin /dev/null, gateway_runtime_start) has no approval channel either.
+        if os.environ.get("HERMES_GATEWAY_DETACHED", "").strip() == "1" and not _stdin_is_tty():
+            return "detached gateway daemon"
+        return ""
+    xpc_service = os.environ.get("XPC_SERVICE_NAME", "").strip()
+    # GUI terminals inherit LaunchServices' application.* identity. A real TTY
+    # inside that application is still interactive, unlike a named launchd job.
+    if (xpc_service not in {"", "0"} and not xpc_service.startswith("application.")) or (
+        os.environ.get("HERMES_LAUNCHD_LABEL", "").strip() not in {"", "0"}
+    ):
+        return "launchd job"
+    return "" if _stdin_is_tty() else "no terminal on standard input"
+
+
+def _stdin_is_tty() -> bool:
+    try:
+        return sys.stdin is not None and sys.stdin.isatty()
+    except (AttributeError, OSError, ValueError):
+        return False  # closed/missing stdin cannot provide an interactive approval channel
+
+
+def _startup_secret_sources(cfg: dict, *, environ: Mapping[str, str] | None = None) -> dict:
+    """*cfg* minus a tokenless 1Password source when no person can approve it (startup only;
+    ``hermes secrets onepassword sync`` and the browser vault are separate paths)."""
+    source = cfg.get("onepassword")
+    if not isinstance(source, dict) or source.get("enabled") is not True:
+        return cfg
+    # The exact fetch environment after the .op.env bootstrap, never a sibling profile's token.
+    source_env = os.environ if environ is None else environ
+    token_env = str(source.get("service_account_token_env") or "OP_SERVICE_ACCOUNT_TOKEN")
+    if source_env.get(token_env, "").strip():
+        return cfg
+    reason = _startup_onepassword_skip_reason()
+    if not reason:
+        return cfg
+    global _ONEPASSWORD_SKIP_LOGGED
+    with _SECRET_SOURCE_CACHE_LOCK:
+        if not _ONEPASSWORD_SKIP_LOGGED:
+            print(f"1Password skipped: {reason}.", file=sys.stderr)
+            _ONEPASSWORD_SKIP_LOGGED = True
+    return {name: value for name, value in cfg.items() if name != "onepassword"}
 
 # What THIS process has published from dotenv files, per variable: (value before our first publish, or
 # None if absent; last value we published; load pass that published it). Reloads run per gateway turn and
@@ -210,6 +284,7 @@ def _hydrate_profile_secret_sources(home: Path) -> dict[str, str]:
             for _name, _value in load_env_file(op_env).items():
                 local_env.setdefault(_name, _value)
         local_env["HERMES_HOME"] = str(home)
+        cfg = _startup_secret_sources(cfg, environ=local_env)
         report = apply_all(cfg, home, environ=local_env)
     except Exception:
         return {}
@@ -696,7 +771,7 @@ def _apply_external_secret_sources(home_path: Path) -> None:
     # disable secret loading for this process, and an unmarked home picks up a config change on the next
     # load (the signature-cached read is cheap).
     try:
-        cfg = _load_secrets_config(home_path)
+        cfg = _startup_secret_sources(_load_secrets_config(home_path))
     except Exception:
         # See #40597.
         return

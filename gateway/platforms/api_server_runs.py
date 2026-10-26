@@ -750,6 +750,8 @@ async def _handle_runs(self, request: web.Request, *, _api_server) -> web.Respon
         turn_author = _api_server._request_turn_author(body)
     except ValueError as exc:
         return _json_error(_openai_error, str(exc), code="invalid_author", status=400)
+    # The server-verified caller replaces any asserted author before Bot Chat / authority admission.
+    user_message, turn_author = _api_server.bind_verified_message(user_message, turn_author)
     conversation_history, instructions, stored_session_id, history_err, walked_from = await _resolve_chained_history(
         self, body, raw_input, _openai_error=_openai_error)
     if history_err is not None:

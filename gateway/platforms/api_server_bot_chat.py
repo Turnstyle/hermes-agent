@@ -125,9 +125,10 @@ def bot_chat_tip(authority, session_id):
     return db.get_session(tip)
 
 
-async def admit_peer_turn(runner, session_id, message, author):
+async def admit_peer_turn(runner, session_id, message, author, *, delivery_id=None):
     """``(profile home, receipt)`` when *session_id* is the Bot Chat and the turn was admitted to its
-    FIFO; None when the target is any other session (the caller runs it as an API turn)."""
+    FIFO; None when the target is any other session (the caller runs it as an API turn). A caller
+    replaying durable input passes its own stable *delivery_id* so a repeat names the same delivery."""
     from gateway.session_authorities import served_profile_name
     from gateway.session_bot import deliver
     authority = _authority(runner)
@@ -148,7 +149,7 @@ async def admit_peer_turn(runner, session_id, message, author):
         # input, the way owner recovery re-admits queued deliveries (``recover_bot_deliveries``).
         actor = Principal(tip['user_id'], authority.profile_id,
                           frozenset({'session:submit', 'session:read'}), 'api-peer-dm')
-    key = uuid.uuid4().hex
+    key = delivery_id or uuid.uuid4().hex
     params = dict(id=key, profile=served_profile_name(home), message=message)
     if author is not None:
         params['author'] = dict(author)

@@ -3,7 +3,7 @@
 Pure-data leaf module — must not import from hermes_cli.config. Comments are the user-facing
 docs of config.yaml.
 """
-
+from hermes_cli.config_defaults_auth import AUTH_DEFAULTS
 
 #: Image every container terminal backend (docker/modal/daytona, the singularity plugin) uses unless the
 #: user pins one. LEGACY_SANDBOX_IMAGES are the plain defaults that preceded the desktop stack
@@ -1765,21 +1765,7 @@ DEFAULT_CONFIG = {
     # Custom personalities: {"name": "system prompt"} or {"name": {"description", "system_prompt",
     # "tone", "style"}}.
     "personalities": {},
-    "auth": {  # Login policy (credentials themselves live in auth.json / .env).
-        # Borrow and refresh the Codex CLI (~/.codex/auth.json) and Claude Code (~/.claude/.credentials.json)
-        # logins automatically when Hermes has no usable login of its own. Their refresh tokens are single-use
-        # and rotate, so two programs on one login can log each other out; set false to make Hermes use only
-        # its own logins (`hermes auth add <provider>`). `hermes auth add openai-codex` still offers the import
-        # interactively.
-        "adopt_external_logins": True,
-        # How `hermes auth add openai-codex` / `hermes model` sign in to OpenAI Codex.
-        # "device_code" (default): open a URL, enter a code. "browser": authorization-code + PKCE on
-        # the loopback listener http://localhost:1455/auth/callback (the redirect OpenAI registered
-        # for the Codex client) — for organizations that disable the device-code grant. Falls back
-        # to device code when that port is busy. `hermes auth add openai-codex --browser` opts in
-        # for one login without changing this key.
-        "codex_login_flow": "device_code",
-    },
+    "auth": AUTH_DEFAULTS,  # Login policy (credentials themselves live in auth.json / .env).
     "security": {  # Security: URL/private-network guards, redaction and approval presentation.
         "allow_private_urls": False,  # allow requests to private/internal IPs (OpenWrt, VPNs)
         # CIDR blocks a local TUN proxy answers DNS with (Mihomo/Clash fake-ip, Surge enhanced).

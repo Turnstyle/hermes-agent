@@ -979,8 +979,7 @@ def _complete_turn_payload(session: dict, st: _TurnRun, status_note: str | None,
     return payload, raw, status
 
 
-def _recover_turn_exception(sid: str, session: dict, st: _TurnRun, e: BaseException) -> None:
-    """Except-path of the turn: crash log, history restore, terminal error frame."""
+def _log_turn_crash(sid: str, e: BaseException) -> None:
     import traceback
     with contextlib.suppress(Exception):
         os.makedirs(os.path.dirname(_CRASH_LOG), exist_ok=True)
@@ -990,25 +989,38 @@ def _recover_turn_exception(sid: str, session: dict, st: _TurnRun, e: BaseExcept
                 f"{time.strftime('%Y-%m-%d %H:%M:%S')} · sid={sid} ===\n")
             f.write(traceback.format_exc())
     print(f"[gateway-turn] {type(e).__name__}: {e}", file=sys.stderr, flush=True)
-    # A finalizer exception can leave in-memory history at the turn-start snapshot.
-    _restore_agent_history_after_turn_error(session, st.agent)
+
+
+def _recover_turn_exception(sid: str, session: dict, st: _TurnRun, e: BaseException) -> None:
+    """Except-path of the turn: crash log, history restore, terminal error frame. A pre-send
+    fallback refusal is a typed no-execution failure instead: safe copy, retryable surface."""
+    from agent.fallback_chain_refresh import FallbackRouteUnavailableError
+    refused = isinstance(e, FallbackRouteUnavailableError)
+    error, error_surface = (e.user_message, dict(e.error_surface)) if refused else (e, None)
+    if refused:
+        # Nothing ran: the turn-start history is already the truth, and there is no crash to keep.
+        logger.info("Pre-send fallback route refused in session %s", sid)
+    else:
+        _log_turn_crash(sid, e)
+        # A finalizer exception can leave in-memory history at the turn-start snapshot.
+        _restore_agent_history_after_turn_error(session, st.agent)
     if st.terminal_callback is not None and not st.receipt_attempted:
         st.receipt_attempted = True
         try:
-            st.terminal_callback({"status": "failed", "text": "", "error": str(e)})
+            st.terminal_callback({"status": "failed", "text": "", "error": str(error)})
             st.receipt_committed = True
         except Exception:
             logger.exception("hosted room terminal receipt commit failed")
     try:
         # Same terminal error frame shape as the returned-error path.
-        _emit_terminal_turn_error(sid, session, e, retire_marker=st.receipt_committed)
+        _emit_terminal_turn_error(sid, session, error, error_surface=error_surface, retire_marker=st.receipt_committed)
         st.error_retained = True
-        st.error_detail = _turn_failure_detail(e, type(e).__name__, st.prompt_text)
+        st.error_detail = _turn_failure_detail(error, type(e).__name__, st.prompt_text)
     except Exception as emit_exc:
         print(
             f"[gateway-turn] terminal error emit failed: {type(emit_exc).__name__}: {emit_exc}",
             file=sys.stderr, flush=True)
-        _emit("error", sid, {"message": str(e)})
+        _emit("error", sid, {"message": str(error)})
 
 
 def _release_turn_scopes(sid: str, session: dict, st: _TurnRun) -> None:

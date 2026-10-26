@@ -686,6 +686,15 @@ auth:
 
 With the switch off Hermes never reads or refreshes those files: the `claude_code` credential-pool row disappears, `hermes auth list` prints one line saying so, and the log carries one INFO line per process. Only automatic adoption is affected — `hermes auth add openai-codex` still asks before importing an existing Codex CLI login. Automatic recovery also only repairs the credential Hermes already holds: a Codex CLI/Desktop login into a different ChatGPT workspace is refused with a warning (re-authenticate with `hermes auth add openai-codex`), and a login you complete while recovery is running is never overwritten. Add your own logins with `hermes auth add anthropic` / `hermes auth add openai-codex`.
 
+To forbid a profile's bots from reading any OS credential store at all, set `auth.no_keychain: true` in that profile's `config.yaml` (default `false`):
+
+```yaml
+auth:
+  no_keychain: true   # default: false
+```
+
+Hermes then never reads the macOS Keychain, Claude Code's login file, `gh auth token` or a git credential helper for that profile, and never refreshes, persists or borrows a refresh grant. Anthropic auth becomes access-only: an injected `CLAUDE_CODE_OAUTH_TOKEN`, `ANTHROPIC_TOKEN` or `ANTHROPIC_API_KEY`, or a private `credentials/anthropic.json` under the profile home (directory `0700`, regular file `0600`, only `accessToken` and an optional `expiresAt` in epoch milliseconds). A missing or expired token fails loudly so whatever issued it can renew it. Your own CLI sign-ins are not touched. A config that cannot be parsed is treated as forbidding OS-store access rather than silently falling back.
+
 ### What Each Sandbox Filters
 
 | Sandbox | Default Filter | Passthrough Override |

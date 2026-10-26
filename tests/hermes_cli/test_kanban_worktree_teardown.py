@@ -78,6 +78,15 @@ def _branch_exists(repo: Path, branch: str) -> bool:
     return bool(out.strip())
 
 
+@pytest.fixture(autouse=True)
+def _rowless_ids_skip_bundle_gate(request: pytest.FixtureRequest, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Direct cleanup calls here use ids with no task row, which the accepted-bundle
+    gate refuses (fail closed); the gate is covered by test_kanban_bundle_preserve.py
+    and stays live in the ``kanban_home`` tests that use real task rows."""
+    if "kanban_home" not in request.fixturenames:
+        monkeypatch.setattr(kbw, "preservation_gate", lambda *a, **k: True)
+
+
 # ---------------------------------------------------------------------------
 # _cleanup_worktree_workspace unit behavior
 # ---------------------------------------------------------------------------

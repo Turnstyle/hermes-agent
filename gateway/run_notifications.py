@@ -1696,11 +1696,13 @@ class GatewayNotificationsMixin(GatewayUpdateNotificationsMixin, GatewayNotifica
         # Truncate at line boundaries so notifications never start mid-line (fixes #23284). Keep the last
         # ~2000 chars but snap to the nearest preceding newline, then prepend a truncation marker when
         # output was cut.
+        _cut = 0
         if len(_raw) > _LIMIT:
             _tail = _raw[-_LIMIT:]
             _nl = _tail.find("\n")
             _tail = _tail[_nl + 1:] if _nl != -1 else _tail
             _out = f"[… output truncated — showing last {len(_tail)} chars]\n{_tail}"
+            _cut = len(_raw) - len(_tail)
         else:
             _out = _raw
         return {
@@ -1716,6 +1718,8 @@ class GatewayNotificationsMixin(GatewayUpdateNotificationsMixin, GatewayNotifica
             "completion_reason": getattr(session, "completion_reason", "exited"),
             "termination_source": getattr(session, "termination_source", ""),
             "output": _redact_gateway_user_facing_secrets(_out),
+            # A consumer that relays the output (a bot DM's reply) must know it is not whole.
+            **({"output_cut": _cut} if _cut else {}),
             # Spawning session-db id: lets pre-flight drop this completion if the user /new'd first.
             "parent_session_id": (
                 watcher.get("parent_session_id") or getattr(session, "parent_session_id", "") or ""

@@ -321,7 +321,7 @@ def _resolve_crash_grace_seconds() -> int:
 
 def _resolve_rate_limit_cooldown_seconds() -> int:
     """``HERMES_KANBAN_RATE_LIMIT_COOLDOWN_SECONDS`` (0 = next tick, for tests) else default."""
-    return _env_int("HERMES_KANBAN_RATE_LIMIT_COOLDOWN_SECONDS", DEFAULT_RATE_LIMIT_COOLDOWN_SECONDS)
+    return min(600, _env_int("HERMES_KANBAN_RATE_LIMIT_COOLDOWN_SECONDS", DEFAULT_RATE_LIMIT_COOLDOWN_SECONDS))
 
 
 # --- Paths ---
@@ -404,7 +404,12 @@ def kanban_home() -> Path:
     override = os.environ.get("HERMES_KANBAN_HOME", "").strip()
     if override:
         return Path(override).expanduser()
-    from hermes_constants import get_default_hermes_root
+    from hermes_constants import get_default_hermes_root, get_hermes_home_override
+    override = get_hermes_home_override()
+    # A launch HERMES_HOME anchors the shared root and a context override never forks it.
+    # With no launch home, a bound ``<root>/profiles/<name>`` still names its machine root.
+    if override and not os.environ.get("HERMES_HOME", "").strip() and Path(override).parent.name == "profiles":
+        return get_default_hermes_root(home=override)
     return get_default_hermes_root()
 
 
@@ -450,14 +455,10 @@ def get_current_board() -> str:
         f = current_board_path()
         if f.exists():
             # utf-8-sig read fix (ours): tolerate BOM-persisted current-board files.
-            val = f.read_text(encoding="utf-8-sig").strip()
-            if val:
-                try:
-                    normed = _normalize_board_slug(val)
-                    if normed and board_exists(normed):
-                        return normed
-                except ValueError:
-                    pass
+            # Same live-board/tombstone rule as the overrides: never resurrect an archived board.
+            found = _existing(f.read_text(encoding="utf-8-sig").strip())
+            if found:
+                return found
     except OSError:
         pass
     return DEFAULT_BOARD
@@ -1276,7 +1277,7 @@ def create_task(
                         _opt_int(max_runtime_seconds),
                         json.dumps(skills_list) if skills_list is not None else None,
                         _opt_int(max_retries), model_override, provider_override, reasoning_effort,
-                        1 if goal_mode else 0, _opt_int(goal_max_turns), session_id, completion_contract,
+                        1 if goal_mode else 0, _positive_int_or_none(goal_max_turns), session_id, completion_contract,
                     ),
                 )
                 for pid in parents:
@@ -1306,7 +1307,7 @@ def create_task(
                         conn,
                         task_id,
                         "blocked",
-                        {"reason": "initial_status", "status": "blocked", "actor": created_by or "user"},
+                        {"reason": "initial_status", "status": "blocked", "actor": created_by or "user", "bookkeeping": True},
                     )
                 if task_status == "todo":
                     # Parked behind an open parent: record why, exactly as
@@ -1451,8 +1452,11 @@ def list_tasks(
     return [Task.from_row(r) for r in rows]
 
 
-def assign_task(conn: sqlite3.Connection, task_id: str, profile: Optional[str]) -> bool:
-    """Assign/reassign; raises RuntimeError while the task is running under a claim."""
+def assign_task(
+    conn: sqlite3.Connection, task_id: str, profile: Optional[str], *, reason: Optional[str] = None,
+) -> bool:
+    """Assign/reassign; raises RuntimeError while the task is running under a claim.
+    A non-empty ``reason`` is saved on the ``assigned`` event (why this claimant)."""
     profile = _canonical_assignee(profile)
     with write_txn(conn):
         row = conn.execute(
@@ -1475,9 +1479,10 @@ def assign_task(conn: sqlite3.Connection, task_id: str, profile: Optional[str]) 
             conn.execute("UPDATE tasks SET assignee = ? WHERE id = ?", (profile, task_id))
         # ``from`` lets the respawn guard tell a real handoff (dev→closer) from
         # a no-op re-assign or an unassign, which must not lift ``active_pr``.
-        _append_event(
-            conn, task_id, "assigned", {"assignee": profile, "from": row["assignee"]},
-        )
+        payload = {"assignee": profile, "from": row["assignee"]}
+        if reason and str(reason).strip():
+            payload["reason"] = str(reason).strip()
+        _append_event(conn, task_id, "assigned", payload)
     # Observer fires AFTER commit so subscribers see durable state.
     notify_task_updated(conn, task_id, ("assignee",))
     return True
@@ -1898,6 +1903,12 @@ def _opt_int(value: Any) -> Optional[int]:
     return int(value) if value is not None else None
 
 
+def _positive_int_or_none(value: Any) -> Optional[int]:
+    """Persist only a positive goal turn budget; unset and nonpositive mean NULL."""
+    parsed = _opt_int(value)
+    return parsed if parsed is not None and parsed > 0 else None
+
+
 def _json_or_null(obj: Any) -> Optional[str]:
     """JSON text for a payload/metadata column; falsy -> NULL."""
     return json.dumps(obj, ensure_ascii=False) if obj else None
@@ -2032,66 +2043,7 @@ def _resume_status_from_events(conn: sqlite3.Connection, task_id: str) -> str:
     return "ready"
 
 
-def recompute_ready(conn: sqlite3.Connection, failure_limit: int | None = None) -> int:
-    """Promote ``todo``/``blocked`` tasks whose parents are all done/archived;
-    returns the count. Opens its own IMMEDIATE txn — call OUTSIDE any write txn.
-
-    ``blocked`` is skipped when sticky (explicit ``kanban_block``) or when
-    ``consecutive_failures`` reached the limit (else the breaker could never
-    trip). Limit order matches ``_record_task_failure``: ``max_retries`` >
-    ``failure_limit`` > ``DEFAULT_FAILURE_LIMIT``.
-
-    1. The most recent block event was a worker-initiated ``kanban_block`` — those stay blocked until an
-    explicit ``kanban_unblock`` (#28712).
-    """
-    if failure_limit is None:
-        failure_limit = DEFAULT_FAILURE_LIMIT
-    promoted = 0
-    with write_txn(conn):
-        todo_rows = conn.execute(
-            "SELECT id, status, consecutive_failures, max_retries "
-            "FROM tasks WHERE status IN ('todo', 'blocked')"
-        ).fetchall()
-        for row in todo_rows:
-            task_id = row["id"]
-            cur_status = row["status"]
-            if cur_status == "blocked" and _has_sticky_block(conn, task_id):
-                # Explicit human-intervention block; only ``unblock_task`` may exit it.
-                continue
-            parents = conn.execute(
-                "SELECT t.status FROM tasks t "
-                "JOIN task_links l ON l.parent_id = t.id "
-                "WHERE l.child_id = ?", (task_id,),
-            ).fetchall()
-            if all(p["status"] in ("done", "archived") for p in parents):
-                resume_status = _resume_status_from_events(conn, task_id)
-                if cur_status == "blocked":
-                    # At the breaker limit, no auto-recovery (else block ->
-                    # recover -> respawn -> exhaust -> block forever). The
-                    # counter is preserved so it accumulates across cycles.
-                    failures = int(row["consecutive_failures"] or 0)
-                    task_limit = row["max_retries"]
-                    effective_limit = (
-                        int(task_limit) if task_limit is not None
-                        else int(failure_limit)
-                    )
-                    if failures >= effective_limit:
-                        continue
-                    conn.execute(
-                        "UPDATE tasks SET status = ? "
-                        "WHERE id = ? AND status = 'blocked'", (resume_status, task_id),
-                    )
-                else:
-                    conn.execute(
-                        "UPDATE tasks SET status = ? WHERE id = ? AND status = 'todo'",
-                        (resume_status, task_id),
-                    )
-                _append_event(
-                    conn, task_id, "promoted",
-                    {"status": resume_status} if resume_status != "ready" else None,
-                )
-                promoted += 1
-    return promoted
+# ``recompute_ready`` lives in kanban_db_ready (fleet promotion fences).
 
 
 # --- Claim / complete / block ---
@@ -2190,6 +2142,8 @@ def claim_task(
             )
             _append_event(conn, task_id, "claim_rejected", {"reason": "parents_not_done"})
             return None
+        if reject_busy_workspace(conn, task_id):
+            return None
         # Close a leaked prior run so the CAS below doesn't strand it.
         _reclaim_dangling_run(
             conn, task_id, statuses=("ready",), now=now, note="invariant recovery on re-claim",
@@ -2223,6 +2177,8 @@ def claim_review_task(
                     conn, task_id, "dependency_wait",
                     {"reason": "parent_reopened", "source_status": "review"},
                 )
+            return None
+        if reject_busy_workspace(conn, task_id):
             return None
         run_id = _claim_and_open_run(
             conn, task_id, "review", lock, expires, now, event_extra={"source_status": "review"},
@@ -2353,10 +2309,19 @@ def release_stale_claims(
         "  AND claim_expires < ?", (now,),
     ).fetchall()
     from hermes_cli.kanban_owner_recovery import owner_reclaim_blocked, owner_reclaim_blocked_after_kill
+    from hermes_cli.kanban_db_dispatch import _recovery_owned_here
+    installed_node_id = _fleet_adapter_installed_node_id(conn) if stale else None
     for row in stale:
+        host_local = (row["claim_lock"] or "").startswith(host_prefix)
+        # A claim this host did not take is a Fleet mirror of another node's card unless
+        # canonical ownership says otherwise: decide BEFORE any PID probe/signal/write.
+        # A host-local claim is real local ownership evidence; owner receipts still gate both.
+        if not host_local and not _recovery_owned_here(
+            conn, None, "release_stale_claims", row["id"], installed_node_id,
+        ):
+            continue
         if owner_reclaim_blocked(conn, row["id"]):
             continue
-        host_local = (row["claim_lock"] or "").startswith(host_prefix)
         hb = _to_epoch(row["last_heartbeat_at"])
         # Backstop: a heartbeat older than the max-stale threshold means no
         # observable progress — reclaim even if the PID is alive (logic loop).
@@ -2518,7 +2483,7 @@ def reassign_task(
         reclaim_task(conn, task_id, reason=reason or "reassign")
     # assign_task handles its own txn + the still-running guard.
     try:
-        return assign_task(conn, task_id, profile)
+        return assign_task(conn, task_id, profile, reason=reason)
     except RuntimeError:
         # Task is still running and reclaim_first was False; caller
         # needs to decide whether to retry with reclaim.
@@ -3557,50 +3522,6 @@ def _landing_status_after_parents(conn: sqlite3.Connection, task_id: str) -> str
     return "ready" if _parents_satisfied(conn, task_id) else "todo"
 
 
-def unblock_task(conn: sqlite3.Connection, task_id: str) -> bool:
-    """``blocked``/``scheduled`` -> its resumable phase (parent re-gated; ``review``
-    when that is where it left off), closing any leaked run first."""
-    now = int(time.time())
-    with write_txn(conn):
-        resume_status = (
-            _resume_status_from_events(conn, task_id)
-            if _task_status(conn, task_id) == "blocked"
-            else "ready"
-        )
-        _reclaim_dangling_run(
-            conn, task_id, statuses=("blocked", "scheduled"), now=now,
-            note="invariant recovery on unblock",
-        )
-        # Re-gate on parent completion before restoring the source phase.
-        landing_status = _landing_status_after_parents(conn, task_id)
-        new_status = (
-            "review"
-            if landing_status == "ready" and resume_status == "review"
-            else landing_status
-        )
-        # ``block_kind``/``block_recurrences`` deliberately survive the unblock:
-        # resetting them is the amnesia that let cron-unblock <-> re-block loop
-        # unbounded; only complete_task clears them. ``consecutive_failures``
-        # (the dispatcher's spawn/crash counter) IS reset — a deliberate unblock
-        # is a fresh start for the retry budget.
-        cur = conn.execute(
-            "UPDATE tasks SET status = ?, current_run_id = NULL, "
-            "consecutive_failures = 0, last_failure_error = NULL "
-            "WHERE id = ? AND status IN ('blocked', 'scheduled')", (new_status, task_id),
-        )
-        if cur.rowcount != 1:
-            return False
-        _append_event(
-            conn, task_id, "unblocked",
-            (
-                {"status": new_status, "resume_status": resume_status}
-                if new_status != "ready" or resume_status != "ready"
-                else None
-            ),
-        )
-        return True
-
-
 def reopen_review_task(conn: sqlite3.Connection, task_id: str) -> bool:
     """``review`` -> ``ready``/``todo`` so the implementer re-runs on the new
     comments; restores the implementer from the ``review_requested`` event.
@@ -4220,6 +4141,18 @@ from hermes_cli.kanban_db_connect import (
     init_db,
     write_txn,
 )
+from hermes_cli.kanban_db_ownership import (
+    FLEET_OWNER_FOREIGN, FLEET_OWNER_LOCAL, FLEET_OWNER_UNKNOWN, _FLEET_NODE_UNPARSEABLE,
+    _fleet_adapter_installed_node_id, _fleet_row_ownership, _is_foreign_fleet_mirror,
+)
+from hermes_cli.kanban_db_holds import (
+    BLOCK_ENTRY_SCHEMA_SQL, NEEDS_INPUT_TODO_HOLD_SECONDS, _has_explicit_block, _has_turner_hold,
+    _needs_input_hold_state, unblock_task,
+)
+from hermes_cli.kanban_db_ready import _card_write_savepoint, recompute_ready
+from hermes_cli.kanban_db_spec import HASH_ENCODING, compute_task_sha256, keep_spec_triage_task
+from hermes_cli.kanban_db_workspace_busy import _is_workspace_busy, reject_busy_workspace
+SCHEMA_SQL += BLOCK_ENTRY_SCHEMA_SQL
 from hermes_cli.kanban_db_workspace import (
     _cleanup_workspace,
     _is_managed_scratch_path,

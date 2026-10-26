@@ -287,6 +287,10 @@ def sort_skills(skills: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return sorted(skills, key=lambda s: (s.get("category") or "", s["name"]))
 
 
+# Compatibility for standalone hermes-webui callers predating the public name.
+_sort_skills = sort_skills
+
+
 def skills_list(category: str | None = None, task_id: str | None = None) -> str:
     """Tier 1 listing: name + description (+ category) only; ``task_id`` is handler parity."""
     try:

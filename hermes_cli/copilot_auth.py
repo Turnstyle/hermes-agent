@@ -115,6 +115,9 @@ def _invalidate_gh_cli_token_cache() -> None:
 
 def _try_gh_cli_token() -> Optional[str]:
     """Token from ``gh auth token`` when available; the result (incl. a miss) is cached per TTL."""
+    from agent.keychain_policy import keychain_access_forbidden
+    if keychain_access_forbidden():
+        return None
     global _gh_cli_token_cache
     now = time.monotonic()
     cache = _gh_cli_token_cache
@@ -127,6 +130,9 @@ def _try_gh_cli_token() -> Optional[str]:
 
 def _probe_gh_cli_token() -> Optional[str]:
     """Uncached ``gh auth token`` subprocess probe (see ``_try_gh_cli_token``)."""
+    from agent.keychain_policy import keychain_access_forbidden
+    if keychain_access_forbidden():
+        return None
     hostname = os.getenv("COPILOT_GH_HOST", "").strip()
     # gh must not short-circuit on GITHUB_TOKEN / GH_TOKEN, nor prompt from a backend process.
     clean_env = {k: v for k, v in os.environ.items() if k not in {"GITHUB_TOKEN", "GH_TOKEN"}}

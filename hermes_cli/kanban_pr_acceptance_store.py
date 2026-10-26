@@ -1,6 +1,8 @@
 """Persist acceptance with the same ownership snapshot as the terminal write."""
 from __future__ import annotations
 
+import re
+
 from hermes_cli.kanban_db_connect import write_txn
 from hermes_cli.kanban_pr_acceptance import _PR, collect_acceptance
 
@@ -29,10 +31,14 @@ def prepare_acceptance(conn, task_id, expected_run_id, metadata):
             conn.execute("UPDATE tasks SET completion_contract=? WHERE id=?", (published_pr, task_id))
         snapshot = (run_id, status, published_pr)
         contract = published_pr
+    # A published head binds acceptance to the commit the worker actually pushed;
+    # a later force-push makes the receipt stale instead of accepting new code.
+    published_head = metadata.get("published_head") if isinstance(metadata, dict) else None
+    expected_head = published_head if isinstance(published_head, str) and re.fullmatch(r"[0-9a-f]{40}", published_head) else None
     # The assignee profile's gh login owns the repo: acceptance must not run as
     # the ambient login of whichever process completes the card (#122689).
     assignee = conn.execute("SELECT assignee FROM tasks WHERE id=?", (task_id,)).fetchone()["assignee"]
-    return snapshot, collect_acceptance(contract, published_pr, assignee=assignee)
+    return snapshot, collect_acceptance(contract, published_pr, expected_head=expected_head, assignee=assignee)
 
 
 def record_acceptance(conn, task_id, acceptance):
@@ -42,6 +48,11 @@ def record_acceptance(conn, task_id, acceptance):
     if _snapshot(conn, task_id) != snapshot:
         return False
     _append_event(conn, task_id, "pr_acceptance", receipt, run_id=snapshot[0])
+    if receipt["classification"] == "merged_fallback_rules_unavailable":
+        _append_event(conn, task_id, "pr_acceptance_fallback", {
+            "pr_url": receipt["pr_url"], "head_sha": receipt["head_sha"],
+            "merge_sha": receipt["merge_sha"], "reason": "rules_api_plan_limited_403",
+        }, run_id=snapshot[0])
     if not receipt["ok"]:
         detail = f"PR acceptance {receipt['classification']}: {receipt.get('detail', '')} {receipt['recovery']}"
         conn.execute("UPDATE tasks SET last_failure_error=? WHERE id=?", (detail, task_id))

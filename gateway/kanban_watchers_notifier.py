@@ -73,6 +73,12 @@ def diagnostic_event(ev) -> bool:
 # every 5 seconds forever. A genuinely dead chat still drops, just ~60s later — a fine trade for an
 # unattended gate where a false drop means silent work pileup.
 MAX_SEND_FAILURES = 12
+# A wake targets a live owner session, not a chat that may be dead: an unreachable owner (restart,
+# update drain) is retried for ~1 hour at the 5 s tick before the subscription drops. A busy owner
+# (WakeNotAccepted / TurnBusyError) never spends this budget at all.
+WAKE_MAX_FAILURES = 720
+# Subscriptions whose busy-owner deferral was already logged once (cleared on delivery/drop).
+_BUSY_WAKE_LOGGED: set = set()
 
 _LOCAL_PATH_RE = re.compile(r"(?<![\w:/])(?:/(?:Users|home|private|tmp|var|etc|workspace)/[^\s,;]+|" r"[A-Za-z]:\\[^\s,;]+)")
 
@@ -540,13 +546,18 @@ class _KanbanNotification:
 
     def clear_failures(self) -> None:
         self.sub_fail_counts.pop(self.sub_key, None)
+        _BUSY_WAKE_LOGGED.discard(self.sub_key)
 
-    async def delivery_failed(self, fmt: str, prefix: tuple, drop_fmt: str, exc: Exception, exc_info: bool) -> None:
+    async def delivery_failed(self, fmt: str, prefix: tuple, drop_fmt: str, exc: Exception, exc_info: bool,
+                              limit: int = MAX_SEND_FAILURES) -> None:
         """Bump the failure counter; drop the sub past the limit, else rewind the claim so the next tick retries."""
         fails = self.sub_fail_counts.get(self.sub_key, 0) + 1
         self.sub_fail_counts[self.sub_key] = fails
-        logger.warning(fmt, *prefix, fails, MAX_SEND_FAILURES, exc, exc_info=exc_info)
-        if fails >= MAX_SEND_FAILURES:
+        # The long wake budget would otherwise warn every tick for an hour: warn on the first few,
+        # every 60th and the final attempt; the rest stay at debug.
+        loud = limit <= MAX_SEND_FAILURES or fails <= 3 or fails % 60 == 0 or fails >= limit
+        (logger.warning if loud else logger.debug)(fmt, *prefix, fails, limit, exc, exc_info=exc_info)
+        if fails >= limit:
             logger.warning(drop_fmt, self.task_id, self.platform_str, fails)
             await self.unsub()
             self.clear_failures()
@@ -554,8 +565,11 @@ class _KanbanNotification:
             await self.rewind()
 
     async def _wake_failed(self, fmt: str, exc: Exception) -> None:
-        drop_fmt = "kanban notifier: dropping subscription %s on %s after %d consecutive wake failures"
-        await self.delivery_failed(fmt, (self.task_id,), drop_fmt, exc, True)
+        drop_fmt = (
+            "kanban notifier: dropping subscription %s on %s after %d consecutive wake failures; "
+            f"owner not woken for {self.task_id}: read it with `hermes kanban show {self.task_id}`"
+        )
+        await self.delivery_failed(fmt, (self.task_id,), drop_fmt, exc, True, limit=WAKE_MAX_FAILURES)
 
     # -- formatting --
 
@@ -792,6 +806,7 @@ class _KanbanNotification:
             self.d = {**self.d, "events": original_events}
         is_push = self.is_push_adapter
         from gateway.wake import WakeNotAccepted
+        from tools.bot_relay import TurnBusyError
 
         # A requested wake is required even when its passive ping already landed.
         if wake_payloads:
@@ -799,9 +814,15 @@ class _KanbanNotification:
                 for self.synth, self.wake_diagnostic, self.wake_kinds in wake_payloads:
                     await self.wake()
                 self.clear_failures()
-            except WakeNotAccepted:
-                # Startup / full queue is not a dead destination. Keep the durable
-                # subscription alive regardless of how long admission takes.
+            except (WakeNotAccepted, TurnBusyError):
+                # Startup / full queue / an owner mid-turn is not a dead destination: keep the
+                # durable subscription and spend no failure budget, however long admission takes.
+                if self.sub_key not in _BUSY_WAKE_LOGGED:
+                    logger.info(
+                        "kanban notifier: wake for %s deferred: the bot is in a turn; "
+                        "trying again each tick; this is not a failure", self.task_id,
+                    )
+                    _BUSY_WAKE_LOGGED.add(self.sub_key)
                 await self.rewind()
                 return
             except Exception as _wk_err:

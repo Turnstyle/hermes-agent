@@ -80,7 +80,7 @@ def main():
     hook.write_text('from pathlib import Path\nPath(' + repr(str(home / 'hook-effect')) + ').write_text("accepted")\n', encoding='utf-8')
     cfg = {'gateway': {'multiplex_profiles': False}, 'model': {'provider': 'custom', 'default': 'loop-model', 'base_url': url},
         'auxiliary': {'title_generation': {'enabled': False}}, 'platform_toolsets': {'cli': ['terminal', 'file']},
-        'terminal': {'backend': 'local'}, 'agent': {'api_max_retries': 1}, 'kanban': {'dispatch_in_gateway': False},
+        'terminal': {'backend': 'local'}, 'agent': {'api_max_retries': 1}, 'kanban': {'dispatch_in_gateway': False, 'dispatch_profiles': ['default']},  # fleet: default is a placeholder unless listed
         'hooks': {'post_tool_call': [{'command': f'{sys.executable} {hook}'}]}}
     (home / 'config.yaml').write_text(json.dumps(cfg), encoding='utf-8')
     from hermes_cli import kanban_db as kb

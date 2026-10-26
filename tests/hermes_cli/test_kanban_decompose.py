@@ -76,6 +76,62 @@ def _patch_list_profiles(names: list[str]):
     ]
 
 
+def test_foreign_fleet_mirror_is_not_listed_or_decomposed(kanban_home, monkeypatch):
+    monkeypatch.setenv("FLEET_KANBAN_ACTOR_NODE", "node-a")
+    with kbc.connect() as conn:
+        conn.execute("""CREATE TABLE fleet_kanban_issue_map (
+            local_task_id TEXT PRIMARY KEY, issue_id TEXT, raw_title TEXT,
+            canonical_body TEXT, source_node TEXT, current_node TEXT,
+            source_profile TEXT, deferred_snapshot TEXT, canonical_status TEXT
+        )""")
+        conn.execute("""CREATE TRIGGER fleet_kanban_task_insert AFTER INSERT ON tasks BEGIN
+            INSERT INTO fleet_kanban_issue_map(
+                local_task_id, issue_id, raw_title, canonical_body,
+                source_node, current_node, source_profile
+            ) VALUES(NEW.id, 'fk_' || lower(hex(randomblob(4))), NEW.title,
+                     NEW.body, 'node-a', NULL, 'p');
+        END""")
+        foreign_id = kb.create_task(conn, title="foreign", triage=True)
+        local_id = kb.create_task(conn, title="local", triage=True)
+        conn.execute(
+            "UPDATE fleet_kanban_issue_map SET current_node = 'node-b' WHERE local_task_id = ?",
+            (foreign_id,),
+        )
+        conn.commit()
+
+    listed = decomp.list_triage_ids()
+    assert foreign_id not in listed
+    assert local_id in listed
+
+    llm_payload = jsonlib.dumps({
+        "fanout": True,
+        "tasks": [{"title": "local child", "body": "work", "assignee": "orchestrator", "parents": []}],
+    })
+    patches = _patch_list_profiles(["orchestrator"])
+    for p in patches:
+        p.start()
+    try:
+        with _patch_aux_client(llm_payload) as aux:
+            foreign = decomp.decompose_task(foreign_id, author="auto-decomposer")
+            assert foreign.ok is False
+            assert "foreign Fleet mirror" in foreign.reason
+            aux.assert_not_called()
+            local = decomp.decompose_task(local_id, author="auto-decomposer")
+            assert local.ok is True, local.reason
+            aux.assert_called_once()
+    finally:
+        for p in patches:
+            p.stop()
+
+    with kbc.connect() as conn:
+        assert kb.get_task(conn, foreign_id).status == "triage"
+        assert conn.execute(
+            "SELECT COUNT(*) FROM task_links WHERE parent_id = ?", (foreign_id,),
+        ).fetchone()[0] == 0
+        assert len(local.child_ids) == 1
+        assert kb.get_task(conn, local.child_ids[0]) is not None
+
+
 def test_decompose_with_fanout_creates_children(kanban_home):
     with kbc.connect() as conn:
         tid = kb.create_task(conn, title="ship a feature", triage=True)
@@ -256,3 +312,252 @@ def test_decompose_returns_false_when_task_not_triage(kanban_home):
     assert outcome.ok is False
 
 
+def test_decompose_wires_repaired_prompt_and_known_owner_to_call_llm(kanban_home):
+    """decompose_task delivers the repaired section contract in the system prompt
+    and carries the task's actual assignee + verbatim technical identifiers +
+    roster in the user prompt sent to call_llm."""
+    repo_root = Path(__file__).resolve().parents[2]
+    assert Path(decomp.__file__).resolve().is_relative_to(repo_root)
+
+    raw_body = (
+        "Audit 409 handling in ~/.hermes/profiles/tb-decider/plugins/jev/receipt_outbox.py:266-271 "
+        "from t_516b84b1 (commit dc778ca4) and verify delegation.reasoning_effort."
+    )
+    with kbc.connect() as conn:
+        tid = kb.create_task(
+            conn,
+            title="Audit and test 409 receipt drain",
+            body=raw_body,
+            assignee="tb-cndr",
+            triage=True,
+        )
+
+    child_body_0 = (
+        "**Purpose**\n"
+        "Confirm the 409 receipt drain gap with an offline reproduction test.\n\n"
+        "**Work**\n"
+        "- Inspect the 409 branch in the receipt drain.\n"
+        "- Add an offline reproduction test.\n\n"
+        "**Owner**\n"
+        "researcher\n\n"
+        "**Done when** — Acceptance criteria:\n"
+        "- Offline reproduction test fails on unpatched 409 mismatch.\n\n"
+        "**Blocker**\n"
+        "unknown\n\n"
+        "**Proof**\n"
+        "unknown\n\n"
+        "**Supporting details**\n"
+        "- Path: ~/.hermes/profiles/tb-decider/plugins/jev/receipt_outbox.py:266-271\n"
+        "- Card: t_516b84b1 (SHA dc778ca4)"
+    )
+    child_body_1 = (
+        "**Purpose**\n"
+        "Require an exact GET match before counting a 409 receipt response as sent.\n\n"
+        "**Work**\n"
+        "- Fetch the existing document on 409 and compare fields.\n"
+        "- Run negative and positive unit tests.\n\n"
+        "**Owner**\n"
+        "engineer\n\n"
+        "**Done when** — Acceptance criteria:\n"
+        "- Mismatched or missing GET on 409 fails the run.\n"
+        "- Exact GET match on 409 counts as sent.\n\n"
+        "**Blocker**\n"
+        "Wait for child task 0 reproduction test.\n\n"
+        "**Proof**\n"
+        "unknown\n\n"
+        "**Supporting details**\n"
+        "- Path: ~/.hermes/profiles/tb-decider/plugins/jev/receipt_outbox.py:266-271\n"
+        "- Config key: delegation.reasoning_effort"
+    )
+    llm_payload = jsonlib.dumps({
+        "fanout": True,
+        "rationale": "Split reproduction test from drain patch.",
+        "tasks": [
+            {"title": "Reproduce 409 drain gap", "body": child_body_0, "assignee": "researcher", "parents": []},
+            {"title": "Patch 409 GET verification", "body": child_body_1, "assignee": "engineer", "parents": [0]},
+        ],
+    })
+
+    mock_llm = MagicMock(return_value=_fake_aux_response(llm_payload))
+    patches = _patch_list_profiles(["tb-cndr", "researcher", "engineer"])
+    for p in patches:
+        p.start()
+    try:
+        with patch("agent.auxiliary_client.call_llm", mock_llm), _patch_extra_body(), patch(
+            "hermes_cli.config.load_config_readonly",
+            return_value={},
+        ):
+            outcome = decomp.decompose_task(tid, author="decomposer-test")
+    finally:
+        for p in patches:
+            p.stop()
+
+    assert outcome.ok, outcome.reason
+    assert outcome.fanout is True
+    assert mock_llm.call_count == 1
+
+    call_kwargs = mock_llm.call_args.kwargs
+    assert call_kwargs["task"] == "kanban_decomposer"
+    messages = call_kwargs["messages"]
+    assert [m["role"] for m in messages] == ["system", "user"]
+    sys_msg = messages[0]["content"]
+    user_msg = messages[1]["content"]
+
+    required_headings = [
+        "**Purpose**",
+        "**Work**",
+        "**Owner**",
+        "**Done when** — Acceptance criteria:",
+        "**Blocker**",
+        "**Proof**",
+        "**Supporting details**",
+    ]
+    positions = [sys_msg.index(h) for h in required_headings]
+    assert positions == sorted(positions)
+    assert "plain language" in sys_msg
+    assert '"unknown"' in sys_msg
+    assert "Do not inherit the root's" in sys_msg
+    assert 'For "fanout": false, keep Current owner' in sys_msg
+    assert 'or default_assignee when "assignee" is null' in sys_msg
+
+    assert f"Task id: {tid}" in user_msg
+    assert "Current owner (assignee): tb-cndr" in user_msg
+    assert "Default assignee (used when no profile fits a task): tb-cndr" in user_msg
+    for ident in (
+        "~/.hermes/profiles/tb-decider/plugins/jev/receipt_outbox.py:266-271",
+        "t_516b84b1",
+        "dc778ca4",
+        "delegation.reasoning_effort",
+    ):
+        assert ident in user_msg
+
+    with kbc.connect() as conn:
+        c0 = kb.get_task(conn, outcome.child_ids[0])
+        c1 = kb.get_task(conn, outcome.child_ids[1])
+    assert c0.body == child_body_0
+    assert c1.body == child_body_1
+
+    import re
+    m = re.search(r"acceptance(?:\s+criteria)?[:\s]+(.*?)(?=\n\n|\Z)", c1.body, re.IGNORECASE | re.DOTALL)
+    assert m is not None
+    extracted = re.sub(r"\s+", " ", m.group(1)).strip().lower()
+    assert extracted == (
+        "- mismatched or missing get on 409 fails the run. "
+        "- exact get match on 409 counts as sent."
+    )
+
+
+def test_decompose_passes_explicit_unknown_when_owner_unassigned_via_cli(kanban_home, capsys):
+    """When an unassigned triage card is decomposed through the CLI surface,
+    'Current owner (assignee): unknown' is passed explicitly in the user prompt."""
+    import argparse
+    from hermes_cli import kanban as kanban_cli
+
+    with kbc.connect() as conn:
+        tid = kb.create_task(
+            conn,
+            title="unassigned single task",
+            body="Update /Users/turner/.hermes/profiles/tb-core-cos/config.yaml",
+            triage=True,
+        )
+
+    fenced_payload = "```json\n" + jsonlib.dumps({
+        "fanout": False,
+        "rationale": "Single config change.",
+        "title": "Update tb-core-cos config",
+        "body": (
+            "**Purpose**\nUpdate delegation config.\n\n"
+            "**Work**\n- Set config values.\n\n"
+            "**Owner**\nfallback\n\n"
+            "**Done when** — Acceptance criteria:\n- Config values match.\n\n"
+            "**Blocker**\nunknown\n\n"
+            "**Proof**\nunknown\n\n"
+            "**Supporting details**\n- /Users/turner/.hermes/profiles/tb-core-cos/config.yaml"
+        ),
+        "assignee": None,
+    }) + "\n```"
+
+    mock_llm = MagicMock(return_value=_fake_aux_response(fenced_payload))
+    patches = _patch_list_profiles(["orchestrator", "fallback"])
+    for p in patches:
+        p.start()
+    try:
+        with patch("agent.auxiliary_client.call_llm", mock_llm), _patch_extra_body(), patch(
+            "hermes_cli.config.load_config_readonly",
+            return_value={"kanban": {"default_assignee": "fallback"}},
+        ):
+            root = argparse.ArgumentParser()
+            subp = root.add_subparsers(dest="cmd")
+            kanban_cli.build_parser(subp)
+            ns = root.parse_args(["kanban", "decompose", tid, "--json"])
+            rc = kanban_cli.kanban_command(ns)
+    finally:
+        for p in patches:
+            p.stop()
+
+    assert rc == 0
+    payload = jsonlib.loads(capsys.readouterr().out.strip())
+    assert payload["ok"] is True
+    assert payload["fanout"] is False
+
+    user_msg = mock_llm.call_args.kwargs["messages"][1]["content"]
+    assert "Current owner (assignee): unknown" in user_msg
+    assert "/Users/turner/.hermes/profiles/tb-core-cos/config.yaml" in user_msg
+
+    with kbc.connect() as conn:
+        task = kb.get_task(conn, tid)
+    assert task.assignee == "fallback"
+    assert "**Owner**\nfallback" in (task.body or "")
+
+
+def test_auto_decompose_dispatcher_caller_delivers_repaired_prompt(kanban_home):
+    """Gateway auto-decompose caller path (_decompose_one -> decompose_task)
+    delivers the repaired section prompt and actual task owner to call_llm."""
+    from gateway.kanban_watchers_dispatcher import _KanbanDispatcher
+
+    with kbc.connect() as conn:
+        tid = kb.create_task(
+            conn,
+            title="dispatcher auto-decompose task",
+            body="Check t_19f38859 on tb-decider",
+            assignee="tb-decider",
+            triage=True,
+        )
+
+    llm_payload = jsonlib.dumps({
+        "fanout": False,
+        "rationale": "Single verification unit.",
+        "title": "Verify t_19f38859 on tb-decider",
+        "body": (
+            "**Purpose**\nVerify card t_19f38859 on tb-decider.\n\n"
+            "**Work**\n- Run verification check.\n\n"
+            "**Owner**\ntb-decider\n\n"
+            "**Done when** — Acceptance criteria:\n- Verification succeeds.\n\n"
+            "**Blocker**\nunknown\n\n"
+            "**Proof**\nunknown\n\n"
+            "**Supporting details**\n- Card: t_19f38859\n- Profile: tb-decider"
+        ),
+        "assignee": "tb-decider",
+    })
+
+    mock_llm = MagicMock(return_value=_fake_aux_response(llm_payload))
+    patches = _patch_list_profiles(["tb-decider"])
+    for p in patches:
+        p.start()
+    try:
+        with patch("agent.auxiliary_client.call_llm", mock_llm), _patch_extra_body(), patch(
+            "hermes_cli.config.load_config_readonly",
+            return_value={},
+        ):
+            rc = _KanbanDispatcher._decompose_one(decomp, "default", tid)
+    finally:
+        for p in patches:
+            p.stop()
+
+    assert rc == 1
+    sys_msg = mock_llm.call_args.kwargs["messages"][0]["content"]
+    user_msg = mock_llm.call_args.kwargs["messages"][1]["content"]
+    assert "**Done when** — Acceptance criteria:" in sys_msg
+    assert "**Supporting details**" in sys_msg
+    assert "Current owner (assignee): tb-decider" in user_msg
+    assert "t_19f38859" in user_msg

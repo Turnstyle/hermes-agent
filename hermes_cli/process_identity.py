@@ -284,6 +284,44 @@ def is_desktop_owned_backend(argv: Optional[Sequence[str]] = None) -> bool:
     return is_desktop_ssh_backend_argv(list(sys.argv[1:] if argv is None else argv))
 
 
+#: Per-session/supervisor markers a parent shell (``hermes chat -Q``, cron, launchd, a supervised
+#: child) exports into ``os.environ``. A Desktop app or backend launched from that shell would
+#: otherwise run every interactive session in one-shot/cron/supervised mode. Not
+#: ``HERMES_DELEGATED_CHILD_CONTEXT``: that is the Kanban board write fence, not a session mode.
+INHERITED_SESSION_MARKER_NAMES = frozenset({
+    "HERMES_CRON_SESSION",
+    "HERMES_LAUNCHD_LABEL",
+    "HERMES_S6_SUPERVISED_CHILD",
+    "HERMES_SESSION_ID",
+    "HERMES_SINGLE_QUERY_SESSION",
+    "HERMES_SUPERVISED_CHILD",
+})
+INHERITED_SESSION_MARKER_PREFIX = "HERMES_SESSION_"
+
+
+def is_inherited_session_marker(key: str) -> bool:
+    """True when *key* is a per-session or supervisor marker a Desktop-owned process must not inherit."""
+    upper = str(key).upper()
+    return upper in INHERITED_SESSION_MARKER_NAMES or upper.startswith(INHERITED_SESSION_MARKER_PREFIX)
+
+
+def strip_inherited_session_markers(env=None, *, desktop_owned=False) -> list[str]:
+    """Scrub inherited markers from *env* (default ``os.environ``) of an explicitly Desktop-owned
+    process only; returns the removed names, never values.
+
+    Desktop launch builders opt in; a running backend proves ownership with
+    :func:`is_desktop_owned_backend`. Gateways, standalone dashboards and supervised CLI sessions
+    keep their identity, and a real one-shot child sets its own markers after launch.
+    """
+    if not desktop_owned:
+        return []
+    target = os.environ if env is None else env
+    stripped = [key for key in list(target) if is_inherited_session_marker(key)]
+    for key in stripped:
+        target.pop(key, None)
+    return stripped
+
+
 # Set while this process works for the Desktop app on its own machine: one request from, or one turn of
 # a chat created by, a client ``local_desktop_client`` accepted. The gateway serves the Desktop, the CLI,
 # the TUI and bots from one process, so this is a property of the activity, never of the process.

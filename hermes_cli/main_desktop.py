@@ -1511,9 +1511,13 @@ _DESKTOP_TMPDIR_ENV = "HERMES_DESKTOP_TMPDIR"
 def _desktop_launch_env(args: argparse.Namespace) -> tuple[dict, list[str]]:
     """Electron child env + config-supplied extra flags. ``desktop.*`` config is bridged to env vars
     Electron already reads; an explicit env var wins over config (and over keychain detection)."""
+    from hermes_cli.process_identity import strip_inherited_session_markers
     from hermes_constants import socket_safe_tmpdir, with_hermes_node_path
     # with_hermes_node_path() copies os.environ when called with no arg.
     env = with_hermes_node_path()
+    # The app and every backend it spawns serve interactive sessions: a one-shot/cron/supervisor
+    # marker exported by the shell that ran `hermes desktop` must not follow them.
+    strip_inherited_session_markers(env, desktop_owned=True)
     tmpdir = env.get("TMPDIR", "")
     if sys.platform == "linux" and len(os.fsencode(tmpdir)) > _ELECTRON_TMPDIR_MAX_BYTES:
         # A longer TMPDIR hangs requestSingleInstanceLock(). Only Chromium's socket dir moves:
@@ -1621,8 +1625,11 @@ def _launch_installed_macos_desktop_app() -> bool:
     if not executable.is_file():
         return False
     from hermes_cli.bundled_app import launch_detached
+    from hermes_cli.process_identity import strip_inherited_session_markers
 
-    pid = launch_detached([str(executable)], cwd=executable.parent)
+    env = dict(os.environ)
+    strip_inherited_session_markers(env, desktop_owned=True)
+    pid = launch_detached([str(executable)], env=env, cwd=executable.parent)
     print(f"→ Launched the installed Hermes Desktop app: {executable} (pid {pid})")
     return True
 
