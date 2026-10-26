@@ -43,6 +43,21 @@ class _Agent:
         return {"completed": True, "final_response": f"slice {self.calls} progress"}
 
 
+class _FailingContinuation(_Agent):
+    """The first conversation settles; the goal loop's continuation fails natively."""
+
+    def __init__(self, reason):
+        super().__init__()
+        self.reason = reason
+
+    def run_conversation(self, message, conversation_history=None):
+        if not self.calls:
+            return super().run_conversation(message, conversation_history)
+        self.calls += 1
+        return {"completed": False, "failed": True, "failure_reason": self.reason,
+                "final_response": f"continuation stopped: {self.reason}"}
+
+
 def _frame(tmp_path, monkeypatch, *, bound_pid=None, admission="running"):
     monkeypatch.setenv("HERMES_HOME", str(tmp_path))
     monkeypatch.setattr(rec, "RECOVERY_DELAYS_SECONDS", (0.0,))
@@ -152,3 +167,59 @@ def test_a_hand_back_from_an_unbound_interpreter_leaves_no_receipt_flag(tmp_path
     # The unbound interpreter cannot write the attempt's receipt at all, so the sweep has no
     # hand-back to book and nothing about the card changed beyond its block.
     assert session_kanban.worker_result(path, context) == {}
+
+
+@pytest.mark.parametrize("reason, exit_code, status", [
+    ("auth", kb.KANBAN_TERMINAL_PROVIDER_EXIT_CODE, "blocked"),
+    ("tool_error", 1, None),
+])
+def test_a_failed_continuation_keeps_its_exit_instead_of_a_budget_hand_back(
+        tmp_path, monkeypatch, reason, exit_code, status):
+    path, ledger, context, frame = _frame(tmp_path, monkeypatch)
+    task_id, run_id = context["task_id"], context["run_id"]
+    judged = []
+    monkeypatch.setattr(goals, "judge_goal",
+                        lambda *a, **_k: judged.append(a) or ("continue", "more to do", False, False, False))
+    agent = _FailingContinuation(reason)
+
+    result = session_kanban.run_worker_turns(agent, frame, [])
+
+    # The failure reaches the worker outcome; nothing judges it or spends the rest of the budget.
+    assert (result["failed"], result["completed"], result["failure_reason"]) == (True, False, reason)
+    assert (agent.calls, len(judged)) == (2, 1)
+    assert session_kanban.worker_exit_code(path, context) == exit_code
+    assert "handback" not in session_kanban.worker_result(path, context)
+    with connect_closing(path) as conn:
+        assert kb.get_task(conn, task_id).status == "running"
+
+    with sqlite3.connect(ledger) as store:
+        store.execute("UPDATE session_admissions SET status = 'terminal', outcome = 'completed'")
+    submitter = subprocess.Popen([sys.executable, "-c", "pass"])
+    submitter.wait()
+    monkeypatch.setenv("HERMES_KANBAN_CRASH_GRACE_SECONDS", "0")
+    with connect_closing(path) as conn:
+        with kb.write_txn(conn):
+            conn.execute("UPDATE tasks SET worker_pid = ? WHERE id = ?", (submitter.pid, task_id))
+        assert kbd.detect_crashed_workers(conn) == [task_id]
+        task = kb.get_task(conn, task_id)
+        # Charged as the failure it was: a terminal provider parks the card, never a neutral release.
+        assert task.consecutive_failures >= 1
+        if status:
+            assert task.status == status
+        run = conn.execute("SELECT outcome FROM task_runs WHERE id = ?", (run_id,)).fetchone()
+        assert run["outcome"] == "crashed"
+        assert not any(kind == BUDGET_HANDBACK for kind, _ in _events(conn, task_id))
+
+
+def test_a_stale_hand_back_flag_cannot_neutralize_a_failed_last_turn(tmp_path, monkeypatch):
+    path, _ledger, context, frame = _frame(tmp_path, monkeypatch)
+
+    def failed_after_hand_back(_agent, _frame, _history, ctx):
+        ctx["handback"] = {"reason": session_kanban._TURN_BUDGET_SPENT, "summary": ""}
+        return {"completed": False, "failed": True, "failure_reason": "auth", "final_response": ""}
+    monkeypatch.setattr(session_kanban, "_run_task_turns", failed_after_hand_back)
+
+    session_kanban.run_worker_turns(_Agent(), frame, [])
+
+    assert session_kanban.worker_exit_code(path, context) == kb.KANBAN_TERMINAL_PROVIDER_EXIT_CODE
+    assert "handback" not in session_kanban.worker_result(path, context)

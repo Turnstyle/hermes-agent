@@ -280,14 +280,18 @@ def _run_worker_turns(agent, frame, history):
         result = _run_task_turns(agent, frame, history, context)
         code = turn_exit_code(result, kanban_worker=True)
         last_output = str(result.get('final_response') or '')[-500:] if isinstance(result, dict) else ''
-        if context.get('handback'):
-            from hermes_cli.kanban_budget_handback import KANBAN_BUDGET_HANDBACK_EXIT_CODE
-            code = KANBAN_BUDGET_HANDBACK_EXIT_CODE
         return result
     except Exception as exc:
         code = turn_exit_code(None, kanban_worker=True, **credential_failure_flags(exc))
         raise
     finally:
+        # A hand-back is neutral only over a settled last turn: a failed one keeps its own exit
+        # (78 parks the provider, 1 charges a failure), never a stale budget flag's 79.
+        if code != 0:
+            context.pop('handback', None)
+        elif context.get('handback'):
+            from hermes_cli.kanban_budget_handback import KANBAN_BUDGET_HANDBACK_EXIT_CODE
+            code = KANBAN_BUDGET_HANDBACK_EXIT_CODE
         _record_worker_result(context, code, last_output)
 
 
@@ -407,7 +411,11 @@ def _run_task_turns(agent, frame, history, context):
     def turn(prompt):
         nonlocal result
         result = agent.run_conversation(prompt, conversation_history=agent._session_db.get_messages_as_conversation(agent.session_id))
-        return result.get('final_response', '')
+        # The one-shot worker's run_turn shape: an unsettled continuation stops the loop before
+        # another verdict can spend the budget into a hand-back over the real failure.
+        return {'response': result.get('final_response') or '',
+                'failed': turn_exit_code(result, kanban_worker=True) != 0,
+                'failure_reason': result.get('failure_reason')}
     run_kanban_goal_loop(task_id=context['task_id'], goal_text=context['goal_text'], run_turn=turn,
         task_status_fn=status, block_fn=block, max_turns=context['goal_max_turns'] or DEFAULT_MAX_TURNS,
         first_response=result.get('final_response', ''))
