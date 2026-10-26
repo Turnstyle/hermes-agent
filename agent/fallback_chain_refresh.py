@@ -5,7 +5,8 @@ start and hand the chain here. A refresh is not a new failure: the primary coold
 reset-aware pool gate and the entitlement gate stay in force (``restore_primary_runtime`` owns
 them), and an unrelated edit must not make an unchanged known-bad route eligible again. What a
 refresh may not do is leave the agent on a route the operator removed: when neither the primary
-nor another configured route is eligible, the turn is refused before anything is staged or sent.
+nor another configured route is eligible, the turn is refused before anything is staged or sent,
+and so is every later turn until one of them replaces the removed route.
 """
 
 from __future__ import annotations
@@ -68,17 +69,34 @@ def _route_index(agent, chain: list) -> int | None:
     return None
 
 
-def _leave_removed_route(agent) -> None:
+def _removed_route(agent, old_chain: list) -> dict | None:
+    """The removed chain entry the agent still runs on, else None. Only a route that WAS a chain
+    entry is "removed": a `/model --once` or voice route that never was one stays with
+    restore_primary_runtime. After a refused refresh the published chain no longer names the
+    route, so the fence ``_leave_removed_route`` left keeps it removed on every later refresh."""
+    index = _route_index(agent, old_chain)
+    if index is not None:
+        return old_chain[index]
+    fenced = getattr(agent, "_removed_fallback_route", None)
+    if fenced is not None and _route_index(agent, [fenced]) is not None:
+        return fenced
+    return None
+
+
+def _leave_removed_route(agent, removed: dict) -> None:
     """Move off an active fallback the operator removed. The primary comes back only through its
-    own gates (cooldown, pool reset, entitlement); otherwise the next eligible route, else refuse."""
+    own gates (cooldown, pool reset, entitlement); otherwise the next eligible route, else refuse.
+    The new chain is already published, so ``removed`` is fenced on the agent first and cleared
+    only once a move succeeds: a refusal (or any raise) keeps the next refresh refusing too."""
+    agent._removed_fallback_route = removed
     logger.info("Active fallback %s (%s) is no longer in fallback config; switching off it.",
                 getattr(agent, "model", ""), getattr(agent, "provider", ""))
-    if agent._restore_primary_runtime():
-        return
-    agent._fallback_index = 0
-    if not agent._try_activate_fallback():
-        raise FallbackRouteUnavailableError(
-            "Active fallback removed; primary is unavailable and no configured fallback is eligible")
+    if not agent._restore_primary_runtime():
+        agent._fallback_index = 0
+        if not agent._try_activate_fallback():
+            raise FallbackRouteUnavailableError(
+                "Active fallback removed; primary is unavailable and no configured fallback is eligible")
+    agent._removed_fallback_route = None
 
 
 def apply_fallback_chain_to_agent(agent: Any, chain: Any = _READ_PROFILE_CONFIG) -> bool:
@@ -88,28 +106,32 @@ def apply_fallback_chain_to_agent(agent: Any, chain: Any = _READ_PROFILE_CONFIG)
     profile's config is read fail-closed. An owner-pinned chain (delegated child, cron job;
     ``hermes_cli.fallback_config.scoped_fallback_chain``) is never replaced by profile config.
     Raises :class:`FallbackRouteUnavailableError` when the active fallback was removed and no route
-    is eligible: the caller refuses the turn unsent.
+    is eligible: the caller refuses the turn unsent, and every later refresh refuses again until the
+    primary or a configured route replaces the removed one.
     """
     if agent is None or getattr(agent, "_fallback_chain_pinned", False):
         return False
+    old_chain = list(getattr(agent, "_fallback_chain", None) or [])
     new_chain = _profile_fallback_chain() if chain is _READ_PROFILE_CONFIG else list(chain or [])
     if new_chain is None:
-        return False
-    old_chain = list(getattr(agent, "_fallback_chain", None) or [])
+        # Unreadable config keeps the last known-good chain; a fenced removed route still refuses.
+        new_chain = old_chain
     changed = new_chain != old_chain
     if changed:
         _forget_changed_route_failures(agent, old_chain, new_chain)
         agent._fallback_chain = new_chain
         agent._fallback_model = new_chain[0] if new_chain else None
-    if not getattr(agent, "_fallback_activated", False):
-        if changed:
-            agent._fallback_index = 0
-        return changed
-    active = _route_index(agent, new_chain)
-    if active is not None:
-        agent._fallback_index = active + 1
-    elif _route_index(agent, old_chain) is not None:
-        # Only a route that WAS a chain entry is "removed"; a `/model --once` or voice route that
-        # never was one stays with restore_primary_runtime, as before.
-        _leave_removed_route(agent)
+    removed = None
+    if getattr(agent, "_fallback_activated", False):
+        active = _route_index(agent, new_chain)
+        if active is not None:
+            agent._fallback_index = active + 1
+        else:
+            removed = _removed_route(agent, old_chain)
+    elif changed:
+        agent._fallback_index = 0
+    if removed is not None:
+        _leave_removed_route(agent, removed)
+    elif getattr(agent, "_removed_fallback_route", None) is not None:
+        agent._removed_fallback_route = None  # observed off the removed route: the fence is spent
     return changed

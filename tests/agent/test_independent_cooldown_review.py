@@ -57,6 +57,33 @@ def test_removed_route_is_refused_even_during_cooldown():
     agent.client.chat.completions.create.assert_not_called()
 
 
+def test_removed_route_stays_refused_on_every_refresh_until_replaced():
+    """The first refusal publishes the new chain, which no longer names the removed route: every later
+    refresh (unchanged chain, still-ineligible edit, torn config read) refuses again until a configured
+    route replaces it, and that replacement is then kept."""
+    old = {"provider": "openrouter", "model": "offline-model", "base_url": "https://offline.example/v1"}
+    agent = active_agent(old)
+    removed_client, deadline = agent.client, agent._rate_limited_until
+    with patch("agent.auxiliary_client.resolve_provider_client", return_value=(None, "offline-model")):
+        for chain in ([], [], [{**old, "base_url": "https://different.example/v1"}]):
+            with pytest.raises(FallbackRouteUnavailableError):
+                apply_fallback_chain_to_agent(agent, chain)
+        with patch("hermes_cli.config_effective.load_user_config_effective", side_effect=ValueError("torn write")):
+            with pytest.raises(FallbackRouteUnavailableError):
+                apply_fallback_chain_to_agent(agent)
+    assert agent.base_url == old["base_url"]
+
+    replacement = {**old, "base_url": "https://offline.example/v2"}
+    with patch("agent.auxiliary_client.resolve_provider_client",
+               return_value=(_mock_resolve(base_url=replacement["base_url"]), replacement["model"])):
+        assert apply_fallback_chain_to_agent(agent, [replacement]) is True
+    assert agent.base_url == replacement["base_url"]
+    assert apply_fallback_chain_to_agent(agent, [replacement]) is False
+    assert agent.base_url == replacement["base_url"] and agent._fallback_index == 1
+    assert agent._rate_limited_until == deadline and agent._rate_limit_backoff_count == 4
+    removed_client.chat.completions.create.assert_not_called()
+
+
 def test_pinned_route_and_unavailable_memo_are_not_mutated():
     agent = active_agent({"provider": "openrouter", "model": "offline-model"})
     agent._fallback_chain_pinned = True
