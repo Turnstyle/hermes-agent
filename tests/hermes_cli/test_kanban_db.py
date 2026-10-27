@@ -22,6 +22,19 @@ from hermes_cli import kanban_db_dispatch as kbd
 from hermes_cli import kanban_db_workspace as kbw
 
 
+@pytest.fixture(autouse=True)
+def _portable_git_ceiling(tmp_path, monkeypatch):
+    ceilings = [
+        str(tmp_path.resolve()),
+        str(tmp_path.parent.resolve()),
+        str(Path(__file__).resolve().parents[2]),
+    ]
+    existing = os.environ.get("GIT_CEILING_DIRECTORIES", "")
+    if existing:
+        ceilings.extend(p for p in existing.split(os.pathsep) if p)
+    monkeypatch.setenv("GIT_CEILING_DIRECTORIES", os.pathsep.join(dict.fromkeys(ceilings)))
+
+
 @pytest.fixture
 def kanban_home(tmp_path, monkeypatch):
     """Isolated HERMES_HOME with an empty kanban DB."""

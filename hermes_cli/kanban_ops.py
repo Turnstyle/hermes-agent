@@ -285,6 +285,18 @@ def _cmd_watch(args: argparse.Namespace) -> int:
 def _cmd_gc(args: argparse.Namespace) -> int:
     """Remove archived tasks' scratch workspaces, old events, and old worker logs."""
     import shutil
+
+    event_days = getattr(args, "event_retention_days", 30)
+    log_days = getattr(args, "log_retention_days", 30)
+    if event_days is not None and int(event_days) < 0:
+        return _err("--event-retention-days must be >= 0", 2)
+    if log_days is not None and int(log_days) < 0:
+        return _err("--log-retention-days must be >= 0", 2)
+
+    if kbw._is_delegated_child_context():
+        print("GC skipped in delegated child context")
+        return 0
+
     scratch_root = kb.workspaces_root()
     removed_ws = 0
     with kbc.connect_closing() as conn:
@@ -310,24 +322,30 @@ def _cmd_gc(args: argparse.Namespace) -> int:
             path = path.resolve()
         except OSError:
             continue
-        try:
-            path.relative_to(scratch_root.resolve())
-        except ValueError:
-            # Safety: never delete outside the scratch root.
+        if not kbw._is_managed_scratch_path(path):
+            # Safety: never delete the workspaces root itself or anything outside managed scratch.
             continue
         if path.exists() and path.is_dir():
             from hermes_cli import kanban_bundle_preserve as bp
             with kbc.connect_closing() as conn:
+                if kbw._is_task_cleanup_fenced(conn, row["id"]):
+                    continue
+                if kbw._is_shared_scratch_workspace_in_use(conn, row["id"], path):
+                    continue
                 if not bp.preservation_gate(row["id"], path, conn=conn):
                     continue
             shutil.rmtree(path, ignore_errors=True)
             removed_ws += 1
 
-    event_days = getattr(args, "event_retention_days", 30)
-    log_days = getattr(args, "log_retention_days", 30)
-    with kbc.connect_closing() as conn:
-        removed_events = kb.gc_events(conn, older_than_seconds=event_days * 24 * 3600)
-    removed_logs = kb.gc_worker_logs(older_than_seconds=log_days * 24 * 3600)
+    if event_days and int(event_days) > 0:
+        with kbc.connect_closing() as conn:
+            removed_events = kb.gc_events(conn, older_than_seconds=int(event_days) * 24 * 3600)
+    else:
+        removed_events = 0
+    if log_days and int(log_days) > 0:
+        removed_logs = kb.gc_worker_logs(older_than_seconds=int(log_days) * 24 * 3600)
+    else:
+        removed_logs = 0
     print(f"GC complete: {removed_ws} workspace(s), "
           f"{removed_events} event row(s), {removed_logs} log file(s) removed")
     return 0

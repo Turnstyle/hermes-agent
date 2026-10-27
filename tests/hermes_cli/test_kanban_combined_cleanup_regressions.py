@@ -43,6 +43,22 @@ from hermes_cli import kanban_db_workspace as kbw
 from hermes_cli import kanban_ops
 
 
+@pytest.fixture(autouse=True)
+def _portable_git_ceiling_and_scratch_isolation(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    """Ensure GIT_CEILING_DIRECTORIES is always set portably even when run_tests.sh strips env."""
+    repo_parent = str(Path(__file__).resolve().parents[2].parent)
+    ceilings = [
+        str(tmp_path.resolve()),
+        str(tmp_path.parent.resolve()),
+        str(Path(__file__).resolve().parents[2]),
+        repo_parent,
+    ]
+    existing = os.environ.get("GIT_CEILING_DIRECTORIES", "")
+    if existing:
+        ceilings.extend(p for p in existing.split(os.pathsep) if p)
+    monkeypatch.setenv("GIT_CEILING_DIRECTORIES", os.pathsep.join(dict.fromkeys(ceilings)))
+
+
 @pytest.fixture
 def isolated_board(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     """Disposable isolated HERMES_HOME and SQLite board under pytest tmp_path."""
@@ -58,7 +74,16 @@ def isolated_board(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
         monkeypatch.delenv(k, raising=False)
     monkeypatch.setenv("HERMES_HOME", str(home))
     monkeypatch.setattr(Path, "home", lambda: tmp_path)
-    monkeypatch.setattr(kbw, "_cleanup_worker_tmux", lambda *_a, **_kw: None)
+
+    class _ForbiddenRuntimeCall(BaseException):
+        """BaseException subclass so `_cleanup_workspace`'s `except Exception:` cannot swallow it."""
+
+    def _forbid_worker_tmux(*args, **kwargs):
+        raise _ForbiddenRuntimeCall(
+            f"_cleanup_worker_tmux must never be called during workspace cleanup: {args!r}"
+        )
+
+    monkeypatch.setattr(kbw, "_cleanup_worker_tmux", _forbid_worker_tmux)
     kb.init_db()
     with kbc.connect_closing() as conn:
         yield conn, tmp_path
@@ -1450,3 +1475,751 @@ def test_case_d_external_skill_negative_controls_fail_closed(
         bp.plan_bundle(conn, tid7, ws7)
     assert bp.preservation_gate(tid7, ws7, conn=conn) is False
 
+
+# ---------------------------------------------------------------------------
+# 16. Case (e): Plural/List External-Skill Provenance & Prohibited-Substring Safety
+# ---------------------------------------------------------------------------
+
+
+def test_case_e_plural_updated_own_skill_references_and_semantic_variants(
+    isolated_board, monkeypatch: pytest.MonkeyPatch
+):
+    """Case (e) Positive Regressions:
+    - metadata.updated_own_skill_references = ['fleet-bot-standup/references/blind-credential-helpers.md',
+      'jev/references/context-tiers.md'] (plus semantic relative and synthetic absolute external skill paths)
+      must be classified as external skill provenance, NOT required workspace members and NOT prohibited
+      local filenames ('blind-credential-helpers.md' contains 'credential').
+    - Never opens, stats, lstats, or scandirs the external skill paths.
+    - Full safe workspace inventory (a.py, siblings b.txt, sub/c.json, preservation_probe.py) is durably
+      captured with exact archive, manifest, and attachment read-back.
+    - External skill references are never reported in captured local files or referenced_files.
+    """
+    conn, tmp_path = isolated_board
+
+    ext_skill_root = tmp_path / "synthetic_profile_e" / "skills"
+    ext_cred_helper = ext_skill_root / "fleet-bot-standup" / "references" / "blind-credential-helpers.md"
+    ext_jev_tiers = ext_skill_root / "jev" / "references" / "context-tiers.md"
+    ext_abs_token = ext_skill_root / "auth-router" / "references" / "secret-token-rotation.md"
+    for p in (ext_cred_helper, ext_jev_tiers, ext_abs_token):
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_bytes(b"external skill reference content\n")
+
+    ext_resolved = {
+        os.path.normpath(str(ext_cred_helper)),
+        os.path.normpath(str(ext_jev_tiers)),
+        os.path.normpath(str(ext_abs_token)),
+        os.path.normpath(str(ext_skill_root)),
+        str(ext_cred_helper.resolve()),
+        str(ext_jev_tiers.resolve()),
+        str(ext_abs_token.resolve()),
+        str(ext_skill_root.resolve()),
+    }
+    touched_external: List[str] = []
+    real_os_open = os.open
+    real_builtins_open = builtins.open
+    real_lstat = os.lstat
+    real_stat = os.stat
+    real_scandir = os.scandir
+
+    def _check_ext(path_arg: object, op: str) -> None:
+        if isinstance(path_arg, int):
+            return
+        p_str = os.fspath(path_arg)
+        if isinstance(p_str, bytes):
+            p_str = p_str.decode("utf-8", errors="replace")
+        norm_p = os.path.normpath(p_str)
+        if (
+            norm_p in ext_resolved
+            or "synthetic_profile_e" in p_str
+            or "blind-credential-helpers.md" in p_str
+            or "context-tiers.md" in p_str
+            or "secret-token-rotation.md" in p_str
+        ):
+            touched_external.append(f"{op}:{p_str}")
+
+    def _spy_os_open(p, flags, *a, **kw):
+        _check_ext(p, "os.open")
+        return real_os_open(p, flags, *a, **kw)
+
+    def _spy_builtins_open(p, *a, **kw):
+        _check_ext(p, "builtins.open")
+        return real_builtins_open(p, *a, **kw)
+
+    def _spy_lstat(p, *a, **kw):
+        _check_ext(p, "os.lstat")
+        return real_lstat(p, *a, **kw)
+
+    def _spy_stat(p, *a, **kw):
+        _check_ext(p, "os.stat")
+        return real_stat(p, *a, **kw)
+
+    def _spy_scandir(p, *a, **kw):
+        _check_ext(p, "os.scandir")
+        return real_scandir(p, *a, **kw)
+
+    monkeypatch.setattr(os, "open", _spy_os_open)
+    monkeypatch.setattr(builtins, "open", _spy_builtins_open)
+    monkeypatch.setattr(os, "lstat", _spy_lstat)
+    monkeypatch.setattr(os, "stat", _spy_stat)
+    monkeypatch.setattr(os, "scandir", _spy_scandir)
+
+    expected_files = {
+        "a.py": b"def main():\n    return 'case-e'\n",
+        "b.txt": b"unreferenced sibling b\n",
+        "sub/c.json": b'{"sibling": "c"}\n',
+        "preservation_probe.py": b"# case-e probe\n",
+    }
+
+    plural_variants = [
+        (
+            "updated_own_skill_references",
+            [
+                "fleet-bot-standup/references/blind-credential-helpers.md",
+                "jev/references/context-tiers.md",
+            ],
+            [
+                "fleet-bot-standup/references/blind-credential-helpers.md",
+                "jev/references/context-tiers.md",
+            ],
+        ),
+        (
+            "external_skill_references",
+            [
+                str(ext_abs_token),
+                "fleet-bot-standup/references/blind-credential-helpers.md",
+            ],
+            sorted([
+                str(ext_abs_token),
+                "fleet-bot-standup/references/blind-credential-helpers.md",
+            ]),
+        ),
+        (
+            "skills_updated",
+            ["jev/references/context-tiers.md"],
+            ["jev/references/context-tiers.md"],
+        ),
+    ]
+
+    for key_name, raw_val, expected_ext_refs in plural_variants:
+        tid, ws = _create_scratch_task(
+            conn,
+            result="Updated a.py and preservation_probe.py",
+            files=expected_files,
+        )
+        _insert_completed_run(
+            conn,
+            tid,
+            summary="Completed task with plural skill provenance",
+            metadata={key_name: raw_val},
+        )
+
+        plan = bp.plan_bundle(conn, tid, ws)
+        assert plan["unresolved_refs"] == []
+        assert plan["ambiguous_refs"] == []
+        assert plan["external_skill_refs"] == expected_ext_refs
+        captured_paths = [f["path"] for f in plan["files"]]
+        assert captured_paths == sorted(expected_files.keys())
+        for ext_ref in expected_ext_refs:
+            assert ext_ref not in captured_paths
+            assert ext_ref not in plan.get("referenced_files", [])
+
+        assert bp.preservation_gate(tid, ws, conn=conn) is False
+        kbw._cleanup_workspace(conn, tid)
+        assert ws.is_dir()
+        for rel_p, raw_b in expected_files.items():
+            assert (ws / rel_p).read_bytes() == raw_b
+        assert _extract_latest_archive_payloads(conn, tid) == expected_files
+
+    assert touched_external == [], f"External skill paths must never be touched: {touched_external}"
+
+
+def test_case_e_negative_controls_fail_closed(isolated_board, monkeypatch: pytest.MonkeyPatch):
+    """Case (e) Negative Controls:
+    - 'fleet-bot-standup/references/blind-credential-helpers.md' or 'jev/references/context-tiers.md'
+      or synthetic absolute skill path in findings[].file, result, summary, or metadata['artifacts']
+      still fails closed (prohibited name, missing member, unresolved_refs, ambiguous_refs, or outside-root).
+    - Coincidental safe workspace file matching a skill reference is captured by full inventory,
+      not credited as a metadata-required reference.
+    """
+    conn, tmp_path = isolated_board
+    cred_skill = "fleet-bot-standup/references/blind-credential-helpers.md"
+    jev_skill = "jev/references/context-tiers.md"
+    base_files = {
+        "a.py": b"print('a')\n",
+        "preservation_probe.py": b"assert True\n",
+    }
+
+    # 1. cred_skill in findings[].file -> prohibited name ValueError & retains
+    tid1, ws1 = _create_scratch_task(conn, files=base_files)
+    (ws1 / "head").mkdir()
+    _insert_completed_run(
+        conn,
+        tid1,
+        metadata={
+            "updated_own_skill_references": [cred_skill, jev_skill],
+            "worktree": str(ws1 / "head"),
+            "findings": [{"file": cred_skill}],
+        },
+    )
+    with pytest.raises(ValueError, match="prohibited"):
+        bp.plan_bundle(conn, tid1, ws1)
+    assert bp.preservation_gate(tid1, ws1, conn=conn) is False
+
+    # 2. jev_skill in findings[].file under recorded checkout when missing -> missing ValueError & retains
+    tid2, ws2 = _create_scratch_task(conn, files=base_files)
+    (ws2 / "head").mkdir()
+    _insert_completed_run(
+        conn,
+        tid2,
+        metadata={
+            "updated_own_skill_references": [cred_skill, jev_skill],
+            "worktree": str(ws2 / "head"),
+            "findings": [{"file": jev_skill}],
+        },
+    )
+    with pytest.raises(ValueError, match="missing"):
+        bp.plan_bundle(conn, tid2, ws2)
+    assert bp.preservation_gate(tid2, ws2, conn=conn) is False
+
+    # 3. cred_skill in explicit local result context -> prohibited name ValueError & retains
+    tid3, ws3 = _create_scratch_task(
+        conn,
+        result=f"Required output `{cred_skill}` and a.py",
+        files=base_files,
+    )
+    with pytest.raises(ValueError, match="prohibited"):
+        bp.plan_bundle(conn, tid3, ws3)
+    assert bp.preservation_gate(tid3, ws3, conn=conn) is False
+
+    # 4. jev_skill in metadata['artifacts'] -> unresolved_refs & retains
+    tid4, ws4 = _create_scratch_task(conn, files=base_files)
+    _insert_completed_run(conn, tid4, metadata={"artifacts": [jev_skill]})
+    plan4 = bp.plan_bundle(conn, tid4, ws4)
+    assert jev_skill in plan4["unresolved_refs"]
+    assert bp.preservation_gate(tid4, ws4, conn=conn) is False
+
+    # 5. Coincidental safe workspace file matching jev_skill is captured via full inventory,
+    #    NOT credited in referenced_files when only mentioned under updated_own_skill_references
+    tid5, ws5 = _create_scratch_task(
+        conn,
+        result="Updated `a.py`",
+        files={**base_files, jev_skill: b"local coincidental copy\n"},
+    )
+    _insert_completed_run(conn, tid5, metadata={"updated_own_skill_references": [jev_skill]})
+    plan5 = bp.plan_bundle(conn, tid5, ws5)
+    assert [f["path"] for f in plan5["files"]] == sorted([*base_files.keys(), jev_skill])
+    assert plan5["referenced_files"] == ["a.py"]
+    assert jev_skill in plan5["external_skill_refs"]
+
+
+# ---------------------------------------------------------------------------
+# 17. Case (f): Native Descendant/Indeterminate Fences & Zero Runtime Kill Side Effects
+# ---------------------------------------------------------------------------
+
+
+def test_case_f_native_descendant_and_indeterminate_state_fences_before_effects(
+    isolated_board, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    """Case (f) Fence Regressions:
+    - Direct active child, transitive active grandchild/cleanup child under a DONE direct child,
+      self-descendant link, cycle in task_links, DONE descendant with active run (ended_at IS NULL
+      or status='running' or worker_pid set), unknown task status, dangling missing descendant row,
+      non-terminal target task (running/blocked/review), and DB query failure must ALL fence BEFORE
+      any preservation (preservation_gate/preserve_bundle/plan_bundle), destruction (rmtree/worktree remove),
+      or runtime side effect across complete_task, archive_task, _cleanup_workspace,
+      _try_cleanup_parent_workspaces, _cleanup_worktree_workspace, and _cmd_gc.
+    """
+    conn, _ = isolated_board
+
+    gate_calls: List[str] = []
+    preserve_calls: List[str] = []
+    rmtree_calls: List[str] = []
+
+    real_gate = bp.preservation_gate
+    real_preserve = bp.preserve_bundle
+    real_rmtree = kbw.shutil.rmtree
+
+    def _spy_gate(task_id: str, workspace_path, conn=None) -> bool:
+        gate_calls.append(task_id)
+        return real_gate(task_id, workspace_path, conn=conn)
+
+    def _spy_preserve(conn, task_id: str, workspace_path, *a, **kw):
+        preserve_calls.append(task_id)
+        return real_preserve(conn, task_id, workspace_path, *a, **kw)
+
+    def _spy_rmtree(path, *a, **kw):
+        rmtree_calls.append(str(path))
+        return real_rmtree(path, *a, **kw)
+
+    monkeypatch.setattr(bp, "preservation_gate", _spy_gate)
+    monkeypatch.setattr(bp, "preserve_bundle", _spy_preserve)
+    monkeypatch.setattr(kbw.shutil, "rmtree", _spy_rmtree)
+
+    # 1. Transitive active descendant: parent (done) -> child (done) -> cleanup_grandchild (running)
+    parent1, ws1 = _create_scratch_task(conn, status="done", files={"a.py": b"parent1\n"})
+    child1, ws_c1 = _create_scratch_task(conn, status="done", files={"c.py": b"child1\n"})
+    grandchild1, _ = _create_scratch_task(conn, status="running", files={"g.py": b"grand1\n"})
+    kb.link_tasks(conn, parent1, child1)
+    kb.link_tasks(conn, child1, grandchild1)
+
+    assert kbw._has_active_children(conn, parent1) is True
+    kbw._cleanup_workspace(conn, parent1)
+    kbw._try_cleanup_parent_workspaces(conn, child1)
+    assert gate_calls == []
+    assert preserve_calls == []
+    assert rmtree_calls == []
+    assert ws1.is_dir()
+
+    # 2. DONE direct child with an active run (ended_at IS NULL / status='running')
+    parent2, ws2 = _create_scratch_task(conn, status="done", files={"a.py": b"parent2\n"})
+    child2, _ = _create_scratch_task(conn, status="done", files={"c.py": b"child2\n"})
+    kb.link_tasks(conn, parent2, child2)
+    with kb.write_txn(conn):
+        conn.execute(
+            "INSERT INTO task_runs (task_id, status, started_at, ended_at) VALUES (?, 'running', 1, NULL)",
+            (child2,),
+        )
+    assert kbw._has_active_children(conn, parent2) is True
+    kbw._cleanup_workspace(conn, parent2)
+    assert gate_calls == []
+    assert ws2.is_dir()
+
+    # 3. Self-descendant link (parent -> parent) and cycle (parent -> child -> parent) even when all 'done'
+    parent3, ws3 = _create_scratch_task(conn, status="done", files={"a.py": b"parent3\n"})
+    with kb.write_txn(conn):
+        conn.execute(
+            "INSERT INTO task_links (parent_id, child_id) VALUES (?, ?)",
+            (parent3, parent3),
+        )
+    assert kbw._has_active_children(conn, parent3) is True
+    kbw._cleanup_workspace(conn, parent3)
+    assert gate_calls == []
+    assert ws3.is_dir()
+
+    parent4, ws4 = _create_scratch_task(conn, status="done", files={"a.py": b"parent4\n"})
+    child4, _ = _create_scratch_task(conn, status="done", files={"c.py": b"child4\n"})
+    with kb.write_txn(conn):
+        conn.execute("INSERT INTO task_links (parent_id, child_id) VALUES (?, ?)", (parent4, child4))
+        conn.execute("INSERT INTO task_links (parent_id, child_id) VALUES (?, ?)", (child4, parent4))
+    assert kbw._has_active_children(conn, parent4) is True
+    kbw._cleanup_workspace(conn, parent4)
+    assert gate_calls == []
+    assert ws4.is_dir()
+
+    # 4. Unknown status on descendant or target task, and missing descendant row
+    parent5, ws5 = _create_scratch_task(conn, status="done", files={"a.py": b"parent5\n"})
+    child5, _ = _create_scratch_task(conn, status="mystery_status", files={"c.py": b"child5\n"})
+    kb.link_tasks(conn, parent5, child5)
+    assert kbw._has_active_children(conn, parent5) is True
+    kbw._cleanup_workspace(conn, parent5)
+    assert gate_calls == []
+    assert ws5.is_dir()
+
+    parent6, ws6 = _create_scratch_task(conn, status="done", files={"a.py": b"parent6\n"})
+    with kb.write_txn(conn):
+        conn.execute(
+            "INSERT INTO task_links (parent_id, child_id) VALUES (?, ?)",
+            (parent6, "t_dangling_missing_child"),
+        )
+    assert kbw._has_active_children(conn, parent6) is True
+    kbw._cleanup_workspace(conn, parent6)
+    assert gate_calls == []
+    assert ws6.is_dir()
+
+    # 5. DB query failure during descendant check fails closed before gate/destruction
+    class _BrokenConn:
+        def execute(self, *a, **kw):
+            raise sqlite3.OperationalError("simulated query failure")
+
+    assert kbw._has_active_children(_BrokenConn(), parent1) is True
+    kbw._cleanup_workspace(_BrokenConn(), parent1)
+    assert gate_calls == []
+
+    # 6. GC and worktree cleanup also fence on transitive active descendant before preservation_gate
+    arch_parent, ws_arch = _create_scratch_task(conn, status="archived", files={"a.py": b"arch\n"})
+    arch_mid, _ = _create_scratch_task(conn, status="done", files={"m.py": b"mid\n"})
+    arch_leaf, _ = _create_scratch_task(conn, status="ready", files={"l.py": b"leaf\n"})
+    kb.link_tasks(conn, arch_parent, arch_mid)
+    kb.link_tasks(conn, arch_mid, arch_leaf)
+
+    rc = kanban_ops._cmd_gc(Namespace(event_retention_days=30, log_retention_days=30))
+    assert rc == 0
+    assert arch_parent not in gate_calls
+    assert ws_arch.is_dir()
+
+    # 7. No-active-descendant control: once arch_leaf is also 'done', arch_parent is no longer fenced
+    with kb.write_txn(conn):
+        conn.execute("UPDATE tasks SET status = 'done' WHERE id = ?", (arch_leaf,))
+    assert kbw._has_active_children(conn, arch_parent) is False
+    kbw._cleanup_workspace(conn, arch_parent)
+    assert arch_parent in gate_calls
+    assert ws_arch.is_dir()  # still retained by zero-initial-attachment rule, but reached the gate!
+
+
+def test_case_f_no_runtime_kill_or_lsp_release_on_eligible_cleanup(
+    isolated_board, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    """Case (f) No Runtime Kill/Stop/Release Guarantee:
+    - Across complete_task, archive_task, _cleanup_workspace, _try_cleanup_parent_workspaces,
+      _cleanup_worktree_workspace, and _cmd_gc (both when retained and when empty/gate-approved
+      workspace is removed), NO tmux session kill, worker process kill, or LSP client release
+      is ever invoked.
+    """
+    conn, _ = isolated_board
+
+    class _ForbiddenRuntimeTermination(BaseException):
+        """BaseException subclass so try/except Exception in cleanup cannot mask runtime kills."""
+
+    forbidden_runtime_calls: List[str] = []
+    real_run = subprocess.run
+
+    def _spy_worker_tmux(*args, **kwargs):
+        forbidden_runtime_calls.append(f"_cleanup_worker_tmux:{args!r}")
+        raise _ForbiddenRuntimeTermination(f"Forbidden _cleanup_worker_tmux call: {args!r}")
+
+    def _spy_subprocess_run(cmd, *a, **kw):
+        argv = [str(x) for x in cmd] if isinstance(cmd, (list, tuple)) else [str(cmd)]
+        if any(tok in argv[0] for tok in ("tmux", "kill", "pkill", "killall")):
+            forbidden_runtime_calls.append(f"subprocess:{argv!r}")
+            raise _ForbiddenRuntimeTermination(f"Forbidden runtime termination command invoked: {argv!r}")
+        return real_run(cmd, *a, **kw)
+
+    def _spy_os_kill(pid: int, sig: int) -> None:
+        forbidden_runtime_calls.append(f"os.kill({pid}, {sig})")
+        raise _ForbiddenRuntimeTermination(f"Forbidden os.kill({pid}, {sig}) during cleanup")
+
+    monkeypatch.setattr(kbw, "_cleanup_worker_tmux", _spy_worker_tmux)
+    monkeypatch.setattr(subprocess, "run", _spy_subprocess_run)
+    monkeypatch.setattr(os, "kill", _spy_os_kill)
+
+    # 1. Eligible scratch task completing (empty workspace -> gate returns True -> rmtree runs, 0 tmux/kill calls)
+    tid_empty, ws_empty = _create_scratch_task(conn, status="ready", files={})
+    assert kb.claim_task(conn, tid_empty, claimer="swarm1") is not None
+    assert kb.complete_task(conn, tid_empty, summary="completed cleanly") is True
+    assert not ws_empty.exists()
+    assert forbidden_runtime_calls == []
+
+    # 2. Eligible scratch task archiving with files (retained by zero-initial-attachments, 0 tmux/kill calls)
+    tid_arch, ws_arch = _create_scratch_task(
+        conn, status="ready", files={"deliverable.py": b"print(1)\n"}
+    )
+    assert kb.archive_task(conn, tid_arch) is True
+    assert ws_arch.is_dir()
+    assert forbidden_runtime_calls == []
+
+    # 3. Eligible worktree task completing & GC sweeping
+    origin = tmp_path / "origin_f.git"
+    subprocess.run(["git", "init", "--bare", str(origin)], check=True, capture_output=True)
+    repo = tmp_path / "repo_f"
+    subprocess.run(["git", "clone", str(origin), str(repo)], check=True, capture_output=True)
+    subprocess.run(["git", "-C", str(repo), "config", "user.email", "t@example.com"], check=True)
+    subprocess.run(["git", "-C", str(repo), "config", "user.name", "t"], check=True)
+    (repo / "README.md").write_text("init\n", encoding="utf-8")
+    subprocess.run(["git", "-C", str(repo), "add", "README.md"], check=True)
+    subprocess.run(["git", "-C", str(repo), "commit", "-m", "init"], check=True, capture_output=True)
+    subprocess.run(["git", "-C", str(repo), "push", "origin", "HEAD"], check=True, capture_output=True)
+
+    tid_wt = kb.create_task(conn, title="wt-clean", assignee="swarm2", workspace_kind="worktree")
+    wt_path = repo / ".worktrees" / tid_wt
+    kbw._ensure_git_worktree(repo, wt_path, f"wt/{tid_wt}")
+    with kb.write_txn(conn):
+        conn.execute(
+            "UPDATE tasks SET status='archived', workspace_kind='worktree', workspace_path=?, branch_name=? WHERE id=?",
+            (str(wt_path), f"wt/{tid_wt}", tid_wt),
+        )
+    kbw._cleanup_workspace(conn, tid_wt)
+    assert wt_path.is_dir()
+    assert forbidden_runtime_calls == []
+
+
+def test_case_f_delegated_child_and_shared_workspace_fences(
+    isolated_board, monkeypatch: pytest.MonkeyPatch
+):
+    """Case (f) Delegated Child Context & Shared Scratch Workspace Guards:
+    - HERMES_DELEGATED_CHILD_CONTEXT=1 blocks preservation_gate, preserve_bundle, _cleanup_workspace,
+      and _cmd_gc from mutating attachments or deleting workspaces.
+    - Shared scratch workspace used by a live task on the same board or another board (or when
+      boards dir cannot be listed) defers cleanup and records workspace_cleanup_deferred_shared.
+    - Negative retention days in _cmd_gc refuses with rc=2 before sweeping workspaces.
+    """
+    conn, _ = isolated_board
+
+    # 1. Delegated child context fence
+    tid_del, ws_del = _create_scratch_task(
+        conn, status="archived", files={"a.py": b"delegated\n"}
+    )
+    monkeypatch.setenv("HERMES_DELEGATED_CHILD_CONTEXT", "1")
+    assert bp.preservation_gate(tid_del, ws_del, conn=conn) is False
+    assert kb.list_attachments(conn, tid_del) == []
+    kbw._cleanup_workspace(conn, tid_del)
+    assert ws_del.is_dir()
+    monkeypatch.delenv("HERMES_DELEGATED_CHILD_CONTEXT", raising=False)
+
+    # 2. Shared scratch workspace on same board and cross-board
+    shared_ws = kb.workspaces_root() / "shared_case_f"
+    shared_ws.mkdir(parents=True, exist_ok=True)
+    (shared_ws / "shared.txt").write_bytes(b"shared payload\n")
+
+    t_arch = kb.create_task(conn, title="arch sharer")
+    t_live = kb.create_task(conn, title="live sharer")
+    with kb.write_txn(conn):
+        conn.execute(
+            "UPDATE tasks SET status='archived', workspace_kind='scratch', workspace_path=? WHERE id=?",
+            (str(shared_ws), t_arch),
+        )
+        conn.execute(
+            "UPDATE tasks SET status='ready', workspace_kind='scratch', workspace_path=? WHERE id=?",
+            (str(shared_ws), t_live),
+        )
+
+    assert kanban_ops._cmd_gc(Namespace(event_retention_days=30, log_retention_days=30)) == 0
+    assert (shared_ws / "shared.txt").read_bytes() == b"shared payload\n"
+    ev_rows = conn.execute(
+        "SELECT payload FROM task_events WHERE task_id=? AND kind='workspace_cleanup_deferred_shared' ORDER BY id",
+        (t_arch,),
+    ).fetchall()
+    assert [json.loads(r["payload"])["reason"] for r in ev_rows] == ["shared"]
+
+    # 3. Cross-board live sharer and unreadable boards dir ('unknown') fail closed
+    kb.create_board("other_board_f")
+    cross_ws = kb.workspaces_root() / "cross_board_case_f"
+    cross_ws.mkdir(parents=True, exist_ok=True)
+    (cross_ws / "cross.txt").write_bytes(b"cross board payload\n")
+    t_arch_cross = kb.create_task(conn, title="arch cross")
+    with kb.write_txn(conn):
+        conn.execute(
+            "UPDATE tasks SET status='archived', workspace_kind='scratch', workspace_path=? WHERE id=?",
+            (str(cross_ws), t_arch_cross),
+        )
+    with kbc.connect_closing(board="other_board_f") as other_conn:
+        t_other_live = kb.create_task(other_conn, title="other live")
+        with kb.write_txn(other_conn):
+            other_conn.execute(
+                "UPDATE tasks SET status='ready', workspace_kind='scratch', workspace_path=? WHERE id=?",
+                (str(cross_ws), t_other_live),
+            )
+    kbw._cleanup_workspace(conn, t_arch_cross)
+    assert (cross_ws / "cross.txt").read_bytes() == b"cross board payload\n"
+
+    with kbc.connect_closing(board="other_board_f") as other_conn, kb.write_txn(other_conn):
+        other_conn.execute("UPDATE tasks SET status='done' WHERE id=?", (t_other_live,))
+
+    real_iterdir = Path.iterdir
+
+    def _fail_boards_iterdir(self):
+        if self.name == "boards":
+            raise PermissionError("simulated unreadable boards dir")
+        return real_iterdir(self)
+
+    monkeypatch.setattr(Path, "iterdir", _fail_boards_iterdir)
+    kbw._cleanup_workspace(conn, t_arch_cross)
+    monkeypatch.setattr(Path, "iterdir", real_iterdir)
+    assert (cross_ws / "cross.txt").read_bytes() == b"cross board payload\n"
+    cross_reasons = [
+        json.loads(r["payload"])["reason"]
+        for r in conn.execute(
+            "SELECT payload FROM task_events WHERE task_id=? AND kind='workspace_cleanup_deferred_shared' ORDER BY id",
+            (t_arch_cross,),
+        ).fetchall()
+    ]
+    assert cross_reasons == ["shared", "unknown"]
+
+    # 4. Workspaces root itself is never removed by _cmd_gc and negative/zero retention windows behave safely
+    t_root_ws = kb.create_task(conn, title="root ws task")
+    with kb.write_txn(conn):
+        conn.execute(
+            "UPDATE tasks SET status='archived', workspace_kind='scratch', workspace_path=? WHERE id=?",
+            (str(kb.workspaces_root()), t_root_ws),
+        )
+    assert kanban_ops._cmd_gc(Namespace(event_retention_days=0, log_retention_days=0)) == 0
+    assert kb.workspaces_root().is_dir()
+    assert kanban_ops._cmd_gc(Namespace(event_retention_days=-1, log_retention_days=30)) == 2
+
+
+# ---------------------------------------------------------------------------
+# 18. Case (g): Non-Path Scalar Metadata (`review.family = 'Gemini/Google'` & Variants)
+# ---------------------------------------------------------------------------
+
+
+def test_case_g_non_path_scalar_metadata_review_family_and_variants(
+    isolated_board, monkeypatch: pytest.MonkeyPatch
+):
+    """Case (g) Positive Regressions:
+    - Exact nested metadata {'review': {'family': 'Gemini/Google'}} (plus recorded checkout
+      worktree) and semantic scalar variants (provider, model, reviewer_family, writer_family,
+      vendor, tier, effort, verdict, route, transport, status, role, lane) containing '/'
+      must be classified as non-path metadata values from their semantic field context,
+      NOT required bundle members, unresolved_refs, unresolved_non_path_refs, or ambiguous_refs.
+    - Never opens or stats a filesystem path for 'Gemini/Google' or the scalar variants.
+    - Captures full safe workspace inventory (a.py, siblings b.txt, sub/c.json, preservation_probe.py)
+      with exact archive, manifest, and attachment read-back.
+    """
+    conn, _ = isolated_board
+
+    touched_scalar_paths: List[str] = []
+    real_os_open = os.open
+    real_lstat = os.lstat
+    real_stat = os.stat
+
+    scalar_Check_tokens = (
+        "Gemini/Google",
+        "Google/gemini-4-argon-high",
+        "Anthropic/Claude-Opus",
+        "OpenAI/GPT-5",
+        "High/Max",
+        "PASS/READY",
+        "CLI/Gateway",
+    )
+
+    def _spy_check(p: object, op: str) -> None:
+        if isinstance(p, int):
+            return
+        p_str = os.fspath(p)
+        if isinstance(p_str, bytes):
+            p_str = p_str.decode("utf-8", errors="replace")
+        for tok in scalar_Check_tokens:
+            if tok in p_str:
+                touched_scalar_paths.append(f"{op}:{p_str}")
+
+    monkeypatch.setattr(
+        os, "open", lambda p, flags, *a, **kw: (_spy_check(p, "os.open"), real_os_open(p, flags, *a, **kw))[1]
+    )
+    monkeypatch.setattr(
+        os, "lstat", lambda p, *a, **kw: (_spy_check(p, "os.lstat"), real_lstat(p, *a, **kw))[1]
+    )
+    monkeypatch.setattr(
+        os, "stat", lambda p, *a, **kw: (_spy_check(p, "os.stat"), real_stat(p, *a, **kw))[1]
+    )
+
+    expected_files = {
+        "a.py": b"print('case-g')\n",
+        "b.txt": b"sibling b\n",
+        "sub/c.json": b'{"case": "g"}\n',
+        "preservation_probe.py": b"# case-g probe\n",
+    }
+
+    tid, ws = _create_scratch_task(
+        conn,
+        result="Updated `a.py` and `preservation_probe.py`",
+        files=expected_files,
+    )
+    (ws / "head").mkdir()
+    _insert_completed_run(
+        conn,
+        tid,
+        summary="Completed review handoff",
+        metadata={
+            "worktree": str(ws / "head"),
+            "review": {
+                "family": "Gemini/Google",
+                "model": "Google/gemini-4-argon-high",
+                "verdict": "PASS/READY",
+            },
+            "provider": "Anthropic/Claude-Opus",
+            "writer_family": "OpenAI/GPT-5",
+            "reasoning_effort": "High/Max",
+            "transport": "CLI/Gateway",
+        },
+    )
+
+    plan = bp.plan_bundle(conn, tid, ws)
+    assert plan["unresolved_refs"] == []
+    assert plan["unresolved_non_path_refs"] == []
+    assert plan["ambiguous_refs"] == []
+    assert "Gemini/Google" in plan["non_path_metadata_values"]
+    assert "Google/gemini-4-argon-high" in plan["non_path_metadata_values"]
+    assert "PASS/READY" in plan["non_path_metadata_values"]
+    assert "Anthropic/Claude-Opus" in plan["non_path_metadata_values"]
+    assert [f["path"] for f in plan["files"]] == sorted(expected_files.keys())
+
+    assert bp.preservation_gate(tid, ws, conn=conn) is False
+    kbw._cleanup_workspace(conn, tid)
+    assert ws.is_dir()
+    for rel_p, raw_b in expected_files.items():
+        assert (ws / rel_p).read_bytes() == raw_b
+    assert _extract_latest_archive_payloads(conn, tid) == expected_files
+    assert touched_scalar_paths == [], f"Must never stat/open non-path scalar metadata: {touched_scalar_paths}"
+
+
+def test_case_g_negative_controls_and_coincidental_local_file(isolated_board):
+    """Case (g) Negative Controls & Coincidental Local File:
+    - Same string 'Gemini/Google' in findings[].file, task.result, ./Gemini/Google, or
+      metadata['artifacts'] still fails closed (missing ValueError, ambiguous_refs, or unresolved_refs).
+    - Non-scalar prose key inside review (e.g. review.notes referencing missing file) still fails closed.
+    - Coincidental real workspace file 'Gemini/Google' is captured by full safe inventory,
+      not credited in referenced_files when only present under review.family.
+    """
+    conn, _ = isolated_board
+    base_files = {
+        "a.py": b"print('a')\n",
+        "preservation_probe.py": b"assert True\n",
+    }
+
+    # 1. 'Gemini/Google' in findings[].file under recorded checkout -> raises missing ValueError & retains
+    tid1, ws1 = _create_scratch_task(conn, files=base_files)
+    (ws1 / "head").mkdir()
+    _insert_completed_run(
+        conn,
+        tid1,
+        metadata={
+            "worktree": str(ws1 / "head"),
+            "review": {"family": "Gemini/Google"},
+            "findings": [{"file": "Gemini/Google"}],
+        },
+    )
+    with pytest.raises(ValueError, match="missing"):
+        bp.plan_bundle(conn, tid1, ws1)
+    assert bp.preservation_gate(tid1, ws1, conn=conn) is False
+
+    # 2. 'Gemini/Google' in findings[].file without recorded checkout -> ambiguous_refs & retains
+    tid2, ws2 = _create_scratch_task(conn, files=base_files)
+    _insert_completed_run(
+        conn,
+        tid2,
+        metadata={"findings": [{"file": "Gemini/Google"}]},
+    )
+    plan2 = bp.plan_bundle(conn, tid2, ws2)
+    assert "Gemini/Google" in plan2["ambiguous_refs"]
+    assert bp.preservation_gate(tid2, ws2, conn=conn) is False
+
+    # 3. 'Gemini/Google' in explicit local result context (`Gemini/Google` or ./Gemini/Google) -> unresolved_refs & retains
+    tid3, ws3 = _create_scratch_task(
+        conn,
+        result="Required output `Gemini/Google` and `./Gemini/Google` and a.py",
+        files=base_files,
+    )
+    _insert_completed_run(conn, tid3, metadata={"review": {"family": "Gemini/Google"}})
+    plan3 = bp.plan_bundle(conn, tid3, ws3)
+    assert "Gemini/Google" in plan3["unresolved_refs"]
+    assert bp.preservation_gate(tid3, ws3, conn=conn) is False
+
+    # 4. 'Gemini/Google' in metadata['artifacts'] -> unresolved_refs & retains
+    tid4, ws4 = _create_scratch_task(conn, files=base_files)
+    _insert_completed_run(conn, tid4, metadata={"artifacts": ["Gemini/Google"]})
+    plan4 = bp.plan_bundle(conn, tid4, ws4)
+    assert "Gemini/Google" in plan4["unresolved_refs"]
+    assert bp.preservation_gate(tid4, ws4, conn=conn) is False
+
+    # 5. Prose field inside review (review.notes) referencing missing file -> unresolved_refs & retains
+    tid5, ws5 = _create_scratch_task(conn, files=base_files)
+    _insert_completed_run(
+        conn,
+        tid5,
+        metadata={"review": {"family": "Gemini/Google", "notes": "Missing `missing_review_doc.md`"}},
+    )
+    plan5 = bp.plan_bundle(conn, tid5, ws5)
+    assert "missing_review_doc.md" in plan5["unresolved_refs"]
+    assert bp.preservation_gate(tid5, ws5, conn=conn) is False
+
+    # 6. Coincidental real workspace file 'Gemini/Google' is captured via full safe inventory,
+    #    NOT credited in referenced_files when only present under review.family
+    tid6, ws6 = _create_scratch_task(
+        conn,
+        result="Updated `a.py`",
+        files={**base_files, "Gemini/Google": b"coincidental local file\n"},
+    )
+    _insert_completed_run(conn, tid6, metadata={"review": {"family": "Gemini/Google"}})
+    plan6 = bp.plan_bundle(conn, tid6, ws6)
+    assert [f["path"] for f in plan6["files"]] == sorted([*base_files.keys(), "Gemini/Google"])
+    assert plan6["referenced_files"] == ["a.py"]
+    assert "Gemini/Google" in plan6["non_path_metadata_values"]

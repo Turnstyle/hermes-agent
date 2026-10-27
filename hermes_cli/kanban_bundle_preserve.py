@@ -71,10 +71,99 @@ _KNOWN_EXTENSIONLESS_FILES = frozenset({
     "DISPOSABLE-WORKSPACE",
 })
 
-_EXTERNAL_SKILL_KEY_PATTERN = re.compile(
-    r"^(?:external_)?skills?_(?:updated|created|patched|modified|installed|applied|used|provenance|ref|refs|source|path|paths)$"
-    r"|^(?:updated|created|patched|modified|installed|applied|external)_skills?$",
-    re.IGNORECASE,
+_SKILL_PROVENANCE_WORDS = frozenset({
+    "skill",
+    "skills",
+    "updated",
+    "created",
+    "patched",
+    "modified",
+    "installed",
+    "applied",
+    "used",
+    "own",
+    "external",
+    "provenance",
+    "ref",
+    "refs",
+    "reference",
+    "references",
+    "source",
+    "sources",
+    "path",
+    "paths",
+    "doc",
+    "docs",
+    "name",
+    "names",
+    "id",
+    "ids",
+    "list",
+})
+
+_NON_PATH_SCALAR_METADATA_KEYS = frozenset({
+    "family",
+    "reviewer_family",
+    "writer_family",
+    "model_family",
+    "provider",
+    "model",
+    "main_model",
+    "finishing_model",
+    "reviewer_model",
+    "requested_model",
+    "served_model",
+    "vendor",
+    "subscription",
+    "tier",
+    "effort",
+    "reasoning_effort",
+    "writer_tool",
+    "tool",
+    "client",
+    "transport",
+    "route",
+    "reviewer_route",
+    "backend",
+    "platform",
+    "verdict",
+    "outcome",
+    "status",
+    "source_status",
+    "approval",
+    "stage",
+    "phase",
+    "role",
+    "lane",
+    "owner",
+    "flow_owner",
+    "assignee",
+    "author",
+    "authority",
+    "kind",
+    "type",
+    "mode",
+    "category",
+    "severity",
+    "priority",
+    "decision",
+    "action",
+})
+
+_NON_PATH_SCALAR_KEY_SUFFIXES = (
+    "_family",
+    "_provider",
+    "_model",
+    "_vendor",
+    "_tier",
+    "_effort",
+    "_verdict",
+    "_status",
+    "_route",
+    "_transport",
+    "_role",
+    "_lane",
+    "_tool",
 )
 
 
@@ -82,7 +171,38 @@ def is_external_skill_provenance_key(key: str) -> bool:
     """Return True if a structured metadata key denotes external skill provenance."""
     if not key or not isinstance(key, str):
         return False
-    return bool(_EXTERNAL_SKILL_KEY_PATTERN.match(key.strip()))
+    words = [w for w in re.split(r"[_-]+", key.strip().lower()) if w]
+    if len(words) < 2:
+        return False
+    if "skill" not in words and "skills" not in words:
+        return False
+    return all(w in _SKILL_PROVENANCE_WORDS for w in words)
+
+
+def is_non_path_scalar_metadata_key(key: str) -> bool:
+    """Return True if a structured metadata key denotes a non-path scalar descriptor
+    (e.g. review.family, provider, model, vendor, tier, effort, verdict, status, role).
+    """
+    if not key or not isinstance(key, str):
+        return False
+    k = key.strip().lower()
+    if not k or k in {
+        "artifacts",
+        "artifact",
+        "bundle",
+        "path",
+        "paths",
+        "file",
+        "files",
+        "worktree",
+        "findings",
+    }:
+        return False
+    if is_external_skill_provenance_key(k):
+        return False
+    if k in _NON_PATH_SCALAR_METADATA_KEYS:
+        return True
+    return k.endswith(_NON_PATH_SCALAR_KEY_SUFFIXES)
 
 
 def is_non_path_metadata(token: str) -> bool:
@@ -559,7 +679,8 @@ def _extract_references_from_text(
         def _replace_wrapped(m: re.Match) -> str:
             val = m.group(1).strip()
             if val:
-                results.append((val, default_explicit_local))
+                is_wrapped_local = default_explicit_local or not is_non_path_metadata(val)
+                results.append((val, is_wrapped_local))
             return " " * len(m.group(0))
 
         working = re.sub(pat, _replace_wrapped, working)
@@ -791,6 +912,8 @@ def plan_bundle(
     unresolved_non_path_refs: List[str] = []
     ambiguous_refs: List[str] = []
     external_skill_refs: List[str] = []
+    non_path_metadata_values: List[str] = []
+    referenced_files: List[str] = []
 
     def _add_unique(target_list: List[str], item: str) -> None:
         if item not in target_list:
@@ -838,9 +961,14 @@ def plan_bundle(
                             # Must resolve inside this run's recorded checkout (run_wt)
                             if os.path.isabs(f_ref) or _lexical_rel_parts_in_root(run_wt, f_ref) is None:
                                 raise ValueError(f"finding escapes recorded checkout: {f_ref}")
-                            _validate_safe_path_in_root(
+                            f_full, f_rel, _ = _validate_safe_path_in_root(
                                 run_wt, f_ref, allow_root=False, require_regular=True
                             )
+                            ws_rel_parts = _lexical_rel_parts_in_root(workspace, f_full)
+                            if ws_rel_parts:
+                                _add_unique(referenced_files, "/".join(ws_rel_parts))
+                            else:
+                                _add_unique(referenced_files, f_rel)
                     else:
                         _collect_finding_extras(v)
             elif isinstance(item, str):
@@ -858,7 +986,11 @@ def plan_bundle(
         )
 
     def _collect_metadata_dict_refs(
-        obj: Any, *, under_explicit_key: bool = False, under_skill_provenance_key: bool = False
+        obj: Any,
+        *,
+        under_explicit_key: bool = False,
+        under_skill_provenance_key: bool = False,
+        under_non_path_key: bool = False,
     ) -> None:
         if isinstance(obj, str):
             s = obj.strip()
@@ -868,19 +1000,38 @@ def plan_bundle(
                 s = staged_complete_map[s]
             if under_skill_provenance_key and not under_explicit_key:
                 # External skill provenance value: classify lexically without opening/stat-traversing external paths
-                if not s.startswith("./") and ".." not in Path(s).parts:
-                    if os.path.isabs(s):
-                        if _lexical_rel_parts_in_root(workspace, s) is None and (
+                s_clean = s.strip(" \t\r\n`\"'")
+                if s_clean and not s_clean.startswith("./") and ".." not in Path(s_clean).parts:
+                    if os.path.isabs(s_clean):
+                        if _lexical_rel_parts_in_root(workspace, s_clean) is None and (
                             recorded_checkout is None
-                            or _lexical_rel_parts_in_root(recorded_checkout, s) is None
+                            or _lexical_rel_parts_in_root(recorded_checkout, s_clean) is None
                         ):
-                            _add_unique(external_skill_refs, s)
+                            _add_unique(external_skill_refs, s_clean)
                             return
                     else:
-                        norm_s = s.replace("\\", "/").strip("/")
-                        if norm_s and norm_s not in workspace_files:
+                        norm_s = s_clean.replace("\\", "/").strip("/")
+                        if norm_s:
                             _add_unique(external_skill_refs, norm_s)
                             return
+            if under_non_path_key and not under_explicit_key and not under_skill_provenance_key:
+                # Documented non-path scalar metadata value (e.g. review.family, provider, model, verdict)
+                s_clean = s.strip(" \t\r\n`\"'")
+                if not s_clean:
+                    return
+                if _URL_PATTERN.match(s_clean):
+                    _add_unique(unresolved_non_path_refs, sanitize_uri(s_clean))
+                    return
+                if not s_clean.startswith(("./", "../")) and ".." not in Path(s_clean).parts:
+                    if not os.path.isabs(s_clean) or (
+                        _lexical_rel_parts_in_root(workspace, s_clean) is None
+                        and (
+                            recorded_checkout is None
+                            or _lexical_rel_parts_in_root(recorded_checkout, s_clean) is None
+                        )
+                    ):
+                        _add_unique(non_path_metadata_values, s_clean)
+                        return
             if under_explicit_key:
                 # Could be a decorated string or a direct path (including spaced path)
                 extracted = _extract_references_from_text(
@@ -907,15 +1058,27 @@ def plan_bundle(
                     elem,
                     under_explicit_key=under_explicit_key,
                     under_skill_provenance_key=under_skill_provenance_key,
+                    under_non_path_key=under_non_path_key,
                 )
         elif isinstance(obj, dict):
             for k, v in obj.items():
-                is_exp = under_explicit_key or (str(k).lower() in {"artifacts", "artifact", "bundle", "path", "file"})
+                k_str = str(k)
+                is_exp = under_explicit_key or (
+                    k_str.lower() in {"artifacts", "artifact", "bundle", "path", "paths", "file", "files"}
+                )
                 is_skill_prov = (not is_exp) and (
-                    under_skill_provenance_key or is_external_skill_provenance_key(str(k))
+                    under_skill_provenance_key or is_external_skill_provenance_key(k_str)
+                )
+                is_non_path = (
+                    (not is_exp)
+                    and (not is_skill_prov)
+                    and (under_non_path_key or is_non_path_scalar_metadata_key(k_str))
                 )
                 _collect_metadata_dict_refs(
-                    v, under_explicit_key=is_exp, under_skill_provenance_key=is_skill_prov
+                    v,
+                    under_explicit_key=is_exp,
+                    under_skill_provenance_key=is_skill_prov,
+                    under_non_path_key=is_non_path,
                 )
 
     for r_row, m_obj, _run_wt in parsed_runs:
@@ -929,10 +1092,23 @@ def plan_bundle(
             for k, v in m_obj.items():
                 if k in {"worktree", "findings"}:
                     continue
-                is_exp = str(k).lower() in {"artifacts", "artifact", "bundle", "path", "file"}
-                is_skill_prov = (not is_exp) and is_external_skill_provenance_key(str(k))
+                k_str = str(k)
+                is_exp = k_str.lower() in {
+                    "artifacts",
+                    "artifact",
+                    "bundle",
+                    "path",
+                    "paths",
+                    "file",
+                    "files",
+                }
+                is_skill_prov = (not is_exp) and is_external_skill_provenance_key(k_str)
+                is_non_path = (not is_exp) and (not is_skill_prov) and is_non_path_scalar_metadata_key(k_str)
                 _collect_metadata_dict_refs(
-                    v, under_explicit_key=is_exp, under_skill_provenance_key=is_skill_prov
+                    v,
+                    under_explicit_key=is_exp,
+                    under_skill_provenance_key=is_skill_prov,
+                    under_non_path_key=is_non_path,
                 )
 
     candidate_refs.extend(extra_required_refs)
@@ -972,7 +1148,13 @@ def plan_bundle(
         exists_any_co = any(_exists_in_root_lexically(wt, clean_ref) for wt in worktree_roots)
 
         # Non-path metadata check (only when NOT in explicit local context and NOT existing on disk)
-        if not is_explicit_local and not exists_ws and not exists_co and not exists_any_co:
+        if (
+            not is_explicit_local
+            and not clean_ref.startswith("./")
+            and not exists_ws
+            and not exists_co
+            and not exists_any_co
+        ):
             if is_non_path_metadata(clean_ref):
                 continue
 
@@ -997,7 +1179,7 @@ def plan_bundle(
             target_root = workspace if in_ws_parts is not None else recorded_checkout
             assert target_root is not None
             # Validates existence, no symlinks, no prohibited components
-            target_full, _, st_target = _validate_safe_path_in_root(
+            target_full, target_rel, st_target = _validate_safe_path_in_root(
                 target_root, clean_ref, allow_root=True
             )
             if stat.S_ISDIR(st_target.st_mode):
@@ -1009,6 +1191,9 @@ def plan_bundle(
                     raise ValueError(f"directory walk failed: {exc}") from exc
             elif not stat.S_ISREG(st_target.st_mode):
                 raise ValueError(f"unsafe non-regular entry: {clean_ref}")
+            else:
+                ws_rel = _lexical_rel_parts_in_root(workspace, target_full)
+                _add_unique(referenced_files, "/".join(ws_rel) if ws_rel else target_rel)
             continue
 
         # Relative path resolution
@@ -1037,7 +1222,7 @@ def plan_bundle(
         exists_co = _exists_in_root_lexically(recorded_checkout, norm_clean)
 
         if exists_ws:
-            ws_full, _, ws_st = _validate_safe_path_in_root(workspace, norm_clean, allow_root=False)
+            ws_full, ws_rel_key, ws_st = _validate_safe_path_in_root(workspace, norm_clean, allow_root=False)
             if not (stat.S_ISREG(ws_st.st_mode) or stat.S_ISDIR(ws_st.st_mode)):
                 raise ValueError(f"unsafe non-regular entry: {norm_clean}")
             # If the user referenced `file:suffix` where `file` is a directory, do not expand directory
@@ -1046,7 +1231,7 @@ def plan_bundle(
                 continue
 
         if exists_co and recorded_checkout is not None:
-            co_full, _, co_st = _validate_safe_path_in_root(
+            co_full, co_rel_key, co_st = _validate_safe_path_in_root(
                 recorded_checkout, norm_clean, allow_root=False
             )
             if not (stat.S_ISREG(co_st.st_mode) or stat.S_ISDIR(co_st.st_mode)):
@@ -1058,6 +1243,11 @@ def plan_bundle(
                 continue
 
         if exists_ws or exists_co:
+            if exists_ws and stat.S_ISREG(ws_st.st_mode):
+                _add_unique(referenced_files, ws_rel_key)
+            elif exists_co and recorded_checkout is not None and stat.S_ISREG(co_st.st_mode):
+                ws_rel_co = _lexical_rel_parts_in_root(workspace, co_full)
+                _add_unique(referenced_files, "/".join(ws_rel_co) if ws_rel_co else co_rel_key)
             continue
 
         # Neither exists on disk
@@ -1085,9 +1275,11 @@ def plan_bundle(
         "files": [{"path": f["path"], "bytes": f["bytes"], "sha256": f["sha256"]} for f in all_files],
         "_file_details": all_files,
         "bytes": sum(f["bytes"] for f in all_files),
+        "referenced_files": sorted(referenced_files),
         "unresolved_refs": sorted(unresolved_refs),
         "unresolved_non_path_refs": sorted(unresolved_non_path_refs),
         "external_skill_refs": sorted(external_skill_refs),
+        "non_path_metadata_values": sorted(non_path_metadata_values),
         "ambiguous_refs": sorted(ambiguous_refs),
         "excluded": excluded,
         "directories": sorted(directories),
@@ -1292,6 +1484,11 @@ def preserve_bundle(
     max_bytes: int = MAX_BUNDLE_BYTES,
 ) -> Dict[str, Any]:
     """Execute bundle capture, write archive and manifest outside workspace, register, and verify."""
+    from hermes_cli import kanban_db_workspace as kbw
+
+    if not dry_run and kbw._is_delegated_child_context():
+        raise ValueError("delegated child context cannot mutate preserved bundles")
+
     report = plan_bundle(conn, task_id, workspace_path, max_bytes=max_bytes, dry_run=dry_run)
     if dry_run:
         return report
@@ -1459,6 +1656,12 @@ def preservation_gate(
             return False
 
     try:
+        from hermes_cli import kanban_db_workspace as kbw
+
+        if kbw._is_delegated_child_context():
+            _record_comment(conn, task_id, "delegated child context cannot authorize disposal")
+            return False
+
         if conn.in_transaction:
             # Caller-owned write transaction is not durable proof
             return False
@@ -1479,10 +1682,9 @@ def preservation_gate(
             _record_comment(conn, task_id, reason or "hold marker")
             return False
 
-        # 3. Verify task exists and is in a terminal state ('done' or 'archived')
-        t_row = conn.execute("SELECT status FROM tasks WHERE id = ?", (task_id,)).fetchone()
-        if not t_row or t_row["status"] not in ("done", "archived"):
-            _record_comment(conn, task_id, "task is missing or non-terminal")
+        # 3. Verify task exists, is in a terminal state ('done' or 'archived'), and is not fenced by active/indeterminate descendants or runs
+        if kbw._is_task_cleanup_fenced(conn, task_id):
+            _record_comment(conn, task_id, "task is missing, non-terminal, or fenced by active/indeterminate descendants")
             return False
 
         # 4. Snapshot initial attachments BEFORE any action

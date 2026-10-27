@@ -7,19 +7,37 @@ late-bound via ``_kb`` (import-cycle breaking) so monkeypatching
 
 from __future__ import annotations
 
+import contextlib
 import os
 import shutil
 import sqlite3
 import subprocess
+import time
 from pathlib import Path
 from typing import Optional
 from typing import TYPE_CHECKING
-import contextlib
 
 if TYPE_CHECKING:
     from hermes_cli.kanban_db import Task
 
 _REMOVABLE_KINDS = ("scratch", "worktree")
+
+_TERMINAL_TARGET_STATUSES = frozenset({"done", "archived"})
+_TERMINAL_CHILD_STATUSES = frozenset({"done", "archived", "failed", "cancelled"})
+_TERMINAL_RUN_STATUSES = frozenset({
+    "done",
+    "completed",
+    "archived",
+    "failed",
+    "cancelled",
+    "timed_out",
+    "crashed",
+    "gave_up",
+    "rate_limited",
+    "reclaimed",
+    "blocked",
+    "changes_requested",
+})
 
 # Statuses after which a child no longer needs its parent's workspace artifacts.
 _ACTIVE_CHILDREN_SQL = (
@@ -29,7 +47,7 @@ _ACTIVE_CHILDREN_SQL = (
     "LIMIT 1"
 )
 
-_WORKSPACE_ROW_SQL = "SELECT workspace_kind, workspace_path, branch_name FROM tasks WHERE id = ?"
+_WORKSPACE_ROW_SQL = "SELECT status, workspace_kind, workspace_path, branch_name FROM tasks WHERE id = ?"
 
 
 def _git(repo_root: Path, *args: str, timeout: int) -> subprocess.CompletedProcess:
@@ -43,8 +61,196 @@ def _git(repo_root: Path, *args: str, timeout: int) -> subprocess.CompletedProce
     )
 
 
+def _is_delegated_child_context() -> bool:
+    """True when running inside a delegated child worker context that must not destroy parent/board state."""
+    val = os.environ.get("HERMES_DELEGATED_CHILD_CONTEXT", "").strip().lower()
+    return val in ("1", "true", "yes", "on")
+
+
+def _task_has_active_run(conn: sqlite3.Connection, task_id: str) -> bool:
+    """Return True if *task_id* has any active/non-terminal run in ``task_runs``."""
+    rows = conn.execute(
+        "SELECT status, outcome, ended_at, worker_pid FROM task_runs WHERE task_id = ?",
+        (task_id,),
+    ).fetchall()
+    for r in rows:
+        if r["worker_pid"] is not None:
+            return True
+        st = (r["status"] or "").strip().lower()
+        if st not in _TERMINAL_RUN_STATUSES:
+            return True
+        if r["ended_at"] is None and not (r["outcome"] or "").strip():
+            return True
+    return False
+
+
 def _has_active_children(conn: sqlite3.Connection, task_id: str) -> bool:
-    return conn.execute(_ACTIVE_CHILDREN_SQL, (task_id,)).fetchone() is not None
+    """Return True if *task_id* has any direct, transitive, or self descendant that is
+    non-terminal, has an active run/worker, has an unknown status, is missing, or forms a cycle,
+    or if querying descendant state fails. Fails closed (returns True) on any error.
+    """
+    try:
+        if not task_id or not isinstance(task_id, str):
+            return True
+        # 3-color DFS over task_links: 1 = visiting (on current recursion path), 2 = verified clean
+        color: dict[str, int] = {task_id: 1}
+
+        def _visit(parent: str) -> bool:
+            link_rows = conn.execute(
+                "SELECT child_id FROM task_links WHERE parent_id = ? ORDER BY child_id",
+                (parent,),
+            ).fetchall()
+            for lr in link_rows:
+                cid = lr["child_id"]
+                if not cid or not isinstance(cid, str):
+                    return True
+                if cid == parent or color.get(cid) == 1:
+                    # Self-descendant or cycle in task_links -> fail closed
+                    return True
+                if color.get(cid) == 2:
+                    continue
+                t_row = conn.execute(
+                    "SELECT status, worker_pid, current_run_id FROM tasks WHERE id = ?",
+                    (cid,),
+                ).fetchone()
+                if t_row is None:
+                    return True
+                st = (t_row["status"] or "").strip().lower()
+                if st not in _TERMINAL_CHILD_STATUSES:
+                    return True
+                if t_row["worker_pid"] is not None or t_row["current_run_id"] is not None:
+                    return True
+                if _task_has_active_run(conn, cid):
+                    return True
+                color[cid] = 1
+                if _visit(cid):
+                    return True
+                color[cid] = 2
+            return False
+
+        return _visit(task_id)
+    except Exception:
+        return True
+
+
+def _is_task_cleanup_fenced(conn: sqlite3.Connection, task_id: str) -> bool:
+    """Return True if *task_id* must be fenced from workspace preservation/destruction."""
+    try:
+        if _is_delegated_child_context():
+            return True
+        if not task_id or not isinstance(task_id, str):
+            return True
+        t_row = conn.execute(
+            "SELECT status, worker_pid, current_run_id FROM tasks WHERE id = ?",
+            (task_id,),
+        ).fetchone()
+        if t_row is None:
+            return True
+        st = (t_row["status"] or "").strip().lower()
+        if st not in _TERMINAL_TARGET_STATUSES:
+            return True
+        if t_row["worker_pid"] is not None or t_row["current_run_id"] is not None:
+            return True
+        if _task_has_active_run(conn, task_id):
+            return True
+        if _has_active_children(conn, task_id):
+            return True
+        return False
+    except Exception:
+        return True
+
+
+def _record_deferred_shared_event(
+    conn: sqlite3.Connection, task_id: str, reason: str, wp: Path
+) -> None:
+    try:
+        with _kb.write_txn(conn):
+            _kb._append_event(
+                conn,
+                task_id,
+                "workspace_cleanup_deferred_shared",
+                {"reason": reason, "workspace_path": str(wp)},
+            )
+    except Exception:
+        pass
+
+
+def _is_shared_scratch_workspace_in_use(
+    conn: sqlite3.Connection, task_id: str, wp: Path
+) -> bool:
+    """Return True (and emit ``workspace_cleanup_deferred_shared``) when a live task on
+    this board or another board shares *wp*, or when board enumeration/querying fails.
+    """
+    try:
+        wp_resolved = wp.expanduser().resolve(strict=False)
+    except Exception:
+        _record_deferred_shared_event(conn, task_id, "unknown", wp)
+        return True
+
+    def _paths_overlap(other_raw: Optional[str]) -> bool:
+        if not other_raw:
+            return False
+        try:
+            other_p = Path(other_raw).expanduser().resolve(strict=False)
+            return (
+                other_p == wp_resolved
+                or other_p.is_relative_to(wp_resolved)
+                or wp_resolved.is_relative_to(other_p)
+            )
+        except Exception:
+            return True
+
+    try:
+        # 1. Check live tasks on the current connection's board
+        live_rows = conn.execute(
+            "SELECT id, status, workspace_path FROM tasks WHERE id != ? AND workspace_path IS NOT NULL",
+            (task_id,),
+        ).fetchall()
+        for r in live_rows:
+            st = (r["status"] or "").strip().lower()
+            if st not in _TERMINAL_CHILD_STATUSES and _paths_overlap(r["workspace_path"]):
+                _record_deferred_shared_event(conn, task_id, "shared", wp)
+                return True
+
+        # 2. Check other boards under kanban_home()/kanban/boards (and default board if needed)
+        cur_db_file = ""
+        with contextlib.suppress(Exception):
+            db_list = conn.execute("PRAGMA database_list").fetchall()
+            if db_list:
+                cur_db_file = str(Path(db_list[0][2]).resolve(strict=False)) if db_list[0][2] else ""
+
+        home = _kb.kanban_home()
+        other_db_paths: list[Path] = []
+        default_db = home / "kanban.db"
+        if default_db.exists():
+            other_db_paths.append(default_db)
+        boards_dir = home / "kanban" / "boards"
+        if boards_dir.exists():
+            for entry in boards_dir.iterdir():
+                if entry.is_dir():
+                    bdb = entry / "kanban.db"
+                    if bdb.exists():
+                        other_db_paths.append(bdb)
+
+        from hermes_cli import kanban_db_connect as kbc
+
+        for bdb in other_db_paths:
+            if cur_db_file and str(bdb.resolve(strict=False)) == cur_db_file:
+                continue
+            with kbc.connect_closing(db_path=bdb) as other_conn:
+                other_rows = other_conn.execute(
+                    "SELECT id, status, workspace_path FROM tasks WHERE workspace_path IS NOT NULL"
+                ).fetchall()
+                for r in other_rows:
+                    st = (r["status"] or "").strip().lower()
+                    if st not in _TERMINAL_CHILD_STATUSES and _paths_overlap(r["workspace_path"]):
+                        _record_deferred_shared_event(conn, task_id, "shared", wp)
+                        return True
+    except Exception:
+        _record_deferred_shared_event(conn, task_id, "unknown", wp)
+        return True
+
+    return False
 
 
 def _managed_scratch_path_info(p: Path) -> tuple[bool, Optional[str]]:
@@ -111,12 +317,15 @@ def _is_managed_scratch_path(p: Path) -> bool:
 
 
 def _cleanup_workspace(conn: sqlite3.Connection, task_id: str) -> None:
-    """Remove a task's scratch workspace dir and kill its stale tmux session.
-    Called from :func:`complete_task` after the transaction commits; best-effort
-    so cleanup never blocks completion. ``scratch`` is removed; ``worktree``
-    only when provably free of work (clean tree, every commit reachable from a
-    remote-tracking ref); ``dir`` is intentionally preserved."""
+    """Remove a task's scratch workspace dir or clean linked worktree when eligible.
+    Called from :func:`complete_task` / :func:`archive_task` after the transaction commits;
+    best-effort so cleanup never blocks completion. ``scratch`` is removed only when all
+    fences and ``preservation_gate`` pass; ``worktree`` only when provably free of work
+    and ``preservation_gate`` passes; ``dir`` is intentionally preserved. Never kills
+    worker tmux sessions or releases runtime/LSP resources during cleanup."""
     try:
+        if _is_delegated_child_context():
+            return
         row = conn.execute(_WORKSPACE_ROW_SQL, (task_id,)).fetchone()
         if not row:
             return
@@ -128,19 +337,15 @@ def _cleanup_workspace(conn: sqlite3.Connection, task_id: str) -> None:
             # See #33774.
             _try_cleanup_parent_workspaces(conn, task_id)
             return
-        # Defer while any child is not yet terminal so it can still read
-        # handoff artifacts from this workspace.
-        if _has_active_children(conn, task_id):
+        # Defer while task is non-terminal or any direct/transitive descendant is active/indeterminate.
+        if _is_task_cleanup_fenced(conn, task_id):
             _kb._log.debug(
                 "Deferring %s workspace cleanup for task %s: "
-                "active children still need workspace at %s",
+                "active/indeterminate descendants or runs still need workspace at %s",
                 kind, task_id, path,
             )
             return
-        # Kill the (dead) tmux worker session BEFORE removing a worktree so a
-        # lingering worker never has its cwd deleted from under it.
         if kind == "worktree":
-            _cleanup_worker_tmux(conn, task_id)
             _cleanup_worktree_workspace(task_id, path, row["branch_name"], conn=conn)
             _try_cleanup_parent_workspaces(conn, task_id)
             return
@@ -151,6 +356,8 @@ def _cleanup_workspace(conn: sqlite3.Connection, task_id: str) -> None:
             # source tree; without this, completion would rmtree the user's data.
             # See #28818.
             if _is_managed_scratch_path(wp):
+                if _is_shared_scratch_workspace_in_use(conn, task_id, wp):
+                    return
                 from hermes_cli import kanban_bundle_preserve as bp
                 if not bp.preservation_gate(task_id, wp, conn=conn):
                     _kb._log.info("Preserving workspace for task %s: preservation gate held", task_id)
@@ -164,9 +371,6 @@ def _cleanup_workspace(conn: sqlite3.Connection, task_id: str) -> None:
                     "kanban-managed workspaces root)",
                     task_id, wp,
                 )
-        # Kill the owning worker's tmux session if it is now dead, then let any
-        # parent whose children are all done run its deferred cleanup.
-        _cleanup_worker_tmux(conn, task_id)
         # After cleaning up this task's workspace, check if any parent tasks now have all children done —
         # their deferred cleanup can proceed (#33774).
         _try_cleanup_parent_workspaces(conn, task_id)
@@ -184,11 +388,30 @@ def _cleanup_worktree_workspace(
     ref; any doubt (dirty, unpushed, unresolvable repo, failing git) preserves
     it. The auto-generated ``wt/<task-id>`` branch is deleted with it; custom
     branches are kept. Best-effort."""
+    if _is_delegated_child_context():
+        return
     try:
         from hermes_cli.worktree_ops import _worktree_has_unpushed_commits, _worktree_is_dirty
     except Exception:
         return  # CLI safety predicates unavailable — preserve
     try:
+        if conn is not None:
+            if _is_task_cleanup_fenced(conn, task_id):
+                return
+        else:
+            from hermes_cli import kanban_db_connect as kbc
+
+            db_path = _kb.kanban_db_path()
+            if db_path.exists():
+                with kbc.connect_closing(db_path=db_path) as tmp_conn:
+                    has_record = (
+                        tmp_conn.execute("SELECT 1 FROM tasks WHERE id = ?", (task_id,)).fetchone()
+                        or tmp_conn.execute("SELECT 1 FROM task_links WHERE parent_id = ?", (task_id,)).fetchone()
+                        or tmp_conn.execute("SELECT 1 FROM task_runs WHERE task_id = ?", (task_id,)).fetchone()
+                    )
+                    if has_record and _is_task_cleanup_fenced(tmp_conn, task_id):
+                        return
+
         wp = Path(path).expanduser()
         if not wp.is_dir():
             return
@@ -196,7 +419,8 @@ def _cleanup_worktree_workspace(
         if common is None or common.name != ".git":
             return  # not a linked worktree of a normal repo — never guess
         repo_root = common.parent
-        if wp.resolve(strict=False) == repo_root.resolve(strict=False):
+        wp_resolved = wp.resolve(strict=False)
+        if wp_resolved == repo_root.resolve(strict=False):
             return  # never remove the main checkout
         if _worktree_is_dirty(str(wp)) or _worktree_has_unpushed_commits(str(wp)):
             _kb._log.info(
@@ -208,9 +432,19 @@ def _cleanup_worktree_workspace(
         if not bp.preservation_gate(task_id, wp, conn=conn):
             _kb._log.info("Preserving worktree for task %s: preservation gate held", task_id)
             return
+        try:
+            cwd = Path.cwd().resolve(strict=False)
+            if cwd == wp_resolved or cwd.is_relative_to(wp_resolved):
+                os.chdir(repo_root)
+        except OSError:
+            with contextlib.suppress(OSError):
+                os.chdir(repo_root)
         # No --force: git's own dirty guard re-verifies at removal time, so if
         # the tree became dirty since our check (TOCTOU) removal fails safe.
         result = _git(repo_root, "worktree", "remove", str(wp), timeout=60)
+        if result.returncode != 0:
+            time.sleep(0.05)
+            result = _git(repo_root, "worktree", "remove", str(wp), timeout=60)
         if result.returncode != 0:
             _kb._log.warning(
                 "git worktree remove failed for task %s at %s: %s",
@@ -230,9 +464,11 @@ def _try_cleanup_parent_workspaces(conn: sqlite3.Connection, task_id: str) -> No
     children are now all done/archived/failed/cancelled (called after each
     child completes).
 
-    See #33774.
+    See #33774 and #133501.
     """
     try:
+        if _is_delegated_child_context():
+            return
         parents = conn.execute(
             "SELECT parent_id FROM task_links WHERE child_id = ?",
             (task_id,),
@@ -243,7 +479,7 @@ def _try_cleanup_parent_workspaces(conn: sqlite3.Connection, task_id: str) -> No
                 not row
                 or row["workspace_kind"] not in _REMOVABLE_KINDS
                 or not row["workspace_path"]
-                or _has_active_children(conn, parent_id)
+                or _is_task_cleanup_fenced(conn, parent_id)
             ):
                 continue
             if row["workspace_kind"] == "worktree":
@@ -251,6 +487,8 @@ def _try_cleanup_parent_workspaces(conn: sqlite3.Connection, task_id: str) -> No
                 continue
             wp = Path(row["workspace_path"])
             if wp.is_dir() and _is_managed_scratch_path(wp):
+                if _is_shared_scratch_workspace_in_use(conn, parent_id, wp):
+                    continue
                 from hermes_cli import kanban_bundle_preserve as bp
                 if not bp.preservation_gate(parent_id, wp, conn=conn):
                     _kb._log.info("Preserving parent workspace for task %s: preservation gate held", parent_id)
