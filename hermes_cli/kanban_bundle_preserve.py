@@ -166,10 +166,75 @@ _NON_PATH_SCALAR_KEY_SUFFIXES = (
     "_tool",
 )
 
+_EXPLICIT_LOCAL_METADATA_KEYS = frozenset({
+    "artifact",
+    "artifacts",
+    "bundle",
+    "bundles",
+    "path",
+    "paths",
+    "local_path",
+    "local_paths",
+    "workspace_path",
+    "workspace_paths",
+    "file_path",
+    "file_paths",
+    "target_path",
+    "target_paths",
+    "output_path",
+    "output_paths",
+    "report_path",
+    "report_paths",
+    "file",
+    "files",
+    "local_file",
+    "local_files",
+    "workspace_file",
+    "workspace_files",
+    "required_file",
+    "required_files",
+    "output_file",
+    "output_files",
+    "report_file",
+    "report_files",
+    "files_changed",
+    "changed_files",
+    "local_ref",
+    "local_refs",
+    "local_reference",
+    "local_references",
+    "workspace_ref",
+    "workspace_refs",
+    "finding",
+    "findings",
+    "deliverable",
+    "deliverables",
+    "member",
+    "members",
+})
+
+_GENERAL_REFERENCE_METADATA_KEYS = frozenset({
+    "required",
+    "requirements",
+    "reference",
+    "references",
+    "ref",
+    "refs",
+})
+
+
+def is_explicit_local_metadata_key(key: str) -> bool:
+    """Return True if a structured metadata key explicitly requires a local workspace path/member."""
+    if not key or not isinstance(key, str):
+        return False
+    return key.strip().lower() in _EXPLICIT_LOCAL_METADATA_KEYS
+
 
 def is_external_skill_provenance_key(key: str) -> bool:
     """Return True if a structured metadata key denotes external skill provenance."""
     if not key or not isinstance(key, str):
+        return False
+    if is_explicit_local_metadata_key(key):
         return False
     words = [w for w in re.split(r"[_-]+", key.strip().lower()) if w]
     if len(words) < 2:
@@ -186,23 +251,44 @@ def is_non_path_scalar_metadata_key(key: str) -> bool:
     if not key or not isinstance(key, str):
         return False
     k = key.strip().lower()
-    if not k or k in {
-        "artifacts",
-        "artifact",
-        "bundle",
-        "path",
-        "paths",
-        "file",
-        "files",
-        "worktree",
-        "findings",
-    }:
+    if not k or is_explicit_local_metadata_key(k) or k in _GENERAL_REFERENCE_METADATA_KEYS or k in {"worktree"}:
         return False
     if is_external_skill_provenance_key(k):
         return False
     if k in _NON_PATH_SCALAR_METADATA_KEYS:
         return True
     return k.endswith(_NON_PATH_SCALAR_KEY_SUFFIXES)
+
+
+def is_non_path_scalar_value(val: str) -> bool:
+    """Return True if a string under a non-path scalar metadata key is a valid
+    scalar descriptor token (e.g. 'Gemini/Google', 'Google/gemini-4-argon-high',
+    'PASS/READY') rather than a local/external filesystem path or prose with file refs.
+    """
+    if not val or not isinstance(val, str):
+        return False
+    s = val.strip()
+    if not s or any(ch in s for ch in " \t\r\n`\"'<>[]"):
+        return False
+    if _URL_PATTERN.match(s):
+        return False
+    if os.path.isabs(s) or s.startswith(("./", "../", "~", "\\")):
+        return False
+    if re.match(r"^(?:artifact|path|file|required|placement)[:=]", s, re.IGNORECASE):
+        return False
+    norm = s.replace("\\", "/")
+    parts = [p for p in norm.split("/") if p]
+    if not parts or len(parts) > 3:
+        return False
+    if any(p in (".", "..") or p.startswith(".") for p in parts):
+        return False
+    if is_prohibited_name(norm) or has_excluded_component(norm):
+        return False
+    for p in parts:
+        base_p = _SOURCE_SUFFIX_PATTERN.sub("", p)
+        if _FILE_EXT_PATTERN.search(base_p) or base_p in _KNOWN_EXTENSIONLESS_FILES:
+            return False
+    return True
 
 
 def is_non_path_metadata(token: str) -> bool:
@@ -989,6 +1075,7 @@ def plan_bundle(
         obj: Any,
         *,
         under_explicit_key: bool = False,
+        under_general_ref_key: bool = False,
         under_skill_provenance_key: bool = False,
         under_non_path_key: bool = False,
     ) -> None:
@@ -998,23 +1085,54 @@ def plan_bundle(
                 return
             if s in staged_complete_map:
                 s = staged_complete_map[s]
-            if under_skill_provenance_key and not under_explicit_key:
+            if under_skill_provenance_key and not under_explicit_key and not under_general_ref_key:
                 # External skill provenance value: classify lexically without opening/stat-traversing external paths
                 s_clean = s.strip(" \t\r\n`\"'")
-                if s_clean and not s_clean.startswith("./") and ".." not in Path(s_clean).parts:
+                if (
+                    s_clean
+                    and not any(ch in s_clean for ch in " \t\r\n`\"'<>[]")
+                    and not _URL_PATTERN.match(s_clean)
+                    and not s_clean.startswith(("./", "../", "~"))
+                    and not re.match(r"^(?:artifact|path|file|required|placement)[:=]", s_clean, re.IGNORECASE)
+                    and ".." not in Path(s_clean).parts
+                ):
                     if os.path.isabs(s_clean):
-                        if _lexical_rel_parts_in_root(workspace, s_clean) is None and (
-                            recorded_checkout is None
-                            or _lexical_rel_parts_in_root(recorded_checkout, s_clean) is None
-                        ):
+                        in_local = (
+                            _lexical_rel_parts_in_root(workspace, s_clean) is not None
+                            or (
+                                recorded_checkout is not None
+                                and _lexical_rel_parts_in_root(recorded_checkout, s_clean) is not None
+                            )
+                            or any(_lexical_rel_parts_in_root(wt, s_clean) is not None for wt in worktree_roots)
+                        )
+                        lower_parts = [p.lower() for p in Path(s_clean).parts if p and p != "/"]
+                        has_skill_marker = (
+                            any(
+                                p in {"skills", "skill", "optional-skills", "references"} or p.startswith("skill")
+                                for p in lower_parts
+                            )
+                            or (bool(lower_parts) and lower_parts[-1] == "skill.md")
+                        )
+                        if not in_local and has_skill_marker:
                             _add_unique(external_skill_refs, s_clean)
                             return
                     else:
                         norm_s = s_clean.replace("\\", "/").strip("/")
-                        if norm_s:
+                        rel_parts = [p for p in norm_s.split("/") if p]
+                        if (
+                            len(rel_parts) >= 2
+                            and not any(p in (".", "..") for p in rel_parts)
+                            and not rel_parts[0].startswith(".")
+                            and not has_excluded_component(norm_s)
+                        ):
                             _add_unique(external_skill_refs, norm_s)
                             return
-            if under_non_path_key and not under_explicit_key and not under_skill_provenance_key:
+            if (
+                under_non_path_key
+                and not under_explicit_key
+                and not under_general_ref_key
+                and not under_skill_provenance_key
+            ):
                 # Documented non-path scalar metadata value (e.g. review.family, provider, model, verdict)
                 s_clean = s.strip(" \t\r\n`\"'")
                 if not s_clean:
@@ -1022,17 +1140,10 @@ def plan_bundle(
                 if _URL_PATTERN.match(s_clean):
                     _add_unique(unresolved_non_path_refs, sanitize_uri(s_clean))
                     return
-                if not s_clean.startswith(("./", "../")) and ".." not in Path(s_clean).parts:
-                    if not os.path.isabs(s_clean) or (
-                        _lexical_rel_parts_in_root(workspace, s_clean) is None
-                        and (
-                            recorded_checkout is None
-                            or _lexical_rel_parts_in_root(recorded_checkout, s_clean) is None
-                        )
-                    ):
-                        _add_unique(non_path_metadata_values, s_clean)
-                        return
-            if under_explicit_key:
+                if is_non_path_scalar_value(s_clean):
+                    _add_unique(non_path_metadata_values, s_clean)
+                    return
+            if under_explicit_key or (under_general_ref_key and not is_non_path_metadata(s.strip(" \t\r\n`\"'"))):
                 # Could be a decorated string or a direct path (including spaced path)
                 extracted = _extract_references_from_text(
                     s, workspace, recorded_checkout, default_explicit_local=True
@@ -1057,26 +1168,34 @@ def plan_bundle(
                 _collect_metadata_dict_refs(
                     elem,
                     under_explicit_key=under_explicit_key,
+                    under_general_ref_key=under_general_ref_key,
                     under_skill_provenance_key=under_skill_provenance_key,
                     under_non_path_key=under_non_path_key,
                 )
         elif isinstance(obj, dict):
             for k, v in obj.items():
                 k_str = str(k)
-                is_exp = under_explicit_key or (
-                    k_str.lower() in {"artifacts", "artifact", "bundle", "path", "paths", "file", "files"}
-                )
-                is_skill_prov = (not is_exp) and (
-                    under_skill_provenance_key or is_external_skill_provenance_key(k_str)
+                k_lower = k_str.strip().lower()
+                is_exp = under_explicit_key or is_explicit_local_metadata_key(k_str)
+                is_gen_ref = (not is_exp) and (under_general_ref_key or (k_lower in _GENERAL_REFERENCE_METADATA_KEYS))
+                is_skill_prov = (
+                    (not is_exp)
+                    and (not is_gen_ref)
+                    and (
+                        is_external_skill_provenance_key(k_str)
+                        or (under_skill_provenance_key and k_lower in {"skill", "skills", "target", "value", "values"})
+                    )
                 )
                 is_non_path = (
                     (not is_exp)
+                    and (not is_gen_ref)
                     and (not is_skill_prov)
-                    and (under_non_path_key or is_non_path_scalar_metadata_key(k_str))
+                    and is_non_path_scalar_metadata_key(k_str)
                 )
                 _collect_metadata_dict_refs(
                     v,
                     under_explicit_key=is_exp,
+                    under_general_ref_key=is_gen_ref,
                     under_skill_provenance_key=is_skill_prov,
                     under_non_path_key=is_non_path,
                 )
@@ -1093,25 +1212,43 @@ def plan_bundle(
                 if k in {"worktree", "findings"}:
                     continue
                 k_str = str(k)
-                is_exp = k_str.lower() in {
-                    "artifacts",
-                    "artifact",
-                    "bundle",
-                    "path",
-                    "paths",
-                    "file",
-                    "files",
-                }
-                is_skill_prov = (not is_exp) and is_external_skill_provenance_key(k_str)
-                is_non_path = (not is_exp) and (not is_skill_prov) and is_non_path_scalar_metadata_key(k_str)
+                k_lower = k_str.strip().lower()
+                is_exp = is_explicit_local_metadata_key(k_str)
+                is_gen_ref = (not is_exp) and (k_lower in _GENERAL_REFERENCE_METADATA_KEYS)
+                is_skill_prov = (not is_exp) and (not is_gen_ref) and is_external_skill_provenance_key(k_str)
+                is_non_path = (
+                    (not is_exp)
+                    and (not is_gen_ref)
+                    and (not is_skill_prov)
+                    and is_non_path_scalar_metadata_key(k_str)
+                )
                 _collect_metadata_dict_refs(
                     v,
                     under_explicit_key=is_exp,
+                    under_general_ref_key=is_gen_ref,
                     under_skill_provenance_key=is_skill_prov,
                     under_non_path_key=is_non_path,
                 )
 
     candidate_refs.extend(extra_required_refs)
+
+    co_rel_prefixes: List[str] = []
+    for wt in worktree_roots:
+        wt_parts = _lexical_rel_parts_in_root(workspace, wt)
+        if wt_parts:
+            co_rel_prefixes.append("/".join(wt_parts) + "/")
+
+    def _in_scanned_inventory(ref_candidate: str) -> bool:
+        norm_c = ref_candidate.replace("\\", "/").strip("/")
+        if not norm_c:
+            return False
+        if norm_c in workspace_files or norm_c in directories:
+            return True
+        for pref in co_rel_prefixes:
+            comb = f"{pref}{norm_c}"
+            if comb in workspace_files or comb in directories:
+                return True
+        return False
 
     # 7. Resolve and validate all candidate references
     seen_candidates: Set[Tuple[str, bool]] = set()
@@ -1142,21 +1279,19 @@ def plan_bundle(
         # Strip :line or #L suffix unless literal suffixed path exists
         clean_ref = _strip_source_suffix(ref_str, workspace, recorded_checkout)
 
+        # Non-path metadata check (only when NOT in explicit local context and NOT in scanned workspace inventory)
+        if (
+            not is_explicit_local
+            and not clean_ref.startswith("./")
+            and not _in_scanned_inventory(clean_ref)
+            and is_non_path_metadata(clean_ref)
+        ):
+            continue
+
         # Check if path exists on disk locally inside workspace or recorded_checkout
         exists_ws = _exists_in_root_lexically(workspace, clean_ref)
         exists_co = _exists_in_root_lexically(recorded_checkout, clean_ref)
         exists_any_co = any(_exists_in_root_lexically(wt, clean_ref) for wt in worktree_roots)
-
-        # Non-path metadata check (only when NOT in explicit local context and NOT existing on disk)
-        if (
-            not is_explicit_local
-            and not clean_ref.startswith("./")
-            and not exists_ws
-            and not exists_co
-            and not exists_any_co
-        ):
-            if is_non_path_metadata(clean_ref):
-                continue
 
         # Prohibited / excluded name check
         if is_prohibited_name(clean_ref) or has_excluded_component(clean_ref):
