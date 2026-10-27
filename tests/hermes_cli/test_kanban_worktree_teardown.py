@@ -11,6 +11,7 @@ remote-tracking ref. Any doubt preserves the worktree.
 
 from __future__ import annotations
 
+import os
 import subprocess
 from pathlib import Path
 
@@ -19,6 +20,19 @@ import pytest
 from hermes_cli import kanban_db as kb
 from hermes_cli import kanban_db_workspace as kbw
 from hermes_cli import kanban_db_connect as kbc
+
+
+@pytest.fixture(autouse=True)
+def _portable_git_ceiling(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    ceilings = [
+        str(tmp_path.resolve()),
+        str(tmp_path.parent.resolve()),
+        str(Path(__file__).resolve().parents[2]),
+    ]
+    existing = os.environ.get("GIT_CEILING_DIRECTORIES", "")
+    if existing:
+        ceilings.extend(p for p in existing.split(os.pathsep) if p)
+    monkeypatch.setenv("GIT_CEILING_DIRECTORIES", os.pathsep.join(dict.fromkeys(ceilings)))
 
 
 def _git(*args: str, cwd: str | None = None) -> str:
@@ -82,7 +96,14 @@ def _branch_exists(repo: Path, branch: str) -> bool:
 # ---------------------------------------------------------------------------
 
 
-def test_clean_pushed_worktree_removed(repo: Path) -> None:
+def test_clean_pushed_worktree_removed(
+    repo: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Unit mechanics: when the preservation gate approves disposal, a clean
+    pushed worktree and its auto-generated wt/<task-id> branch are removed."""
+    from hermes_cli import kanban_bundle_preserve as bp
+
+    monkeypatch.setattr(bp, "preservation_gate", lambda *_a, **_kw: True)
     wt = _make_worktree(repo, "t_aaaa1111")
     kbw._cleanup_worktree_workspace("t_aaaa1111", str(wt))
     assert not wt.exists()
@@ -90,6 +111,19 @@ def test_clean_pushed_worktree_removed(repo: Path) -> None:
     assert not _branch_exists(repo, "wt/t_aaaa1111")
     # main checkout untouched
     assert (repo / "README.md").exists()
+
+
+def test_clean_pushed_worktree_without_conn_retains_when_gate_holds(
+    kanban_home: Path, repo: Path
+) -> None:
+    """Direct _cleanup_worktree_workspace(..., conn=None) must still pass
+    through preservation_gate and retain uncaptured work."""
+    wt = _make_worktree(repo, "t_aaaa1112")
+    kbw._cleanup_worktree_workspace("t_aaaa1112", str(wt), conn=None)
+    assert wt.is_dir()
+    assert (wt / "README.md").read_text(encoding="utf-8") == "hello\n"
+    assert _branch_exists(repo, "wt/t_aaaa1112")
+    assert (repo / "README.md").read_text(encoding="utf-8") == "hello\n"
 
 
 def test_dirty_worktree_preserved(repo: Path) -> None:
@@ -109,7 +143,14 @@ def test_unpushed_commits_preserved(repo: Path) -> None:
     assert wt.is_dir()
 
 
-def test_custom_branch_survives_worktree_removal(repo: Path) -> None:
+def test_custom_branch_survives_worktree_removal(
+    repo: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Unit mechanics: when the preservation gate approves disposal, custom
+    (non-wt/*) branches survive worktree removal."""
+    from hermes_cli import kanban_bundle_preserve as bp
+
+    monkeypatch.setattr(bp, "preservation_gate", lambda *_a, **_kw: True)
     wt = _make_worktree(repo, "t_dddd4444", branch="feature/custom")
     kbw._cleanup_worktree_workspace("t_dddd4444", str(wt), "feature/custom")
     assert not wt.exists()
@@ -171,15 +212,20 @@ def _worktree_task(conn, repo: Path, title: str = "wt-task") -> tuple[str, Path]
     return tid, wt
 
 
-def test_complete_task_reaps_clean_worktree(kanban_home: Path, repo: Path) -> None:
+def test_complete_task_retains_clean_worktree_with_zero_initial_attachments(
+    kanban_home: Path, repo: Path
+) -> None:
     with kbc.connect_closing() as conn:
         tid, wt = _worktree_task(conn, repo)
         with kb.write_txn(conn):
             conn.execute("UPDATE tasks SET status='ready' WHERE id=?", (tid,))
         assert kb.claim_task(conn, tid, claimer="worker") is not None
         assert kb.complete_task(conn, tid, summary="done")
-    assert not wt.exists()
-    assert not _branch_exists(repo, f"wt/{tid}")
+    # Stronger retention contract: zero initial attachments retains worktree and exact bytes
+    assert wt.exists()
+    assert (wt / "README.md").read_text(encoding="utf-8") == "hello\n"
+    assert _branch_exists(repo, f"wt/{tid}")
+    assert (repo / "README.md").read_text(encoding="utf-8") == "hello\n"
 
 
 def test_complete_task_preserves_dirty_worktree(kanban_home: Path, repo: Path) -> None:
@@ -191,14 +237,20 @@ def test_complete_task_preserves_dirty_worktree(kanban_home: Path, repo: Path) -
         assert kb.claim_task(conn, tid, claimer="worker") is not None
         assert kb.complete_task(conn, tid, summary="done")
     assert wt.is_dir()
-    assert (wt / "wip.txt").exists()
+    assert (wt / "wip.txt").read_text(encoding="utf-8") == "unsaved\n"
+    assert (wt / "README.md").read_text(encoding="utf-8") == "hello\n"
 
 
-def test_archive_task_reaps_clean_worktree(kanban_home: Path, repo: Path) -> None:
+def test_archive_task_retains_clean_worktree_with_zero_initial_attachments(
+    kanban_home: Path, repo: Path
+) -> None:
     with kbc.connect_closing() as conn:
         tid, wt = _worktree_task(conn, repo)
         assert kb.archive_task(conn, tid)
-    assert not wt.exists()
+    # Stronger retention contract: zero initial attachments retains worktree and exact bytes
+    assert wt.exists()
+    assert (wt / "README.md").read_text(encoding="utf-8") == "hello\n"
+    assert _branch_exists(repo, f"wt/{tid}")
 
 
 def test_parent_worktree_deferred_until_children_done(
@@ -215,10 +267,147 @@ def test_parent_worktree_deferred_until_children_done(
         assert kb.complete_task(conn, parent, summary="parent done")
         # child still active -> parent worktree must survive for handoff
         assert parent_wt.is_dir()
+        assert (parent_wt / "README.md").read_text(encoding="utf-8") == "hello\n"
 
         with kb.write_txn(conn):
             conn.execute("UPDATE tasks SET status='ready' WHERE id=?", (child,))
         assert kb.claim_task(conn, child, claimer="worker") is not None
         assert kb.complete_task(conn, child, summary="child done")
-    # last child terminal -> deferred parent worktree reaped
-    assert not parent_wt.exists()
+    # Stronger retention contract: zero initial attachments retains parent worktree and exact bytes
+    assert parent_wt.exists()
+    assert (parent_wt / "README.md").read_text(encoding="utf-8") == "hello\n"
+    assert _branch_exists(repo, f"wt/{parent}")
+
+
+def test_cleanup_leaves_a_worktree_cwd_before_removal(
+    repo: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Windows cannot remove a worktree that is the process's current directory."""
+    from hermes_cli import kanban_bundle_preserve as bp
+
+    monkeypatch.setattr(bp, "preservation_gate", lambda *_a, **_kw: True)
+    wt = _make_worktree(repo, "t_cwd112425")
+    real_git = kbw._git
+
+    def windows_git(repo_root: Path, *args: str, timeout: int) -> subprocess.CompletedProcess:
+        if args[:2] == ("worktree", "remove") and Path.cwd().is_relative_to(wt):
+            return subprocess.CompletedProcess(
+                ["git", *args], 1, stderr="Permission denied: current directory"
+            )
+        return real_git(repo_root, *args, timeout=timeout)
+
+    monkeypatch.setattr(kbw, "_git", windows_git)
+    monkeypatch.chdir(wt)
+    kbw._cleanup_worktree_workspace("t_cwd112425", str(wt))
+
+    assert Path.cwd().resolve() == repo.resolve()
+    assert not wt.exists()
+
+
+def test_cleanup_proceeds_when_cwd_was_deleted(
+    repo: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Deferred parent cleanup (#33774) runs after the child's scratch cwd was
+    rmtree'd; a dead cwd must not preserve a clean, pushed worktree when gate approves."""
+    from hermes_cli import kanban_bundle_preserve as bp
+
+    monkeypatch.setattr(bp, "preservation_gate", lambda *_a, **_kw: True)
+    wt = _make_worktree(repo, "t_deadcwd113073")
+    scratch = tmp_path / "scratch"
+    scratch.mkdir()
+    monkeypatch.chdir(scratch)
+    scratch.rmdir()
+
+    kbw._cleanup_worktree_workspace("t_deadcwd113073", str(wt))
+
+    assert not wt.exists()
+    assert not _branch_exists(repo, "wt/t_deadcwd113073")
+
+
+def test_cleanup_retries_worktree_removal_once(
+    repo: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A brief Windows directory-handle delay gets one safe retry."""
+    from hermes_cli import kanban_bundle_preserve as bp
+
+    monkeypatch.setattr(bp, "preservation_gate", lambda *_a, **_kw: True)
+    wt = _make_worktree(repo, "t_retry112425")
+    real_git = kbw._git
+    attempts = 0
+
+    def delayed_remove(repo_root: Path, *args: str, timeout: int) -> subprocess.CompletedProcess:
+        nonlocal attempts
+        if args[:2] == ("worktree", "remove"):
+            attempts += 1
+            if attempts == 1:
+                return subprocess.CompletedProcess(
+                    ["git", *args], 1, stderr="Permission denied: handle pending"
+                )
+        return real_git(repo_root, *args, timeout=timeout)
+
+    monkeypatch.setattr(kbw, "_git", delayed_remove)
+    monkeypatch.setattr(kbw.time, "sleep", lambda _delay: None)
+    kbw._cleanup_worktree_workspace("t_retry112425", str(wt))
+
+    assert attempts == 2
+    assert not wt.exists()
+
+
+def _running_scratch_parent(conn, title: str = "parent") -> tuple[str, Path]:
+    tid = kb.create_task(conn, title=title)
+    assert kb.claim_task(conn, tid) is not None  # -> running
+    ws = Path(kbw.resolve_workspace(kb.get_task(conn, tid)))
+    kbw.set_workspace_path(conn, tid, ws)
+    return tid, ws
+
+
+@pytest.mark.parametrize("live_status", ["running", "blocked", "review"])
+def test_live_parent_scratch_survives_last_child_archived(
+    kanban_home: Path, live_status: str
+) -> None:
+    """#133501: the deferred sweep must not reap a still-live parent's scratch."""
+    with kbc.connect_closing() as conn:
+        parent, ws = _running_scratch_parent(conn)
+        (ws / "work.txt").write_text("in progress", encoding="utf-8")
+        child = kb.create_task(conn, title="probe")
+        kb.link_tasks(conn, parent, child)
+        if live_status == "blocked":
+            assert kb.block_task(conn, parent, reason="waiting")
+        elif live_status == "review":
+            assert kb.request_review(conn, parent, summary="please review", force=True)
+        assert kb.archive_task(conn, child)
+        assert kb.get_task(conn, parent).status == live_status
+    assert (ws / "work.txt").is_file()
+
+
+def test_live_parent_worktree_survives_last_child_archived(
+    kanban_home: Path, repo: Path
+) -> None:
+    """#133501, worktree flavour: a running parent's clean linked worktree
+    must not be removed because a child got archived."""
+    with kbc.connect_closing() as conn:
+        parent, parent_wt = _worktree_task(conn, repo, title="live parent")
+        with kb.write_txn(conn):
+            conn.execute("UPDATE tasks SET status='ready' WHERE id=?", (parent,))
+        assert kb.claim_task(conn, parent, claimer="worker") is not None
+        child = kb.create_task(conn, title="probe")
+        kb.link_tasks(conn, parent, child)
+        assert kb.archive_task(conn, child)
+        assert kb.get_task(conn, parent).status == "running"
+    assert parent_wt.is_dir()
+
+
+def test_terminal_scratch_parent_still_swept_after_last_child(
+    kanban_home: Path,
+) -> None:
+    """#33774 unchanged by the #133501 guard: an empty terminal parent scratch
+    workspace that finished while a child was still active gets swept by the
+    last child's completion."""
+    with kbc.connect_closing() as conn:
+        parent, ws = _running_scratch_parent(conn)
+        child = kb.create_task(conn, title="child")
+        kb.link_tasks(conn, parent, child)
+        assert kb.complete_task(conn, parent, summary="parent done")
+        assert ws.is_dir()
+        assert kb.archive_task(conn, child)
+    assert not ws.exists()
