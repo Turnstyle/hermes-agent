@@ -141,7 +141,7 @@ def _cleanup_workspace(conn: sqlite3.Connection, task_id: str) -> None:
         # lingering worker never has its cwd deleted from under it.
         if kind == "worktree":
             _cleanup_worker_tmux(conn, task_id)
-            _cleanup_worktree_workspace(task_id, path, row["branch_name"])
+            _cleanup_worktree_workspace(task_id, path, row["branch_name"], conn=conn)
             _try_cleanup_parent_workspaces(conn, task_id)
             return
         wp = Path(path)
@@ -151,6 +151,10 @@ def _cleanup_workspace(conn: sqlite3.Connection, task_id: str) -> None:
             # source tree; without this, completion would rmtree the user's data.
             # See #28818.
             if _is_managed_scratch_path(wp):
+                from hermes_cli import kanban_bundle_preserve as bp
+                if not bp.preservation_gate(task_id, wp, conn=conn):
+                    _kb._log.info("Preserving workspace for task %s: preservation gate held", task_id)
+                    return
                 shutil.rmtree(wp, ignore_errors=True)
                 _kb._log.debug("Removed scratch workspace: %s", wp)
             else:
@@ -171,7 +175,8 @@ def _cleanup_workspace(conn: sqlite3.Connection, task_id: str) -> None:
 
 
 def _cleanup_worktree_workspace(
-    task_id: str, path: str, branch_name: Optional[str] = None
+    task_id: str, path: str, branch_name: Optional[str] = None,
+    conn: Optional[sqlite3.Connection] = None,
 ) -> None:
     """Remove a finished task's linked git worktree when it holds no work.
     Mirrors the CLI startup pruner (``cli._prune_stale_worktrees``): removal
@@ -198,6 +203,10 @@ def _cleanup_worktree_workspace(
                 "Preserving worktree for task %s: dirty or unpushed work at %s",
                 task_id, wp,
             )
+            return
+        from hermes_cli import kanban_bundle_preserve as bp
+        if not bp.preservation_gate(task_id, wp, conn=conn):
+            _kb._log.info("Preserving worktree for task %s: preservation gate held", task_id)
             return
         # No --force: git's own dirty guard re-verifies at removal time, so if
         # the tree became dirty since our check (TOCTOU) removal fails safe.
@@ -238,10 +247,14 @@ def _try_cleanup_parent_workspaces(conn: sqlite3.Connection, task_id: str) -> No
             ):
                 continue
             if row["workspace_kind"] == "worktree":
-                _cleanup_worktree_workspace(parent_id, row["workspace_path"], row["branch_name"])
+                _cleanup_worktree_workspace(parent_id, row["workspace_path"], row["branch_name"], conn=conn)
                 continue
             wp = Path(row["workspace_path"])
             if wp.is_dir() and _is_managed_scratch_path(wp):
+                from hermes_cli import kanban_bundle_preserve as bp
+                if not bp.preservation_gate(parent_id, wp, conn=conn):
+                    _kb._log.info("Preserving parent workspace for task %s: preservation gate held", parent_id)
+                    continue
                 shutil.rmtree(wp, ignore_errors=True)
                 _kb._log.debug("Deferred cleanup: removed parent %s scratch workspace: %s", parent_id, wp)
     except Exception:

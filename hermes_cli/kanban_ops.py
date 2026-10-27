@@ -298,7 +298,8 @@ def _cmd_gc(args: argparse.Namespace) -> int:
             # Same safety predicate: only clean, fully-pushed worktrees go.
             wt_path = row["workspace_path"]
             if wt_path and Path(wt_path).is_dir():
-                kbw._cleanup_worktree_workspace(row["id"], wt_path, row["branch_name"])
+                with kbc.connect_closing() as conn:
+                    kbw._cleanup_worktree_workspace(row["id"], wt_path, row["branch_name"], conn=conn)
                 if not Path(wt_path).is_dir():
                     removed_ws += 1
             continue
@@ -315,6 +316,10 @@ def _cmd_gc(args: argparse.Namespace) -> int:
             # Safety: never delete outside the scratch root.
             continue
         if path.exists() and path.is_dir():
+            from hermes_cli import kanban_bundle_preserve as bp
+            with kbc.connect_closing() as conn:
+                if not bp.preservation_gate(row["id"], path, conn=conn):
+                    continue
             shutil.rmtree(path, ignore_errors=True)
             removed_ws += 1
 

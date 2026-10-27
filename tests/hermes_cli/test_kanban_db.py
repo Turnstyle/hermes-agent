@@ -602,7 +602,8 @@ def test_complete_task_persists_scratch_artifacts_before_cleanup(kanban_home):
         persisted = Path(completed.payload["artifacts"][0])
         run = kb.latest_run(conn, t)
 
-    assert not ws.exists(), "scratch workspace should still be cleaned up"
+    assert ws.exists(), "scratch workspace retained by stronger preservation policy"
+    assert artifact.exists() and artifact.read_bytes() == b"png-bytes"
     assert persisted.exists(), "artifact copy should survive scratch cleanup"
     assert persisted.parent == kb.task_attachments_dir(t)
     assert persisted.name == "chart.png"
