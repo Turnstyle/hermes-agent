@@ -138,6 +138,7 @@ _KANBAN_NOTIFY_KINDS = ("completed", "blocked", "gave_up", "crashed", "timed_out
 # kanban, /loop + /heartbeat and the bot mailbox share one idle-poll cadence; probing the lease registry on
 # every 0.5s queue timeout cost ~a core at 11 sessions (#108005).
 _KANBAN_POLL_SECONDS = _LOOP_POLL_SECONDS = _BOT_DELIVERY_POLL_SECONDS = 5.0
+_FLEET_MESSAGE_POLL_SECONDS = 60.0
 
 
 def _notif_release_turn(session: dict) -> None:
@@ -646,7 +647,9 @@ def _notif_handle_ready(sid, session, events, emitted, registry, fmt, deferred, 
 
 def _poll_bot_live_delivery_once(sid: str, session: dict) -> bool:
     """Run one durable envelope only after local FIFO/continuations yield the idle boundary."""
-    from tools.bot_live_delivery import claim_pending_delivery, complete_delivery, find_canonical_live_owner, has_mailbox
+    from tools.bot_live_delivery import (
+        adopt_orphaned_deliveries, claim_pending_delivery, complete_delivery, find_canonical_live_owner, has_mailbox,
+    )
 
     home = _session_home(session)
     # Most profiles never receive a delivery: without a mailbox there is nothing to claim, and the owner
@@ -668,6 +671,9 @@ def _poll_bot_live_delivery_once(sid: str, session: dict) -> bool:
                 or owner.get("live_session_id") != sid
                 or owner.get("session_id") != session.get("session_key")):
             return False
+        # Envelopes a previous owner of this Bot Chat left queued when it closed are re-pinned to this
+        # owner (or retired), else they stay pinned to a dead lease forever (t_78c79c6b).
+        adopt_orphaned_deliveries(home, owner, state=session)
         # The mailbox matches each envelope to this pinned lease/live id and compression lineage.
         claimed = claim_pending_delivery(home, owner)
         if claimed is None:
@@ -702,6 +708,114 @@ def _poll_bot_live_delivery_once(sid: str, session: dict) -> bool:
         _notif_release_turn(session)
         terminal_receipt({"status": "failed", "error": "live session owner could not start the delivery turn"})
     return started
+
+
+def _fleet_drain_session_is_canonical(sid: str, session: dict, home) -> bool:
+    """True when ``session`` is idle and holds the canonical Bot Chat live lease of ``home``. Local only
+    (state.db + registry lock): the Firestore query is never reached for any other session."""
+    from tools.bot_live_delivery import find_canonical_live_owner
+
+    with _session_turn_admission(session) as admitted:
+        if not admitted or any(session.get(key) for key in (
+                "running", "_closing", "_finalized", "queued_prompt", "queued_prompts",
+                "_auto_continue_scheduled")) or session.get("agent") is None:
+            return False
+        lease = session.get("active_session_lease")
+        if lease is None or getattr(lease, "released", False):
+            return False
+    owner = find_canonical_live_owner(home)
+    return bool(owner and owner.get("lease_id") == lease.lease_id and owner.get("live_session_id") == sid
+                and owner.get("session_id") == session.get("session_key"))
+
+
+def _drain_fleet_messages_once(sid: str, session: dict) -> bool:
+    """Drain this bot's queued ``fleet_messages_v1`` docs at a turn end or idle tick.
+
+    Runs one indexed query, claims the oldest doc (queued -> delivered, updateTime
+    precondition), then runs it as this Bot Chat's next turn (-> read -> done, or requeue/failed with
+    attempts + last_error). True when a turn was started (the caller then skips its lower-priority work;
+    that turn's own end drains the next doc)."""
+    from tools import fleet_message_drain as fmd
+
+    pending = session.get("_fleet_drain_pending")
+    if pending is not None:
+        try:
+            pending()
+        except Exception:
+            logger.warning("fleet message drain: outcome write still pending", exc_info=True)
+        else:
+            session.pop("_fleet_drain_pending", None)
+        return False  # Resolve the prior receipt without replaying its completed turn.
+
+    config = fmd.drain_config()
+    if config is None:
+        return False
+    home = _session_home(session)
+    if not _fleet_drain_session_is_canonical(sid, session, home):
+        return False
+    triplet = fmd.turn_end_drain_query(home)
+    if triplet is None:
+        return False
+    config, store, claimed = triplet
+    if claimed is None:
+        return False
+    # The query ran outside the admission lock; a user prompt that arrived meanwhile wins the session.
+    if not _notif_claim_turn(session):
+        def release() -> None:
+            fmd.release(store, claimed)  # delivered -> queued, no attempt counted
+        try:
+            release()
+        except Exception:
+            session["_fleet_drain_pending"] = release
+            logger.warning("fleet message drain: claim release pending for %s", claimed.doc_id, exc_info=True)
+        return False
+
+    def receipt(outcome: dict) -> None:
+        def settle() -> None:
+            fmd.finish(store, claimed, outcome, max_attempts=config.max_attempts)
+        try:
+            settle()
+        except Exception:
+            logger.warning("fleet message drain: could not record the outcome of %s", claimed.doc_id, exc_info=True)
+            session["_fleet_drain_pending"] = settle
+
+    started = False
+    read_attempted = False
+    try:
+        if any(session.get(key) for key in (
+                "_closing", "_finalized", "queued_prompt", "queued_prompts", "_auto_continue_scheduled")):
+            fmd.release(store, claimed)
+            return False
+        read_attempted = True
+        if not fmd.mark_read(store, claimed):
+            return False  # Another writer moved the doc after our claim.
+        text, author, display_metadata = fmd.render_input(claimed)
+        started = _run_prompt_submit(f"__fleet_msg__{claimed.doc_id}", sid, session, text, image_paths=[],
+                                     terminal_callback=receipt, turn_author=author,
+                                     **({"display_metadata": display_metadata} if display_metadata else {}))
+        if not started:
+            fmd.record_error(store, claimed, "live Bot Chat could not start the turn",
+                             max_attempts=config.max_attempts)
+        return started
+    except Exception as exc:
+        # No worker owns this admission. Keep a retryable status write if the store is unavailable.
+        error = f"turn dispatch failed: {exc}"
+        def recover() -> None:
+            if read_attempted and claimed.pending_fields and claimed.pending_fields.get("status") == "read":
+                if not fmd.reconcile_claim(store, claimed):
+                    return
+            fmd.record_error(store, claimed, error,
+                             max_attempts=config.max_attempts)
+        try:
+            recover()
+        except Exception:
+            session["_fleet_drain_pending"] = recover
+            logger.warning("fleet message drain: unstarted claim recovery pending for %s", claimed.doc_id,
+                           exc_info=True)
+        raise
+    finally:
+        if not started:
+            _notif_release_turn(session)
 
 
 # A failing mailbox poll (typically the active-session registry lock unavailable under contention) is
@@ -751,7 +865,7 @@ def _notification_poller_scoped_loop(stop_event: threading.Event, sid: str, sess
     emitted = session.setdefault("_notification_emitted", set())
     handle = lambda events, deferred: _notif_handle_ready(
         sid, session, events, emitted, process_registry, format_process_notification, deferred)
-    last_kanban_poll = last_loop_poll = last_bot_poll = 0.0
+    last_kanban_poll = last_loop_poll = last_bot_poll = last_fleet_poll = 0.0
     while not stop_event.is_set() and not session.get("_finalized"):
         now = time.monotonic()
         # Completions whose owner process died after this one started (#97202); throttled per profile home.
@@ -759,6 +873,15 @@ def _notification_poller_scoped_loop(stop_event: threading.Event, sid: str, sess
         if now - last_bot_poll >= _BOT_DELIVERY_POLL_SECONDS:  # bot DM → live-owner delivery latency ≤ 5 s
             last_bot_poll = now
             _poll_bot_live_delivery_guarded(sid, session, now)
+        if now - last_fleet_poll >= _FLEET_MESSAGE_POLL_SECONDS:
+            last_fleet_poll = now
+            try:
+                with _session_profile_runtime_scope(session):
+                    _drain_fleet_messages_once(sid, session)
+            except Exception as exc:
+                from tools.fleet_message_drain import NoGoogleCredentials
+                if not isinstance(exc, NoGoogleCredentials):
+                    _notif_log_failure("fleet message idle drain failed", exc)
         # /loop and /heartbeat wakeup drivers: fire a due tick for THIS session while idle (same claim-under-lock
         # as kanban dispatch). An active non-parked /goal owns the idle boundary and defers the loop tick.
         if now - last_loop_poll >= _LOOP_POLL_SECONDS:

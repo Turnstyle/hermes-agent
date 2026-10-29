@@ -183,6 +183,7 @@ class _KanbanDispatcher:
         fingerprint = self.board_db_fingerprint(slug)
         if not self._quarantine_lifted(slug, fingerprint):
             return None
+        db_path = self.kb.kanban_db_path(slug)
         kwargs = {k: v for k, v in asdict(self.settings).items() if k != "interval"}
         try:
             # No explicit init_db(): connect() runs the migration once per
@@ -196,6 +197,7 @@ class _KanbanDispatcher:
                 return _kbd().dispatch_once(conn, board=slug, **kwargs)
         except Exception as exc:
             if self.is_corrupt_board_db_error(exc):
+                _kbc().close_wal_keepalive(db_path=db_path, board=slug)
                 self.disabled_corrupt_boards[slug] = (fingerprint, time.monotonic())
                 logger.error(
                     "kanban dispatcher: board %s database %s is not a valid "
@@ -243,6 +245,32 @@ class _KanbanDispatcher:
                         with contextlib.suppress(Exception):
                             conn.close()
         return False
+
+    def ready_counts(self) -> dict[str, int]:
+        """Aggregate spawnable and placeholder ready counts across all boards.
+
+        Returns ``{"spawnable": ..., "placeholder": ...}``. Placeholder counts
+        are non-paging diagnostics.
+        """
+        kbd = _kbd()
+        _review_probe = kbd.review_dispatch_enabled()
+        counts = {"spawnable": 0, "placeholder": 0}
+        for slug in self._board_slugs():
+            conn = None
+            try:
+                conn = _kbc().connect(board=slug)
+                counts["spawnable"] += kbd.count_spawnable_ready(conn)
+                counts["placeholder"] += kbd.count_placeholder_ready(conn)
+                if _review_probe:
+                    counts["spawnable"] += kbd.count_spawnable_review(conn)
+                    counts["placeholder"] += kbd.count_placeholder_review(conn)
+            except Exception:
+                continue
+            finally:
+                if conn is not None:
+                    with contextlib.suppress(Exception):
+                        conn.close()
+        return counts
 
     def auto_decompose_tick(self, auto_decompose_per_tick: int) -> int:
         """Auto-decompose up to N triage tasks across all boards into ready workgraphs.
@@ -327,20 +355,53 @@ def _default_profile_secret_scope():
         reset_secret_scope(token)
 
 
+_LAST_PLACEHOLDER_LOG: dict[str, tuple[int, float]] = {}
+
+
 def _log_spawn_results(results: Optional[list]) -> bool:
     """Log per-board spawn summaries; returns whether any board spawned."""
     any_spawned = False
+    now = time.time()
     for slug, res in (results or []):
-        if res is not None and getattr(res, "spawned", None):
+        if res is None:
+            continue
+        claim_errors = getattr(res, "claim_errors", None) or []
+        reclaim_errors = getattr(res, "reclaim_errors", None) or []
+        for step, errors in (("claim", claim_errors), ("reclaim", reclaim_errors)):
+            if not errors:
+                continue
+            due = [(tid, err) for tid, err in errors
+                   if _kbd()._fence_log_due(f"{step}-summary", tid, now)]
+            log = logger.warning if due else logger.debug
+            shown = due or errors
+            log(
+                "kanban dispatcher [%s]: %d %s refusal(s): %s",
+                slug, len(shown), step,
+                "; ".join(f"{tid}: {err}" for tid, err in shown),
+            )
+        skipped_placeholder = getattr(res, "skipped_placeholder", None) or []
+        if getattr(res, "spawned", None):
             any_spawned = True
             # Quiet by default: an idle gateway stays silent.
             logger.info(
                 "kanban dispatcher [%s]: spawned=%d reclaimed=%d "
-                "crashed=%d timed_out=%d promoted=%d auto_blocked=%d",
+                "crashed=%d timed_out=%d promoted=%d auto_blocked=%d placeholder=%d",
                 slug, len(res.spawned), res.reclaimed,
                 len(res.crashed) if hasattr(res.crashed, "__len__") else 0,
                 len(res.timed_out) if hasattr(res.timed_out, "__len__") else 0,
                 res.promoted,
                 len(res.auto_blocked) if hasattr(res.auto_blocked, "__len__") else 0,
+                len(skipped_placeholder),
             )
+        elif skipped_placeholder:
+            last = _LAST_PLACEHOLDER_LOG.get(slug)
+            if last is None or last[0] != len(skipped_placeholder) or (now - last[1]) >= 300:
+                logger.info(
+                    "kanban dispatcher [%s]: %d placeholder-assigned task(s) skipped "
+                    "(non-paging, waiting for assignment)",
+                    slug, len(skipped_placeholder),
+                )
+                _LAST_PLACEHOLDER_LOG[slug] = (len(skipped_placeholder), now)
+        elif slug in _LAST_PLACEHOLDER_LOG:
+            _LAST_PLACEHOLDER_LOG.pop(slug, None)
     return any_spawned

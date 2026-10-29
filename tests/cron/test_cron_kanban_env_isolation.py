@@ -362,8 +362,9 @@ def test_dispatcher_grants_only_the_assigned_worker_scope(tmp_path, monkeypatch)
     from hermes_cli.kanban_db_dispatch import _default_spawn
 
     monkeypatch.setenv("HOME", str(tmp_path))
-    db = tmp_path / "board.db"
-    monkeypatch.setenv("HERMES_KANBAN_DB", str(db))
+    monkeypatch.setenv("HERMES_KANBAN_HOME", str(tmp_path / "scratch-board"))
+    monkeypatch.delenv("HERMES_KANBAN_DB", raising=False)
+    db = kb.kanban_db_path()
     conn = connect(db)
     tid = kb.create_task(conn, title="assigned child", assignee="default")
     kb.claim_task(conn, tid)
@@ -382,9 +383,9 @@ def test_dispatcher_grants_only_the_assigned_worker_scope(tmp_path, monkeypatch)
     monkeypatch.setenv("HERMES_BIN", str(worker))
     # Building a new worker under an existing task must replace, not inherit, its scope.
     monkeypatch.setenv("HERMES_KANBAN_TASK", "prior-task")
-    # A dispatcher launched from an agent's shell carries the descendant fence itself; the worker it
-    # grants a task to must not (an inherited marker fences the worker's own heartbeat + handoff).
-    monkeypatch.setenv("HERMES_DELEGATED_CHILD_CONTEXT", str(tmp_path))
+    # An inherited fence for another board must not cross this explicit grant.
+    # A fence covering THIS board is refused before spawn by the launch guard.
+    monkeypatch.setenv("HERMES_DELEGATED_CHILD_CONTEXT", str(tmp_path / "parent-board"))
     pid = _default_spawn(task, str(tmp_path), board="default")
     assert pid is not None
     os.waitpid(pid, 0)  # windows-footgun: ok — Linux-only real dispatcher spawn

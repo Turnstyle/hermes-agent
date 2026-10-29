@@ -297,6 +297,44 @@ def test_request_review_accepts_installed_profile(monkeypatch, worker_env, tmp_p
         assert (task.status, task.assignee) == ("review", "verifier")
 
 
+@pytest.mark.parametrize("homes,admitted", [
+    ([node], True) for node in ("max", "sheldon", "turnerbook", "snowdrop", "rosie")
+] + [([], False), (["unknown"], False), ([None], False),
+     (["max", "sheldon"], False), (["max", "max"], False)])
+def test_request_review_admits_exactly_one_known_fleet_home(worker_env, homes, admitted):
+    from hermes_cli import kanban_db as kb
+    from hermes_cli import kanban_db_connect as kbc
+    from tools import kanban_tools  # Register the real handlers.
+    from tools.registry import registry
+
+    with kbc.connect_closing() as conn:
+        conn.execute("CREATE TABLE fleet_kanban_assignee_homes (assignee TEXT, home_node TEXT)")
+        conn.executemany("INSERT INTO fleet_kanban_assignee_homes VALUES ('remote-reviewer', ?)",
+                         [(home,) for home in homes])
+        conn.commit()
+        before = kb.get_task(conn, worker_env)
+        events = kb.list_events(conn, worker_env)
+        runs = kb.list_runs(conn, worker_env)
+        comments = kb.list_comments(conn, worker_env)
+    result = json.loads(registry.dispatch("kanban_request_review", {
+        "summary": "Implementation verified.", "reviewer": "remote-reviewer",
+    }))
+    with kbc.connect_closing() as conn:
+        task = kb.get_task(conn, worker_env)
+        if admitted:
+            assert result.get("ok") is True, result
+            assert (task.status, task.assignee, task.current_run_id) == ("review", "remote-reviewer", None)
+            event = kb.list_events(conn, worker_env)[-1]
+            assert event.kind == "review_requested"
+            assert event.payload["reviewer"] == "remote-reviewer"
+        else:
+            assert result.get("error"), result
+            assert task == before
+            assert kb.list_events(conn, worker_env) == events
+            assert kb.list_runs(conn, worker_env) == runs
+            assert kb.list_comments(conn, worker_env) == comments
+
+
 def test_unbound_worker_cannot_mutate_card(monkeypatch, worker_env):
     """A dispatcher-spawned worker that cannot resolve its run id must be refused
     on every run-lifecycle mutation. ``expected_run_id=None`` would silently skip
@@ -742,6 +780,25 @@ def test_create_happy_path(worker_env):
         conn.close()
 
 
+def test_create_normalizes_nonpositive_goal_turns(worker_env):
+    from tools import kanban_tools as kt
+    from hermes_cli import kanban_db_connect as kbc
+
+    with kbc.connect() as conn:
+        for requested, expected in ((5, 5), (0, None), (-2, None)):
+            result = json.loads(kt._handle_create({
+                "title": f"goal turns {requested}",
+                "assignee": "peer",
+                "goal_mode": True,
+                "goal_max_turns": requested,
+            }))
+            assert result["ok"] is True, result
+            stored = conn.execute(
+                "SELECT goal_max_turns FROM tasks WHERE id=?", (result["task_id"],)
+            ).fetchone()[0]
+            assert stored == expected
+
+
 @pytest.mark.parametrize("explicit", [{"workspace_kind": "scratch"}, {"project": ""}])
 @pytest.mark.parametrize("target_scoped", [False, True])
 def test_create_explicit_scratch_ignores_ambient_board_project(
@@ -818,6 +875,46 @@ def test_unblock_happy_path(monkeypatch, worker_env):
         assert kb.get_task(conn, tid).status == "ready"
     finally:
         conn.close()
+
+
+@pytest.mark.parametrize("blocked_history", [True, False])
+def test_unblock_schema_and_registry_dispatch_preserve_evaluation(monkeypatch, worker_env, blocked_history):
+    from hermes_cli import kanban_db as kb
+    from hermes_cli import kanban_db_connect as kbc
+    from hermes_constants import get_hermes_home
+    from tools import kanban_tools  # Register the real handlers.
+    from tools.registry import invalidate_check_fn_cache, registry
+
+    monkeypatch.delenv("HERMES_KANBAN_TASK")
+    (get_hermes_home() / "config.yaml").write_text("toolsets: [kanban]\n")
+    invalidate_check_fn_cache()
+    definitions = registry.get_definitions({"kanban_unblock"}, quiet=True)
+    properties = definitions[0]["function"]["parameters"]["properties"]
+    assert properties["to_todo"]["type"] == "boolean"
+    assert properties["expected_blocked_event_id"]["type"] == "integer"
+    with kbc.connect_closing() as conn:
+        tid = kb.create_task(conn, title="evaluated unblock", assignee="worker")
+        with kb.write_txn(conn):
+            conn.execute("UPDATE tasks SET status='blocked' WHERE id=?", (tid,))
+            if blocked_history:
+                kb._append_event(conn, tid, "blocked", {"reason": "waiting"})
+        event_id = next((e.id for e in kb.list_events(conn, tid) if e.kind == "blocked"), 0)
+        before = kb.get_task(conn, tid)
+        events = kb.list_events(conn, tid)
+    stale = json.loads(registry.dispatch("kanban_unblock", {
+        "task_id": tid, "to_todo": True, "expected_blocked_event_id": event_id + 1,
+    }))
+    assert stale.get("error"), stale
+    with kbc.connect_closing() as conn:
+        assert kb.get_task(conn, tid) == before
+        assert kb.list_events(conn, tid) == events
+    result = json.loads(registry.dispatch("kanban_unblock", {
+        "task_id": tid, "to_todo": True, "expected_blocked_event_id": event_id,
+    }))
+    assert result.get("ok") is True, result
+    assert result["status"] == "todo"
+    with kbc.connect_closing() as conn:
+        assert kb.get_task(conn, tid).status == "todo"
 
 
 def test_unblock_with_pending_parents_returns_todo(monkeypatch, tmp_path):

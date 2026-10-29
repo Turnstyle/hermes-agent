@@ -16,6 +16,7 @@ local → ``hermes -p <name> chat --in ~ -c "Bot Chat" --create-if-missing -Q
 from __future__ import annotations
 
 import contextlib
+from contextlib import ExitStack
 import hashlib
 import json
 import logging
@@ -48,10 +49,26 @@ REPLY_COMPLETION_CHARS = MESSAGE_MAX_CHARS + 2000
 # the machine dies between spawn ack and the runner's finally.
 _DM_DIR_NAME = "hermes-dm"
 _DM_STALE_SECONDS = 24 * 60 * 60
+# Short live-owner receipt wait shared by the Desktop relay and peer routes (bounded by their deadlines).
 _LIVE_WAIT_SECONDS = 300
 # A live owner may run a turn past one wait window, but each waiting runner holds ~46 MB and the
 # sender's notify slot: past this the runner reports pending (do not resend) and exits.
 _LIVE_WAIT_MAX_SECONDS = 30 * 60
+
+# The local message_agent runner is a detached process that wakes its sender on exit, so it waits up to
+# ``bot_mode.dm_queue_wait_seconds`` instead. None = read config; tests pin a number.
+_LOCAL_LIVE_WAIT_SECONDS: Optional[float] = None
+# While waiting on a live owner's receipt, re-check that the owner lease still exists this often.
+_OWNER_CHECK_SECONDS = 15.0
+# Relay still uses this slice. Local bot DMs fast-ack instead of looping it.
+_BUSY_SLICE_SECONDS = 15.0
+# Busy fast-ack budget. The registry write returns well inside this; the lock probe must too.
+_FAST_ACK_SECONDS = 2.0
+# Last-resort bound on the ``hermes peer dm`` child (``stdin_file`` deliveries). The CLI's own HTTP wait
+# (``hermes_cli.subcommands.peer.DM_TIMEOUT_S``, 600s) already ends a slow turn with its "accepted, Do NOT
+# resend" notice, so this must outlast it by a startup margin: it only fires on a CLI that hangs past its
+# own deadline (e.g. in interpreter finalization), where the outcome is unknown.
+PEER_DM_RUNNER_TIMEOUT_SECONDS = 720.0
 
 # '<peer>/<agent>' — peer names are lowercase (``hermes peer`` normalizes them).
 _PEER_TARGET_RE = re.compile(r"^([a-z0-9][a-z0-9_-]{0,63})/([a-zA-Z0-9][a-zA-Z0-9_-]{0,63})$")
@@ -80,8 +97,10 @@ def message_agent_tool_schema() -> dict:
                 "delivery process, not a delivery receipt). It does NOT return their reply and you must "
                 "not wait or poll for one — send it, finish your turn, and that process's "
                 "completion notification wakes you with the outcome: their reply, or the "
-                "delivery failure — unless the ack returns reply_delivery=\"poll\", in which case "
-                "follow its process(action=\"wait\") instruction before ending the turn. COMPOSE the message yourself: write what YOU want to say to "
+                "delivery failure — unless the ack returns reply_delivery=\"transcript\", "
+                "in which case the reply is saved in this session's transcript and you should finish "
+                "your turn, or reply_delivery=\"poll\", in which case follow its "
+                "process(action=\"wait\") instruction before ending the turn. COMPOSE the message yourself: write what YOU want to say to "
                 "that agent (lead with the point; include the concrete ask or result). "
                 "Never paste the user's words verbatim — paraphrase the actionable "
                 "substance, and keep private 1:1 chat content private. Message one "
@@ -120,10 +139,10 @@ def message_agent_tool_schema() -> dict:
     }
 
 
-def message_agent_authorized(agent: Any) -> bool:
-    """The ``message_agent`` gate: a protocol-enabled agent whose session is a managed
-    Bot-Mode canonical Bot Chat. Session-stable, so it is prompt-cache safe to re-evaluate
-    on every tool-snapshot rebuild. Never raises."""
+def is_canonical_bot_chat(agent: Any) -> bool:
+    """A protocol-enabled agent whose session is a managed Bot-Mode canonical Bot Chat.
+    The strict gate: Bot-Chat-only machinery (the fleet message drain) keys on this, never on
+    the wider ``message_agent_authorized``. Never raises."""
     try:
         if not getattr(agent, "_bot_mode_protocol", True):
             return False
@@ -132,6 +151,90 @@ def message_agent_authorized(agent: Any) -> bool:
         # Managed-install check, NOT section non-emptiness: a SOUL.md carrying the
         # legacy protocol text gets an empty section but must still get the tool.
         return _session_title(agent) == BOT_CHAT_TITLE and is_bot_mode_managed(_agent_home(agent))
+    except Exception:  # pragma: no cover — must never break a turn
+        logger.debug("is_canonical_bot_chat failed", exc_info=True)
+        return False
+
+
+# carry (fleet t_2e0ceb41): per-profile opt-in that lets a messaging-gateway session (Slack, a
+# Meet voice bridge, ...) carry message_agent. Key: ``bot_mode.message_agent_platforms`` in the
+# PROFILE's own config.yaml — a list of gateway platform names (``agent.platform``), e.g. [slack].
+_SURFACE_CFG_KEY = "message_agent_platforms"
+# Never widened by config: the local CLI/TUI already has a Bot Chat, and these surfaces are
+# internal runners whose sender identity / reply routing is not a human-facing chat.
+# Kanban workers are authorized separately for one-way queued messaging with card reply routing.
+_SURFACE_NEVER = frozenset({"", "cli", "tui", "cron", "subagent", "batch"})
+
+
+def is_kanban_worker(agent: Any) -> bool:
+    """Require dispatcher provenance; an inherited card id alone is insufficient."""
+    platform = str(getattr(agent, "platform", "") or "").strip().lower()
+    if platform in {"cron", "subagent", "batch", "tui"}:
+        return False
+    source = str(getattr(agent, "_session_source", "") or
+                 os.environ.get("HERMES_SESSION_SOURCE", "")).strip().lower()
+    return platform == "kanban" or source == "kanban"
+
+
+def message_agent_surfaces(home: str | os.PathLike | None) -> frozenset[str]:
+    """Platforms the profile at ``home`` opted into for message_agent outside Bot Chat
+    (lower-cased, never-list removed). Empty on any read problem. Never raises."""
+    try:
+        from tools.bot_mode_probe import _read_yaml_dict
+
+        cfg = _read_yaml_dict(Path(str(home)) / "config.yaml", _SURFACE_CFG_KEY) if home else None
+        raw = ((cfg or {}).get("bot_mode") or {}).get(_SURFACE_CFG_KEY)
+        if isinstance(raw, str):
+            raw = [raw]
+        if not isinstance(raw, (list, tuple)):
+            return frozenset()
+        return frozenset(str(p).strip().lower() for p in raw if str(p).strip()) - _SURFACE_NEVER
+    except Exception:  # pragma: no cover — defensive
+        logger.debug("message_agent_surfaces read failed", exc_info=True)
+        return frozenset()
+
+
+def _surface_authorized(agent: Any) -> bool:
+    """A non-Bot-Chat gateway session on a managed install whose profile opted its platform in.
+    Memoized on the agent so the tool list stays byte-stable for the session (prompt-cache safe):
+    a config edit takes effect on the next new session / agent rebuild, not mid-session. The memo
+    is keyed by the resolved home, so a call made before the gateway bound the profile home can
+    never poison the answer for the bound turn."""
+    try:
+        home = _agent_home(agent)
+    except Exception:  # pragma: no cover — defensive
+        return False
+    memo = getattr(agent, "_message_agent_surface_ok", None)
+    if isinstance(memo, dict) and isinstance(memo.get(home), bool):
+        return memo[home]
+    ok = False
+    try:
+        platform = str(getattr(agent, "platform", "") or "").strip().lower()
+        if platform and platform not in _SURFACE_NEVER and getattr(agent, "_bot_mode_protocol", True):
+            from tools.bot_mode_probe import is_bot_mode_managed
+
+            ok = platform in message_agent_surfaces(home) and is_bot_mode_managed(home)
+    except Exception:  # pragma: no cover — must never break a turn
+        logger.debug("message_agent surface gate failed", exc_info=True)
+        ok = False
+    with contextlib.suppress(Exception):
+        if not isinstance(memo, dict):
+            memo = {}
+            agent._message_agent_surface_ok = memo
+        memo[home] = ok
+    return ok
+
+
+def message_agent_authorized(agent: Any) -> bool:
+    """The ``message_agent`` gate: the canonical Bot Chat (``is_canonical_bot_chat``),
+    a kanban worker (``is_kanban_worker``), or a gateway session whose platform the profile
+    opted in via ``bot_mode.message_agent_platforms``.
+    Session-stable, so it is prompt-cache safe to re-evaluate on every tool-snapshot rebuild.
+    Never raises."""
+    try:
+        if not getattr(agent, "_bot_mode_protocol", True):
+            return False
+        return is_canonical_bot_chat(agent) or is_kanban_worker(agent) or _surface_authorized(agent)
     except Exception:  # pragma: no cover — must never break a turn
         logger.debug("message_agent_authorized failed", exc_info=True)
         return False
@@ -200,7 +303,32 @@ def _err(message: str, *, roster: list[str] | None = None, peers: list[str] | No
 
 def message_agent_tool(target: str = "", message: str = "", task_id: Optional[str] = None, agent: Any = None) -> str:
     """Deliver ``message`` to ``target``'s Bot Chat. Returns a JSON ack/error.
-    ``agent`` is the calling AIAgent — used for the Bot Chat gate and sender identity."""
+    ``agent`` is the calling AIAgent — used for the Bot Chat gate and sender identity.
+
+    A delivered message to the sender of a queued fleet message this bot is answering marks that
+    queued doc done (a reply is the answer; the turn may still be interrupted afterwards)."""
+    result = _message_agent_tool(target=target, message=message, task_id=task_id, agent=agent)
+    try:
+        if not _is_error_result(result):
+            from tools import fleet_message_drain as fmd
+
+            home = Path(_agent_home(agent))
+            fmd.note_reply(fmd.bot_identity(home), str(target or ""))
+    except Exception:
+        logger.debug("fleet message drain: reply note skipped", exc_info=True)
+    return result
+
+
+def _is_error_result(result: Any) -> bool:
+    try:
+        data = json.loads(result) if isinstance(result, str) else result
+    except Exception:
+        return True
+    return not isinstance(data, dict) or bool(data.get("error")) or data.get("success") is False
+
+
+def _message_agent_tool(target: str = "", message: str = "", task_id: Optional[str] = None,
+                        agent: Any = None) -> str:
     home = _agent_home(agent)
     try:
         from tools.bot_mode_probe import (
@@ -209,9 +337,11 @@ def message_agent_tool(target: str = "", message: str = "", task_id: Optional[st
         )
         from tools.bot_relay import BOT_CHAT_TURN_ARGS, _hermes_cli
 
-        if _session_title(agent) != BOT_CHAT_TITLE:
-            return _err("message_agent is only available in a Bot Mode 'Bot Chat' session. "
-                        "This session is not one; do not retry.")
+        is_worker = is_kanban_worker(agent)
+        if _session_title(agent) != BOT_CHAT_TITLE and not _surface_authorized(agent) and not is_worker:
+            return _err("message_agent is only available in a Bot Mode 'Bot Chat' session "
+                        "(or a gateway platform listed in this profile's bot_mode.message_agent_platforms). "
+                        "This session is neither; do not retry.")
         if not is_bot_mode_managed(home):
             return _err("This install is not Bot-Mode-managed (no bot roster); "
                         "message_agent is unavailable. Do not retry.")
@@ -239,6 +369,68 @@ def message_agent_tool(target: str = "", message: str = "", task_id: Optional[st
     raw_target = str(target or "").strip().lstrip("@")
     if not raw_target:
         return _roster_err("target is required.")
+
+    if is_worker:
+        card_id = (
+            getattr(agent, "task_id", None)
+            or getattr(agent, "_kanban_task_id", None)
+            or os.environ.get("HERMES_KANBAN_TASK")
+        )
+        if isinstance(card_id, str):
+            card_id = card_id.strip()
+        if not card_id:
+            return _err("Kanban worker lacks card id (HERMES_KANBAN_TASK not set in environment and no task_id on agent). "
+                        "Cannot establish provenance or reply route for one-way message.")
+
+        resolved = _resolve_local_name(raw_target, roster, root)
+        recipient = resolved or raw_target
+        if recipient == me:
+            return _err("You can't message yourself. Pick a teammate from the roster.")
+
+        origin_board = os.environ.get("HERMES_KANBAN_DB") or "profile default board"
+        content = (f"Message from 🤖 {_display_name(me, roster_homes.get(me, Path(home)))} (@{_handle(me)}) "
+                   f"[card {card_id}; board {origin_board}; profile home {home}]: {body}\n"
+                   f"One-way worker message. Reply route hint: card {card_id} on the named board; "
+                   "automated replies are not relayed to the worker.")
+        from tools.fleet_message_enqueue import enqueue_busy_dm, queued_ack
+        from tools.fleet_message_drain import recipient_drain_enabled
+        delivery_owner_verified = recipient_drain_enabled(
+            recipient, profile_home=roster_homes.get(recipient))
+        delivery_warning = None if delivery_owner_verified else (
+            "Queued storage is not confirmed delivery. No usable local recipient drain was verified. "
+            "Next step: the target machine's Bot Maker or Conductor checks fleet_messages.drain_on_turn_end "
+            "and its live target before relying on delivery.")
+        try:
+            msg_id = enqueue_busy_dm(sender=card_id, recipient=recipient, body=content)
+        except Exception as exc:
+            return _err(f"Failed to queue message to fleet_messages_v1 ({type(exc).__name__}). "
+                        "Next step: check the fleet message writer configuration and retry after repair.")
+
+        # Preserve worker own-card boundary: log comment only on originating card_id
+        try:
+            from tools.kanban_tools import _board
+            with _board(None, quiet_close=True) as (kb, conn):
+                comment_body = f"Sent one-way message to @{_handle(recipient)} (queued {msg_id}): {body}"
+                if delivery_warning:
+                    comment_body += "\n" + delivery_warning
+                author = me or "worker"
+                kb.add_comment(conn, card_id, author=author, body=comment_body)
+        except Exception as comment_exc:
+            logger.warning("Queued message %s has no origin-card comment (%s). "
+                           "Next step: post the queued message id on card %s.",
+                           msg_id, type(comment_exc).__name__, card_id)
+
+        return json.dumps({
+            "status": "queued",
+            "message_id": msg_id,
+            "to": f"@{_handle(recipient)}",
+            "reply_route": card_id,
+            "reply_relayed": False,
+            "delivery_owner_verified": delivery_owner_verified,
+            "warning": delivery_warning,
+            "reply": queued_ack(msg_id),
+        })
+
     # Sender signature: the friendly name when the bot has one (#89720); the @handle stays the routing alias.
     content = f"Message from 🤖 {_display_name(me, roster_homes.get(me, Path(home)))} (@{_handle(me)}): " + body
     delivery = dict(task_id=task_id, agent=agent)
@@ -374,6 +566,8 @@ def cleanup_bot_dm_cache(max_age_hours: float = _DM_STALE_SECONDS / 3600, *, now
         # their runner on purpose — a retry replays the same delivery id from them — so the
         # orphans of runners that never settled are swept here too.
         locations.append((dm_dir, "*.live.json"))
+        locations.append((dm_dir, "*.txt.lock"))  # per-DM runner locks (_dm_runner_lock)
+        locations.append((dm_dir, "*.txt.gen"))  # per-DM live-admission generations
     from tools.bot_relay import unlink_files_older_than
 
     return sum(unlink_files_older_than(d, pattern, cutoff) for d, pattern in locations)
@@ -400,7 +594,7 @@ def _write_dm_file(content: str) -> str:
     return path
 
 
-def _delivery_lock(argv: list[str], *, stdin_file: bool):
+def _delivery_lock(argv: list[str], *, stdin_file: bool, timeout_seconds: Optional[float] = None):
     """Per-profile turn lock for a LOCAL teammate delivery: local and relay deliveries
     into one profile both run a Bot Chat turn here, so the turn window is serialized on
     ``tools.bot_relay``'s cross-process lock. Peer transports (stdin mode) are locked
@@ -417,18 +611,86 @@ def _delivery_lock(argv: list[str], *, stdin_file: bool):
     from tools.bot_mode_probe import _hermes_root
     from tools.bot_relay import acquire_turn_lock
 
-    return acquire_turn_lock(_hermes_root(Path(_default_home())), argv[2])
+    return acquire_turn_lock(_hermes_root(Path(_default_home())), argv[2], timeout_seconds)
 
 
-def _run_local_turn(argv: list[str], dm_file: str, *, env: Optional[dict[str, str]] = None) -> int:
+def refused_not_owned(stderr_text: str) -> bool:
+    """True when ``stderr_text`` carries the CLI's SESSION_NOT_OWNED refusal: a live single-owner
+    lease already holds the target's Bot Chat elsewhere (another surface — plain ``hermes chat``, a
+    gateway bridge turn). The ``hermes-refusal-reason:`` marker wins over prose, including unknown
+    codes from newer CLIs; only older CLIs without a marker need the historical wording fallback.
+    Shared by the local runner (``_run_local_turn``) and the relay's ``bot_relay.deliver`` CLI
+    transport (``tui_gateway/methods_bot_relay.py``) so both retry the SAME refusal the SAME way."""
+    stderr_text = stderr_text or ""
+    reason = next((line.removeprefix("hermes-refusal-reason: ").strip()
+                   for line in stderr_text.splitlines()
+                   if line.startswith("hermes-refusal-reason: ")), None)
+    return reason == "SESSION_NOT_OWNED" if reason is not None else "already has a live owner" in stderr_text
+
+
+def _session_held_cls() -> type:
+    """Lazily-defined, module-cached ``TurnBusyError`` subclass marking an INSTANT SESSION_NOT_OWNED
+    refusal (the target's Bot Chat is held by another surface right now) as distinct from a lock-wait
+    timeout, so ``_run_delivery_locked``'s queue loop can retry the former instead of surfacing the
+    first refusal as a hard failure. Cached so every raise/except pair shares one class identity; the
+    ``tools.bot_relay`` import stays lazy like the rest of this module's Hermes deps."""
+    cls = getattr(_session_held_cls, "_cls", None)
+    if cls is None:
+        from tools.bot_relay import TurnBusyError
+
+        class _SessionHeld(TurnBusyError):
+            pass
+
+        cls = _session_held_cls._cls = _SessionHeld
+    return cls
+
+
+def _turn_timeout_result(argv: list[str]) -> "subprocess.CompletedProcess":
+    """The failed-attempt record for a Bot Chat child killed at its turn deadline."""
+    from tools import bot_relay
+
+    who = argv[2] if len(argv) > 2 else "the recipient"
+    return subprocess.CompletedProcess(
+        argv, 124, "", f"turn_timeout: @{who}'s Bot Chat turn did not finish within "
+        f"{bot_relay.TURN_ATTEMPT_TIMEOUT_SECONDS:g}s and its process was killed; this message was NOT "
+        "delivered and its turn was NOT completed.")
+
+
+def _run_local_turn(argv: list[str], dm_file: str, *, env: Optional[dict[str, str]] = None,
+                    busy_raises: bool = False, retry_lock=None) -> int:
     """One Bot Chat turn via ``--query-file`` (plus one policy-gated retry); re-emits
     the transport's streams and returns its exit code. Transient failures re-run the
     same session; a context_overflow re-run lets the retried turn's pre-API compaction
-    compact the transcript first (no fresh session is ever minted). Auth/quota/config never retry."""
+    compact the transcript first (no fresh session is ever minted). Auth/quota/config never retry.
+    ``busy_raises`` turns a SESSION_NOT_OWNED refusal into a raised ``_SessionHeld`` instead of the
+    printed 'target_busy' refusal below — the caller is queueing behind the recipient and wants to
+    retry, not fail on the first attempt (see ``_run_delivery_locked``). Default False keeps this
+    printed refusal byte-identical for every direct/legacy caller."""
 
     def _turn(turn_env=env):
-        return subprocess.run([*argv, "--query-file", dm_file], check=False, stdin=subprocess.DEVNULL,
-                              capture_output=True, text=True, encoding="utf-8", errors="replace", env=turn_env)
+        from tools import bot_relay
+        from tools.bot_relay import BOT_CHAT_TURN_ARGS
+        if len(argv) < 3 or argv[1] != "-p" or tuple(argv[3:]) != BOT_CHAT_TURN_ARGS:
+            try:
+                return subprocess.run([*argv, "--query-file", dm_file], check=False, stdin=subprocess.DEVNULL,
+                                      capture_output=True, text=True, encoding="utf-8", errors="replace", env=turn_env,
+                                      timeout=bot_relay.TURN_ATTEMPT_TIMEOUT_SECONDS)
+            except subprocess.TimeoutExpired:
+                return _turn_timeout_result(argv)
+        from hermes_cli.quiet_single_query import post_report_exit_wait_seconds, run_reported_turn
+        report = f"{dm_file}.turn.json"
+        try:
+            return run_reported_turn(
+                [*argv, "--query-file", dm_file], env=os.environ if turn_env is None else turn_env,
+                report_path=report, timeout=bot_relay.TURN_ATTEMPT_TIMEOUT_SECONDS, exit_grace=None,
+                reported_linger=post_report_exit_wait_seconds(), encoding="utf-8")
+        except subprocess.TimeoutExpired:
+            # The child was killed (SIGTERM, then SIGKILL) without ever reporting its turn. Same shape as any
+            # failed attempt, so the retry policy below re-runs it (resuming the already-persisted DM row).
+            return _turn_timeout_result(argv)
+        finally:
+            with contextlib.suppress(OSError):
+                os.unlink(report)
 
     proc = _turn()
     if proc.returncode != 0:
@@ -438,23 +700,30 @@ def _run_local_turn(argv: list[str], dm_file: str, *, env: Optional[dict[str, st
         # The re-run replays the same session and payload; the failed attempt already persisted the
         # user row, so the retried process is told to resume it (RESUME_UNANSWERED_TURN_ENV).
         if retry_action(classify_agent_error(turn_failure_text(proc.stdout, proc.stderr))) != RETRY_NONE:
+            if retry_lock is not None:
+                retry_lock()
             proc = _turn(retry_turn_env(env))
-    stderr_text = proc.stderr or ""
-    reason = next((line.removeprefix("hermes-refusal-reason: ").strip()
-                   for line in stderr_text.splitlines()
-                   if line.startswith("hermes-refusal-reason: ")), None)
-    # A code wins over prose, including unknown codes from newer CLIs.
-    # Only older CLIs without a marker need the historical wording fallback.
-    refused_not_owned = (reason == "SESSION_NOT_OWNED" if reason is not None
-                         else "already has a live owner" in stderr_text)
-    if proc.returncode != 0 and refused_not_owned:
+    if proc.returncode != 0 and (proc.stderr or "").startswith("turn_timeout:"):
+        from tools.bot_failure_reasons import TURN_TIMEOUT
+        who = argv[argv.index("-p") + 1] if "-p" in argv[:-1] else "the teammate"
+        print(json.dumps({
+            "error": f"Delivery failed: @{who}'s Bot Chat turn timed out and was killed; this message was NOT "
+                     "delivered and the turn was NOT completed. Do not assume the teammate saw it.",
+            "reason": TURN_TIMEOUT,
+            "reply_relayed": False,
+        }))
+        return 1
+    if proc.returncode != 0 and refused_not_owned(proc.stderr or ""):
         # The target's Bot Chat is held live by another surface (Desktop); the turn
         # never ran — tell the sender plainly instead of leaking a raw lease error.
         # See #100523.
         who = argv[argv.index("-p") + 1] if "-p" in argv[:-1] else "the teammate"
+        if busy_raises:
+            raise _session_held_cls()(who, 0.0)
         print(json.dumps({
-            "error": f"Delivery failed: @{who}'s Bot Chat is open on another "
-                     "surface right now, so your message was NOT delivered. Try again later.",
+            "error": f"Delivery failed: @{who}'s Bot Chat single-owner lock is still held on another "
+                     "surface, so this send did not run. Continue the rest of the card; do not park it "
+                     "for this lock.",
             "reason": "target_busy",
         }))
         return 1
@@ -485,8 +754,39 @@ def _dm_delivery_id(dm_file: str | os.PathLike) -> str:
     return hashlib.sha256(str(Path(dm_file).resolve()).encode()).hexdigest()
 
 
-def _admit_live_dm(profile_home: Path | None, dm_file: str, author: Optional[dict] = None) -> dict | None:
-    """Pin intent before admission; retries may inspect, never change transport."""
+def _generation_delivery_id(dm_file: str, generation: int) -> str:
+    base_id = _dm_delivery_id(dm_file)
+    return base_id if not generation else hashlib.sha256(f"{base_id}:{generation}".encode()).hexdigest()
+
+
+def _read_generation(dm_file: str) -> int:
+    """Durable live-admission generation of a DM file (``<dm>.gen``); 0 when never bumped."""
+    try:
+        return max(0, int(Path(dm_file + ".gen").read_text(encoding="utf-8").strip() or 0))
+    except (OSError, ValueError):
+        return 0
+
+
+def _write_generation(dm_file: str, generation: int) -> None:
+    from utils import atomic_write_text
+
+    atomic_write_text(Path(dm_file + ".gen"), str(generation), mode=0o600, fsync_dir=True)
+
+
+def _unlink_dm_artifacts(dm_file: str) -> None:
+    """Payload FIRST, then the intent and generation: while the payload survives, its delivery identity must
+    survive too, or a retry could re-send an already delivered message (checker r3)."""
+    _unlink_dm_file(dm_file)
+    if Path(dm_file).exists():
+        return  # payload removal failed: keep the identity files so a retry reads the same receipt
+    _unlink_dm_file(dm_file + ".live.json")
+    _unlink_dm_file(dm_file + ".gen")
+
+
+def _admit_live_dm(profile_home: Path | None, dm_file: str, author: Optional[dict] = None,
+                   *, generation: int = 0) -> dict | None:
+    """Pin intent before admission; retries may inspect, never change transport. ``generation`` > 0 re-admits a
+    message whose earlier envelope was retired ``owner_gone`` (never executed) under a derived delivery id."""
     from tools.bot_live_delivery import deliver_to_live_owner, find_canonical_live_owner, read_delivery_result
     from utils import fsync_directory
 
@@ -496,11 +796,15 @@ def _admit_live_dm(profile_home: Path | None, dm_file: str, author: Optional[dic
         intent = json.loads(intent_path.read_text(encoding="utf-8-sig"))
     else:
         assert profile_home is not None
+        # A receipt for this generation outranks any fresh admission (its intent file may be gone).
+        existing = read_delivery_result(profile_home, _generation_delivery_id(dm_file, generation))
+        if existing is not None:
+            return existing
         owner = find_canonical_live_owner(profile_home)
         if owner is None:
             return None
         intent = dict(owner=owner, message=Path(dm_file).read_text(encoding="utf-8-sig"),
-                      delivery_id=_dm_delivery_id(dm_file),
+                      delivery_id=_generation_delivery_id(dm_file, generation),
                       **({"author": author} if author else {}))
         try:
             fd = os.open(intent_path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
@@ -520,39 +824,74 @@ def _admit_live_dm(profile_home: Path | None, dm_file: str, author: Optional[dic
     return record
 
 
-def _wait_live_dm(home: str, delivery_id: str, *, dm_file: str | os.PathLike | None = None) -> int:
-    from tools.bot_failure_reasons import RUNTIME_OFFLINE
-    from tools.bot_live_delivery import await_delivery, cancel_queued_delivery, owner_holds_delivery
+def _live_wait_budget() -> float:
+    if _LOCAL_LIVE_WAIT_SECONDS is not None:
+        return float(_LOCAL_LIVE_WAIT_SECONDS)
+    from tools.bot_relay import dm_queue_wait_seconds
 
-    deadline = time.monotonic() + _LIVE_WAIT_MAX_SECONDS
-    missed = 0
+    return dm_queue_wait_seconds()
+
+
+def _owner_gone(record: Optional[dict]) -> bool:
+    from tools.bot_live_delivery import OWNER_GONE_REASON
+
+    return bool(record) and record.get("status") == "cancelled" and record.get("reason") == OWNER_GONE_REASON
+
+
+def _settle_if_owner_gone(home: str, delivery_id: str) -> None:
+    """The pinned owner lease is gone: hand the still-queued envelope to the Bot Chat's current live
+    consumer (same compression lineage), or retire it as ``owner_gone`` so this runner can take the CLI
+    transport. Never raises and never guesses: an unreadable registry leaves the envelope queued."""
+    from tools.bot_live_delivery import (
+        find_canonical_live_owner, live_lease_ids, queued_pins, reconcile_orphaned_deliveries,
+    )
+
+    try:
+        # Pin first, then liveness evidence: the mutation below applies only if the pin is unchanged, so an
+        # owner that registered and adopted the envelope after our registry read is never overridden.
+        pins = queued_pins(home, only_id=delivery_id)
+        if not pins:
+            return
+        live = live_lease_ids(home)
+        if pins[delivery_id] in live:
+            return
+        reconcile_orphaned_deliveries(home, find_canonical_live_owner(home), live_leases=live, expected_pins=pins,
+                                      adopt_max_age_seconds=_live_wait_budget(), only_id=delivery_id)
+    except Exception:
+        logger.debug("live-owner liveness check failed for %s", delivery_id, exc_info=True)
+
+
+def _await_live_record(home: str, delivery_id: str, budget: float) -> Optional[dict]:
+    """Wait for the owner's receipt; a queued envelope whose owner lease died is adopted by the new
+    owner (keep waiting) or retired ``owner_gone`` (returned at once)."""
+    from tools.bot_live_delivery import await_delivery
+
+    deadline = time.monotonic() + max(0.0, budget)
     while True:
-        record = await_delivery(home, delivery_id, max(0.0, min(_LIVE_WAIT_SECONDS, deadline - time.monotonic())))
-        if record is None or record["status"] not in ("queued", "claimed") or time.monotonic() >= deadline:
-            break
-        try:
-            held = owner_holds_delivery(home, record)
-        except Exception:
-            logger.debug("Could not check live DM owner", exc_info=True)
-            held = None
-        if held:
-            missed = 0
-            continue
-        if held is False and record["status"] == "queued":
-            # Under the same mailbox lock as claim, either cancellation wins or
-            # the claim wins and we must keep waiting for its outcome.
-            record = cancel_queued_delivery(
-                home, delivery_id, error="Live Bot Chat owner is no longer available",
-                reason=RUNTIME_OFFLINE)
-            if record is None or record["status"] != "claimed":
-                break
-            missed = 0
-            continue
-        # A vanished consumer may leave a permanent claim, and an owner we cannot look up
-        # may be gone: allow one more window for an in-flight turn, then release the runner.
-        missed += 1
-        if missed > 1:
-            break
+        next_check = time.monotonic() + _OWNER_CHECK_SECONDS
+        remaining = max(0.0, deadline - time.monotonic())
+        record = await_delivery(home, delivery_id, min(remaining, _OWNER_CHECK_SECONDS),
+                                should_stop=lambda: time.monotonic() >= next_check)
+        if record is None or record["status"] not in ("queued", "claimed"):
+            return record
+        if record["status"] == "queued":
+            _settle_if_owner_gone(home, delivery_id)
+            from tools.bot_live_delivery import read_delivery_result
+
+            record = read_delivery_result(home, delivery_id) or record
+            if record["status"] not in ("queued", "claimed"):
+                return record
+        if time.monotonic() >= deadline:
+            return record
+
+
+def _wait_live_dm(home: str, delivery_id: str, *, dm_file: "str | os.PathLike | None" = None,
+                  fallback_ok: bool = False) -> Optional[int]:
+    """Report the live owner's receipt. With ``fallback_ok`` an ``owner_gone`` receipt (the message
+    never ran) returns None so the caller delivers it over the CLI transport instead."""
+    record = _await_live_record(home, delivery_id, _live_wait_budget())
+    if fallback_ok and _owner_gone(record):
+        return None
     status = record["status"] if record else "ambiguous"
     payload = {key: record[key] for key in ("reply", "error", "reason") if record and record.get(key)}
     payload.update(status=status, delivery_id=delivery_id)
@@ -562,8 +901,7 @@ def _wait_live_dm(home: str, delivery_id: str, *, dm_file: str | os.PathLike | N
         # The intent carries the message plaintext so a retry can replay the SAME delivery id;
         # once the owner settled it nothing retries, so it goes along with the dm file (same
         # plaintext) — the live branch returns before _run_delivery's own unlink.
-        _unlink_dm_file(_live_intent_file(dm_file))
-        _unlink_dm_file(str(dm_file))
+        _unlink_dm_artifacts(str(dm_file))
     print(json.dumps(payload))
     return 0 if status in ("settled", "queued", "claimed") else 1
 
@@ -599,46 +937,279 @@ def _runner_argv(args: list[str]) -> tuple[Optional[str], str, str, list[str]] |
         return None
     return author, rest[0], rest[1], rest[2:]
 
+def _busy_sender(author: Optional[dict]) -> str:
+    """tb-king: the fleet handle is the author id with a leading ``bot:`` stripped.
+
+    A missing or non-bot author still queues, under the ``sender`` fallback, so a failed write
+    stays an immediate ``target_busy`` rather than a wait loop.
+    """
+    author_id = str((author or {}).get("id") or "") if isinstance(author, dict) else ""
+    if author_id.startswith("bot:"):
+        sender = author_id.removeprefix("bot:").split(":", 1)[0]
+        if sender:
+            return sender
+    if isinstance(author, dict):
+        from tools.fleet_message_enqueue import fleet_handle
+        return fleet_handle(author.get("name") or author.get("id"), fallback="sender")
+    return "sender"
+
+
+def _recipient_admits_queue(profile: str, home: Path | None) -> bool | None:
+    """True when that profile drains, False when it does not, None when this interpreter cannot read config.
+
+    The delivery runner is sometimes the bare store python (no yaml). A failed import is not
+    "drain disabled": the checkout launcher decides admission. A readable config that is off is
+    an honest ``target_busy`` and does not start the enqueue subprocess.
+    """
+    try:
+        from hermes_cli.config import read_user_config_raw  # noqa: F401
+    except ImportError:
+        return None
+    if home is None:
+        return False
+    from tools.fleet_message_drain import recipient_drain_enabled
+    return recipient_drain_enabled(profile, profile_home=home)
+
+
+def _drain_enqueue_command(cli: str, sender: str, home: Path, dm_file: str,
+                           message_id: str | None = None) -> list[str]:
+    """Run the Firestore write under the Hermes runtime of the SAME source tree this runner runs from.
+
+    The runner itself runs under the bare store python (no yaml / google.auth). Prefer the checkout's
+    bootstrap launcher when present. On v0.21.5 nodes, use the checkout's venv Python directly so
+    ``-m`` imports this source tree. The delivery CLI is the last fallback.
+
+    ``message_id`` is the relay envelope id (create-only: an existing doc is not reset to queued).
+    """
+    source_launcher = Path(__file__).resolve().parents[1] / ".hermes" / "bin" / "hermes"
+    args = ["enqueue", "--from", sender, "--to-home", str(home), "--body-file", dm_file]
+    if message_id:
+        args.extend(["--message-id", message_id])
+    if source_launcher.is_file():
+        return [str(source_launcher), "--run-module", "tools.fleet_message_drain", *args]
+    checkout_python = source_launcher.parents[2] / "venv" / "bin" / "python"
+    if checkout_python.is_file():
+        return [str(checkout_python), "-m", "tools.fleet_message_drain", *args]
+    return [cli, "--run-module", "tools.fleet_message_drain", *args]
+
+
+def enqueue_busy_peer_dm(home: Path, sender: str, message: str) -> str:
+    """Use the local runner's queue command for a busy peer; return its durable message id."""
+    from hermes_platform.resolver import locate_command
+    from tools.environments.local import served_profile_child_env
+
+    fd, body_file = tempfile.mkstemp(prefix="peer-dm-", suffix=".txt", dir=_dm_dir(), text=True)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as stream:
+            stream.write(message)
+        command_path = locate_command("hermes").command
+        cli = command_path[0] if command_path else sys.executable
+        command = _drain_enqueue_command(cli, sender, home, body_file)
+        if command[0] == sys.executable:
+            command[1:3] = ["-m", "tools.fleet_message_drain"]
+        result = subprocess.run(
+            command, check=False, stdin=subprocess.DEVNULL, capture_output=True,
+            text=True, encoding="utf-8", errors="replace", timeout=5,
+            env=served_profile_child_env(target_home=home, inherit_credentials=True))
+        if result.returncode != 0:
+            detail = (result.stderr or "").strip() or f"enqueue exited {result.returncode}"
+            raise ValueError(detail.splitlines()[0])
+        payload = json.loads(result.stdout)
+        message_id = payload.get("message_id")
+        if payload.get("status") != "queued" or not isinstance(message_id, str) or not message_id:
+            raise ValueError("enqueue did not return a queued message id")
+        return message_id
+    finally:
+        _unlink_dm_file(body_file)
+
+
+@contextlib.contextmanager
+def _dm_runner_lock(dm_file: str):
+    """One runner per DM file for its whole lifecycle (live admission, owner_gone re-admission, CLI fallback).
+    Every decision inside re-reads the durable intent/receipt, so an overlapping retry of the same runner
+    waits and then observes its predecessor's outcome instead of acting on a stale receipt (checker r2).
+    Blocking by design: runners are detached background processes. No-op without ``fcntl`` (Windows)."""
+    try:
+        import fcntl
+    except ImportError:  # pragma: no cover — Windows
+        yield
+        return
+    fd = os.open(dm_file + ".lock", os.O_RDWR | os.O_CREAT, 0o600)
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX)
+        try:
+            yield
+        finally:
+            with contextlib.suppress(OSError):
+                fcntl.flock(fd, fcntl.LOCK_UN)
+    finally:
+        os.close(fd)
+
 
 def _run_delivery(argv: list[str], dm_file: str, *, stdin_file: bool,
                   profile_home: Path | None = None, author: Optional[dict] = None) -> int:
+    if stdin_file:
+        return _run_delivery_locked(argv, dm_file, stdin_file=True, profile_home=profile_home, author=author)
+    with _dm_runner_lock(dm_file):
+        if not Path(dm_file).exists() and not Path(dm_file + ".live.json").exists():
+            # A predecessor runner for this DM already finished and consumed the payload.
+            print(json.dumps({"status": "ambiguous", "delivery_id": _dm_delivery_id(dm_file),
+                              "error": "Another delivery run for this message already handled it. Do not resend."}))
+            return 1
+        return _run_delivery_locked(argv, dm_file, stdin_file=False, profile_home=profile_home, author=author)
+
+
+def _run_delivery_locked(argv: list[str], dm_file: str, *, stdin_file: bool,
+                         profile_home: Path | None = None, author: Optional[dict] = None) -> int:
     """Route to the live owner before attempting a CLI transport. Live deliveries
     retain their intent/payload and immutable receipt; only CLI/peer payloads are
-    removed after consumption. The CLI turn window holds the profile lock, so two
-    deliveries into one profile queue; a bounded wait ends in a 'target_busy' refusal.
+    removed after consumption. When the profile lock or Bot Chat is busy, the message
+    is written to fleet_messages_v1 and the sender is acked in under 5s.
     ``author`` rides to the child as HERMES_TURN_AUTHOR; ``hermes peer dm`` forwards it in the request body.
 
     Local (query-file) turns get one policy-gated retry (#93091 item 5): transient failures re-run the same
     session; a context_overflow re-run lets the retried turn's pre-API compaction pass compact the Bot Chat
     transcript first (agent/conversation_loop.py) — the sanctioned compression lever; no fresh session is
-    ever minted. Auth/quota/config failures never retry. Peer transports (stdin mode) retry on their own
+    ever minted. Auth/quota/config failures never retry. A busy target is not retried for
+    dm_queue_wait_seconds: it is written to fleet_messages_v1 and the sender is told
+    ``queued (<message_id>)`` within the fast-ack budget. Peer transports (stdin mode) retry on their own
     gateway's deliver path, not here.
     """
     # The live consumer owns turn admission; never compete for its CLI lease.
-    if not stdin_file:
-        home = profile_home or _local_delivery_home(argv)
-        if home is not None or os.path.exists(_live_intent_file(dm_file)):
+    home = (profile_home or _local_delivery_home(argv)) if not stdin_file else None
+
+    def _via_live_owner() -> Optional[int]:
+        """rc when the live-owner path answered; None to take the CLI transport. The generation is durable
+        (``<dm>.gen``) and bumped only after an ``owner_gone`` receipt, which proves that envelope never ran."""
+        if stdin_file or (home is None and not Path(dm_file + ".live.json").exists()):
+            return None
+        for _ in range(8):  # each retirement needs an owner lease to die; bounded against a flapping owner
+            generation = _read_generation(dm_file)
             try:
-                record = _admit_live_dm(home, dm_file, author)
+                record = _admit_live_dm(home, dm_file, author, generation=generation)
             except Exception as exc:
-                print(_live_outcome_unknown(dm_file, exc))
+                print(json.dumps({"status": "ambiguous", "delivery_id": _generation_delivery_id(dm_file, generation),
+                    "error": f"Live admission outcome unknown: {exc}. Do not resend.",
+                    "evidence_file": dm_file}))
                 return 1
-            if record is not None:
-                return _wait_live_dm(record["profile_home"], record["delivery_id"], dm_file=dm_file)
+            if record is None:
+                return None
+            if not _owner_gone(record):
+                rc = _wait_live_dm(record["profile_home"], record["delivery_id"], dm_file=dm_file, fallback_ok=True)
+                if rc is not None:
+                    return rc
+            # The owner closed before running it (nothing ran). Persist the next generation BEFORE dropping the
+            # spent intent, so a retry never re-reads a stale generation; then offer a fresh envelope to the
+            # current live owner, or fall through to the CLI transport when there is none.
+            if record["delivery_id"] == _generation_delivery_id(dm_file, generation):
+                _write_generation(dm_file, generation + 1)
+            _unlink_dm_file(dm_file + ".live.json")
+        return None
+
+    rc = _via_live_owner()
+    if rc is not None:
+        return rc
+    keep_dm_file = False
     try:
-        from tools.bot_relay import delivery_env
+        from tools.bot_relay import TurnBusyError, delivery_env, dm_queue_wait_seconds
 
         env = delivery_env(author, profile_home if not stdin_file else None)
-        with _delivery_lock(argv, stdin_file=stdin_file):
-            if not stdin_file:
-                return _run_local_turn(argv, dm_file, env=env)
-            # Keep the file open until the transport exits; cleanup occurs
-            # after subprocess.run returns, not merely after stdin reaches EOF.
-            with open(dm_file, "r", encoding="utf-8-sig") as stream:
-                # Passing the file descriptor as stdin bypasses the BOM-aware decoder.
-                return subprocess.run(argv, input=stream.read().encode("utf-8"), check=False, env=env).returncode
+        if stdin_file:
+            with _delivery_lock(argv, stdin_file=stdin_file):
+                # Keep the file open until the transport exits; cleanup occurs
+                # after subprocess.run returns, not merely after stdin reaches EOF.
+                with open(dm_file, "r", encoding="utf-8-sig") as stream:
+                    # Passing the file descriptor as stdin bypasses the BOM-aware decoder.
+                    try:
+                        return subprocess.run(argv, input=stream.read().encode("utf-8"), check=False, env=env,
+                                              timeout=PEER_DM_RUNNER_TIMEOUT_SECONDS).returncode
+                    except subprocess.TimeoutExpired:
+                        # The peer CLI may or may not have sent the DM before it hung, so the outcome is unknown:
+                        # report it ambiguous and never resend. Anything it printed is already above this line.
+                        print(json.dumps({
+                            "status": "ambiguous", "delivery_id": _dm_delivery_id(dm_file),
+                            "error": (f"The peer DM process did not exit within {PEER_DM_RUNNER_TIMEOUT_SECONDS:g}s and was "
+                                      "killed. The message may or may not have reached the peer, and its reply was not "
+                                      "confirmed. Do NOT resend automatically; if the peer's own output above reports "
+                                      "an outcome, trust that, otherwise check with the peer first."),
+                            "reply_relayed": False}))
+                        return 1
+        # A busy target is a fast-ack, not an 1800s blind wait. One short lock probe, then
+        # the checkout launcher writes fleet_messages_v1. Under 5s.
+        from tools.fleet_message_enqueue import queued_ack
+
+        can_queue = home is not None
+        probe = min(_FAST_ACK_SECONDS, dm_queue_wait_seconds())
+        try:
+            from hermes_cli.quiet_single_query import release_lock_at_report
+            with ExitStack() as lock_stack:
+                lock_stack.enter_context(_delivery_lock(argv, stdin_file=False, timeout_seconds=probe))
+                released = False
+
+                def _release_reported_lock():
+                    nonlocal released
+                    lock_stack.close()
+                    released = True
+
+                def _retry_lock():
+                    if released:
+                        lock_stack.enter_context(_delivery_lock(
+                            argv, stdin_file=False, timeout_seconds=probe))
+
+                with release_lock_at_report(_release_reported_lock):
+                    return _run_local_turn(
+                        argv, dm_file, env=env, busy_raises=can_queue, retry_lock=_retry_lock)
+        except (_session_held_cls(), TurnBusyError) as exc:
+            if not can_queue:
+                raise
+            from tools.bot_mode_probe import _default_home, _hermes_root, _roster
+
+            recipient_home = home
+            if recipient_home is None:
+                recipient_home = dict(_roster(_hermes_root(Path(_default_home())))).get(exc.profile)
+            admits = _recipient_admits_queue(exc.profile, recipient_home)
+            if admits is False or recipient_home is None:
+                print(json.dumps({
+                    "error": (f"Delivery failed: @{exc.profile}'s Bot Chat is busy and the recipient "
+                              "does not drain queued fleet messages at turn end."),
+                    "reason": "target_busy",
+                    "reply_relayed": False,
+                }))
+                return 1
+            sender = _busy_sender(author)
+            envelope_id = _generation_delivery_id(dm_file, _read_generation(dm_file))
+            try:
+                result = subprocess.run(
+                    _drain_enqueue_command(argv[0], sender, recipient_home, dm_file, envelope_id),
+                    check=False, stdin=subprocess.DEVNULL, capture_output=True,
+                    text=True, encoding="utf-8", errors="replace", timeout=5, env=env)
+                if result.returncode != 0:
+                    detail = (result.stderr or "").strip() or f"enqueue exited {result.returncode}"
+                    raise ValueError(detail.splitlines()[0])
+                child = json.loads(result.stdout)
+                if child.get("status") != "queued":
+                    raise ValueError(str(child.get("status") or "not queued"))
+                message_id = child.get("message_id")
+                if not isinstance(message_id, str) or not message_id:
+                    raise ValueError("missing queue message id")
+            except Exception as write_exc:
+                logger.warning("fleet message drain: enqueue failed", exc_info=True)
+                print(json.dumps({
+                    "error": f"Delivery failed: could not queue for @{exc.profile}: {write_exc}",
+                    "reason": "target_busy",
+                    "reply_relayed": False,
+                }))
+                return 1
+            print(json.dumps({
+                "status": "queued",
+                "message_id": message_id,
+                "reply_relayed": False,
+                "reply": queued_ack(message_id),
+            }))
+            return 0
     finally:
-        _unlink_dm_file(dm_file)
+        if not keep_dm_file:
+            _unlink_dm_artifacts(dm_file)
 
 
 def _delivery_command(argv: list[str], dm_file: str, *, stdin_file: bool,
@@ -682,9 +1253,8 @@ def _start_delivery(argv: list[str], content: str, label: str, *, stdin_file: bo
             elif notification.get("process_id"):
                 result["process_id"] = notification["process_id"]
                 result["reply_delivery"] = notification.get("reply_delivery", "notification")
-                if result["reply_delivery"] == "poll":
-                    # Same runner, same stdout-borne reply (#101142): a non-push sender must get
-                    # the poll instruction here too, not 'finish your turn'.
+                if result["reply_delivery"] in ("poll", "transcript"):
+                    # The same runner carries the reply for both non-push return paths.
                     result["detail"] = f"Durably queued for the live Bot Chat owner. Do NOT resend. {notification['detail']}"
             return json.dumps(result)
     try:
@@ -727,19 +1297,27 @@ def _spawn_delivery(command: str, label: str, *, dm_file: Optional[str] = None, 
         # From here the background runner owns the file (removed after the consumer finishes).
         transferred = True
         if parsed.get("notify_on_complete") is False:
-            # terminal_tool refused the completion promise: this session (api_server, one-shot
-            # runner) cannot receive an async completion, so the recipient's reply would never
-            # be injected here (#101142). Say so and name the return path the surface supports.
-            detail = (f"Message handed to a background delivery process for {label}, but THIS session "
-                      "cannot receive completion notifications, so the reply will NOT arrive on its own. "
-                      f"Before ending your turn, retrieve the outcome with process(action='wait', "
-                      f"session_id='{proc_id}') — its output is the reply (relay it, attributed to that "
-                      "agent) or the delivery failure (report it; the message was NOT delivered); "
-                      "if wait returns status=timeout, call wait again until the process exits.")
-            if _persist_reply_when_done(proc_id, agent):
+            # This flag also covers one-shot and Kanban workers. Only API turns with an armed
+            # transcript row can finish without waiting for the runner's outcome.
+            persisted = _persist_reply_when_done(proc_id, agent)
+            if getattr(agent, "platform", None) == "api_server" and persisted:
+                reply_delivery = "transcript"
+                detail = (f"Message handed to a background delivery process for {label}. This session "
+                          "cannot receive completion notifications. Do NOT wait or poll: the reply "
+                          "is saved into this transcript as a delivery row when it arrives. Finish your turn.")
+            else:
+                reply_delivery = "poll"
+                detail = (f"Message handed to a background delivery process for {label}, but THIS session "
+                          "cannot receive completion notifications, so the reply will NOT arrive on its own. "
+                          f"Before ending your turn, retrieve the outcome with process(action='wait', "
+                          f"session_id='{proc_id}') — its output is the reply (relay it, attributed to that "
+                          "agent) or the delivery failure (report it; the message was NOT delivered); "
+                          "if wait returns status=timeout, call wait again until the process exits.")
+            if persisted and reply_delivery == "poll":
                 detail += (" Its outcome is also saved into this session's transcript as a delivery row "
                            "when the process exits, so it survives even if the turn ends first.")
         else:
+            reply_delivery = "notification"
             detail = (f"Message queued for {label}: this acknowledges the hand-off to a "
                       "background delivery process, not a delivery receipt — do NOT wait or poll. "
                       "Finish your turn now; that process's completion notification carries the "
@@ -749,7 +1327,7 @@ def _spawn_delivery(command: str, label: str, *, dm_file: Optional[str] = None, 
             "status": "queued",
             "delivery_id": delivery_id or (_dm_delivery_id(dm_file) if dm_file else ""),
             "to": label,
-            "reply_delivery": "poll" if parsed.get("notify_on_complete") is False else "notification",
+            "reply_delivery": reply_delivery,
             "detail": detail,
             "process_id": proc_id,
             "queued_at": int(time.time()),
@@ -798,11 +1376,37 @@ def _persist_reply_when_done(proc_id: str, agent: Any) -> bool:
     return True
 
 
+def _normalize_relay_profile(name: str) -> str:
+    s = str(name or "").strip()
+    if not s:
+        return ""
+    return "default" if s.lower() == "hermes" else s
+
+
+def _reply_attestation(reply_path: str, record: dict) -> tuple[str, str]:
+    from tools.bot_relay import CLAIMED_DIR
+
+    expected = ""
+    claimed_path = Path(reply_path).parent.parent / CLAIMED_DIR / Path(reply_path).name
+    try:
+        with open(claimed_path, encoding="utf-8-sig") as fh:
+            env = json.load(fh)
+        expected = _normalize_relay_profile(str(env.get("target_profile") or ""))
+    except (OSError, json.JSONDecodeError, TypeError, ValueError):
+        expected = ""
+    delivered = _normalize_relay_profile(str(record.get("delivered_profile") or ""))
+    return expected, delivered
+
+
 def _wait_reply_main(reply_path: str, label: str, budget_seconds: str) -> int:
     """The relay reply waiter (``tools/bot_relay.waiter_command``): block until the sender-side
     reply file exists, print it as the completion notification the sender wakes on, exit 1 on a
-    delivery error or when the budget runs out. Stdlib only: this runs as a background process
-    from any bot turn, and the sender's completion notification is exactly its stdout."""
+    delivery error, when the responder is unattested or is not the envelope's target, or when the
+    budget runs out. An attested ok reply with ``reply_not_relayed`` (or ``reply_relayed: false``)
+    exits 0 with a typed flag and is not the trusted ``Reply from`` line: the message will run, so
+    a resend would duplicate it, but the prose is not that bot's answer. Stdlib only: this runs as a
+    background process from any bot turn, and the
+    sender's completion notification is exactly its stdout."""
     try:
         deadline = time.time() + float(budget_seconds)
     except ValueError:
@@ -812,12 +1416,54 @@ def _wait_reply_main(reply_path: str, label: str, budget_seconds: str) -> int:
             with open(reply_path, encoding="utf-8-sig") as fh:
                 d = json.load(fh)
             if d.get("error"):
+                from tools.bot_failure_reasons import UNKNOWN, classify_agent_error
+
                 # Typed reason code rides ahead of the free text so the sender can branch on it
                 # without parsing provider prose. See #93091.
                 code = str(d.get("reason") or "").strip()
+                if code in ("", UNKNOWN):
+                    code = classify_agent_error(d["error"])
                 tag = f" [reason: {code}]" if code else ""
                 print(f"Delivery to {label} failed{tag}: {d['error']}")
                 return 1
+            from tools.bot_failure_reasons import REPLY_NOT_RELAYED, TARGET_SCOPE_UNRESOLVED
+
+            expected, delivered = _reply_attestation(reply_path, d)
+            if expected and delivered and expected != delivered:
+                print(
+                    f"Delivery to {label} failed [reason: {TARGET_SCOPE_UNRESOLVED}]: MISROUTED: "
+                    f"the relay delivered this message to @{delivered} instead of @{expected}; "
+                    f"that bot's reply is not {label}'s and is withheld. The message did NOT reach "
+                    f"{label}."
+                )
+                return 1
+            if not delivered or not expected:
+                print(
+                    f"Delivery to {label} UNVERIFIED [reason: {TARGET_SCOPE_UNRESOLVED}]: the relay "
+                    f"did not attest which bot answered (a Desktop or target gateway older than "
+                    f"delivery attestation), so the reply text is withheld. Do not attribute it to "
+                    f"{label} and do not resend blindly."
+                )
+                return 1
+            status = str(d.get("status") or "").strip()
+            if status == "queued":
+                from tools.bot_relay import relay_queued_sender_text
+
+                print(relay_queued_sender_text(delivered or expected))
+                return 0
+            reason = str(d.get("reason") or "").strip()
+            relayed = d.get("reply_relayed")
+            # An admitted-but-unrelayed ok reply is not the target's answer. Exit 0 so the sender
+            # does not resend a message that will run; the typed flag is what stops it booking the
+            # prose as "Reply from {label}".
+            if reason == REPLY_NOT_RELAYED or relayed is False:
+                flag = "true" if relayed is True else "false"
+                print(
+                    f"Delivery to {label} admitted "
+                    f"[reason: {reason or REPLY_NOT_RELAYED}, reply_relayed: {flag}]: "
+                    f"{d.get('reply') or '(empty reply)'}"
+                )
+                return 0
             print(f"Reply from {label}:")
             print(d.get("reply") or "(empty reply)")
             return 0
@@ -863,7 +1509,15 @@ def _delivery_main(args: list[str]) -> int:
 
 
 def _agent_home(agent: Any) -> str:
-    """The calling agent's OWN home (session-db derived), not ambient env."""
+    """The calling agent's OWN home: a bound HERMES_HOME override first (the messaging gateway
+    multiplexes profiles and binds the profile home per turn — same precedence as
+    ``agent/system_prompt._agent_home``), else session-db derived, never ambient env first."""
+    with contextlib.suppress(Exception):
+        from hermes_constants import get_hermes_home_override
+
+        override = get_hermes_home_override()
+        if override:
+            return str(override)
     with contextlib.suppress(Exception):
         db_path = getattr(getattr(agent, "_session_db", None), "db_path", None)
         if db_path:

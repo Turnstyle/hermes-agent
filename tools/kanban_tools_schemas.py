@@ -540,6 +540,8 @@ KANBAN_UNBLOCK_SCHEMA = _schema(
     ),
     {
         "task_id": _prop("string", "Blocked task id to move to ready or parent-gated todo."),
+        "to_todo": _prop("boolean", "Move only a currently blocked card to todo, even when parents are done."),
+        "expected_blocked_event_id": _prop("integer", "Latest blocked event must match this nonnegative ID; 0 asserts no blocked history."),
     },
     ["task_id"],
 )

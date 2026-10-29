@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from tests.hermes_cli.kanban_spawn_helpers import claim_for_spawn
+
 import json
 import os
 import sqlite3
@@ -496,9 +498,20 @@ def test_respawn_guard_blocker_auth_curated_not_open_stem(
 
     with kbc.connect() as conn:
         tid = kb.create_task(conn, title="prose", assignee="a")
+        kb.claim_task(conn, tid)
+        run_id = kb.get_task(conn, tid).current_run_id
+        # The guard reads the latest run's own error. A leftover quota string
+        # on the task row must not park the card when the run says otherwise.
         conn.execute(
-            "UPDATE tasks SET last_failure_error=? WHERE id=?",
-            (error_text, tid),
+            "UPDATE task_runs SET outcome='failed', status='failed', error=?, ended_at=? "
+            "WHERE id=?",
+            (error_text, 5_000_000, run_id),
+        )
+        conn.execute(
+            "UPDATE tasks SET status='ready', current_run_id=NULL, "
+            "claim_lock=NULL, claim_expires=NULL, worker_pid=NULL, "
+            "last_failure_error=? WHERE id=?",
+            ("429 leftover rate limit", tid),
         )
         conn.commit()
         assert kbd.check_respawn_guard(conn, tid) == expected
@@ -516,9 +529,14 @@ def test_respawn_guard_ignores_auth_words_in_crashed_worker_output(kanban_home):
         kb.claim_task(conn, crashed_id)
         crashed_run_id = kb.get_task(conn, crashed_id).current_run_id
         conn.execute(
-            "UPDATE task_runs SET outcome='crashed', status='failed', ended_at=? "
+            "UPDATE task_runs SET outcome='crashed', status='failed', error=?, ended_at=? "
             "WHERE id=?",
-            (5_000_000, crashed_run_id),
+            (
+                "pid 1 killed by signal 9. Worker's last output: "
+                "'env -u ANTHROPIC_API_KEY claude auth status --text'",
+                5_000_000,
+                crashed_run_id,
+            ),
         )
         conn.execute(
             "UPDATE tasks SET status='ready', current_run_id=NULL, "
@@ -535,9 +553,9 @@ def test_respawn_guard_ignores_auth_words_in_crashed_worker_output(kanban_home):
         kb.claim_task(conn, spawn_failed_id)
         spawn_run_id = kb.get_task(conn, spawn_failed_id).current_run_id
         conn.execute(
-            "UPDATE task_runs SET outcome='spawn_failed', status='failed', ended_at=? "
+            "UPDATE task_runs SET outcome='spawn_failed', status='failed', error=?, ended_at=? "
             "WHERE id=?",
-            (5_000_000, spawn_run_id),
+            ("provider authentication failed", 5_000_000, spawn_run_id),
         )
         conn.execute(
             "UPDATE tasks SET status='ready', current_run_id=NULL, "
@@ -632,12 +650,9 @@ def test_recompute_ready_honours_dispatcher_failure_limit(kanban_home):
         # Config allows MORE retries than the default. A task blocked
         # with failures below the configured limit must still recover.
         t = kb.create_task(conn, title="lenient", assignee="a")
-        conn.execute(
-            "UPDATE tasks SET status='blocked', consecutive_failures=? "
-            "WHERE id=?",
-            (kb.DEFAULT_FAILURE_LIMIT, t),
-        )
-        conn.commit()
+        from hermes_cli.kanban_db_dispatch import _record_task_failure
+        for _ in range(kb.DEFAULT_FAILURE_LIMIT):
+            _record_task_failure(conn, t, "fixture failure", outcome="crashed")
         # Default-limit call would stick it (failures >= default).
         assert kb.recompute_ready(conn) == 0
         assert kb.get_task(conn, t).status == "blocked"
@@ -653,12 +668,7 @@ def test_recompute_ready_honours_dispatcher_failure_limit(kanban_home):
         # Config allows FEWER retries than the default. A task at the
         # stricter limit must stay blocked even though it's below default.
         t2 = kb.create_task(conn, title="strict", assignee="a")
-        conn.execute(
-            "UPDATE tasks SET status='blocked', consecutive_failures=1 "
-            "WHERE id=?",
-            (t2,),
-        )
-        conn.commit()
+        _record_task_failure(conn, t2, "fixture failure", outcome="crashed", failure_limit=1)
         # Default-limit (2) would recover it (1 < 2).
         # Stricter config limit (1) must keep it blocked (1 >= 1).
         assert kb.recompute_ready(conn, failure_limit=1) == 0
@@ -1157,7 +1167,7 @@ class TestSharedBoardPaths:
             tenant=None,
             branch_name="wt/t_dispatch_env",
         )
-        kbd._default_spawn(task, str(tmp_path / "ws"))
+        kbd._default_spawn(claim_for_spawn(task), str(tmp_path / "ws"))
 
         env = captured["env"]
         assert env["HERMES_KANBAN_DB"] == str(default_home / "kanban.db")
@@ -1473,6 +1483,59 @@ def test_unlink_tasks_triggers_recompute_ready(kanban_home):
             "child should promote to ready immediately after unlink_tasks "
             "removes its last blocking dependency"
         )
+
+
+@pytest.mark.parametrize(
+    "hold, dependency_release, operator_release",
+    [
+        ("needs_input", "unlink", "unblock"),
+        ("title_marker", "complete", "promote"),
+    ],
+)
+def test_turner_hold_in_todo_requires_explicit_release(
+    kanban_home, hold, dependency_release, operator_release,
+):
+    """Text markers do not hold cards; fresh needs_input holds still require release."""
+    with kbc.connect() as conn:
+        parent = kb.create_task(conn, title="open-parent")
+        title = "hOlD fOr TuRnEr: awaiting answer" if hold == "title_marker" else "held card"
+        held = kb.create_task(conn, title=title, parents=[parent])
+        if hold == "needs_input":
+            with kb.write_txn(conn):
+                conn.execute(
+                    "UPDATE tasks SET block_kind = 'needs_input' WHERE id = ?", (held,),
+                )
+                kb._append_event(conn, held, "block_loop_detected", {"kind": "needs_input"})
+        assert kb.get_task(conn, held).status == "todo"
+
+        if dependency_release == "unlink":
+            assert kb.unlink_tasks(conn, parent, held) is True
+        else:
+            assert kb.complete_task(conn, parent, result="done") is True
+        if hold == "title_marker":
+            kb.recompute_ready(conn)
+            assert kb.get_task(conn, held).status == "ready"
+            return
+        assert kb.get_task(conn, held).status == "todo"
+        kb.recompute_ready(conn)
+        assert kb.get_task(conn, held).status == "todo"
+
+        if operator_release == "unblock":
+            assert kb.unblock_task(conn, held) is True
+            release_kind = "unblocked"
+        else:
+            assert kb.promote_task(conn, held, actor="Turner") == (True, None)
+            release_kind = "promoted_manual"
+        assert release_kind in [event.kind for event in kb.list_events(conn, held)]
+        kb.recompute_ready(conn)
+        assert kb.get_task(conn, held).status == "ready"
+
+        # A later dependency gate must still honor the operator's release.
+        another_parent = kb.create_task(conn, title="another open parent")
+        assert kb.link_tasks(conn, another_parent, held) is True
+        assert kb.get_task(conn, held).status == "todo"
+        assert kb.unlink_tasks(conn, another_parent, held) is True
+        assert kb.get_task(conn, held).status == "ready"
 
 
 
@@ -2084,3 +2147,33 @@ def test_archive_non_running_task_does_not_attempt_termination(kanban_home):
             (t,),
         ).fetchone()
         assert row is None
+
+
+@pytest.mark.parametrize("release", ["expire", "unblock"])
+def test_needs_input_todo_hold_expires_or_releases(kanban_home, release):
+    """Fresh holds pause after parent completion; expiry warns once and unblock releases now."""
+    with kbc.connect() as conn:
+        parent = kb.create_task(conn, title="parent")
+        held = kb.create_task(conn, title="needs answer", parents=[parent])
+        with kb.write_txn(conn):
+            conn.execute("UPDATE tasks SET block_kind = 'needs_input' WHERE id = ?", (held,))
+            kb._append_event(conn, held, "blocked", {"kind": "needs_input"})
+        assert kb.complete_task(conn, parent, result="done")
+        assert kb.recompute_ready(conn) == 0
+        assert kb.get_task(conn, held).status == "todo"
+        if release == "expire":
+            with kb.write_txn(conn):
+                conn.execute(
+                    "UPDATE task_events SET created_at = created_at - 90000 "
+                    "WHERE task_id = ? AND kind = 'blocked'", (held,),
+                )
+            assert kb.recompute_ready(conn) == 1
+        else:
+            assert kb.unblock_task(conn, held)
+        assert kb.get_task(conn, held).status == "ready"
+        assert kb.recompute_ready(conn) == 0
+        comments = [c for c in kb.list_comments(conn, held) if "NEEDS-INPUT HOLD EXPIRED" in c.body]
+        assert len(comments) == (1 if release == "expire" else 0)
+        if comments:
+            assert comments[0].author == "dispatcher"
+            assert held in comments[0].body

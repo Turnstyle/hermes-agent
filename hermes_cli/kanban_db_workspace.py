@@ -19,6 +19,7 @@ from typing import TYPE_CHECKING
 import contextlib
 
 from hermes_cli.worktree_ops import release_lsp_clients
+from hermes_cli.kanban_bundle_preserve import preservation_gate
 
 if TYPE_CHECKING:
     from hermes_cli.kanban_db import Task
@@ -391,7 +392,7 @@ def _cleanup_workspace(conn: sqlite3.Connection, task_id: str) -> None:
         if kind == "worktree":
             _cleanup_worker_tmux(conn, task_id)
             if not _defer_shared_worktree_cleanup(conn, task_id, path):
-                _cleanup_worktree_workspace(task_id, path, row["branch_name"])
+                _cleanup_worktree_workspace(task_id, path, row["branch_name"], conn=conn)
             _try_cleanup_parent_workspaces(conn, task_id)
             return
         wp = Path(path)
@@ -401,7 +402,7 @@ def _cleanup_workspace(conn: sqlite3.Connection, task_id: str) -> None:
             # source tree; without this, completion would rmtree the user's data.
             # See #28818. Containment runs first so an unmanaged dir that is
             # never removed does not pay for (or log) the shared-use scan.
-            if _is_managed_scratch_path(wp):
+            if _is_managed_scratch_path(wp) and preservation_gate(task_id, wp, conn=conn):
                 if not _defer_shared_workspace_cleanup(conn, task_id, path):
                     release_lsp_clients(str(wp))
                     shutil.rmtree(wp, ignore_errors=True)
@@ -424,7 +425,7 @@ def _cleanup_workspace(conn: sqlite3.Connection, task_id: str) -> None:
 
 
 def _cleanup_worktree_workspace(
-    task_id: str, path: str, branch_name: Optional[str] = None
+    task_id: str, path: str, branch_name: Optional[str] = None, *, conn=None
 ) -> None:
     """Remove a finished task's linked git worktree when it holds no work.
     Mirrors the CLI startup pruner (``cli._prune_stale_worktrees``): removal
@@ -475,6 +476,8 @@ def _cleanup_worktree_workspace(
                 return
         # No --force: git's own dirty guard re-verifies at removal time, so if
         # the tree became dirty since our check (TOCTOU) removal fails safe.
+        if not preservation_gate(task_id, wp, conn=conn):
+            return
         release_lsp_clients(str(worktree_path))
         result = _git(repo_root, "worktree", "remove", str(wp), timeout=60)
         if result.returncode != 0:
@@ -522,12 +525,12 @@ def _try_cleanup_parent_workspaces(conn: sqlite3.Connection, task_id: str) -> No
             if row["workspace_kind"] == "worktree":
                 if _defer_shared_worktree_cleanup(conn, parent_id, ws_path):
                     continue
-                _cleanup_worktree_workspace(parent_id, ws_path, row["branch_name"])
+                _cleanup_worktree_workspace(parent_id, ws_path, row["branch_name"], conn=conn)
                 continue
             wp = Path(ws_path)
             if not wp.is_dir():
                 continue
-            if _is_managed_scratch_path(wp):
+            if _is_managed_scratch_path(wp) and preservation_gate(parent_id, wp, conn=conn):
                 if _defer_shared_workspace_cleanup(conn, parent_id, ws_path):
                     continue
                 release_lsp_clients(str(wp))

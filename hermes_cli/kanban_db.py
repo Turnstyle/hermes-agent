@@ -15,6 +15,7 @@ locks). Schema: tasks, task_links, task_comments, task_events, task_runs, attach
 from __future__ import annotations
 
 import contextlib
+import hashlib
 import json
 import os
 import re
@@ -31,6 +32,9 @@ from typing import Any, Iterable, Optional
 
 from hermes_cli.kanban_workflow import DEFAULT_STATUSES as VALID_STATUSES
 from toolsets import get_toolset_names
+from hermes_cli.kanban_board_ops_transactions import (
+    promotion_in_scope,
+)
 
 _log = logging.getLogger(__name__)
 
@@ -233,9 +237,9 @@ def notify_task_updated(
 # DispatchResult counters whose non-zero value means the tick did something.
 _TICK_ACTIVITY_FIELDS = (
     "spawned", "reclaimed", "promoted", "reconciled_orphans", "reaped_terminal_workers", "crashed", "stale",
-    "timed_out", "auto_blocked", "rate_limited", "auto_assigned_default",
+    "timed_out", "auto_blocked", "rate_limited", "profile_busy", "auto_assigned_default",
     "respawn_guarded", "skipped_per_profile_capped", "skipped_unassigned",
-    "skipped_nonspawnable",
+    "skipped_placeholder", "skipped_nonspawnable", "owner_unavailable",
 )
 
 
@@ -321,7 +325,7 @@ def _resolve_crash_grace_seconds() -> int:
 
 def _resolve_rate_limit_cooldown_seconds() -> int:
     """``HERMES_KANBAN_RATE_LIMIT_COOLDOWN_SECONDS`` (0 = next tick, for tests) else default."""
-    return _env_int("HERMES_KANBAN_RATE_LIMIT_COOLDOWN_SECONDS", DEFAULT_RATE_LIMIT_COOLDOWN_SECONDS)
+    return min(600, _env_int("HERMES_KANBAN_RATE_LIMIT_COOLDOWN_SECONDS", DEFAULT_RATE_LIMIT_COOLDOWN_SECONDS))
 
 
 # build_worker_context() caps, sized for a ~100k-char prompt with headroom.
@@ -588,19 +592,19 @@ def _board_path(
 
 
 def kanban_db_path(board: Optional[str] = None) -> Path:
-    """``kanban.db`` path: ``HERMES_KANBAN_DB`` pins it (injected into workers);
+    """Explicit ``board`` wins; otherwise ``HERMES_KANBAN_DB`` pins the path.
     ``default`` -> ``<root>/kanban.db`` (back-compat), else the board dir."""
     return _board_path("HERMES_KANBAN_DB", board, ("kanban.db",), "kanban.db")
 
 
 def workspaces_root(board: Optional[str] = None) -> Path:
-    """Per-board scratch workspace root (``HERMES_KANBAN_WORKSPACES_ROOT`` wins);
+    """Per-board scratch workspace root (explicit board wins over the env pin);
     ``default`` keeps the legacy ``<root>/kanban/workspaces/``."""
     return _board_path("HERMES_KANBAN_WORKSPACES_ROOT", board, ("kanban", "workspaces"), "workspaces")
 
 
 def attachments_root(board: Optional[str] = None) -> Path:
-    """Per-board attachments root (``HERMES_KANBAN_ATTACHMENTS_ROOT`` wins). Workers
+    """Per-board attachments root (explicit board wins over the env pin). Workers
     read attachments by absolute path, so remote terminal backends must mount it."""
     return _board_path("HERMES_KANBAN_ATTACHMENTS_ROOT", board, ("kanban", "attachments"), "attachments")
 
@@ -926,6 +930,35 @@ CREATE TABLE IF NOT EXISTS task_events (
     payload    TEXT,
     created_at INTEGER NOT NULL
 );
+
+-- Direct SQL snapshot imports do not emit a local blocked event. Remember
+-- the event boundary of every blocked write, including blocked-to-blocked
+-- snapshots, so an older release cannot release a newer hold.
+CREATE TABLE IF NOT EXISTS task_block_entries (
+    task_id TEXT PRIMARY KEY,
+    event_id INTEGER NOT NULL
+);
+CREATE TRIGGER IF NOT EXISTS task_block_entry_insert AFTER INSERT ON tasks
+WHEN NEW.status = 'blocked'
+BEGIN
+    INSERT OR REPLACE INTO task_block_entries VALUES (
+        NEW.id, COALESCE((SELECT MAX(id) FROM task_events WHERE task_id = NEW.id), 0)
+    );
+END;
+CREATE TRIGGER IF NOT EXISTS task_block_entry_update AFTER UPDATE OF status ON tasks
+WHEN NEW.status = 'blocked'
+BEGIN
+    INSERT OR REPLACE INTO task_block_entries VALUES (
+        NEW.id, COALESCE((SELECT MAX(id) FROM task_events WHERE task_id = NEW.id), 0)
+    );
+END;
+CREATE TRIGGER IF NOT EXISTS task_block_entry_delete AFTER DELETE ON tasks
+BEGIN
+    DELETE FROM task_block_entries WHERE task_id = OLD.id;
+END;
+INSERT OR IGNORE INTO task_block_entries (task_id, event_id)
+    SELECT t.id, COALESCE((SELECT MAX(e.id) FROM task_events e WHERE e.task_id = t.id), 0)
+    FROM tasks t WHERE t.status = 'blocked';
 
 -- Historical attempt record. Each time the dispatcher claims a task, a
 -- new row is created here; claim state, PID, heartbeat, runtime cap,
@@ -1304,7 +1337,7 @@ def create_task(
                         _opt_int(max_runtime_seconds),
                         json.dumps(skills_list) if skills_list is not None else None,
                         _opt_int(max_retries), model_override, provider_override, reasoning_effort,
-                        1 if goal_mode else 0, _opt_int(goal_max_turns), session_id, completion_contract,
+                        1 if goal_mode else 0, _positive_int_or_none(goal_max_turns), session_id, completion_contract,
                     ),
                 )
                 for pid in parents:
@@ -1334,7 +1367,12 @@ def create_task(
                         conn,
                         task_id,
                         "blocked",
-                        {"reason": "initial_status", "status": "blocked", "actor": created_by or "user"},
+                        {
+                            "reason": "initial_status",
+                            "status": "blocked",
+                            "actor": created_by or "user",
+                            "bookkeeping": True,
+                        },
                     )
                 if task_status == "todo":
                     # Parked behind an open parent: record why, exactly as
@@ -1479,8 +1517,11 @@ def list_tasks(
     return [Task.from_row(r) for r in rows]
 
 
-def assign_task(conn: sqlite3.Connection, task_id: str, profile: Optional[str]) -> bool:
-    """Assign/reassign; raises RuntimeError while the task is running under a claim."""
+def assign_task(
+    conn: sqlite3.Connection, task_id: str, profile: Optional[str], *, reason: Optional[str] = None,
+) -> bool:
+    """Assign/reassign; raises RuntimeError while the task is running under a claim.
+    A non-empty ``reason`` is saved on the ``assigned`` event (why this claimant)."""
     profile = _canonical_assignee(profile)
     with write_txn(conn):
         row = conn.execute(
@@ -1503,9 +1544,10 @@ def assign_task(conn: sqlite3.Connection, task_id: str, profile: Optional[str]) 
             conn.execute("UPDATE tasks SET assignee = ? WHERE id = ?", (profile, task_id))
         # ``from`` lets the respawn guard tell a real handoff (dev→closer) from
         # a no-op re-assign or an unassign, which must not lift ``active_pr``.
-        _append_event(
-            conn, task_id, "assigned", {"assignee": profile, "from": row["assignee"]},
-        )
+        payload = {"assignee": profile, "from": row["assignee"]}
+        if reason and str(reason).strip():
+            payload["reason"] = str(reason).strip()
+        _append_event(conn, task_id, "assigned", payload)
     # Observer fires AFTER commit so subscribers see durable state.
     notify_task_updated(conn, task_id, ("assignee",))
     return True
@@ -1926,6 +1968,12 @@ def _opt_int(value: Any) -> Optional[int]:
     return int(value) if value is not None else None
 
 
+def _positive_int_or_none(value: Any) -> Optional[int]:
+    """Persist only a positive goal turn budget; unset and nonpositive mean NULL."""
+    parsed = _opt_int(value)
+    return parsed if parsed is not None and parsed > 0 else None
+
+
 def _json_or_null(obj: Any) -> Optional[str]:
     """JSON text for a payload/metadata column; falsy -> NULL."""
     return json.dumps(obj, ensure_ascii=False) if obj else None
@@ -2003,31 +2051,45 @@ def _synthesize_ended_run(
 # --- Dependency resolution (todo -> ready) ---
 
 def _has_sticky_block(conn: sqlite3.Connection, task_id: str) -> bool:
-    """True when the newest ``blocked``/``unblocked``/``gave_up`` event says the
-    block must wait for an operator: an explicit ``kanban_block`` (#28712), or a
-    breaker trip ``_record_task_failure`` stamped ``sticky`` — the clean-exit
-    protocol-violation budget or a systemic same-error wave. Those trip on a
-    policy independent of ``consecutive_failures``, so ``recompute_ready``'s
-    counter check cannot see them — without this the trip is promoted back to
-    ``ready`` in the same tick and the card respawns forever. A plain
-    (unified-budget) ``gave_up`` carries no marker and is judged by the counter,
-    so raising ``failure_limit`` or ``assign_task`` to a fresh profile still
-    releases it; a task with no such event at all (direct DB edit) auto-recovers.
-    """
+    """Preserve an explicit worker/owner block; automatic breaker trips are advisory."""
+    return _newest_event_kind(conn, task_id, ("blocked", "unblocked")) == "blocked"
+
+
+def _newest_event_kind(
+    conn: sqlite3.Connection, task_id: str, kinds: tuple[str, ...],
+) -> Optional[str]:
+    """Kind of the newest ``task_events`` row whose kind is in ``kinds``."""
+    placeholders = ", ".join("?" for _ in kinds)
     row = conn.execute(
-        "SELECT kind FROM task_events "
-        "WHERE task_id = ? AND kind IN ('blocked', 'unblocked') "
-        "ORDER BY id DESC LIMIT 1", (task_id,),
+        f"SELECT kind FROM task_events WHERE task_id = ? AND kind IN ({placeholders}) "
+        "ORDER BY id DESC LIMIT 1", (task_id, *kinds),
     ).fetchone()
-    if row and row["kind"] == "blocked":
-        return True
-    trip = conn.execute(
-        "SELECT payload FROM task_events "
-        "WHERE task_id = ? AND kind = 'gave_up' AND id > COALESCE("
-        "  (SELECT MAX(id) FROM task_events WHERE task_id = ? AND kind = 'unblocked'), 0) "
-        "ORDER BY id DESC LIMIT 1", (task_id, task_id),
+    return row["kind"] if row else None
+
+
+_HOLD_EVENT_KINDS = ("blocked", "block_loop_detected")
+_HOLD_RELEASE_EVENT_KINDS = ("unblocked", "promoted_manual")
+NEEDS_INPUT_TODO_HOLD_SECONDS = 2 * 3600  # A hold may not wait forever on a person.
+
+
+def _needs_input_hold_state(conn, task_id, block_kind):
+    """'active', 'expired' or None for a needs_input hold on a todo/triage card."""
+    if block_kind != "needs_input":
+        return None
+    row = conn.execute(
+        "SELECT kind, created_at FROM task_events WHERE task_id = ? AND kind IN (?, ?, ?, ?) "
+        "ORDER BY id DESC LIMIT 1", (task_id, *_HOLD_EVENT_KINDS, *_HOLD_RELEASE_EVENT_KINDS),
     ).fetchone()
-    return bool(trip) and bool(_json_dict(trip["payload"]).get("sticky"))
+    if row is None or row["kind"] not in _HOLD_EVENT_KINDS:
+        return None
+    return "expired" if int(time.time()) - int(row["created_at"] or 0) >= NEEDS_INPUT_TODO_HOLD_SECONDS else "active"
+
+def _has_turner_hold(
+    conn: sqlite3.Connection, task_id: str, block_kind: Optional[str],
+    title: str, body: Optional[str],
+) -> bool:
+    """Only a needs_input hold younger than 2 hours pauses a todo/triage card."""
+    return _needs_input_hold_state(conn, task_id, block_kind) == "active"
 
 
 def _latest_event(
@@ -2048,9 +2110,9 @@ def _resume_status_from_events(conn: sqlite3.Connection, task_id: str) -> str:
     row = conn.execute(
         "SELECT payload FROM task_events "
         "WHERE task_id = ? AND kind IN ("
-        "'blocked', 'block_loop_detected', 'dependency_wait', 'gave_up', "
+        "'blocked', 'block_loop_detected', 'degree_warning', 'dependency_wait', 'gave_up', "
         "'unblocked', 'changes_requested', 'review_reopened', 'status', 'reclaimed', "
-        "'stale', 'timed_out', 'crashed', 'spawn_failed', 'rate_limited'"
+        "'stale', 'timed_out', 'crashed', 'spawn_failed', 'rate_limited', 'profile_busy'"
         ") ORDER BY id DESC LIMIT 1", (task_id,),
     ).fetchone()
     payload = _json_dict(_row_get(row, "payload"))
@@ -2060,7 +2122,184 @@ def _resume_status_from_events(conn: sqlite3.Connection, task_id: str) -> str:
     return "ready"
 
 
-def recompute_ready(conn: sqlite3.Connection, failure_limit: int | None = None) -> int:
+# Sentinel: Fleet adapter trigger present but its node id is unreadable.
+_FLEET_NODE_UNPARSEABLE = "\x00fleet-node-unparseable"
+
+# Tolerant of case, whitespace/newlines between tokens, and SQL-escaped
+# quotes ('') inside the node literal.
+_FLEET_TRIGGER_NODE_RE = re.compile(
+    r"INSERT\s+INTO\s+fleet_kanban_issue_map\s*\([^)]*\)\s*VALUES\s*\(\s*"
+    r"NEW\s*\.\s*id\s*,\s*.+?\s*,\s*NEW\s*\.\s*title\s*,\s*NEW\s*\.\s*body\s*,\s*"
+    r"'((?:[^']|'')+)'",
+    re.IGNORECASE | re.DOTALL,
+)
+
+
+def _fleet_adapter_installed_node_id(conn: sqlite3.Connection) -> Optional[str]:
+    """This board's own installed Fleet-adapter node identity, or ``None`` when no
+    Fleet adapter is installed at all.
+
+    Authoritative source is the ``fleet_kanban_task_insert`` AFTER-INSERT trigger
+    the external adapter installs once per board: its body literally embeds the
+    node id the board was installed with, so reading it back from
+    ``sqlite_master`` queries this board's actually-installed schema rather than
+    re-deriving it from a mutable env var. Deliberately no cross-repo import —
+    only SQL text the standard ``sqlite_master`` table already exposes.
+
+    ``None`` means no ownership filtering applies: a plain board with no adapter
+    has no concept of a "foreign-owned mirror", so every task on it is local and
+    legacy semantics are preserved exactly.
+
+    Fails CLOSED: when the trigger EXISTS but its text cannot be parsed
+    (reformatted SQL, a future adapter version) this returns
+    :data:`_FLEET_NODE_UNPARSEABLE` and logs a WARNING, so callers treat every
+    mapped Fleet row as foreign rather than as "no adapter, all local" — which
+    would silently re-open the auto-promotion incident.
+    """
+    row = conn.execute(
+        "SELECT sql FROM sqlite_master "
+        "WHERE type = 'trigger' AND name = 'fleet_kanban_task_insert'"
+    ).fetchone()
+    if row is None or not row[0]:
+        return None
+    match = _FLEET_TRIGGER_NODE_RE.search(row[0])
+    if match is None:
+        _log.warning(
+            "kanban recompute_ready: fleet_kanban_task_insert trigger exists "
+            "but its installed node id could not be parsed. Failing closed: "
+            "every Fleet-mapped task is treated as foreign (not auto-promoted) "
+            "until the trigger text is recognized again."
+        )
+        return _FLEET_NODE_UNPARSEABLE
+    return match.group(1).replace("''", "'")
+
+
+def _is_foreign_fleet_mirror(
+    conn: sqlite3.Connection,
+    task_id: str,
+    installed_node_id: Optional[str],
+) -> bool:
+    """True iff ``task_id`` is a Fleet-mirrored task this board's own installed
+    node does not currently own, per the adapter's authoritative
+    ``current_node``/``source_node`` columns.
+
+    ``installed_node_id is None`` (no Fleet adapter) always returns ``False`` —
+    legacy boards are untouched. A task with NO ``fleet_kanban_issue_map`` row is
+    also local: the AFTER-INSERT trigger fires unconditionally, so a missing row
+    means the task predates the adapter, not that it is silently foreign.
+
+    Ownership is SQL ``COALESCE(current_node, source_node)``, matching the
+    adapter's own resolution order: ``source_node`` applies only when
+    ``current_node`` IS NULL — a present-but-blank ``current_node`` is the
+    owner, not a cue to fall back to historical source ownership. An owner that
+    is not a non-blank string (both NULL, empty, whitespace) is UNKNOWN: that
+    counts as foreign (safe — never auto-promote what this node cannot
+    positively attribute to itself) and logs a WARNING (visible — an operator
+    can find and fix the corrupt mapping row instead of the task silently never
+    promoting).
+    """
+    if installed_node_id is None:
+        return False
+    row = conn.execute(
+        "SELECT current_node, source_node FROM fleet_kanban_issue_map "
+        "WHERE local_task_id = ?",
+        (task_id,),
+    ).fetchone()
+    if row is None:
+        return False
+    current_node, source_node = row["current_node"], row["source_node"]
+    owner = source_node if current_node is None else current_node
+    if not isinstance(owner, str) or not owner.strip():
+        _log.warning(
+            "kanban recompute_ready: task %s has a fleet_kanban_issue_map row "
+            "whose owner COALESCE(current_node, source_node) is not a node id "
+            "(current_node=%r, source_node=%r) — ownership is UNKNOWN. "
+            "Treating as foreign (not auto-promoted) rather than risk promoting "
+            "a task this node cannot positively attribute to itself. This "
+            "indicates a corrupt/partial adapter mapping row and should be "
+            "investigated.",
+            task_id, current_node, source_node,
+        )
+        return True
+    return owner != installed_node_id
+
+
+# Verdicts of :func:`_fleet_row_ownership`.
+FLEET_OWNER_LOCAL = "local"
+FLEET_OWNER_FOREIGN = "foreign"
+FLEET_OWNER_UNKNOWN = "unknown"
+
+
+def _fleet_row_ownership(
+    conn: sqlite3.Connection,
+    task_id: str,
+    installed_node_id: Optional[str],
+) -> tuple[str, str]:
+    """Verdict ``(owner, detail)`` on whether THIS node may recover ``task_id``.
+
+    Recovery paths (orphan reconciliation, expired-claim release of a claim this
+    host did not take) write ``running -> ready``. On a synced Fleet board the
+    local copy of another node's ``running`` card has no local claim, worker or
+    lease, and the lifecycle fence refuses every such write (t_23c40d89). This
+    decides ownership BEFORE any host-local PID probe or write is attempted.
+
+    ``FLEET_OWNER_LOCAL``: no adapter installed (legacy board), no map row (the
+    card predates the adapter — same rule as :func:`_is_foreign_fleet_mirror`),
+    or the canonical home ``COALESCE(current_node, source_node)`` is this node
+    AND ``tasks.tenant`` (where the assignee-home rule records the card's home)
+    does not disagree. A NULL/blank tenant is no evidence either way.
+
+    ``FLEET_OWNER_FOREIGN``: the canonical home is another node. Expected,
+    silent: the owner node recovers its own card.
+
+    ``FLEET_OWNER_UNKNOWN``: ownership cannot be verified — unreadable adapter
+    node id, unreadable map, blank/non-text canonical home, or a canonical home
+    that contradicts ``tenant``. The caller must leave the row untouched AND
+    surface it; ``detail`` names why. Fails closed on any read error.
+    """
+    if installed_node_id is None:
+        return FLEET_OWNER_LOCAL, ""
+    if installed_node_id == _FLEET_NODE_UNPARSEABLE:
+        return FLEET_OWNER_UNKNOWN, "fleet adapter node id is unreadable"
+    try:
+        row = conn.execute(
+            "SELECT m.current_node, m.source_node, t.tenant "
+            "FROM tasks t LEFT JOIN fleet_kanban_issue_map m ON m.local_task_id = t.id "
+            "WHERE t.id = ?",
+            (task_id,),
+        ).fetchone()
+    except sqlite3.Error as exc:
+        return FLEET_OWNER_UNKNOWN, f"ownership read failed: {exc}"
+    if row is None:
+        return FLEET_OWNER_LOCAL, ""
+    current_node, source_node, tenant = row[0], row[1], row[2]
+    if current_node is None and source_node is None:
+        # LEFT JOIN found no map row (both columns NULL) — or a row with no owner
+        # at all. Tell the two apart: a missing row predates the adapter (local).
+        try:
+            mapped = conn.execute(
+                "SELECT 1 FROM fleet_kanban_issue_map WHERE local_task_id = ?", (task_id,),
+            ).fetchone()
+        except sqlite3.Error as exc:
+            return FLEET_OWNER_UNKNOWN, f"ownership read failed: {exc}"
+        if mapped is None:
+            return FLEET_OWNER_LOCAL, ""
+    owner = source_node if current_node is None else current_node
+    if not isinstance(owner, str) or not owner.strip():
+        return FLEET_OWNER_UNKNOWN, (
+            f"canonical home is not a node id (current_node={current_node!r}, "
+            f"source_node={source_node!r})"
+        )
+    if owner != installed_node_id:
+        return FLEET_OWNER_FOREIGN, f"canonical home is {owner!r}"
+    if isinstance(tenant, str) and tenant.strip() and tenant != owner:
+        return FLEET_OWNER_UNKNOWN, (
+            f"canonical home {owner!r} contradicts card home (tenant) {tenant!r}"
+        )
+    return FLEET_OWNER_LOCAL, ""
+
+
+def recompute_ready(conn: sqlite3.Connection, failure_limit: int = None) -> int:
     """Promote ``todo``/``blocked`` tasks whose parents are all done/archived;
     returns the count. Opens its own IMMEDIATE txn — call OUTSIDE any write txn.
 
@@ -2071,54 +2310,113 @@ def recompute_ready(conn: sqlite3.Connection, failure_limit: int | None = None) 
 
     1. The most recent block event was a worker-initiated ``kanban_block`` — those stay blocked until an
     explicit ``kanban_unblock`` (#28712).
+    2. ``todo`` is skipped while its ``needs_input`` hold is younger than 2 hours.
+    Older holds expire automatically; title/body text never holds a card.
+
+    A Fleet-mirrored row owned by ANOTHER node is never promoted: this is
+    automatic, node-local bookkeeping and has no authority over a remote node's
+    own in-flight work, which merely mirrors here with zero local parent links.
+    See :func:`_is_foreign_fleet_mirror`; non-Fleet boards are unaffected.
     """
     if failure_limit is None:
         failure_limit = DEFAULT_FAILURE_LIMIT
     promoted = 0
     with write_txn(conn):
+        # Resolved once per call, not per row: same value for every row this
+        # tick and there is no reason to repeat the sqlite_master lookup.
+        installed_node_id = _fleet_adapter_installed_node_id(conn)
+
         todo_rows = conn.execute(
-            "SELECT id, status, consecutive_failures, max_retries "
+            "SELECT id, status, consecutive_failures, max_retries, block_kind, title, body "
             "FROM tasks WHERE status IN ('todo', 'blocked')"
         ).fetchall()
         for row in todo_rows:
             task_id = row["id"]
-            cur_status = row["status"]
-            if cur_status == "blocked" and _has_sticky_block(conn, task_id):
-                # Explicit human-intervention block; only ``unblock_task`` may exit it.
-                continue
-            parents = conn.execute(
-                "SELECT t.status FROM tasks t "
-                "JOIN task_links l ON l.parent_id = t.id "
-                "WHERE l.child_id = ?", (task_id,),
-            ).fetchall()
-            if all(p["status"] in ("done", "archived") for p in parents):
-                resume_status = _resume_status_from_events(conn, task_id)
-                if cur_status == "blocked":
-                    # At the breaker limit, no auto-recovery (else block ->
-                    # recover -> respawn -> exhaust -> block forever). The
-                    # counter is preserved so it accumulates across cycles.
-                    failures = int(row["consecutive_failures"] or 0)
-                    task_limit = row["max_retries"]
-                    effective_limit = (
-                        int(task_limit) if task_limit is not None
-                        else int(failure_limit)
-                    )
-                    if failures >= effective_limit:
+            try:
+                with _card_write_savepoint(conn):
+                    if not promotion_in_scope(conn, task_id):
                         continue
-                    conn.execute(
-                        "UPDATE tasks SET status = ? "
-                        "WHERE id = ? AND status = 'blocked'", (resume_status, task_id),
-                    )
-                else:
-                    conn.execute(
-                        "UPDATE tasks SET status = ? WHERE id = ? AND status = 'todo'",
-                        (resume_status, task_id),
-                    )
-                _append_event(
-                    conn, task_id, "promoted",
-                    {"status": resume_status} if resume_status != "ready" else None,
-                )
-                promoted += 1
+                    cur_status = row["status"]
+                    # Ownership FIRST, before the sticky-block check or anything else: a
+                    # foreign-owned mirror is entirely out of scope for automatic
+                    # promotion — no write, no event, no outbox entry — whatever its
+                    # local status / blocked reason / dependency state.
+                    if _is_foreign_fleet_mirror(conn, task_id, installed_node_id):
+                        continue
+                    if cur_status == "blocked" and _needs_input_hold_state(conn, task_id, row["block_kind"]) == "expired":
+                        _handoff_to_decider(conn, task_id, "needs_input expired after 2 hours")
+                        continue
+                    if cur_status == "blocked" and _has_sticky_block(conn, task_id):
+                        # Explicit human-intervention block; only ``unblock_task`` may exit it.
+                        continue
+                    if cur_status == "todo" and _has_turner_hold(
+                        conn, task_id, row["block_kind"], row["title"], row["body"],
+                    ):
+                        # Fresh needs_input hold; unblock/promote can release it sooner.
+                        continue
+                    if cur_status == "todo" and _needs_input_hold_state(conn, task_id, row["block_kind"]) == "expired":
+                        _handoff_to_decider(conn, task_id, "needs_input expired after 2 hours")
+                        continue
+                    parents = conn.execute(
+                        "SELECT t.status FROM tasks t "
+                        "JOIN task_links l ON l.parent_id = t.id "
+                        "WHERE l.child_id = ?", (task_id,),
+                    ).fetchall()
+                    if cur_status == "blocked":
+                        recovery = conn.execute(
+                            "SELECT 1 FROM task_events e JOIN task_block_entries b "
+                            "ON b.task_id = e.task_id WHERE e.task_id = ? "
+                            "AND e.id > b.event_id "
+                            "AND e.kind IN ('unblocked', 'gave_up', 'promoted_manual') LIMIT 1",
+                            (task_id,),
+                        ).fetchone()
+                        if recovery is None:
+                            automatic = conn.execute(
+                                "SELECT 1 FROM task_events WHERE task_id=? AND kind='gave_up' "
+                                "AND id > COALESCE((SELECT event_id FROM task_block_entries WHERE task_id=?),0) "
+                                "ORDER BY id DESC LIMIT 1", (task_id,task_id),
+                            ).fetchone()
+                            if automatic is None:
+                                # Older evidence cannot release the current imported blocked snapshot.
+                                continue
+                    if all(p["status"] in ("done", "archived") for p in parents):
+                        resume_status = _resume_status_from_events(conn, task_id)
+                        if cur_status == "blocked":
+                            # An automatic legacy breaker may retry with a visible advisory;
+                            # explicit blocks and imported snapshot custody were checked above.
+                            failures = int(row["consecutive_failures"] or 0)
+                            task_limit = row["max_retries"]
+                            effective_limit = (
+                                int(task_limit) if task_limit is not None
+                                else int(failure_limit)
+                            )
+                            if failures >= effective_limit:
+                                from hermes_cli.kanban_db_dispatch import _record_degree_warning
+                                _record_degree_warning(conn, task_id, "legacy_failure_counter")
+                            conn.execute(
+                                "UPDATE tasks SET status = ? "
+                                "WHERE id = ? AND status = 'blocked'", (resume_status, task_id),
+                            )
+                        else:
+                            conn.execute(
+                                "UPDATE tasks SET status = ? WHERE id = ? AND status = 'todo'",
+                                (resume_status, task_id),
+                            )
+                            if _needs_input_hold_state(conn, task_id, row["block_kind"]) == "expired":
+                                _insert_comment(
+                                    conn, task_id, "dispatcher",
+                                    "NEEDS-INPUT HOLD EXPIRED: nobody answered in 24 hours, so this card moves on. "
+                                    "The assignee takes the recommended option written in the card. "
+                                    f'To hold it again run: hermes kanban block {task_id} "<reason>" --kind needs_input',
+                                    int(time.time()),
+                                )
+                        _append_event(
+                            conn, task_id, "promoted",
+                            {"status": resume_status} if resume_status != "ready" else None,
+                        )
+                        promoted += 1
+            except Exception:
+                _log.warning("kanban recompute_ready: card %s failed; rolled back this card and continuing tick", task_id, exc_info=True)
     return promoted
 
 
@@ -2195,6 +2493,46 @@ def _claim_and_open_run(
     return run_id
 
 
+def _normalize_workspace_path(path: Optional[str]) -> str:
+    """Normalize a workspace path for comparison (expand ~ and resolve symlinks)."""
+    if not path:
+        return ""
+    p = os.path.expanduser(str(path).strip())
+    try:
+        return str(Path(p).resolve())
+    except Exception:
+        return os.path.normpath(p)
+
+
+def _is_workspace_busy(conn: sqlite3.Connection, task_id: str) -> Optional[str]:
+    """Check if task_id has workspace_kind in ('worktree', 'dir') with a non-null
+    workspace_path that matches the normalized workspace_path of any currently RUNNING task.
+    Returns the normalized path if busy, else None."""
+    trow = conn.execute(
+        "SELECT workspace_kind, workspace_path FROM tasks WHERE id = ?", (task_id,),
+    ).fetchone()
+    if not trow:
+        return None
+    kind = trow["workspace_kind"]
+    path = trow["workspace_path"]
+    if kind not in ("worktree", "dir") or not path:
+        return None
+    target_norm = _normalize_workspace_path(path)
+    if not target_norm:
+        return None
+    running_rows = conn.execute(
+        "SELECT id, workspace_kind, workspace_path FROM tasks "
+        "WHERE status = 'running' AND id != ? "
+        "  AND workspace_kind IN ('worktree', 'dir') AND workspace_path IS NOT NULL",
+        (task_id,),
+    ).fetchall()
+    for r in running_rows:
+        r_path = r["workspace_path"]
+        if r_path and _normalize_workspace_path(r_path) == target_norm:
+            return target_norm
+    return None
+
+
 def claim_task(
     conn: sqlite3.Connection, task_id: str, *, ttl_seconds: Optional[int] = None,
     claimer: Optional[str] = None,
@@ -2204,30 +2542,40 @@ def claim_task(
     Returns the claimed ``Task`` on success, ``None`` if the task was
     already claimed (or is not in ``ready`` status).
     """
-    now = int(time.time())
-    lock = claimer or _claimer_id()
-    expires = now + _resolve_claim_ttl_seconds(ttl_seconds)
-    with write_txn(conn):
-        # Single enforcement point: never ready -> running with an undone
-        # parent, whichever writer set 'ready'. Demote to 'todo';
-        # recompute_ready re-promotes when the parents finish.
-        if not _parents_satisfied(conn, task_id):
-            conn.execute(
-                "UPDATE tasks SET status = 'todo' "
-                "WHERE id = ? AND status = 'ready'", (task_id,),
+    from hermes_cli.kanban_launch import handoff_pending, launch_guard
+
+    with launch_guard(conn) as admitted:
+        if not admitted or handoff_pending(conn, task_id):
+            return None
+        now = int(time.time())
+        lock = claimer or _claimer_id()
+        expires = now + _resolve_claim_ttl_seconds(ttl_seconds)
+        with write_txn(conn):
+            # Single enforcement point: never ready -> running with an undone
+            # parent, whichever writer set 'ready'. Demote to 'todo';
+            # recompute_ready re-promotes when the parents finish.
+            if not _parents_satisfied(conn, task_id):
+                conn.execute(
+                    "UPDATE tasks SET status = 'todo' "
+                    "WHERE id = ? AND status = 'ready'", (task_id,),
+                )
+                _append_event(conn, task_id, "claim_rejected", {"reason": "parents_not_done"})
+                return None
+            # Workspace guard (H24): prevent multiple running tasks on the same worktree / dir workspace
+            busy_path = _is_workspace_busy(conn, task_id)
+            if busy_path:
+                _append_event(conn, task_id, "claim_rejected", {"reason": "workspace_busy", "workspace_path": busy_path})
+                return None
+            # Close a leaked prior run so the CAS below doesn't strand it.
+            _reclaim_dangling_run(
+                conn, task_id, statuses=("ready",), now=now, note="invariant recovery on re-claim",
             )
-            _append_event(conn, task_id, "claim_rejected", {"reason": "parents_not_done"})
-            return None
-        # Close a leaked prior run so the CAS below doesn't strand it.
-        _reclaim_dangling_run(
-            conn, task_id, statuses=("ready",), now=now, note="invariant recovery on re-claim",
-        )
-        run_id = _claim_and_open_run(conn, task_id, "ready", lock, expires, now)
-        if run_id is None:
-            return None
-        claimed = get_task(conn, task_id)
-    _fire_task_hook("kanban_task_claimed", claimed, task_id, run_id)
-    return claimed
+            run_id = _claim_and_open_run(conn, task_id, "ready", lock, expires, now)
+            if run_id is None:
+                return None
+            claimed = get_task(conn, task_id)
+        _fire_task_hook("kanban_task_claimed", claimed, task_id, run_id)
+        return claimed
 
 
 def claim_review_task(
@@ -2237,27 +2585,36 @@ def claim_review_task(
     """Atomic ``review -> running`` (None when lost). Parents are re-checked
     (one may have reopened meanwhile) and a NEW run tracks the reviewer
     separately from the implementer."""
-    now = int(time.time())
-    lock = claimer or _claimer_id()
-    expires = now + _resolve_claim_ttl_seconds(ttl_seconds)
-    with write_txn(conn):
-        if not _parents_satisfied(conn, task_id):
-            demoted = conn.execute(
-                "UPDATE tasks SET status = 'todo' "
-                "WHERE id = ? AND status = 'review' AND claim_lock IS NULL", (task_id,),
-            )
-            if demoted.rowcount == 1:
-                _append_event(
-                    conn, task_id, "dependency_wait",
-                    {"reason": "parent_reopened", "source_status": "review"},
+    from hermes_cli.kanban_launch import handoff_pending, launch_guard
+
+    with launch_guard(conn) as admitted:
+        if not admitted or handoff_pending(conn, task_id):
+            return None
+        now = int(time.time())
+        lock = claimer or _claimer_id()
+        expires = now + _resolve_claim_ttl_seconds(ttl_seconds)
+        with write_txn(conn):
+            if not _parents_satisfied(conn, task_id):
+                demoted = conn.execute(
+                    "UPDATE tasks SET status = 'todo' "
+                    "WHERE id = ? AND status = 'review' AND claim_lock IS NULL", (task_id,),
                 )
-            return None
-        run_id = _claim_and_open_run(
-            conn, task_id, "review", lock, expires, now, event_extra={"source_status": "review"},
-        )
-        if run_id is None:
-            return None
-        return get_task(conn, task_id)
+                if demoted.rowcount == 1:
+                    _append_event(
+                        conn, task_id, "dependency_wait",
+                        {"reason": "parent_reopened", "source_status": "review"},
+                    )
+                return None
+            busy_path = _is_workspace_busy(conn, task_id)
+            if busy_path:
+                _append_event(conn, task_id, "claim_rejected", {"reason": "workspace_busy", "workspace_path": busy_path})
+                return None
+            run_id = _claim_and_open_run(
+                conn, task_id, "review", lock, expires, now, event_extra={"source_status": "review"},
+            )
+            if run_id is None:
+                return None
+            return get_task(conn, task_id)
 
 
 def _retry_status_for_run(
@@ -2343,6 +2700,7 @@ def _extend_run_claim(conn: sqlite3.Connection, task_id: str, expires: int) -> O
 
 def release_stale_claims(
     conn: sqlite3.Connection, *, signal_fn=None, failure_limit: Optional[int] = None,
+    errors_out: Optional[list] = None,
 ) -> int:
     """Reclaim ``running`` tasks whose claim expired; returns the count reclaimed.
 
@@ -2369,7 +2727,13 @@ def release_stale_claims(
     so any genuinely active worker keeps its heartbeat fresh as a side effect of normal API traffic.
     ``enforce_max_runtime`` and ``detect_crashed_workers`` remain the upper bounds for genuinely wedged or
     dead workers.
+
+    The worker is signalled inside the release transaction, only after the lifecycle fence accepted the
+    release UPDATE: a refused row is never killed and is recorded in ``errors_out`` (see
+    ``_isolate_fenced_row``). A worker that survives termination rolls the release back and keeps its claim.
     """
+    from hermes_cli.kanban_launch import handoff_pending
+
     now = int(time.time())
     reclaimed = 0
     host_prefix = _host_prefix()
@@ -2380,56 +2744,83 @@ def release_stale_claims(
         "WHERE status = 'running' AND claim_expires IS NOT NULL "
         "  AND claim_expires < ?", (now,),
     ).fetchall()
+    fleet_node_id: Any = _UNSET  # resolved lazily: only a non-host-local claim needs it
     for row in stale:
         host_local = (row["claim_lock"] or "").startswith(host_prefix)
+        # Sibling of reconcile_orphaned_running (t_23c40d89): a claim this host did
+        # not take is a mirrored copy of another node's card on a Fleet board. Its
+        # owner recovers it; the lifecycle fence would refuse our write every tick.
+        # A host-local claim is real local ownership evidence and is not re-judged.
+        if not host_local:
+            if fleet_node_id is _UNSET:
+                fleet_node_id = _fleet_adapter_installed_node_id(conn)
+            if not _recovery_owned_here(
+                conn, errors_out, "release_stale_claims", row["id"], fleet_node_id,
+            ):
+                continue
+        if handoff_pending(conn, row["id"], errors_out=errors_out, stage="release_stale_claims"):
+            continue
         hb = _to_epoch(row["last_heartbeat_at"])
         # Backstop: a heartbeat older than the max-stale threshold means no
         # observable progress — reclaim even if the PID is alive (logic loop).
         heartbeat_stale = hb is not None and (now - hb) > DEFAULT_CLAIM_HEARTBEAT_MAX_STALE_SECONDS
         started_at = _row_get(row, "worker_started_at")
         if (host_local and row["worker_pid"] and _worker_alive(row["worker_pid"], started_at)
-                and not heartbeat_stale):
+                ):
+            if heartbeat_stale:
+                from hermes_cli.kanban_db_dispatch import _record_degree_warning
+                _record_degree_warning(conn, row["id"], "stale_claim_live_owner")
             _extend_live_stale_claim(conn, row, now)
             continue
 
-        termination = _terminate_reclaimed_worker(
-            row["worker_pid"], row["claim_lock"], signal_fn=signal_fn, started_at=started_at,
-        )
-        # A live worker of ours must keep its claim (else a duplicate spawns beside it).
-        if _worker_survived_termination(termination):
+        termination: dict = {}
+        try:
+            with write_txn(conn):
+                if handoff_pending(conn, row["id"], errors_out=errors_out, stage="release_stale_claims"):
+                    continue
+                retry_status = _retry_status_for_run(conn, row["id"])
+                cur = conn.execute(
+                    "UPDATE tasks SET status = ?, claim_lock = NULL, "
+                    "claim_expires = NULL, worker_pid = NULL, worker_started_at = NULL "
+                    "WHERE id = ? AND status = 'running' AND claim_lock IS ? "
+                    "AND claim_expires IS NOT NULL AND claim_expires < ? "
+                    "AND worker_pid IS ?",
+                    (retry_status, row["id"], row["claim_lock"], now, row["worker_pid"]),
+                )
+                if cur.rowcount != 1:
+                    continue
+                # The fence accepted the release; only now may the worker be signalled.
+                termination = _terminate_reclaimed_worker(
+                    row["worker_pid"], row["claim_lock"], signal_fn=signal_fn, started_at=started_at,
+                )
+                # A live worker of ours must keep its claim (else a duplicate spawns beside it).
+                if _worker_survived_termination(termination):
+                    raise _ReclaimAbortForLiveWorker()
+                run_id = _record_reclaim(
+                    conn, row["id"], termination,
+                    error=f"stale_lock={row['claim_lock']}",
+                    payload={
+                        "stale_lock": row["claim_lock"],
+                        "worker_pid": _opt_int(row["worker_pid"]),
+                        "claim_expires": _to_epoch(row["claim_expires"]),
+                        "last_heartbeat_at": hb,
+                        "now": now,
+                        "host_local": host_local,
+                        "heartbeat_stale": bool(heartbeat_stale),
+                        "retry_status": retry_status,
+                    },
+                )
+        except _ReclaimAbortForLiveWorker:
             _defer_reclaim_for_live_worker(
                 conn, row["id"], row["claim_lock"], now, termination,
                 reason="ttl_expired_worker_alive",
             )
             continue
-        with write_txn(conn):
-            retry_status = _retry_status_for_run(conn, row["id"])
-            cur = conn.execute(
-                "UPDATE tasks SET status = ?, claim_lock = NULL, "
-                "claim_expires = NULL, worker_pid = NULL, worker_started_at = NULL "
-                "WHERE id = ? AND status = 'running' AND claim_lock IS ? "
-                "AND claim_expires IS NOT NULL AND claim_expires < ? "
-                # A worker that registered its own pid since the SELECT keeps its claim.
-                "AND worker_pid IS ?",
-                (retry_status, row["id"], row["claim_lock"], now, row["worker_pid"]),
-            )
-            if cur.rowcount != 1:
-                continue
-            run_id = _record_reclaim(
-                conn, row["id"], termination,
-                error=f"stale_lock={row['claim_lock']}",
-                payload={
-                    "stale_lock": row["claim_lock"],
-                    "worker_pid": _opt_int(row["worker_pid"]),
-                    "claim_expires": _to_epoch(row["claim_expires"]),
-                    "last_heartbeat_at": hb,
-                    "now": now,
-                    "host_local": host_local,
-                    "heartbeat_stale": bool(heartbeat_stale),
-                    "retry_status": retry_status,
-                },
-            )
-            reclaimed += 1
+        except sqlite3.Error as exc:
+            if not _isolate_fenced_row(errors_out, "release_stale_claims", row["id"], exc, termination):
+                raise
+            continue
+        reclaimed += 1
         # Own txn, after the reclaim commit (same shape as ``enforce_max_runtime``):
         # the run ended without a verdict, so it counts toward the breaker and a
         # trip flips the task to ``blocked`` + ``gave_up`` on top of ``reclaimed``.
@@ -2496,7 +2887,12 @@ def reclaim_task(
     conn: sqlite3.Connection, task_id: str, *, reason: Optional[str] = None, signal_fn=None,
 ) -> bool:
     """Operator reclaim regardless of TTL: release the claim, restore the source
-    phase, reset the failure counter. False when not running."""
+    phase, reset the failure counter. False when not running.
+
+    The worker is signalled only after the release UPDATE was accepted, inside
+    the same transaction: a lifecycle-fence refusal raises to the operator with
+    the worker untouched. Operator override: the claim is released even if the
+    worker survives termination."""
     row = conn.execute(
         "SELECT status, claim_lock, worker_pid, worker_started_at FROM tasks WHERE id = ?", (task_id,),
     ).fetchone()
@@ -2506,8 +2902,6 @@ def reclaim_task(
         # Nothing to reclaim — already ready / blocked / done.
         return False
     prev_lock = row["claim_lock"]
-    termination = _terminate_reclaimed_worker(
-        row["worker_pid"], prev_lock, signal_fn=signal_fn, started_at=row["worker_started_at"])
     with write_txn(conn):
         retry_status = _retry_status_for_run(conn, task_id)
         cur = conn.execute(
@@ -2518,6 +2912,8 @@ def reclaim_task(
         )
         if cur.rowcount != 1:
             return False
+        termination = _terminate_reclaimed_worker(
+            row["worker_pid"], prev_lock, signal_fn=signal_fn, started_at=row["worker_started_at"])
         _record_reclaim(
             conn, task_id, termination,
             error=f"manual_reclaim: {reason}" if reason else f"manual_reclaim lock={prev_lock}",
@@ -2539,7 +2935,7 @@ def reassign_task(
         reclaim_task(conn, task_id, reason=reason or "reassign")
     # assign_task handles its own txn + the still-running guard.
     try:
-        return assign_task(conn, task_id, profile)
+        return assign_task(conn, task_id, profile, reason=reason)
     except RuntimeError:
         # Task is still running and reclaim_first was False; caller
         # needs to decide whether to retry with reclaim.
@@ -3192,6 +3588,12 @@ def block_task(
             return True
         source_status = _retry_status_for_run(conn, task_id) if cur_row["status"] == "running" else "ready"
         requested_kind = kind
+        prior_reason = conn.execute(
+            "SELECT payload FROM task_events WHERE task_id=? "
+            "AND kind IN ('blocked','degree_warning','decider_handoff') ORDER BY id DESC LIMIT 1",
+            (task_id,),
+        ).fetchone()
+        same_reason = prior_reason is not None and _json_dict(prior_reason["payload"]).get("reason") == reason
         rekind_reason = None
         # ``dependency`` only waits on incomplete parents. A worker filing that
         # kind with none open would park in ``todo`` and ``recompute_ready``
@@ -3202,7 +3604,7 @@ def block_task(
             rekind_reason = "no_open_parent"
         new_status, event_kind, set_sql, params, payload = _route_block(
             kind, reason, source_status, prev_kind=_row_get(cur_row, "block_kind"),
-            prev_recurrences=int(_row_get(cur_row, "block_recurrences") or 0),
+            prev_recurrences=int(_row_get(cur_row, "block_recurrences") or 0) if same_reason else 0,
         )
         if rekind_reason:
             payload["requested_kind"] = requested_kind
@@ -3227,6 +3629,8 @@ def block_task(
             conn, task_id, outcome="blocked", status="blocked", summary=reason, synthesize=bool(reason),
         )
         _append_event(conn, task_id, event_kind, payload, run_id=run_id)
+        if event_kind == "decider_handoff":
+            _handoff_to_decider(conn, task_id, reason or "same block reason three times")
         blocked_task = get_task(conn, task_id)
         if kind == "dependency":
             # Historical ordering: the dependency lane fires inside the txn.
@@ -3251,7 +3655,7 @@ def _route_block(
     returned the task to the pool), so a stored ``block_kind`` equal to the
     incoming one means blocked -> unblocked -> re-block for the same cause
     (un-typed None compares equal to a prior un-typed block). At
-    ``BLOCK_RECURRENCE_LIMIT`` the task routes to ``triage`` for a human.
+    the second identical reason warns and resumes; the third queues a Decider hand-back.
     """
     payload = {"reason": reason, "kind": kind, "source_status": source_status}
     if kind == "dependency":
@@ -3259,10 +3663,76 @@ def _route_block(
     recurrences = prev_recurrences + 1 if prev_kind == kind else 1
     set_sql = "block_kind    = ?,\n                       block_recurrences = ?"
     payload = {"reason": reason, "kind": kind, "recurrences": recurrences, "source_status": source_status}
-    if recurrences >= BLOCK_RECURRENCE_LIMIT:
-        payload["limit"] = BLOCK_RECURRENCE_LIMIT
-        return "triage", "block_loop_detected", set_sql, (kind, recurrences), payload
-    return "blocked", "blocked", set_sql, (kind, recurrences), payload
+    if recurrences >= 3:
+        payload["target_role"] = "Decider"
+        payload["next_step"] = "Tasker hands this card to an available Decider; no automatic retry by the prior worker. Decider may release with a reason."
+        return "triage", "decider_handoff", set_sql, (kind, recurrences), payload
+    if recurrences == 2:
+        payload["next_step"] = "Warning: same reason twice. Resume once with a reason; a third recurrence hands the card to a Decider."
+        return source_status, "degree_warning", set_sql, (kind, recurrences), payload
+    return ("todo" if kind == "needs_input" else "blocked"), "blocked", set_sql, (kind, recurrences), payload
+
+
+@contextlib.contextmanager
+def _card_write_savepoint(conn):
+    """Roll back this card's writes without discarding other cards in the tick."""
+    name = "card_" + secrets.token_hex(8)
+    conn.execute(f"SAVEPOINT {name}")
+    try:
+        yield
+    except Exception:
+        conn.execute(f"ROLLBACK TO {name}")
+        raise
+    finally:
+        conn.execute(f"RELEASE {name}")
+
+
+def _local_triage_owner(conn, prior_assignee):
+    node = _fleet_adapter_installed_node_id(conn)
+    if node is None:
+        # Legacy boards have no node registry. Retain their existing owner.
+        if prior_assignee and str(prior_assignee).strip():
+            return prior_assignee
+        raise ValueError("no node-bound triage owner on this board")
+    candidates = {
+        "sheldon": ("shld-decider",),
+        "turnerbook": ("tb-decider",),
+        "snowdrop": ("snow-decider",),
+        "max": ("max-king", "max-cndr"),
+        "rosie": ("rosie-king", "rosie-cndr"),
+    }.get(node, ())
+    for profile in candidates:
+        home = conn.execute(
+            "SELECT home_node FROM fleet_kanban_assignee_homes WHERE assignee=?", (profile,),
+        ).fetchone()
+        if home is not None and home[0] == node:
+            return profile
+    raise ValueError(f"no registered local triage owner for node {node!r}")
+
+
+def _handoff_to_decider(conn, task_id: str, reason: str, *, raise_errors: bool = False) -> bool:
+    """Keep a registered local owner while routing the decision to a Decider."""
+    try:
+        with _card_write_savepoint(conn):
+            row = conn.execute("SELECT assignee,status,claim_lock,current_run_id FROM tasks WHERE id=?", (task_id,)).fetchone()
+            if row is None or row["status"] == "running" or row["claim_lock"] is not None or row["current_run_id"] is not None:
+                return False
+            owner = _local_triage_owner(conn, row["assignee"])
+            conn.execute("UPDATE tasks SET status='triage', assignee=?, block_kind=NULL WHERE id=?", (owner, task_id))
+            _append_event(conn, task_id, "assigned", {
+                "from": row["assignee"], "assignee": owner, "target_role": "Decider", "reason": reason,
+            })
+            body = ("DECIDER HAND-BACK: " + reason + ". Local triage owner: " + owner + ". Decider route: "
+                "the local Decider handles this card where available; otherwise the local King/Conductor routes the evidence to an available cross-node Decider. "
+                "The prior worker does not auto-resume. A Decider may release the affected action with a reason; independent work can continue.")
+            _insert_comment(conn, task_id, "dispatcher", body, int(time.time()))
+            _append_event(conn, task_id, "commented", {"author": "dispatcher", "body": body})
+        return True
+    except Exception:
+        _log.warning("kanban Decider handoff: card %s failed; rolled back handoff; continuing", task_id, exc_info=True)
+        if raise_errors:
+            raise
+        return False
 
 
 def redact_review_value(value: Any) -> Any:
@@ -3578,18 +4048,74 @@ def _landing_status_after_parents(conn: sqlite3.Connection, task_id: str) -> str
     return "ready" if _parents_satisfied(conn, task_id) else "todo"
 
 
-def unblock_task(conn: sqlite3.Connection, task_id: str) -> bool:
+def unblock_task(
+    conn: sqlite3.Connection, task_id: str, *,
+    actor: Optional[str] = None, reason: Optional[str] = None,
+    to_todo: bool = False, expected_blocked_event_id: Optional[int] = None,
+    require_idle: bool = False, require_closed_parents: bool = False,
+) -> bool:
     """``blocked``/``scheduled`` -> its resumable phase (parent re-gated; ``review``
-    when that is where it left off), closing any leaked run first."""
+    when that is where it left off), closing any leaked run first. A ``todo``
+    row with a fresh ``needs_input`` hold is also accepted: the
+    ``unblocked`` event releases it immediately, before its 24-hour expiry.
+    Triage holds require actor/reason and stay in triage for separate spec release.
+    to_todo accepts only currently blocked cards and lands in todo regardless of
+    parent completion. Expected event 0 asserts absent blocked history; positive
+    IDs assert the latest blocked event; None leaves event history unguarded.
+    require_idle refuses outstanding run/claim/worker bookkeeping or any open run;
+    require_closed_parents refuses release while any parent is unfinished."""
+    if expected_blocked_event_id is not None and expected_blocked_event_id < 0:
+        raise ValueError("expected_blocked_event_id must be nonnegative")
     now = int(time.time())
     with write_txn(conn):
+        hold_row = conn.execute(
+            "SELECT status, block_kind, title, body, current_run_id, claim_lock, "
+            "claim_expires, worker_pid FROM tasks WHERE id = ?", (task_id,),
+        ).fetchone()
+        if require_idle and hold_row is not None:
+            if any(hold_row[key] is not None for key in (
+                "current_run_id", "claim_lock", "claim_expires", "worker_pid",
+            )) or conn.execute(
+                "SELECT 1 FROM task_runs WHERE task_id = ? AND ended_at IS NULL LIMIT 1",
+                (task_id,),
+            ).fetchone() is not None:
+                return False
+        if require_closed_parents and unsatisfied_parents(conn, task_id):
+            return False
+        if to_todo or expected_blocked_event_id is not None:
+            if hold_row is None or hold_row["status"] != "blocked":
+                return False
+            if expected_blocked_event_id is not None:
+                latest_block = conn.execute(
+                    "SELECT id FROM task_events WHERE task_id = ? AND kind = 'blocked' "
+                    "ORDER BY id DESC LIMIT 1", (task_id,),
+                ).fetchone()
+                latest_block_id = latest_block["id"] if latest_block is not None else 0
+                if latest_block_id != expected_blocked_event_id:
+                    return False
+        if hold_row is not None and hold_row["status"] == "triage":
+            from hermes_cli.kanban_db_triage_unblock import clear_triage_hold
+            return clear_triage_hold(
+                conn, task_id, hold_row, actor=actor, reason=reason, now=now,
+            )
+        unblockable = ("blocked", "scheduled")
+        if (
+            hold_row is not None and hold_row["status"] == "todo"
+            and _has_turner_hold(
+                conn, task_id, hold_row["block_kind"], hold_row["title"], hold_row["body"],
+            )
+        ):
+            unblockable = ("todo",)
         resume_status = (
             _resume_status_from_events(conn, task_id)
-            if _task_status(conn, task_id) == "blocked"
+            if hold_row is not None and (
+                hold_row["status"] == "blocked"
+                or (hold_row["status"] == "todo" and unblockable == ("todo",))
+            )
             else "ready"
         )
         _reclaim_dangling_run(
-            conn, task_id, statuses=("blocked", "scheduled"), now=now,
+            conn, task_id, statuses=unblockable, now=now,
             note="invariant recovery on unblock",
         )
         # Re-gate on parent completion before restoring the source phase.
@@ -3599,6 +4125,9 @@ def unblock_task(conn: sqlite3.Connection, task_id: str) -> bool:
             if landing_status == "ready" and resume_status == "review"
             else landing_status
         )
+        if to_todo:
+            new_status = "todo"
+            unblockable = ("blocked",)
         # ``block_kind``/``block_recurrences`` deliberately survive the unblock:
         # resetting them is the amnesia that let cron-unblock <-> re-block loop
         # unbounded; only complete_task clears them. ``consecutive_failures``
@@ -3607,10 +4136,13 @@ def unblock_task(conn: sqlite3.Connection, task_id: str) -> bool:
         cur = conn.execute(
             "UPDATE tasks SET status = ?, current_run_id = NULL, "
             "consecutive_failures = 0, last_failure_error = NULL "
-            "WHERE id = ? AND status IN ('blocked', 'scheduled')", (new_status, task_id),
+            f"WHERE id = ? AND status IN ({', '.join('?' for _ in unblockable)})",
+            (new_status, task_id, *unblockable),
         )
         if cur.rowcount != 1:
             return False
+        if reason and actor:
+            add_comment(conn, task_id, actor, f"UNBLOCK: {reason}")
         _append_event(
             conn, task_id, "unblocked",
             (
@@ -3808,6 +4340,135 @@ def specify_triage_task(
     # flips to 'ready' now instead of idling until the next tick.
     recompute_ready(conn)
     return True
+
+
+HASH_ENCODING = (
+    'SHA-256 of the UTF-8 bytes of compact JSON [title,body] '
+    '(ensure_ascii=False, separators (",",":"), no trailing newline; null body distinct from empty string)'
+)
+
+
+def compute_task_sha256(title: Optional[str], body: Optional[str]) -> str:
+    """Deterministic SHA-256 digest of compact JSON [title, body].
+
+    Payload is UTF-8 bytes of json.dumps([title, body], ensure_ascii=False, separators=(',',':'))
+    with NO trailing newline. null body is distinct from empty string ''.
+    No whitespace stripping or Unicode normalization is performed.
+    """
+    payload = json.dumps([title, body], ensure_ascii=False, separators=(",", ":"))
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
+def keep_spec_triage_task(
+    conn: sqlite3.Connection,
+    task_id: str,
+    *,
+    expected_sha256: str,
+    author: str,
+) -> tuple[bool, str, Optional[str], Optional[str], bool, Optional[str]]:
+    """Verify in-txn SHA-256 and holds, promote triage -> todo, audit, and emit event.
+
+    Why this path exists and guarantees:
+    - Moving a card out of triage must not rewrite instructions a human already
+      reviewed: the model-backed specify path regenerates title/body, which would
+      silently discard human edits; this path releases the exact reviewed text instead.
+    - The expected hash binds the release to the exact bytes reviewed, so an edit
+      after review refuses instead of releasing unreviewed text.
+    - Preservation is exact: whitespace, trailing newlines, Unicode (ensure_ascii=False),
+      and NULL vs empty string are distinct and never normalized.
+    - Hash and status are re-checked inside the same write transaction as the status
+      change so a concurrent edit cannot slip between check and write.
+    - Holds are refused, never cleared, preserving active circuit breakers and markers.
+
+    Returns (ok, reason, computed_sha256, status_after, committed, recompute_error).
+    Enforces nonblank author, in-txn hash match, and active hold refusal inside
+    a single IMMEDIATE write transaction. recompute_ready runs in a separate txn.
+    """
+    _assert_not_delegated_child_mutation()
+
+    if not author or not author.strip():
+        return False, "author cannot be blank", None, None, False, None
+    clean_author = author.strip()
+
+    if expected_sha256 is None:
+        return False, "expected_sha256 cannot be None", None, None, False, None
+    clean_expected = expected_sha256.strip().lower()
+    if len(clean_expected) != 64 or not all(c in "0123456789abcdef" for c in clean_expected):
+        return False, f"invalid sha256 hex digest: {expected_sha256!r}", None, None, False, None
+
+    with write_txn(conn):
+        row = conn.execute(
+            "SELECT id, status, title, body, block_kind, block_recurrences "
+            "FROM tasks WHERE id = ?",
+            (task_id,),
+        ).fetchone()
+        if row is None:
+            return False, "task not found", None, None, False, None
+        if row["status"] != "triage":
+            return False, f"task is not in triage (status is {row['status']!r})", None, row["status"], False, None
+
+        installed_node_id = _fleet_adapter_installed_node_id(conn)
+        if _is_foreign_fleet_mirror(conn, task_id, installed_node_id):
+            return False, "foreign fleet mirror cannot be promoted locally", None, "triage", False, None
+
+        if _has_turner_hold(conn, task_id, row["block_kind"], row["title"], row["body"]):
+            return False, "task has active hold (needs_input, younger than 2 h)", None, "triage", False, None
+
+        if _has_sticky_block(conn, task_id):
+            return False, "task has active sticky block hold", None, "triage", False, None
+
+        computed_sha256 = compute_task_sha256(row["title"], row["body"])
+
+        if computed_sha256.lower() != clean_expected:
+            return (
+                False,
+                f"sha256 mismatch: expected {clean_expected!r}, got {computed_sha256!r}",
+                computed_sha256,
+                "triage",
+                False,
+                None,
+            )
+
+        cur = conn.execute(
+            "UPDATE tasks SET status = 'todo' WHERE id = ? AND status = 'triage'",
+            (task_id,),
+        )
+        if cur.rowcount != 1:
+            return False, "task moved out of triage concurrently", None, None, False, None
+
+        comment_text = (
+            f"Specified by {clean_author} (kept original spec, verified sha256 {computed_sha256}) and promoted to todo."
+        )
+        _insert_comment(conn, task_id, clean_author, comment_text, int(time.time()))
+
+        _append_event(
+            conn,
+            task_id,
+            "specified",
+            {
+                "author": clean_author,
+                "kept_spec": True,
+                "sha256": computed_sha256,
+                "changed_fields": [],
+            },
+        )
+
+    committed = True
+
+    recompute_err = None
+    try:
+        recompute_ready(conn)
+    except Exception as exc:
+        err_msg = str(exc).strip()
+        recompute_err = f"{type(exc).__name__}: {err_msg}" if err_msg else type(exc).__name__
+
+    final_row = conn.execute("SELECT status FROM tasks WHERE id = ?", (task_id,)).fetchone()
+    status_after = final_row["status"] if final_row else "todo"
+
+    if recompute_err is not None:
+        return True, f"kept_spec (recompute_ready deferred: {recompute_err})", computed_sha256, status_after, True, recompute_err
+
+    return True, "kept_spec", computed_sha256, status_after, True, None
 
 
 def archive_task(conn: sqlite3.Connection, task_id: str, *, signal_fn=None) -> bool:
@@ -4223,7 +4884,7 @@ def _retention_seconds(older_than_seconds: int) -> int:
 
 
 def gc_events(conn: sqlite3.Connection, *, older_than_seconds: int = 30 * 24 * 3600) -> int:
-    """Prune old done/archived events, retaining decomposition identity until task deletion.
+    """Prune old done/archived events, retaining decomposition and handoff safety state.
 
     ``older_than_seconds=0`` means everything older than now; the CLI maps
     ``--event-retention-days 0`` to "disabled" before calling this.
@@ -4231,7 +4892,9 @@ def gc_events(conn: sqlite3.Connection, *, older_than_seconds: int = 30 * 24 * 3
     cutoff = int(time.time()) - _retention_seconds(older_than_seconds)
     with write_txn(conn):
         cur = conn.execute(
-            "DELETE FROM task_events WHERE created_at < ? AND kind != 'decomposed' AND task_id IN "
+            "DELETE FROM task_events WHERE created_at < ? "
+            "AND kind NOT IN ('decomposed', 'worker_handoff_pending', "
+            "'worker_handoff_cancelled', 'worker_handoff_resolved') AND task_id IN "
             "(SELECT id FROM tasks WHERE status IN ('done', 'archived'))", (cutoff,),
         )
     return int(cur.rowcount or 0)
@@ -4279,11 +4942,11 @@ def read_worker_log(
         with open(path, "rb") as f:
             if size > tail_bytes:
                 f.seek(size - tail_bytes)
-                # Skip the partial first line unless the window has no newline
-                # at all (readline() would eat everything).
-                probe = f.tell()
-                if not f.readline().endswith(b"\n") and f.tell() >= size:
-                    f.seek(probe)
+                # The window starts inside a line. Always discard that first fragment,
+                # including when the line is longer than the whole window (then the safe
+                # result is empty). Preserving a newline-free fragment can turn a marker
+                # embedded mid-line into an apparent whole-line marker at byte zero.
+                f.readline()
             return f.read().decode("utf-8", errors="replace")
     except OSError:
         return None
@@ -4439,12 +5102,106 @@ from hermes_cli.kanban_db_dispatch import (
     DEFAULT_FAILURE_LIMIT,
     DEFAULT_RATE_LIMIT_COOLDOWN_SECONDS,
     DispatchResult,
+    _ReclaimAbortForLiveWorker,
     _clear_failure_counter,
     _defer_reclaim_for_live_worker,
+    _isolate_fenced_row,
     _pid_alive,
     _record_task_failure,
+    _recovery_owned_here,
     _terminate_reclaimed_worker,
     _worker_alive,
     _worker_survived_termination,
     _worker_terminal_timeout_env,
 )
+
+
+# ---- BEGIN PLUGIN-COMPAT (revert-scheduled; see COMPAT_MANIFEST.md) ----
+# Names external plugins imported from this module before the Sep 2026 decomposition.
+# Internal code MUST NOT use these (scripts/check_compat_pointers.py fails CI if it does).
+# The whole block is removed by reverting the commit that added it.
+from typing import Mapping  # noqa: F401,E402
+from dataclasses import field  # noqa: F401,E402
+import hashlib  # noqa: F401,E402
+import random  # noqa: F401,E402
+import shutil  # noqa: F401,E402
+import threading  # noqa: F401,E402
+
+DEFAULT_SPAWN_FAILURE_LIMIT = DEFAULT_FAILURE_LIMIT
+
+def parent_results(conn: sqlite3.Connection, task_id: str) -> list[tuple[str, Optional[str]]]:
+    """Return ``(parent_id, result)`` for every done parent of ``task_id``."""
+    rows = conn.execute(
+        """
+        SELECT t.id AS id, t.result AS result
+        FROM tasks t
+        JOIN task_links l ON l.parent_id = t.id
+        WHERE l.child_id = ? AND t.status = 'done'
+        ORDER BY t.completed_at ASC
+        """,
+        (task_id,),
+    ).fetchall()
+    return [(r["id"], r["result"]) for r in rows]
+
+
+_PLUGIN_COMPAT_LAZY = {
+    'DEFAULT_BUSY_TIMEOUT_MS': ('hermes_cli.kanban_db_connect', 'DEFAULT_BUSY_TIMEOUT_MS'),
+    'DEFAULT_LOG_BACKUP_COUNT': ('hermes_cli.kanban_db_dispatch', 'DEFAULT_LOG_BACKUP_COUNT'),
+    'DEFAULT_LOG_ROTATE_BYTES': ('hermes_cli.kanban_db_dispatch', 'DEFAULT_LOG_ROTATE_BYTES'),
+    'DERIVED_MAX_IN_PROGRESS_CEILING': ('hermes_cli.kanban_db_dispatch', 'DERIVED_MAX_IN_PROGRESS_CEILING'),
+    'DERIVED_MAX_IN_PROGRESS_FLOOR': ('hermes_cli.kanban_db_dispatch', 'DERIVED_MAX_IN_PROGRESS_FLOOR'),
+    'KANBAN_TERMINAL_TIMEOUT_GRACE_SECONDS': ('hermes_cli.kanban_db_dispatch', 'KANBAN_TERMINAL_TIMEOUT_GRACE_SECONDS'),
+    'KanbanDbCorruptError': ('hermes_cli.kanban_db_connect', 'KanbanDbCorruptError'),
+    'MEMORY_GUARD_MB_PER_WORKER': ('hermes_cli.kanban_db_dispatch', 'MEMORY_GUARD_MB_PER_WORKER'),
+    'RepairResult': ('hermes_cli.kanban_db_connect', 'RepairResult'),
+    'add_notify_sub': ('hermes_cli.kanban_db_notify', 'add_notify_sub'),
+    'advance_notify_cursor': ('hermes_cli.kanban_db_notify', 'advance_notify_cursor'),
+    'check_respawn_guard': ('hermes_cli.kanban_db_dispatch', 'check_respawn_guard'),
+    'claim_unseen_events_for_sub': ('hermes_cli.kanban_db_notify', 'claim_unseen_events_for_sub'),
+    'configured_max_in_progress': ('hermes_cli.kanban_db_dispatch', 'configured_max_in_progress'),
+    'connect': ('hermes_cli.kanban_db_connect', 'connect'),
+    'connect_closing': ('hermes_cli.kanban_db_connect', 'connect_closing'),
+    'count_notify_subs': ('hermes_cli.kanban_db_notify', 'count_notify_subs'),
+    'count_running_tasks': ('hermes_cli.kanban_db_dispatch', 'count_running_tasks'),
+    'count_placeholder_ready': ('hermes_cli.kanban_db_dispatch', 'count_placeholder_ready'),
+    'count_placeholder_review': ('hermes_cli.kanban_db_dispatch', 'count_placeholder_review'),
+    'count_running_tasks_other_boards': ('hermes_cli.kanban_db_dispatch', 'count_running_tasks_other_boards'),
+    'count_spawnable_ready': ('hermes_cli.kanban_db_dispatch', 'count_spawnable_ready'),
+    'count_spawnable_review': ('hermes_cli.kanban_db_dispatch', 'count_spawnable_review'),
+    'derive_default_max_in_progress': ('hermes_cli.kanban_db_dispatch', 'derive_default_max_in_progress'),
+    'detect_crashed_workers': ('hermes_cli.kanban_db_dispatch', 'detect_crashed_workers'),
+    'detect_stale_running': ('hermes_cli.kanban_db_dispatch', 'detect_stale_running'),
+    'dispatch_once': ('hermes_cli.kanban_db_dispatch', 'dispatch_once'),
+    'enforce_max_runtime': ('hermes_cli.kanban_db_dispatch', 'enforce_max_runtime'),
+    'has_spawnable_ready': ('hermes_cli.kanban_db_dispatch', 'has_spawnable_ready'),
+    'has_spawnable_review': ('hermes_cli.kanban_db_dispatch', 'has_spawnable_review'),
+    'heartbeat_worker': ('hermes_cli.kanban_db_dispatch', 'heartbeat_worker'),
+    'is_dispatch_enabled_profile': ('hermes_cli.kanban_db_dispatch', 'is_dispatch_enabled_profile'),
+    'is_placeholder_profile': ('hermes_cli.kanban_db_dispatch', 'is_placeholder_profile'),
+    'list_notify_subs': ('hermes_cli.kanban_db_notify', 'list_notify_subs'),
+    'purge_stale_done_notify_subs': ('hermes_cli.kanban_db_notify', 'purge_stale_done_notify_subs'),
+    'reap_worker_zombies': ('hermes_cli.kanban_db_dispatch', 'reap_worker_zombies'),
+    'reconcile_orphaned_running': ('hermes_cli.kanban_db_dispatch', 'reconcile_orphaned_running'),
+    'remove_notify_sub': ('hermes_cli.kanban_db_notify', 'remove_notify_sub'),
+    'repair_db': ('hermes_cli.kanban_db_connect', 'repair_db'),
+    'resolve_max_in_progress': ('hermes_cli.kanban_db_dispatch', 'resolve_max_in_progress'),
+    'resolve_workspace': ('hermes_cli.kanban_db_workspace', 'resolve_workspace'),
+    'review_dispatch_enabled': ('hermes_cli.kanban_db_dispatch', 'review_dispatch_enabled'),
+    'rewind_notify_cursor': ('hermes_cli.kanban_db_notify', 'rewind_notify_cursor'),
+    'run_daemon': ('hermes_cli.kanban_db_dispatch', 'run_daemon'),
+    'set_branch_name': ('hermes_cli.kanban_db_workspace', 'set_branch_name'),
+    'set_workspace_path': ('hermes_cli.kanban_db_workspace', 'set_workspace_path'),
+    'unseen_events_for_sub': ('hermes_cli.kanban_db_notify', 'unseen_events_for_sub'),
+    'worker_log_rotation_config': ('hermes_cli.kanban_db_dispatch', 'worker_log_rotation_config'),
+}
+
+
+def __getattr__(name):  # PEP 562 — lazy so no import cycles
+    target = _PLUGIN_COMPAT_LAZY.get(name)
+    if target is None:
+        raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+    import importlib
+    from hermes_cli.plugin_compat import warn_once
+    warn_once(__name__, name, *target)
+    return getattr(importlib.import_module(target[0]), target[1])
+# ---- END PLUGIN-COMPAT ----

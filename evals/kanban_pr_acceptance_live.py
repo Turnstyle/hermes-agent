@@ -40,7 +40,8 @@ with tempfile.TemporaryDirectory(prefix='hermes-pr-live-') as home:
             for outcome in ('failure', 'cancelled', 'timed_out', 'success'):
                 state.update(conclusion=outcome)
                 tid = create(conn, 'PR acceptance live')
-                accepted = kb.complete_task(conn, tid, metadata={'published_pr': 'https://github.com/acme/repo/pull/7'})
+                accepted = kb.complete_task(conn, tid, result='probe complete',
+                                            metadata={'published_pr': 'https://github.com/acme/repo/pull/7'})
                 row = conn.execute("SELECT payload FROM task_events WHERE task_id=? AND kind='pr_acceptance' ORDER BY id DESC", (tid,)).fetchone()
                 receipt = json.loads(row[0]) if row else None
                 reports.append({'case': outcome, 'accepted': accepted, 'status': kb.get_task(conn, tid).status, 'receipt': receipt})
@@ -54,7 +55,8 @@ with tempfile.TemporaryDirectory(prefix='hermes-pr-live-') as home:
                         kb.unblock_task(other, tid)
                         state['replacement'] = kb.claim_task(other, tid).current_run_id
                 state.update(conclusion=outcome, race=reclaim)
-                accepted = kb.complete_task(conn, tid, expected_run_id=run_id, metadata={'published_pr': 'https://github.com/acme/repo/pull/7'})
+                accepted = kb.complete_task(conn, tid, result='probe complete', expected_run_id=run_id,
+                                            metadata={'published_pr': 'https://github.com/acme/repo/pull/7'})
                 reports.append({'case': 'CAS-'+outcome, 'accepted': accepted, 'run_id': kb.get_task(conn, tid).current_run_id,
                     'receipts': conn.execute("SELECT count(*) FROM task_events WHERE task_id=? AND kind='pr_acceptance'", (tid,)).fetchone()[0]})
                 del state['race']

@@ -5,6 +5,8 @@ state.db as an untitled `cli` row — the desktop sidebar then rendered one entr
 per attempt, labeled with the worker's own prompt.
 """
 
+from tests.hermes_cli.kanban_spawn_helpers import claim_for_spawn
+
 import os
 
 import pytest
@@ -58,7 +60,7 @@ def test_worker_spawn_tags_session_source_kanban(monkeypatch, tmp_path):
     workspace = str(tmp_path / "ws")
     os.makedirs(workspace, exist_ok=True)
 
-    kbd._default_spawn(task, workspace)
+    kbd._default_spawn(claim_for_spawn(task), workspace)
 
     assert captured["env"]["HERMES_SESSION_SOURCE"] == "kanban"
 
