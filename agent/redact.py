@@ -4,11 +4,14 @@ Short tokens (< 18 chars) are fully masked; longer ones keep the first 6 and
 last 4 characters for debuggability.
 """
 
+import base64
 import logging
+import math
 import os
 import re
 import shlex
 import threading
+from collections import Counter
 from urllib.parse import unquote_plus
 
 # Shared with agent/file_safety's read-block list so the two defenses can't
@@ -379,6 +382,122 @@ def _key_has_secret_keyword(key: str) -> bool:
     return _has_word_bounded_keyword(key, _KEY_KEYWORD_RE)
 
 
+_UUID_RE = re.compile(r"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$")
+_EXPLICIT_SHA_KEY_RE = re.compile(
+    r"(?:^|[ _.\-])(?:sha|sha1|sha256|sha512|commit|git_tree|parent|rev|tree|object|digest|checksum|fingerprint|etag|hash)(?:[ _.\-]|$)",
+    re.IGNORECASE,
+)
+_STANDALONE_B64_CANDIDATE_RE = re.compile(
+    r"(?<![A-Za-z0-9_+\/=-])([A-Za-z0-9_+\/=-]{40,})(?![A-Za-z0-9_+\/=-])"
+)
+
+
+def _is_uuid(val: str) -> bool:
+    return bool(_UUID_RE.match(val))
+
+
+def _is_explicit_sha_key(key: str) -> bool:
+    return bool(_EXPLICIT_SHA_KEY_RE.search(key))
+
+
+def _shannon_entropy(data: str) -> float:
+    if not data:
+        return 0.0
+    counts = Counter(data)
+    total = len(data)
+    return -sum((c / total) * math.log2(c / total) for c in counts.values())
+
+
+def _is_ordinary_base64_text(data: str) -> bool:
+    try:
+        padded = data + "=" * ((4 - len(data) % 4) % 4)
+        raw = None
+        for fn in (base64.b64decode, base64.urlsafe_b64decode):
+            try:
+                raw = fn(padded)
+                break
+            except Exception:
+                pass
+        if not raw or len(raw) < 10:
+            return False
+        try:
+            decoded_str = raw.decode("utf-8")
+        except UnicodeDecodeError:
+            return False
+        printable_count = sum(1 for c in decoded_str if c.isprintable() or c in "\r\n\t")
+        if printable_count / len(decoded_str) < 0.95:
+            return False
+        letters_and_spaces = sum(1 for c in decoded_str if c.isalpha() or c.isspace())
+        if letters_and_spaces / len(decoded_str) > 0.80 and any(c.isspace() for c in decoded_str):
+            return True
+        return False
+    except Exception:
+        return False
+
+
+def _is_inside_url_or_path(text: str, start: int, end: int) -> bool:
+    parts = text[start:end].split("/")
+    if len(parts) >= 3 and all(re.fullmatch(r"[a-z][a-z0-9_.-]{1,24}", p) for p in (parts[0], parts[-1])):
+        return True  # Unambiguous relative path with ordinary directory/file endpoints.
+    if start > 0 and text[start - 1] in ("/", "\\", ".", ":"):
+        return True
+    if end < len(text) and text[end] in ("/", "\\", "."):
+        return True
+    line_start = text.rfind("\n", 0, start) + 1
+    preceding = text[line_start:start]
+    last_word = preceding.split()[-1] if preceding.split() else ""
+    if "://" in last_word or last_word.startswith(("http://", "https://", "gs://", "ftp://", "git@", "file://", "//")):
+        return True
+    if last_word.startswith(("/", "./", "../", "~/")):
+        return True
+    return False
+
+
+def _redact_standalone_high_entropy_base64(text: str, mask_fn) -> str:
+    """Mask standalone high-entropy base64/base64url tokens >= 40 chars.
+
+    Excludes:
+    - Pure hex strings (unkeyed git commit SHAs, digests)
+    - URLs and file paths
+    - UUIDs
+    - Decodable ordinary natural English base64 text
+    Requires:
+    - Length >= 40
+    - Mixed classes: upper, lower, and digit all present
+    - Shannon entropy >= 4.0 bits/char
+    """
+    if len(text) < 40:
+        return text
+
+    def _replace(match: re.Match) -> str:
+        token = match.group(1)
+        # Skip pure hex (unkeyed SHAs and hex digests are preserved)
+        if re.fullmatch(r"[0-9a-fA-F]+", token):
+            return token
+        # Skip if part of URL or file path
+        if _is_inside_url_or_path(text, match.start(1), match.end(1)):
+            return token
+        if token.startswith("/") or token.endswith("/"):
+            return token
+        if token.count("/") >= 2 and all(re.match(r"^[a-z0-9_.-]+$", s) for s in token.split("/")):
+            return token
+        # Skip UUID
+        if _is_uuid(token):
+            return token
+        # Must have mixed classes: upper, lower, digit
+        if not (re.search(r"[a-z]", token) and re.search(r"[A-Z]", token) and re.search(r"[0-9]", token)):
+            return token
+        # Check entropy floor
+        if _shannon_entropy(token) < 4.0:
+            return token
+        # Skip ordinary natural English base64 text
+        if _is_ordinary_base64_text(token):
+            return token
+        return mask_fn(token)
+
+    return _STANDALONE_B64_CANDIDATE_RE.sub(_replace, text)
+
+
 def _looks_like_opaque_credential(value: str) -> bool:
     """Credential-like shape test for ambiguous ``token``/``key`` values, so short
     technical scalars (``CPU``, ``local``) are not masked merely for their key name."""
@@ -411,6 +530,13 @@ def _should_redact_assignment(key: str, value: str, *, check_keyword: bool) -> b
     if value == "***" or value.startswith("«redacted"):
         return False
     if check_keyword and not _key_has_secret_keyword(key):
+        return False
+    # Explicit SHA/commit/digest contexts (e.g. commit_sha, sha256, tree_id, checksum)
+    # are preserved when they do not contain secret keywords (clarifying 40hex ambiguity).
+    if _is_explicit_sha_key(key) and not _key_has_secret_keyword(key):
+        return False
+    # UUIDs and ordinary natural-language base64 text are never secret values
+    if _is_uuid(value) or _is_ordinary_base64_text(value):
         return False
     # A shell rc's ``SSH_AUTH_SOCK=$HOME/.ssh/agent.sock`` is configuration the agent must keep
     # readable; only password-class keys mask a path/variable reference.
@@ -959,6 +1085,8 @@ def redact_sensitive_text(text: str, *, force: bool = False, code_file: bool = F
 
     if not code_file:
         text = _redact_assignments(text, mask_nonreusable=file_read)
+        _b64_sub = _mask_token_nonreusable if file_read else _mask_token
+        text = _redact_standalone_high_entropy_base64(text, mask_fn=_b64_sub)
 
     if "uthorization" in text or "UTHORIZATION" in text:  # cheapest gate over every casing
         text = _AUTH_HEADER_RE.sub(lambda m: m.group(1) + (m.group(2) or "") + _mask_token(m.group(3)), text)

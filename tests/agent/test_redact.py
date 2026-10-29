@@ -19,6 +19,13 @@ def _ensure_redaction_enabled(monkeypatch):
 
 class TestKnownPrefixes:
 
+    def test_relative_mixed_case_entropy_path_is_preserved(self):
+        import random
+        import string
+        segment = "".join(random.Random(7).sample(string.ascii_letters + string.digits, 60))
+        path = "logs/" + segment + "/dump"
+        assert redact_sensitive_text(path) == path
+
     def test_dotted_sk_and_prefixless_zhipu_keys_fully_masked_on_every_surface(self):
         """A key whose body carries dots must never leave a cleartext tail, and the
         prefix-less Zhipu ``id.secret`` shape must mask at all: on the terminal
@@ -1633,3 +1640,100 @@ class TestRedactForEgress:
         from agent import redact as R
         monkeypatch.setattr(R, "redact_sensitive_text", lambda *a, **k: (_ for _ in ()).throw(RuntimeError("boom")))
         assert R.redact_for_egress("sk-live-0123456789abcdef") == R.REDACTION_UNAVAILABLE
+
+
+class TestKeyedHexAndEntropyBase64:
+    """Carried additions for keyed hex >=32, keyed/standalone entropy base64 >=40,
+    with explicit SHA preservation, UUID exclusion, and ordinary base64 text preservation.
+    """
+
+    @staticmethod
+    def _random_hex(length: int) -> str:
+        import secrets
+        chars = "0123456789abcdef"
+        return "".join(secrets.choice(chars) for _ in range(length))
+
+    @staticmethod
+    def _random_b64(length: int, urlsafe: bool = False) -> str:
+        import secrets, string, re
+        alphabet = string.ascii_letters + string.digits + ("-_" if urlsafe else "+/")
+        while True:
+            s = "".join(secrets.choice(alphabet) for _ in range(length))
+            if re.search(r"[a-z]", s) and re.search(r"[A-Z]", s) and re.search(r"[0-9]", s):
+                return s
+
+    def test_keyed_hex_32_and_40_in_secret_context_is_masked(self):
+        fake_32_hex = self._random_hex(32)
+        fake_40_hex = self._random_hex(40)
+        fake_64_hex = self._random_hex(64)
+
+        env_block = f"API_KEY={fake_32_hex}\nTOKEN={fake_40_hex}\nCLIENT_SECRET={fake_64_hex}"
+        redacted = redact_sensitive_text(env_block, force=True)
+        assert fake_32_hex not in redacted
+        assert fake_40_hex not in redacted
+        assert fake_64_hex not in redacted
+
+    def test_explicit_sha_and_digest_contexts_preserved(self):
+        fake_40_hex = self._random_hex(40)
+        fake_64_hex = self._random_hex(64)
+
+        text = (
+            f"commit_sha = {fake_40_hex}\n"
+            f"git_sha: {fake_40_hex}\n"
+            f"sha256 = {fake_64_hex}\n"
+            f"checksum: {fake_64_hex}\n"
+            f"HEAD is at commit {fake_40_hex}\n"
+        )
+        redacted = redact_sensitive_text(text, force=True)
+        assert fake_40_hex in redacted
+        assert fake_64_hex in redacted
+
+    def test_unkeyed_standalone_40hex_preserved(self):
+        fake_40_hex = self._random_hex(40)
+        text = f"Checkout completed for ref {fake_40_hex} successfully."
+        assert redact_sensitive_text(text, force=True) == text
+
+    def test_ambiguity_secret_keyword_protects_key_even_with_sha(self):
+        fake_40_hex = self._random_hex(40)
+        text = f"SECRET_SHA={fake_40_hex}\nAPI_KEY_COMMIT={fake_40_hex}"
+        redacted = redact_sensitive_text(text, force=True)
+        assert fake_40_hex not in redacted
+
+    def test_uuid_preserved(self):
+        uuid_val = "c0a225bb-ea46-4141-8480-ae7d455494de"
+        text = f'USER_ID="{uuid_val}"\n"session_uuid": "{uuid_val}"'
+        redacted = redact_sensitive_text(text, force=True)
+        assert uuid_val in redacted
+
+    def test_keyed_entropy_base64_in_secret_context_masked(self):
+        fake_b64 = self._random_b64(45)
+        fake_b64url = self._random_b64(48, urlsafe=True)
+
+        text = f'MY_SECRET_KEY="{fake_b64}"\n"auth_token": "{fake_b64url}"'
+        redacted = redact_sensitive_text(text, force=True)
+        assert fake_b64 not in redacted
+        assert fake_b64url not in redacted
+
+    def test_standalone_high_entropy_base64_masked(self):
+        fake_b64 = self._random_b64(44)
+        text = f"Found standalone credential token {fake_b64} in output."
+        redacted = redact_sensitive_text(text, force=True)
+        assert fake_b64 not in redacted
+
+    def test_ordinary_base64_english_text_preserved(self):
+        import base64
+        english_bytes = b"This is ordinary English documentation text encoded in base64 format."
+        b64_english = base64.b64encode(english_bytes).decode()
+        text = f"Documentation payload: {b64_english}"
+        redacted = redact_sensitive_text(text, force=True)
+        assert b64_english in redacted
+
+    def test_url_and_path_long_segments_preserved(self):
+        path_segment = self._random_b64(44)
+        url_text = f"Fetching from https://cdn.example.org/blobs/{path_segment} for installation."
+        redacted = redact_sensitive_text(url_text, force=True)
+        assert path_segment in redacted
+
+        path_text = f"Stored at /opt/cache/layers/{path_segment}.tar"
+        redacted_path = redact_sensitive_text(path_text, force=True)
+        assert path_segment in redacted_path
