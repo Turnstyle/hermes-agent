@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from tests.hermes_cli.kanban_spawn_helpers import claim_for_spawn
+
 import json
 import subprocess
 import sys
@@ -24,6 +26,7 @@ def worker_setup(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> tuple[Path,
     monkeypatch.setenv("HERMES_HOME", str(root))
     monkeypatch.setattr(Path, "home", lambda: tmp_path)
     monkeypatch.setattr(kbd, "_resolve_hermes_argv", lambda: ["hermes"])
+    monkeypatch.setattr(kbd, "_live_worker_procs", {})
 
     workspace = tmp_path / "candidate-worktree"
     workspace.mkdir()
@@ -46,7 +49,7 @@ def worker_setup(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> tuple[Path,
         branch_name="wt/t_candidate_restart",
         current_run_id=23,
     )
-    return workspace, task
+    return workspace, claim_for_spawn(task)
 
 
 @pytest.mark.platforms("linux")
@@ -59,6 +62,7 @@ def test_managed_gateway_worker_is_spawned_in_restart_safe_scope(
     captured_cwd: str | None = None
 
     class FakeProc:
+        returncode = None
         pid = 4242
 
     def fake_popen(cmd, **kwargs):
@@ -128,6 +132,7 @@ def test_standalone_dispatcher_keeps_direct_worker_spawn(
     captured_cmd: list[str] = []
 
     class FakeProc:
+        returncode = None
         pid = 4243
 
     # Standalone = no systemd unit at all (CI runners inherit INVOCATION_ID).
@@ -159,6 +164,7 @@ def test_oneshot_unit_dispatcher_scope_wraps_or_warns_never_dooms_silently(
     spawned: list[list[str]] = []
 
     class FakeProc:
+        returncode = None
         pid = 4243
 
     monkeypatch.setattr(subprocess, "Popen", lambda cmd, **kwargs: spawned.append(list(cmd)) or FakeProc())
@@ -174,6 +180,10 @@ def test_oneshot_unit_dispatcher_scope_wraps_or_warns_never_dooms_silently(
     assert spawned[-1][:3] == ["systemd-run", "--user", "--scope"]
     assert f"hermes-worker-kanban-{task.id}-run-{task.current_run_id}" in spawned[-1]
 
+    # The first fake worker has exited; this leg exercises a fresh handoff.
+    from hermes_cli import kanban_db_connect as kbc
+    with kbc.connect_closing() as conn:
+        conn.execute("UPDATE tasks SET worker_pid=NULL WHERE id=?", (task.id,))
     monkeypatch.setattr(process_registry, "_systemd_run_user_scope_available", lambda: False)
     monkeypatch.setattr(process_registry, "_scope_degraded_warned", False)
     with caplog.at_level("WARNING", logger=process_registry.logger.name):

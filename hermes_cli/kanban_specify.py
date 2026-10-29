@@ -76,6 +76,12 @@ class SpecifyOutcome:
     ok: bool
     reason: str = ""
     new_title: Optional[str] = None
+    kept_spec: bool = False
+    sha256: Optional[str] = None
+    hash_encoding: Optional[str] = None
+    status_after: Optional[str] = None
+    committed: bool = False
+    recompute_error: Optional[str] = None
 
 
 def _truncate(text: str, limit: int) -> str:
@@ -232,6 +238,56 @@ def specify_task(
         # Race: promoted/archived between our read and the write.
         return SpecifyOutcome(task_id, False, "task moved out of triage before promotion")
     return SpecifyOutcome(task_id, True, "specified", new_title=new_title)
+
+
+def keep_spec_task(
+    task_id: str,
+    *,
+    expect_sha256: str,
+    author: str,
+) -> SpecifyOutcome:
+    """Specify one triage task by releasing its exact reviewed spec verbatim.
+
+    Why this path exists and guarantees:
+    - Moving a card out of triage must not rewrite instructions a human already
+      reviewed: model-backed specify regenerates title/body, silently replacing
+      human edits; this path bypasses the LLM and releases the reviewed text.
+    - Binds release to exact reviewed bytes via expect_sha256; refuses post-review edits.
+    - Preserves exact bytes: whitespace, trailing newlines, Unicode (ensure_ascii=False),
+      and NULL vs "" are never normalized.
+    - Hash and triage status are verified in the same write transaction as the
+      status change, so a concurrent edit cannot slip between check and write.
+    - Active holds are refused, never cleared.
+    """
+    if not author or not author.strip():
+        return SpecifyOutcome(
+            task_id=task_id,
+            ok=False,
+            reason="author cannot be blank",
+            kept_spec=False,
+            committed=False,
+        )
+
+    clean_author = author.strip()
+    with kbc.connect_closing() as conn:
+        ok, reason, computed_sha256, status_after, committed, recompute_err = kb.keep_spec_triage_task(
+            conn,
+            task_id,
+            expected_sha256=expect_sha256,
+            author=clean_author,
+        )
+
+    return SpecifyOutcome(
+        task_id=task_id,
+        ok=ok,
+        reason=reason,
+        kept_spec=ok,
+        sha256=computed_sha256,
+        hash_encoding=kb.HASH_ENCODING,
+        status_after=status_after,
+        committed=committed,
+        recompute_error=recompute_err,
+    )
 
 
 def list_triage_ids(*, tenant: Optional[str] = None) -> list[str]:

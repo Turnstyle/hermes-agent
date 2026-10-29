@@ -9,17 +9,72 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 import logging
+import io
 import os
 import sys
 import time
 from agent.i18n import t
 from agent.interrupt_compat import request_hard_interrupt
 from contextlib import suppress
+from contextlib import redirect_stdout
 from pathlib import Path
 from typing import Any
 
 # Log-record parity with the origin module.
 logger = logging.getLogger("cli")
+
+
+def _drain_quiet_bot_chat(cli, history) -> None:
+    """Run at most five queued fleet messages as transcript-only Bot Chat turns."""
+    from tools import fleet_message_drain as fmd
+    from tools.bot_mode_dm import _agent_home, _session_title
+    from tools.bot_mode_probe import BOT_CHAT_TITLE
+
+    if _session_title(cli.agent) != BOT_CHAT_TITLE:
+        return
+    config = fmd.drain_config()
+    if config is None:
+        return
+    store = fmd.store_for(config)
+    me = fmd.bot_identity(_agent_home(cli.agent))
+    for _ in range(5):
+        claimed = fmd.claim_next(store, me, limit=config.limit,
+                                 queued_timeout_seconds=config.queued_timeout_seconds)
+        if claimed is None:
+            return
+        try:
+            if not fmd.mark_read(store, claimed):
+                continue
+            text, author, _metadata = fmd.render_input(claimed)
+            author_kwargs = {"turn_author": author} if author is not None else {}
+            with redirect_stdout(io.StringIO()):
+                outcome = cli.agent.run_conversation(
+                    user_message=text, conversation_history=history, **author_kwargs)
+            if isinstance(outcome, dict) and outcome.get("messages"):
+                history = outcome["messages"]
+            _sync = getattr(cli.agent, "session_id", None)
+            if _sync:
+                cli.session_id = _sync
+            settled = (isinstance(outcome, dict) and not outcome.get("failed")
+                       and not outcome.get("partial") and outcome.get("completed") is not False)
+            fmd.finish(store, claimed,
+                       {"status": "settled" if settled else "failed",
+                        "error": outcome.get("error", "") if isinstance(outcome, dict) else "no turn result"},
+                       max_attempts=config.max_attempts)
+            if not settled:
+                return  # Let a later turn retry this doc; do not spend the whole cap on one failure.
+        except BaseException as exc:  # a signal exit must also settle the claim, not leave it 'read'
+            try:
+                # Mirror tui_gateway recover(): an uncertain mark_read leaves pending_fields at
+                # status=read; reconcile first so record_error requeues instead of re-committing a
+                # non-terminal "read" that no future drain would ever query.
+                pending = claimed.pending_fields
+                if not (pending and pending.get("status") == "read"
+                        and not fmd.reconcile_claim(store, claimed)):
+                    fmd.record_error(store, claimed, str(exc), max_attempts=config.max_attempts)
+            except Exception:
+                logger.warning("fleet message drain: could not settle %s", claimed.doc_id, exc_info=True)
+            raise
 
 if TYPE_CHECKING:
     from cli import HermesCLI
@@ -102,11 +157,50 @@ def _run_kanban_goal_loop_q(cli: HermesCLI, first_response: str, run_turn=None, 
         with _kbc.connect_closing() as c:
             _kb.block_task(c, task_id, reason=reason, expected_run_id=worker_run_id)
 
+    from hermes_cli.kanban_budget_handback import handback_budget
+
+    def _handback(reason: str, summary: str) -> bool:
+        with _kbc.connect_closing() as c:
+            return handback_budget(
+                c, task_id, expected_run_id=worker_run_id,
+                claim_lock=os.environ.get("HERMES_KANBAN_CLAIM_LOCK", ""),
+                reason=reason, summary=summary,
+            )
+
+    def _blocked_payload_rows(conn, limit: int):
+        return conn.execute(
+            "SELECT payload FROM task_events WHERE task_id = ? AND kind = 'blocked' "
+            "ORDER BY id DESC LIMIT ?",
+            (task_id, int(limit)),
+        ).fetchall()
+
+    def _block_is_bookkeeping() -> bool:
+        with _kbc.connect_closing() as c:
+            row = _blocked_payload_rows(c, 1)
+            if not row:
+                return False
+            payload = _kb._json_dict(row[0]["payload"])
+            if payload.get("reason") == "initial_status":
+                return True
+            return bool(payload.get("bookkeeping"))
+
+    def _block_reason_unchanged() -> bool:
+        with _kbc.connect_closing() as c:
+            rows = _blocked_payload_rows(c, 2)
+            if len(rows) < 2:
+                return False
+            r0 = str(_kb._json_dict(rows[0]["payload"]).get("reason") or "")
+            r1 = str(_kb._json_dict(rows[1]["payload"]).get("reason") or "")
+            return bool(r0) and r0 == r1
+
     _run_loop(
         task_id=task_id, goal_text=goal_text, run_turn=run_turn or _quiet_turn,
         task_status_fn=_task_status, block_fn=_block,
+        handback_fn=_handback,
         max_turns=task.goal_max_turns or _DEF_TURNS, first_response=first_response or "",
         log=log or (lambda m: logger.info("%s", m)),
+        block_is_bookkeeping_fn=_block_is_bookkeeping,
+        block_reason_unchanged_fn=_block_reason_unchanged,
     )
 
 
@@ -149,8 +243,25 @@ _TERMINAL_PROVIDER_REASONS = frozenset({
 })
 
 
-def _single_query_exit_code(result, *, credentials_rate_limited: bool = False,
-                            credentials_terminal: bool = False) -> int:
+def _session_refusal_exit_code(cli) -> int:
+    """Exit code for a one-shot run refused an active-session slot.
+
+    A Kanban worker refused only by the ``max_concurrent_sessions`` CAP never started its turn:
+    the profile was busy, the task did not fail. It exits ``KANBAN_RATE_LIMIT_EXIT_CODE``
+    (EX_TEMPFAIL) so the dispatcher requeues WITHOUT counting a failure (booked ``profile_busy``
+    when the run-bound busy marker is present, t_76b0d62d). A per-session ownership refusal
+    (another live writer owns the session) or an unprovable registry stays 1: those are not
+    capacity waits. Ported to 0.21.5 from TurnerBook carry c9e7438ede.
+    """
+    if os.environ.get("HERMES_KANBAN_TASK"):
+        from hermes_cli.active_sessions import MAX_CONCURRENT_SESSIONS
+        if getattr(cli, "_active_session_refusal_reason", "") == MAX_CONCURRENT_SESSIONS:
+            from hermes_cli.kanban_db import KANBAN_RATE_LIMIT_EXIT_CODE
+            return KANBAN_RATE_LIMIT_EXIT_CODE
+    return 1
+
+
+def _single_query_exit_code(result, *, credentials_rate_limited: bool = False) -> int:
     """Map a one-shot turn result onto a process exit code, for both `-q` and `-Q`.
 
     0 only when the turn completed; 130 when it was interrupted; 1 when it failed, stopped
@@ -196,6 +307,71 @@ def _single_query_exit_code(result, *, credentials_rate_limited: bool = False,
     return 1
 
 
+def _durable_row_count(cli) -> int | None:
+    """Stored message count of the one-shot's session, or ``None`` when it cannot be read."""
+    session_id = getattr(cli, "session_id", "") or ""
+    db = getattr(cli, "_session_db", None)
+    if db is None or not session_id:
+        return None
+    try:
+        return db.message_count(session_id)
+    except Exception:
+        logger.debug("one-shot row count for %s unavailable", session_id, exc_info=True)
+        return None
+
+
+def _reclaim_session_for_follow_up(cli, deadline: float) -> bool:
+    """Re-take the chat's lease for a notify follow-up, waiting out another writer's turn until ``deadline``."""
+    while not cli._claim_active_session("cli", silent=True):
+        if time.monotonic() >= deadline:
+            return False
+        time.sleep(1.0)
+    return True
+
+
+def _run_single_query_fleet_turn_end_drain(cli) -> None:
+    """Turn-end ``fleet_messages_v1`` query for ``-Q`` Bot Chat (same entry as the TUI post-turn hook)."""
+    from hermes_constants import get_hermes_home
+    from tools import fleet_message_drain as fmd
+
+    triplet = fmd.turn_end_drain_query(get_hermes_home())
+    if triplet is None:
+        return
+    config, store, claimed = triplet
+    if claimed is None:
+        return
+    from agent.interrupt_compat import _accepts_keyword
+
+    if not fmd.mark_read(store, claimed):
+        return
+    text, author, _meta = fmd.render_input(claimed)
+    author_kwargs = (
+        {"turn_author": author}
+        if author is not None and _accepts_keyword(cli.agent.run_conversation, "turn_author")
+        else {}
+    )
+    if not cli._claim_active_session("cli", silent=True):
+        fmd.release(store, claimed)
+        return
+    try:
+        result = cli.agent.run_conversation(
+            user_message=text, conversation_history=cli.conversation_history, **author_kwargs,
+        )
+        if isinstance(result, dict) and result.get("failed"):
+            fmd.finish(
+                store, claimed,
+                {"status": "failed", "error": str(result.get("error") or "failed")},
+                max_attempts=config.max_attempts,
+            )
+        else:
+            fmd.finish(store, claimed, {"status": "settled"}, max_attempts=config.max_attempts)
+    except BaseException as exc:  # a signal exit must also settle the claim, not leave it 'read'
+        fmd.record_error(store, claimed, str(exc), max_attempts=config.max_attempts)
+        raise
+    finally:
+        cli._release_active_session()
+
+
 def _run_quiet_single_query(cli, effective_query, emitter=None):
     """Quiet (-Q) one-shot turn: run, print the response (stderr for errors/session_id), then sys.exit with the automation exit code.
     With a ``StreamJsonEmitter`` the final answer and the exit line become the terminal ``result`` JSONL record instead.
@@ -203,12 +379,16 @@ def _run_quiet_single_query(cli, effective_query, emitter=None):
     Nested Bot Mode notifies bind this session's key (not the dispatcher's) and resume in-process
     before stdout is printed, so a teammate reply is the quiet run's final answer rather than a
     stranded receipt."""
-    from cli import _emit_interrupted_session_end, _run_kanban_goal_loop_q, _single_query_exit_code, _sync_cli_session_id_from_agent
+    from cli import (
+        _emit_interrupted_session_end, _handed_off_session_ids, _run_kanban_goal_loop_q, _single_query_exit_code,
+        _sync_cli_session_id_from_agent,
+    )
     from agent.interrupt_compat import _accepts_keyword
     from agent.turn_author import take_turn_author_from_env
     from hermes_cli.quiet_single_query import (
-        adopt_unanswered_turn, bind_quiet_session_key, continue_quiet_notify_completions,
-        exit_single_query, quiet_notify_linger_seconds, take_turn_report_path, write_turn_report,
+        FOLLOW_UP_NOT_ACCEPTED, adopt_unanswered_turn, bind_quiet_session_key,
+        continue_quiet_notify_completions, exit_single_query, quiet_notify_linger_seconds,
+        take_turn_report_path, write_turn_report,
     )
 
     author = take_turn_author_from_env()
@@ -267,20 +447,50 @@ def _run_quiet_single_query(cli, effective_query, emitter=None):
             )
 
         _report_turn(result)
+        owns_chat = True
         if isinstance(result, dict) and not result.get("failed"):
             history = result.get("messages") or cli.conversation_history
+            linger_budget = quiet_notify_linger_seconds()
+            linger_deadline = time.monotonic() + linger_budget
+            # The lease fences transcript WRITERS; the idle linger below writes nothing, so holding
+            # it there refused every other delivery into this chat for the whole linger budget
+            # ("opened by cli 10m ago"). Kanban goal mode keeps it: its loop below runs more turns.
+            idle_release = os.environ.get("HERMES_KANBAN_GOAL_MODE") != "1"
+            rows_at_release = None
+            last_follow = None
+            if idle_release:
+                rows_at_release = _durable_row_count(cli)
+                cli._release_active_session()
 
             def _follow_up(text):
-                nonlocal history
-                follow = cli.agent.run_conversation(
-                    user_message=text, conversation_history=history, **author_kwargs,
-                )
-                if isinstance(follow, dict) and follow.get("messages"):
-                    history = follow["messages"]
-                # Same sync contract as the main turn: a compression rotation during a
-                # follow-up must not leave a stale id on the exit line / drain key.
-                _sync_cli_session_id_from_agent(cli)
-                return follow
+                nonlocal history, rows_at_release, last_follow
+                if idle_release:
+                    if not _reclaim_session_for_follow_up(cli, linger_deadline):
+                        logger.warning("Notify follow-up for session %s not run: another surface held the "
+                                       "chat through the linger budget", getattr(cli, "session_id", "") or "")
+                        return FOLLOW_UP_NOT_ACCEPTED
+                    rows = _durable_row_count(cli)
+                    if rows is not None and rows_at_release is not None and rows != rows_at_release:
+                        # Another writer's turns landed while this process was idle: continue from the
+                        # stored transcript (the resume path), never the stale in-memory one.
+                        restored = cli._session_db.get_messages_as_conversation(
+                            cli.session_id, repair_alternation=True)
+                        history = [m for m in restored if m.get("role") != "session_meta"] or history
+                try:
+                    follow = cli.agent.run_conversation(
+                        user_message=text, conversation_history=history, **author_kwargs,
+                    )
+                    if isinstance(follow, dict) and follow.get("messages"):
+                        history = follow["messages"]
+                    # Same sync contract as the main turn: a compression rotation during a
+                    # follow-up must not leave a stale id on the exit line / drain key.
+                    _sync_cli_session_id_from_agent(cli)
+                    last_follow = follow
+                    return follow
+                finally:
+                    if idle_release:
+                        rows_at_release = _durable_row_count(cli)
+                        cli._release_active_session()
 
             # One shared linger budget for the whole run: the loop below and the later
             # _wait_for_oneshot_background_completions pass must not each wait the full
@@ -293,15 +503,29 @@ def _run_quiet_single_query(cli, effective_query, emitter=None):
                     getattr(cli, "session_id", "") or "",
                     _follow_up,
                     owns_event=getattr(cli, "_owns_process_notification", None),
-                    linger_budget=quiet_notify_linger_seconds(),
+                    linger_budget=linger_budget,
                 )
             finally:
                 cli._quiet_notify_linger_done = True
+            if idle_release and not cli._claim_active_session("cli", silent=True):
+                # Another writer holds the chat now; ending its row here is the #88234 class
+                # (a leg vanishes from history). That writer's own exit finalizes it.
+                _handed_off_session_ids.add(getattr(cli, "session_id", None))
+                owns_chat = False
             if isinstance(continued, dict):
                 result = continued
                 # A teammate's reply displaced the answer this run prints; tell the spawner.
                 _report_turn(result)
         response = result.get("final_response", "") if isinstance(result, dict) else str(result)
+        # Without the lease this process's history is stale and another writer owns the chat: leave the
+        # queued fleet messages for that owner's own turn-end drain.
+        if owns_chat and _single_query_exit_code(result) == 0:
+            try:
+                _drain_quiet_bot_chat(cli, history)
+            except Exception as exc:
+                from tools.fleet_message_drain import NoGoogleCredentials
+                if not isinstance(exc, NoGoogleCredentials):
+                    logger.warning("fleet message drain: quiet Bot Chat turn skipped: %s", exc)
     # Surface backend errors that produced no visible output (e.g. invalid model slug
     # -> provider 4xx) on stderr so piped stdout stays clean.
     if emitter is not None:
@@ -340,6 +564,9 @@ def _run_quiet_single_query(cli, effective_query, emitter=None):
     if emitter is None:
         print(f"\nsession_id: {cli.session_id}", file=sys.stderr)
 
+    # The live -Q drain is _drain_quiet_bot_chat above (up to five docs, reconcile an
+    # uncertain mark_read). A second exit query would claim the same queue again.
+    _exit_code = _single_query_exit_code(result)
     if emitter is not None:
         _exit_code = emitter.emit_result(result, session_id=cli.session_id or "", exit_code=_exit_code)
     exit_single_query(_exit_code)
@@ -512,96 +739,75 @@ def _run_single_query_mode(cli, query, image, quiet, oneshot, stream_json: bool 
     # isn't engaged) and takes the deterministic approvals.single_query_mode path instead of waiting the
     # full timeout. See #86878.
     os.environ["HERMES_SINGLE_QUERY_SESSION"] = "1"
-    from hermes_cli.quiet_single_query import exit_single_query
-    if os.environ.get("HERMES_KANBAN_TASK"):
-        from tools.kanban_tools import register_current_worker_from_env
-        if not register_current_worker_from_env():
-            # No exit trailer: the task log now belongs to the run that replaced this one.
-            print(t("cli.single_query.kanban_run_reclaimed"), file=sys.stderr)
-            sys.exit(0)
-    if not cli._claim_active_session("cli", stderr=bool(quiet)):
-        exit_single_query(1)
-    try:
-        query, single_query_images = _collect_query_images(query, image)
-        single_query_image_urls = _collect_kanban_task_images(single_query_images)
-        from hermes_cli.observability.shared_metrics_startup import record_cli_one_shot_ready
-        record_cli_one_shot_ready()
-        if quiet:
-            # Quiet mode: suppress banner, spinner, tool previews.
-            cli.tool_progress_mode = "off"
-            emitter = None
-            if stream_json:
-                # Built BEFORE credentials/agent init so a failed start still closes the protocol
-                # (init + result) instead of exiting 1 with an empty stdout.
-                from hermes_cli.stream_json import StreamJsonEmitter
-                emitter = StreamJsonEmitter(model=getattr(cli, "model", "") or "", session_id=cli.session_id or "")
-            if cli._ensure_runtime_credentials():
-                effective_query: Any = _route_single_query_images(
-                    cli, query, query, single_query_images, single_query_image_urls
-                )
-                turn_route = cli._resolve_turn_agent_config(effective_query)
-                if turn_route["signature"] != cli._active_agent_route_signature:
-                    cli.agent = None
-                if cli._init_agent(
-                    model_override=turn_route["model"],
-                    runtime_override=turn_route["runtime"],
-                    request_overrides=turn_route.get("request_overrides"),
-                ):
-                    _configure_quiet_agent(cli.agent)
-                    if emitter is not None:
-                        emitter.attach(cli.agent)
-                    _run_quiet_single_query(cli, effective_query, emitter=emitter)
+    from hermes_cli.quiet_single_query import exit_single_query, single_query_hard_exit, write_worker_busy_marker
+    # Every one-shot leaves via os._exit once cleanup ran: interpreter teardown can block forever on
+    # the import lock held by a background thread (hung rc=75 Kanban workers, Sheldon 2026-09-28; a
+    # Bot Chat DM child that held its recipient's turn lock for 10h14m, 2026-10-03).
+    with single_query_hard_exit():
+        if os.environ.get("HERMES_KANBAN_TASK"):
+            from tools.kanban_tools import register_current_worker_from_env
+            if not register_current_worker_from_env():
+                # No exit trailer: the task log now belongs to the run that replaced this one.
+                print(t("cli.single_query.kanban_run_reclaimed"), file=sys.stderr)
+                sys.exit(0)
+        if not cli._claim_active_session("cli", stderr=bool(quiet)):
+            refusal_code = _session_refusal_exit_code(cli)
+            if refusal_code != 1:
+                # Capacity refusal only: the dispatcher books this run ``profile_busy`` (t_76b0d62d).
+                write_worker_busy_marker(getattr(cli, "_active_session_refusal_reason", ""))
+            exit_single_query(refusal_code)
+        try:
+            query, single_query_images = _collect_query_images(query, image)
+            single_query_image_urls = _collect_kanban_task_images(single_query_images)
+            if quiet:
+                # Quiet mode: suppress banner, spinner, tool previews.
+                cli.tool_progress_mode = "off"
+                emitter = None
+                if stream_json:
+                    # Built BEFORE credentials/agent init so a failed start still closes the protocol
+                    # (init + result) instead of exiting 1 with an empty stdout.
+                    from hermes_cli.stream_json import StreamJsonEmitter
+                    emitter = StreamJsonEmitter(model=getattr(cli, "model", "") or "", session_id=cli.session_id or "")
+                if cli._ensure_runtime_credentials():
+                    effective_query: Any = _route_single_query_images(
+                        cli, query, query, single_query_images, single_query_image_urls
+                    )
+                    turn_route = cli._resolve_turn_agent_config(effective_query)
+                    if turn_route["signature"] != cli._active_agent_route_signature:
+                        cli.agent = None
+                    if cli._init_agent(
+                        model_override=turn_route["model"],
+                        runtime_override=turn_route["runtime"],
+                        request_overrides=turn_route.get("request_overrides"),
+                    ):
+                        _configure_quiet_agent(cli.agent)
+                        if emitter is not None:
+                            emitter.attach(cli.agent)
+                        _run_quiet_single_query(cli, effective_query, emitter=emitter)
 
-            fail_code = _single_query_exit_code(
-                None, credentials_rate_limited=getattr(cli, "_credentials_rate_limited", False),
-                credentials_terminal=getattr(cli, "_credentials_terminal", False))
-            if emitter is not None:
-                emitter.emit_result({"failed": True, "error": "credentials or agent init failed"},
-                                    session_id=cli.session_id or "", exit_code=fail_code)
-            exit_single_query(fail_code)  # credentials or agent init failed
-        # No welcome banner (~420 ms cold); session id / resume hint come from _print_exit_summary().
-        _query_label = query or ("[image attached]" if single_query_images else "")
-        if _query_label:
-            cli.console.print(f"[bold blue]{t('cli.single_query.query_label')}[/] {_query_label}")
-        cli._show_security_advisories()
-        response = cli.chat(query, images=single_query_images or None)
-        # Kanban worker: a failed-silently turn used to end the run as rc=0 with no
-        # terminal kanban call, so the dispatcher booked a protocol violation and
-        # cold-restarted the task from scratch. Retry the authorised turn IN PLACE
-        # (see agent/kanban_turn_recovery.py) and CARRY THE RECOVERED RESPONSE: the
-        # goal judge below must evaluate the deliverable of the latest settled turn,
-        # never the stale provider error of the turn recovery replaced (re-review P2).
-        from agent.kanban_turn_recovery import recover_failed_kanban_turns
-
-        def _nonquiet_recover_turn(nudge):
-            nonlocal response
-            response = cli.chat(nudge)
-            return response
-
-        recover_failed_kanban_turns(
-            _nonquiet_recover_turn,
-            lambda: getattr(cli, "_last_turn_result", None),
-            emit=lambda msg: print(msg, file=sys.stderr, flush=True),
-        )
-        # Kanban goal_mode on the `-q` path: same judge loop as `-Q`, but each follow-up turn
-        # runs through cli.chat so the worker log keeps its live tool feed (the dispatcher
-        # used to force -Q here, which left goal_mode cards with a blank Worker log).
-        # Gated on the post-recovery disposition exactly like the `-Q` block: a result that
-        # remains failed/unfinished — recovery exhausted or DENIED (claim lost, quota wall,
-        # interrupt, terminal settlement) — must reach the shared exit path below with zero
-        # further model entry, because goal_run_status() checks run identity only and would
-        # otherwise continue under an authority this process can no longer prove.
-        if os.environ.get("HERMES_KANBAN_GOAL_MODE") == "1" and _single_query_exit_code(cli._last_turn_result) == 0:
-            try:
-                _run_kanban_goal_loop_chat(cli, response or "")
-            except Exception as _goal_exc:
-                logger.debug("kanban goal loop failed: %s", _goal_exc)
-        cli._print_exit_summary(clear_screen=False)
-        # Same exit contract as `-Q`: scripts and the Kanban dispatcher read the outcome from
-        # the exit code. This path used to fall through to an implicit 0 for every outcome.
-        exit_single_query(_single_query_exit_code(
-            cli._last_turn_result,
-            credentials_rate_limited=getattr(cli, "_credentials_rate_limited", False),
-            credentials_terminal=getattr(cli, "_credentials_terminal", False)))
-    finally:
-        _finalize_single_query(cli)
+                fail_code = _single_query_exit_code(
+                    None, credentials_rate_limited=getattr(cli, "_credentials_rate_limited", False))
+                if emitter is not None:
+                    emitter.emit_result({"failed": True, "error": "credentials or agent init failed"},
+                                        session_id=cli.session_id or "", exit_code=fail_code)
+                exit_single_query(fail_code)  # credentials or agent init failed
+            # No welcome banner (~420 ms cold); session id / resume hint come from _print_exit_summary().
+            _query_label = query or ("[image attached]" if single_query_images else "")
+            if _query_label:
+                cli.console.print(f"[bold blue]Query:[/] {_query_label}")
+            cli._show_security_advisories()
+            response = cli.chat(query, images=single_query_images or None)
+            # Kanban goal_mode on the `-q` path: same judge loop as `-Q`, but each follow-up turn
+            # runs through cli.chat so the worker log keeps its live tool feed (the dispatcher
+            # used to force -Q here, which left goal_mode cards with a blank Worker log).
+            if os.environ.get("HERMES_KANBAN_GOAL_MODE") == "1":
+                try:
+                    _run_kanban_goal_loop_chat(cli, response or "")
+                except Exception as _goal_exc:
+                    logger.debug("kanban goal loop failed: %s", _goal_exc)
+            cli._print_exit_summary(clear_screen=False)
+            # Same exit contract as `-Q`: scripts and the Kanban dispatcher read the outcome from
+            # the exit code. This path used to fall through to an implicit 0 for every outcome.
+            exit_single_query(_single_query_exit_code(cli._last_turn_result))
+        finally:
+            _finalize_single_query(cli)

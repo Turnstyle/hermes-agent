@@ -455,6 +455,26 @@ def _run_post_turn_followups(
                 return  # the user pressed Stop; the goal resumes after their next prompt
             session["running"] = True
         _dispatch_followup_turn(rid, sid, session, goal_followup, "goal continuation dispatch")
+    # A queued teammate DM (live-owner mailbox) goes ahead of process-completion follow-ups. The
+    # poller only claims it at an idle boundary, and a busy Bot Chat chains completion turns
+    # back-to-back from here, so without this a DM waited behind every completion and never ran
+    # while the owner stayed busy (t_78c79c6b). The DM turn's own follow-ups drain the completions.
+    try:
+        with _session_profile_runtime_scope(session):
+            if _poll_bot_live_delivery_once(sid, session):
+                return
+    except Exception as _dm_exc:
+        _hook_failure("bot mailbox claim", _dm_exc)
+    # Queued fleet_messages_v1 docs (Mission Control registry: DMs / notify wakes that hit target_busy
+    # while this bot was mid-turn). The idle poller also calls the same admission-guarded drain.
+    try:
+        with _session_profile_runtime_scope(session):
+            if _drain_fleet_messages_once(sid, session):
+                return
+    except Exception as _fm_exc:
+        from tools.fleet_message_drain import NoGoogleCredentials
+        if not isinstance(_fm_exc, NoGoogleCredentials):
+            _hook_failure("fleet message drain", _fm_exc)
     # Safety net for completion events that arrived mid-turn.  Ownership is positive-proof
     # and compression-chain aware (same fail-closed gate as the poller): session B must
     # not consume session A's event.  Unclaimable events are requeued for the poller.
@@ -1006,35 +1026,42 @@ def _complete_turn_payload(session: dict, st: _TurnRun, status_note: str | None,
 
 
 def _recover_turn_exception(sid: str, session: dict, st: _TurnRun, e: BaseException) -> None:
-    """Except-path of the turn: crash log, history restore, terminal error frame."""
-    import traceback
-    with contextlib.suppress(Exception):
-        os.makedirs(os.path.dirname(_CRASH_LOG), exist_ok=True)
-        with open(_CRASH_LOG, "a", encoding="utf-8") as f:
-            f.write(
-                f"\n=== turn-dispatcher exception · "
-                f"{time.strftime('%Y-%m-%d %H:%M:%S')} · sid={sid} ===\n")
-            f.write(traceback.format_exc())
-    print(f"[gateway-turn] {type(e).__name__}: {e}", file=sys.stderr, flush=True)
-    # A finalizer exception can leave in-memory history at the turn-start snapshot.
-    _restore_agent_history_after_turn_error(session, st.agent)
+    """Except-path of the turn: classify pre-send refusal, otherwise retain crash evidence."""
+    from agent.agent_runtime_helpers import FallbackRouteUnavailableError
+    route_refused = isinstance(e, FallbackRouteUnavailableError)
+    error = e.user_message if route_refused else e
+    error_surface = {"layer": "runtime", "code": "fallback_route_unavailable", "retryable": True} if route_refused else None
+    if route_refused:
+        logger.info("Pre-send fallback route refused in session %s", sid)
+    else:
+        import traceback
+        with contextlib.suppress(Exception):
+            os.makedirs(os.path.dirname(_CRASH_LOG), exist_ok=True)
+            with open(_CRASH_LOG, "a", encoding="utf-8") as f:
+                f.write(
+                    f"\n=== turn-dispatcher exception · "
+                    f"{time.strftime('%Y-%m-%d %H:%M:%S')} · sid={sid} ===\n")
+                f.write(traceback.format_exc())
+        print(f"[gateway-turn] {type(e).__name__}: {e}", file=sys.stderr, flush=True)
+        # No agent turn ran on a refusal: do not replace history with stale agent messages.
+        _restore_agent_history_after_turn_error(session, st.agent)
     if st.terminal_callback is not None and not st.receipt_attempted:
         st.receipt_attempted = True
         try:
-            st.terminal_callback({"status": "failed", "text": "", "error": str(e)})
+            st.terminal_callback({"status": "failed", "text": "", "error": str(error)})
             st.receipt_committed = True
         except Exception:
             logger.exception("hosted room terminal receipt commit failed")
     try:
         # Same terminal error frame shape as the returned-error path.
-        _emit_terminal_turn_error(sid, session, e, retire_marker=st.receipt_committed)
+        _emit_terminal_turn_error(sid, session, error, error_surface=error_surface, retire_marker=st.receipt_committed)
         st.error_retained = True
-        st.error_detail = _turn_failure_detail(e, type(e).__name__, st.prompt_text)
+        st.error_detail = _turn_failure_detail(error, type(e).__name__, st.prompt_text)
     except Exception as emit_exc:
         print(
             f"[gateway-turn] terminal error emit failed: {type(emit_exc).__name__}: {emit_exc}",
             file=sys.stderr, flush=True)
-        _emit("error", sid, {"message": str(e)})
+        _emit("error", sid, {"message": str(error)})
 
 
 def _release_turn_scopes(sid: str, session: dict, st: _TurnRun) -> None:

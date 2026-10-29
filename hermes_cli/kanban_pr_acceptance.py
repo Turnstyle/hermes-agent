@@ -18,6 +18,12 @@ from urllib.parse import quote
 
 _REPO = re.compile(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+")
 _PR = re.compile(r"https://github\.com/([A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+)/pull/([1-9][0-9]*)")
+_SHA = re.compile(r"[0-9a-f]{40}")
+_PLAN_LIMIT_MESSAGE = "Upgrade to GitHub Pro or make this repository public to enable this feature."
+
+
+class _RulesPlanLimited(ValueError):
+    """The branch-rules endpoint is unavailable on this repository's plan."""
 
 
 def validate_contract(value: str | None) -> str:
@@ -43,6 +49,21 @@ def _api(endpoint: str, *, query: str | None = None, paginate: bool = False,
         # 401/403/404 = the login cannot see this repository (wrong profile identity
         # or missing grant), not a transient API failure. Persist only the status
         # code + endpoint, never gh's stderr (credentials/host details).
+        # The exact rules-plan refusal is evidence for the governed merged fallback,
+        # not an identity refusal. All other authorization failures stay fail closed.
+        if "/rules/branches/" in endpoint and "(HTTP 403)" in (exc.stderr or ""):
+            try:
+                body = json.loads(exc.stdout)
+            except (ValueError, TypeError):
+                body = None
+            if isinstance(body, list) and len(body) == 1:
+                body = body[0]
+            if isinstance(body, dict) and body.get("message") == _PLAN_LIMIT_MESSAGE:
+                raise _RulesPlanLimited from None
+        # Unassigned fleet contracts retain the rules-evidence infrastructure
+        # classification; assigned profile identity refusals remain auth.
+        if "/rules/branches/" in endpoint and profile_home is None:
+            raise
         denied = re.search(r"HTTP (40[134])", exc.stderr or "")
         if denied:
             raise _GateAuthError(f"HTTP {denied[1]} on {endpoint.split('?')[0]}") from None
@@ -104,8 +125,25 @@ def _assignee_profile_home(assignee: str | None) -> str | None:
         raise _GateAuthError(f"assignee profile {assignee!r} cannot be resolved") from None
 
 
-def collect_acceptance(contract: str, published_pr: str | None,
-                       assignee: str | None = None) -> dict:
+def _fetch_rules(repo: str, branch: str, *, profile_home: str | None = None):
+    try:
+        return _api(f"repos/{repo}/rules/branches/{quote(branch, safe='')}?per_page=100", paginate=True, profile_home=profile_home)
+    except subprocess.CalledProcessError as exc:
+        if "(HTTP 403)" not in (exc.stderr or ""):
+            raise
+        try:
+            body = json.loads(exc.stdout)
+        except (ValueError, TypeError):
+            raise exc from None
+        if isinstance(body, list) and len(body) == 1:
+            body = body[0]
+        if isinstance(body, dict) and body.get("message") == _PLAN_LIMIT_MESSAGE:
+            raise _RulesPlanLimited from None
+        raise exc from None
+
+
+def collect_acceptance(contract: str, published_pr: str | None, assignee: str | None = None, *,
+                       expected_head: str | None = None) -> dict:
     receipt = {"ok": False, "classification": "missing", "head_sha": None,
                "pr_url": published_pr, "checks": [],
                "recovery": "Fix required failures, rerun infrastructure checks or wait, then retry completion. "
@@ -121,20 +159,42 @@ def collect_acceptance(contract: str, published_pr: str | None,
         repo, number = match[1], int(match[2])
         receipt["pr_url"] = url
         owner, name = repo.split("/")
-        query = f'{{repository(owner:{json.dumps(owner)},name:{json.dumps(name)}){{pullRequest(number:{number:d}){{headRefOid baseRefName state\n            baseRef{{branchProtectionRule{{requiredStatusChecks{{context app{{databaseId}}}}}}}}}}}}}}'
+        query = '''{repository(owner:%s,name:%s){pullRequest(number:%d){headRefOid baseRefName state merged mergeCommit{oid}
+            baseRef{branchProtectionRule{requiredStatusChecks{context app{databaseId}}}}}}}''' % (
+                json.dumps(owner), json.dumps(name), number)
         repository = _api("graphql", query=query, profile_home=profile_home)["data"]["repository"]
         if repository is None:
-            # A private repo the login cannot read resolves to null, not an error.
             raise _GateAuthError(f"HTTP 404 on graphql {repo}")
         pr = repository["pullRequest"]
         sha, branch = pr["headRefOid"], pr["baseRefName"]
         receipt["head_sha"] = sha
-        if not re.fullmatch(r"[0-9a-f]{40}", sha) or pr["state"] not in {"OPEN", "MERGED"}:
+        if not _SHA.fullmatch(sha) or pr["state"] not in {"OPEN", "MERGED"}:
             raise ValueError("PR is closed or current head is unavailable")
+        if expected_head is not None and expected_head != sha:
+            receipt.update(classification="stale", detail="Published head mismatch with the current PR head.")
+            return receipt
         protection = (pr.get("baseRef") or {}).get("branchProtectionRule") or {}
         required = {(r["context"], (r.get("app") or {}).get("databaseId")) for r in protection.get("requiredStatusChecks", [])}
-        rules = _api(f"repos/{repo}/rules/branches/{quote(branch, safe='')}?per_page=100",
-                     paginate=True, profile_home=profile_home)
+        try:
+            rules = _fetch_rules(repo, branch, profile_home=profile_home)
+        except _RulesPlanLimited:
+            base_ref = pr.get("baseRef")
+            if not isinstance(base_ref, dict) or "branchProtectionRule" not in base_ref or base_ref["branchProtectionRule"] is not None:
+                raise
+            if pr["state"] != "MERGED":
+                receipt.update(classification="missing", detail="rules API unavailable; only a MERGED PR at the bound head is accepted")
+                return receipt
+            merge_sha = (pr.get("mergeCommit") or {}).get("oid")
+            current = _api(f"repos/{repo}/pulls/{number}", profile_home=profile_home)
+            if (current["head"]["sha"] != sha or current["base"]["ref"] != branch
+                    or current.get("merged") is not True or current.get("merge_commit_sha") != merge_sha
+                    or not isinstance(merge_sha, str) or not _SHA.fullmatch(merge_sha)):
+                receipt.update(classification="stale", detail="Merged PR head/base or merge commit changed while collecting evidence; retry.")
+                return receipt
+            receipt.update(ok=True, classification="merged_fallback_rules_unavailable", merge_sha=merge_sha,
+                           required=[], checks=[],
+                           detail="Rules API plan-limited 403 and no classic protection; accepted on MERGED at bound head.")
+            return receipt
         for page in rules:
             for rule in page:
                 if rule["type"] == "required_status_checks":
