@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from tests.hermes_cli.kanban_spawn_helpers import claim_for_spawn
+
 import subprocess
 
 
@@ -79,7 +81,7 @@ agent:
 
     workspace = tmp_path / "workspace"
     workspace.mkdir()
-    pid = kbd._default_spawn(_make_task(kb, assignee="elias"), str(workspace))
+    pid = kbd._default_spawn(claim_for_spawn(_make_task(kb, assignee="elias")), str(workspace))
 
     assert pid == 4242
     assert captured["env"]["HERMES_HOME"] == str(profile)
@@ -122,7 +124,7 @@ def test_default_spawn_model_override_survives_real_cli_parse(monkeypatch, tmp_p
     workspace.mkdir()
     task = _make_task(kb, assignee="elias")
     task.model_override = "gpt-5.6-sol"
-    kbd._default_spawn(task, str(workspace))
+    kbd._default_spawn(claim_for_spawn(task), str(workspace))
 
     parser, _subparsers, _chat_parser = build_top_level_parser()
     # Profile selection is attached by the outer CLI bootstrap rather than
@@ -173,7 +175,7 @@ def test_default_spawn_resolves_env_passthrough_under_multiplex(monkeypatch, tmp
 
     set_multiplex_active(True)
     try:
-        pid = kbd._default_spawn(_make_task(kb, assignee="elias"), str(workspace))
+        pid = kbd._default_spawn(claim_for_spawn(_make_task(kb, assignee="elias")), str(workspace))
     finally:
         set_multiplex_active(False)
 

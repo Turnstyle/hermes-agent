@@ -1463,7 +1463,7 @@ def restore_primary_runtime(agent) -> bool:
     blocked, prefetched_pool, prefetched = _primary_reset_gate_blocks(
         agent, rt, primary_provider, primary_runtime_base_url, _matches_primary, _load_primary_pool
     )
-    if blocked:
+    if not force and blocked:
         return False
     agent._restore_wait_logged = False
     fallback_route = getattr(agent, "_provider_fallback_route", None)
@@ -1490,6 +1490,101 @@ def restore_primary_runtime(agent) -> bool:
     except Exception as e:
         logger.warning("Failed to restore primary runtime: %s", e)
         return False
+
+
+class FallbackRouteUnavailableError(RuntimeError):
+    """A removed active route has no eligible replacement for this turn."""
+
+    user_message = (
+        "Your message was not sent to the model. The active fallback was removed, "
+        "and no configured route is eligible. Wait for the primary cooldown or "
+        "choose an available model, then resend your message."
+    )
+
+
+def apply_fallback_chain_to_agent(agent: Any, chain: list | None = None) -> bool:
+    """Keep an agent's fallback chain aligned with current profile config (H20).
+
+    Re-reads the chain from profile config (load_config_readonly), drops entries no longer in
+    config, clears _unavailable_fallback_keys on real change, and when the currently ACTIVE fallback
+    is no longer in config, switches off it at once (restores primary or moves to next allowed entry).
+    Pinned chains (delegated children, cron jobs) are never overridden.
+    """
+    if agent is None:
+        return False
+    if getattr(agent, "_fallback_chain_pinned", False):
+        return False
+
+    if chain is not None:
+        new_chain = list(chain)
+    else:
+        try:
+            from hermes_cli.config_effective import load_user_config_effective
+            from hermes_cli.fallback_config import get_fallback_chain
+            cfg = load_user_config_effective(fail_closed=True)
+            new_chain = get_fallback_chain(cfg)
+        except Exception:
+            logger.debug(
+                "apply_fallback_chain_to_agent: config read failed; keeping last known-good chain",
+                exc_info=True,
+            )
+            return False
+
+    old_chain = list(getattr(agent, "_fallback_chain", []) or [])
+    chain_changed = (old_chain != new_chain)
+
+    if chain_changed:
+        if hasattr(agent, "_unavailable_fallback_keys") and agent._unavailable_fallback_keys is not None:
+            from agent.chat_completion_helpers import _fallback_entry_key
+            # Only a changed/removed route may forget its local failure. Reselection
+            # after removing another active entry must not retry unchanged failures.
+            unchanged_keys = {_fallback_entry_key(e) for e in new_chain if e in old_chain}
+            agent._unavailable_fallback_keys.intersection_update(unchanged_keys)
+        agent._fallback_chain = new_chain
+        agent._fallback_model = new_chain[0] if new_chain else None
+
+    # Check active fallback status
+    if getattr(agent, "_fallback_activated", False):
+        from hermes_cli.fallback_config import _entry_identity
+        new_identities = [_entry_identity(e) for e in new_chain]
+        curr_provider = getattr(agent, "provider", "")
+        curr_model = getattr(agent, "model", "")
+        curr_identity = (
+            str(curr_provider or "").strip().lower(),
+            str(curr_model or "").strip().lower(),
+            str(getattr(agent, "base_url", "") or "").strip().lower().rstrip("/"),
+        )
+        from hermes_cli.model_normalize import normalize_model_for_provider
+
+        # Entries omit provider-resolved endpoints and may use vendor-prefixed
+        # names. Compare models in runtime space; explicit endpoints still bind.
+        matched_index = next((
+            idx for idx, ident in enumerate(new_identities)
+            if curr_identity[0] == ident[0]
+            and curr_identity[1] == normalize_model_for_provider(ident[1], ident[0]).lower()
+            and (not ident[2] or curr_identity[2] == ident[2])
+        ), None)
+        if matched_index is None:
+            logger.info(
+                "Active fallback %s (%s) is no longer in fallback config; switching off it.",
+                curr_model, curr_provider,
+            )
+            # A config refresh is not permission to bypass primary cooldown,
+            # pool-reset, or entitlement gates, nor a new primary failure.
+            restored = agent._restore_primary_runtime()
+            if not restored:
+                agent._fallback_index = 0
+                if not agent._try_activate_fallback():
+                    raise FallbackRouteUnavailableError(
+                        "Active fallback removed; primary is unavailable and no configured fallback is eligible"
+                    )
+        else:
+            agent._fallback_index = matched_index + 1
+    else:
+        if chain_changed:
+            agent._fallback_index = 0
+
+    return chain_changed
 
 
 # Transient transport failures worth one more attempt with a rebuilt client / connection pool.

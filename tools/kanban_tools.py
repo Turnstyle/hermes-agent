@@ -418,6 +418,11 @@ def _opt_int(value: Any, default: Optional[int] = None) -> Optional[int]:
     return int(value) if value is not None else default
 
 
+def _positive_int_or_none(value: Any) -> Optional[int]:
+    parsed = _opt_int(value)
+    return parsed if parsed is not None and parsed > 0 else None
+
+
 _TASK_FIELDS = tuple(
     "id title body assignee status tenant priority workspace_kind workspace_path created_by "
     "created_at started_at completed_at result current_run_id model_override "
@@ -576,30 +581,27 @@ def heartbeat_current_worker_from_env() -> bool:
     try:
         from hermes_cli import kanban_db_dispatch as kbd
         with _board(None, quiet_close=True) as (kb, conn):
-            ops = ((kb.heartbeat_claim, {"claimer": os.environ.get("HERMES_KANBAN_CLAIM_LOCK")}),
-                   (kbd.heartbeat_worker, {"note": None, "expected_run_id": _worker_run_id(tid)}))
-            succeeded = True
-            for fn, kwargs in ops:
-                op = fn.__name__
-                try:
-                    succeeded = bool(fn(conn, tid, **kwargs)) and succeeded
-                except PermissionError as exc:
-                    # The board fence rejected the worker's own liveness write: this process
-                    # inherited HERMES_DELEGATED_CHILD_CONTEXT next to HERMES_KANBAN_TASK, so it is
-                    # a delegate descendant, not the dispatcher's worker (kanban_complete refuses
-                    # too). Loud once: at DEBUG the board just showed a worker that never beats.
-                    succeeded = False
-                    if not _auto_heartbeat_fence_warned:
-                        _auto_heartbeat_fence_warned = True
-                        logger.warning(
-                            "kanban auto-heartbeat for task %s refused (%s): this process carries "
-                            "HERMES_DELEGATED_CHILD_CONTEXT together with HERMES_KANBAN_TASK, so the board "
-                            "treats it as a delegate_task descendant and its claim will not be extended by "
-                            "activity. Only the dispatcher's own spawn grants worker scope; do not copy a "
-                            "worker's environment into a hand-launched process.", tid, exc)
-                except Exception:
-                    logger.debug("auto-heartbeat: %s failed", op, exc_info=True)
-                    succeeded = False
+            warnings: list[str] = []
+            try:
+                succeeded = kbd.heartbeat_worker(
+                    conn, tid, note=None, expected_run_id=_worker_run_id(tid),
+                    extend_claim=True, claimer=_own_task_env(tid, "HERMES_KANBAN_CLAIM_LOCK"),
+                    warnings_out=warnings)
+                for warning in warnings:
+                    logger.warning("kanban auto-heartbeat for task %s: %s", tid, warning)
+            except PermissionError as exc:
+                succeeded = False
+                if not _auto_heartbeat_fence_warned:
+                    _auto_heartbeat_fence_warned = True
+                    logger.warning(
+                        "kanban auto-heartbeat for task %s refused (%s): this process carries "
+                        "HERMES_DELEGATED_CHILD_CONTEXT together with HERMES_KANBAN_TASK, so the board "
+                        "treats it as a delegate_task descendant and its claim will not be extended by "
+                        "activity. Only the dispatcher's own spawn grants worker scope; do not copy a "
+                        "worker's environment into a hand-launched process.", tid, exc)
+            except Exception:
+                logger.debug("auto-heartbeat: heartbeat_worker failed", exc_info=True)
+                succeeded = False
         return succeeded
     except Exception:
         logger.debug("auto-heartbeat: bridge failed", exc_info=True)
@@ -888,15 +890,26 @@ def _handle_request_review(args: dict, **kw) -> str:
     metadata = _stamp_worker_session_metadata(tid, metadata)
     # Reviewer is model-supplied free text stored durably on the event payload.
     reviewer = _redact_opt(args.get("reviewer") or None)
-    if reviewer:
-        from hermes_cli.profiles import list_profile_names, profile_exists
-
-        # A non-profile reviewer would park the card in `review` on an assignee
-        # the dispatcher can never spawn (#106163).
-        _check(profile_exists(reviewer),
-               f"reviewer profile {reviewer!r} is not installed. "
-               f"Installed profiles: {', '.join(list_profile_names())}")
     with _board(args.get("board")) as (kb, conn):
+        if reviewer:
+            from hermes_cli.profiles import list_profile_names, profile_exists
+
+            # A remote reviewer must have one unambiguous fleet HOME; otherwise
+            # the card could park on an assignee no dispatcher can spawn (#106163).
+            home_rows = []
+            if conn.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='table' AND name='fleet_kanban_assignee_homes'",
+            ).fetchone():
+                home_rows = conn.execute(
+                    "SELECT home_node FROM fleet_kanban_assignee_homes WHERE assignee=? LIMIT 2",
+                    (reviewer,),
+                ).fetchall()
+            remote_known = len(home_rows) == 1 and home_rows[0][0] in {
+                "max", "sheldon", "turnerbook", "snowdrop", "rosie",
+            }
+            _check(profile_exists(reviewer) or remote_known,
+                   f"reviewer profile {reviewer!r} is not installed or registered on exactly one fleet HOME. "
+                   f"Installed profiles: {', '.join(list_profile_names())}")
         _goal_gate("kanban_request_review", kb.get_task(conn, tid), tid, summary)
         try:
             ok, fail_reason = kb.request_review(
@@ -939,11 +952,13 @@ def _handle_heartbeat(args: dict, **kw) -> str:
     with _board(args.get("board")) as (kb, conn):
         # The dispatcher pins HERMES_KANBAN_CLAIM_LOCK at spawn; the default
         # claimer covers locally-driven workers that bypassed the dispatcher.
-        kb.heartbeat_claim(conn, tid, claimer=os.environ.get("HERMES_KANBAN_CLAIM_LOCK"))
+        warnings: list[str] = []
         ok = kbd.heartbeat_worker(
-            conn, tid, note=args.get("note"), expected_run_id=_worker_run_id(tid))
-        _check(ok, f"could not heartbeat {tid} (unknown id or not running)")
-        return _ok(task_id=tid)
+            conn, tid, note=args.get("note"), expected_run_id=_worker_run_id(tid),
+            extend_claim=True, claimer=_own_task_env(tid, "HERMES_KANBAN_CLAIM_LOCK"),
+            warnings_out=warnings)
+        _check(ok, f"could not heartbeat {tid} (unknown id, not running, or ownership conflict)")
+        return _ok(task_id=tid, **({"warning": "; ".join(warnings)} if warnings else {}))
 
 
 @_kanban_handler("kanban_comment")
@@ -1143,7 +1158,7 @@ def _handle_create(args: dict, **kw) -> str:
             idempotency_key=args.get("idempotency_key"),
             max_runtime_seconds=_opt_int(args.get("max_runtime_seconds")), skills=skills,
             model_override=model_override, provider_override=provider_override,
-            goal_mode=goal_mode, goal_max_turns=_opt_int(args.get("goal_max_turns")),
+            goal_mode=goal_mode, goal_max_turns=_positive_int_or_none(args.get("goal_max_turns")),
             completion_contract=args.get("completion_contract"),
             initial_status=str(args.get("initial_status") or "running"),
             created_by=_persisted_identity(), session_id=session_id)
@@ -1267,7 +1282,10 @@ def _handle_unblock(args: dict, **kw) -> str:
     tid = str(tid)
     _enforce_worker_task_ownership(tid)
     with _board(args.get("board")) as (kb, conn):
-        _check(kb.unblock_task(conn, tid), f"could not unblock {tid} (not blocked or unknown)")
+        _check(kb.unblock_task(
+            conn, tid, to_todo=args.get("to_todo", False),
+            expected_blocked_event_id=args.get("expected_blocked_event_id"),
+        ), f"could not unblock {tid} (not blocked, stale evaluation, or unknown)")
         return _ok(task_id=tid, **_fields(kb.get_task(conn, tid), ("status",)))
 
 

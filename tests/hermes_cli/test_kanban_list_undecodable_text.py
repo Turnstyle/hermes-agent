@@ -94,10 +94,20 @@ def test_respawn_guard_survives_blob_comment_body_and_failure_error(board):
         # The whole pass must not abort on the poisoned row.
         kbd.dispatch_once(conn, dry_run=True)
 
+        kb.claim_task(conn, tid)
+        run_id = kb.get_task(conn, tid).current_run_id
         with kb.write_txn(conn):
             conn.execute(
-                "UPDATE tasks SET last_failure_error = ? WHERE id = ?",
-                (sqlite3.Binary(b"429 quota exceeded"), tid),
+                "UPDATE task_runs SET outcome='failed', status='failed', error=?, ended_at=? "
+                "WHERE id=?",
+                (sqlite3.Binary(b"429 quota exceeded"), 5_000_000, run_id),
             )
-        # BLOB last_failure_error still matches the quota/auth blocker pattern.
+            conn.execute(
+                "UPDATE tasks SET status='ready', current_run_id=NULL, "
+                "claim_lock=NULL, claim_expires=NULL, worker_pid=NULL, "
+                "last_failure_error=? WHERE id=?",
+                ("worker process gone", tid),
+            )
+        # A BLOB on the latest run's error still matches the quota/auth pattern
+        # and must not abort the guard. Leftover task text is not the source.
         assert kbd.check_respawn_guard(conn, tid) == "blocker_auth"

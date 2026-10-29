@@ -79,7 +79,21 @@ class CLIChatTurnMixin:
         agent = self.agent
         if agent is None:
             return None
-        self._sync_fallback_chain_with_config(agent)  # chain added after this chat opened reaches this turn
+        from agent.agent_runtime_helpers import FallbackRouteUnavailableError
+        try:
+            self._sync_fallback_chain_with_config(agent)  # adopt per-turn config edits
+        except FallbackRouteUnavailableError as exc:
+            # Refuse before staging or image/provider I/O. Keep the original input
+            # out of model history, but available to callers for an explicit retry.
+            error = (f"{exc}. Your message was not sent. Wait for the primary to become "
+                     "eligible or configure an available fallback, then resend your message.")
+            self._last_turn_result = {
+                "final_response": "", "messages": list(getattr(self, "conversation_history", [])),
+                "api_calls": 0, "completed": False, "failed": True, "error": error,
+                "unsent_input": {"message": message, "images": list(images or [])},
+            }
+            _cprint(f"Error: {error}")
+            return None
         message = self._chat_route_images(message, images)
 
         if isinstance(message, str) and not isinstance(message, TimelineNotification):

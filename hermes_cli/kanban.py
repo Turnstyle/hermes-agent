@@ -30,7 +30,8 @@ from hermes_cli.kanban_output import (
 )
 from hermes_cli.kanban_boards import _dispatch_boards
 from hermes_cli.kanban_ops import (
-    _cmd_daemon, _kanban_config, _cmd_dispatch, _cmd_gc, _cmd_repair, _cmd_tail, _cmd_watch,
+    _cmd_daemon, _kanban_config, _cmd_dispatch, _cmd_gc, _cmd_repair, _cmd_refresh_pr_state,
+    _cmd_tail, _cmd_watch,
 )
 from hermes_cli.kanban_parser import build_parser
 
@@ -179,14 +180,18 @@ def kanban_command(args: argparse.Namespace) -> int:
     with board_scope:
         # `repair` dispatches BEFORE auto-init: on a corrupt DB init_db() itself raises
         # KanbanDbCorruptError, which would turn every repair into "could not initialize database".
+        if action == "recover-ghost":
+            return _cmd_recover_ghost(args)
         if action == "repair":
             return _cmd_repair(args)
         # init_db is idempotent (one sqlite_master SELECT when tables exist) and prevents
         # "no such table: tasks" on first use from a fresh HERMES_HOME.
-        try:
-            kb.init_db()
-        except Exception as exc:
-            return _err(f"kanban: could not initialize database: {exc}")
+        diagnostic_dispatch = (action == "dispatch" and bool(getattr(args, "dry_run", False))) or action == "refresh-pr-state"
+        if not diagnostic_dispatch:
+            try:
+                kb.init_db()
+            except Exception as exc:
+                return _err(f"kanban: could not initialize database: {exc}")
 
         handler = _HANDLERS.get(action)
         if not handler:
@@ -206,12 +211,12 @@ def _profile_author() -> str:
 
 
 _DELEGATED_CHILD_DENIED_ACTIONS: frozenset[str] = frozenset({
-    "init", "create", "swarm", "assign", "reclaim", "reassign", "link", "unlink",
+    "init", "create", "swarm", "assign", "reclaim", "recover-ghost", "reassign", "link", "unlink",
     "claim", "comment", "attach", "attach-rm", "complete", "edit", "block",
     "schedule", "unblock", "promote", "archive", "dispatch", "daemon", "repair",
     "heartbeat", "notify-subscribe", "notify-unsubscribe", "specify", "decompose",
     "request-review", "request-changes", "reopen-review",
-    "gc",
+    "gc", "refresh-pr-state",
 })
 
 _DELEGATED_CHILD_DENIED_BOARD_ACTIONS: frozenset[str] = frozenset({
@@ -605,6 +610,11 @@ def _cmd_reclaim(args: argparse.Namespace) -> int:
                       f"Reclaimed {args.task_id}")
 
 
+def _cmd_recover_ghost(args: argparse.Namespace) -> int:
+    from hermes_cli.kanban_recover_ghost import recover_ghost
+    return recover_ghost(args)
+
+
 def _cmd_reassign(args: argparse.Namespace) -> int:
     profile = _none_profile(args.profile)
     reclaim = bool(getattr(args, "reclaim", False))
@@ -909,6 +919,26 @@ def _cmd_complete(args: argparse.Namespace) -> int:
         return rc
     fail_msg: dict[str, str] = {}
     with kbc.connect_closing() as conn:
+        def parent_error(tid: str, blockers: list[tuple[str, str]], status: Optional[str] = None) -> str:
+            detail = ", ".join(f"{pid} ({parent_status})" for pid, parent_status in blockers)
+            status_text = f"card is {status} and has " if status else ""
+            return (f"cannot complete {tid}: {status_text}unsatisfied parent dependencies: {detail}; "
+                    f"complete the parents first, or `hermes kanban unlink <parent> {tid}`.")
+
+        def status_error(tid: str) -> Optional[str]:
+            task = kb.get_task(conn, tid)
+            if task is None:
+                return f"cannot complete {tid}: unknown id"
+            if task.status in ("done", "archived"):
+                return f"cannot complete {tid}: already {task.status}"
+            if task.status in ("todo", "triage"):
+                blockers = kb.unsatisfied_parents(conn, tid)
+                if blockers:
+                    return parent_error(tid, blockers, task.status)
+                return (f"cannot complete {tid}: card is {task.status}; promote it to ready first "
+                        f"(hermes kanban promote {tid})")
+            return None
+
         def op(tid):
             gate_err = _goal_gate_error(
                 conn, tid, (summary or args.result or "").strip(), "completion",
@@ -916,6 +946,10 @@ def _cmd_complete(args: argparse.Namespace) -> int:
                 "Provide evidence matching the task's acceptance criteria.")
             if gate_err:
                 fail_msg[tid] = gate_err
+                return False
+            refusal = status_error(tid)
+            if refusal:
+                fail_msg[tid] = refusal
                 return False
             fail_msg[tid] = f"cannot complete {tid} (unknown id or terminal state)"
             try:
@@ -932,13 +966,15 @@ def _cmd_complete(args: argparse.Namespace) -> int:
                                  f"describing what was done (an empty completion is not evidence).")
                 return False
             if not done:
-                # complete_task returns bare False for a dependency refusal too;
-                # name the open parents instead of claiming the id is unknown.
-                blockers = kb.unsatisfied_parents(conn, tid)
-                if blockers:
-                    detail = ", ".join(f"{pid} ({status})" for pid, status in blockers)
-                    fail_msg[tid] = (f"cannot complete {tid}: unsatisfied parent dependencies: {detail}; "
-                                     f"complete the parents first, or `hermes kanban unlink <parent> {tid}`.")
+                refusal = status_error(tid)
+                if refusal:
+                    fail_msg[tid] = refusal
+                else:
+                    # complete_task returns bare False for a dependency refusal too;
+                    # name the open parents instead of claiming the id is unknown.
+                    blockers = kb.unsatisfied_parents(conn, tid)
+                    if blockers:
+                        fail_msg[tid] = parent_error(tid, blockers)
             return done
 
         return _bulk_apply(ids, op, lambda tid: f"Completed {tid}", fail_msg.__getitem__)
@@ -1001,9 +1037,14 @@ def _cmd_block(args: argparse.Namespace) -> int:
                 return f"{tid} → triage (unblock loop detected — {verdict}){suffix}"
             return f"Blocked {tid}{suffix}"
 
-        op = _commented(conn, reason, author, "BLOCKED", lambda tid: kb.block_task(
-            conn, tid, reason=reason, kind=kind, expected_run_id=_worker_run_id_for(tid)))
-        return _bulk_apply(ids, op, ok_msg, lambda tid: f"cannot block {tid}")
+        def block_with_comment(tid: str) -> bool:
+            ok = kb.block_task(
+                conn, tid, reason=reason, kind=kind, expected_run_id=_worker_run_id_for(tid))
+            if ok and reason:
+                kb.add_comment(conn, tid, author, f"BLOCKED: {reason}")
+            return ok
+
+        return _bulk_apply(ids, block_with_comment, ok_msg, lambda tid: f"cannot block {tid}")
 
 
 def _cmd_schedule(args: argparse.Namespace) -> int:
@@ -1027,9 +1068,14 @@ def _cmd_unblock(args: argparse.Namespace) -> int:
     author = _profile_author() if reason else None
     suffix = f": {reason}" if reason else ""
     with kbc.connect_closing() as conn:
-        op = _commented(conn, reason, author, "UNBLOCK", lambda tid: kb.unblock_task(conn, tid))
+        def op(tid):
+            return kb.unblock_task(
+                conn, tid, actor=author, reason=reason,
+                to_todo=getattr(args, "to_todo", False),
+                expected_blocked_event_id=getattr(args, "expected_blocked_event_id", None),
+            )
         return _bulk_apply(ids, op, lambda tid: f"Unblocked {tid}{suffix}",
-                           lambda tid: f"cannot unblock {tid} (not blocked/scheduled?)")
+                           lambda tid: f"cannot unblock {tid} (not blocked/scheduled or triage-with-hold?)")
 
 
 def _cmd_request_review(args: argparse.Namespace) -> int:
@@ -1254,6 +1300,13 @@ def _run_triage_sweep(args: argparse.Namespace, verb: str, mod, run_one, json_ke
     """Shared driver for ``specify`` / ``decompose``: validate ids (one task id XOR ``--all``), run
     ``run_one(tid, author=...)`` per id, print JSON or human lines, exit code."""
     all_flag = bool(getattr(args, "all_triage", False))
+    if getattr(args, "keep_spec", False):
+        if all_flag:
+            return _err("kanban: --all cannot be used with --keep-spec", 2)
+        if not args.task_id:
+            return _err("kanban: specify --keep-spec requires a task id", 2)
+    if getattr(args, "expect_sha256", None) is not None and not getattr(args, "keep_spec", False):
+        return _err("kanban: --expect-sha256 requires --keep-spec", 2)
     author = getattr(args, "author", None) or _profile_author()
     want_json = bool(getattr(args, "json", False))
     tenant = getattr(args, "tenant", None)
@@ -1297,6 +1350,62 @@ def _cmd_specify(args: argparse.Namespace) -> int:
     """Spec a triage task (or all) via the auxiliary LLM, promote to todo."""
     from hermes_cli import kanban_specify as spec
 
+    if getattr(args, "expect_sha256", None) is not None and not getattr(args, "keep_spec", False):
+        return _err("kanban: --expect-sha256 requires --keep-spec", 2)
+
+    if getattr(args, "keep_spec", False):
+        # Why keep-spec: moving a card out of triage must not rewrite instructions
+        # a human already reviewed. The model-backed path regenerates title/body,
+        # which would silently replace a reviewed spec; keep-spec releases the exact
+        # reviewed text instead.
+        # Guarantees:
+        # - Hash binds release to the exact reviewed bytes; post-review edits refuse.
+        # - Exact byte preservation: whitespace, newlines, Unicode (ensure_ascii=False),
+        #   and NULL vs "" are never normalized.
+        # - Hash and triage status are verified in the same write transaction as the
+        #   status change, so a concurrent edit cannot slip between check and write.
+        # - Active holds are refused, never cleared.
+        if getattr(args, "all_triage", False):
+            return _err("kanban: --all cannot be used with --keep-spec", 2)
+        if not args.task_id:
+            return _err("kanban: specify --keep-spec requires a task id", 2)
+        if getattr(args, "expect_sha256", None) is None:
+            return _err("kanban: specify --keep-spec requires --expect-sha256", 2)
+
+        expect_sha = getattr(args, "expect_sha256", "").strip().lower()
+        if len(expect_sha) != 64 or not all(c in "0123456789abcdef" for c in expect_sha):
+            return _err(f"kanban: specify --keep-spec: invalid sha256 hex digest: {getattr(args, 'expect_sha256', '')!r}", 2)
+
+        author_arg = getattr(args, "author", None)
+        if author_arg is None:
+            return _err("kanban: specify --keep-spec requires --author", 2)
+        if not author_arg.strip():
+            return _err("kanban: specify --keep-spec: author cannot be blank", 2)
+
+        outcome = spec.keep_spec_task(
+            args.task_id,
+            expect_sha256=expect_sha,
+            author=author_arg.strip(),
+        )
+
+        want_json = bool(getattr(args, "json", False))
+        if want_json:
+            fields = (
+                "task_id", "ok", "reason", "kept_spec", "sha256",
+                "hash_encoding", "status_after", "committed", "recompute_error",
+            )
+            print(json.dumps(_obj_dict(outcome, fields)))
+        elif outcome.ok:
+            short_hash = outcome.sha256[:8] if outcome.sha256 else "unknown"
+            print(f"Kept spec for {outcome.task_id} → {outcome.status_after} (sha256: {short_hash})")
+            print(f"Encoding: {outcome.hash_encoding or kb.HASH_ENCODING}")
+            if outcome.recompute_error:
+                print(f"warning: recompute_ready deferred: {outcome.recompute_error}")
+        else:
+            print(f"kanban: specify {outcome.task_id}: {outcome.reason}", file=sys.stderr)
+
+        return 0 if outcome.ok else 1
+
     return _run_triage_sweep(args, "specify", spec, spec.specify_task, "specified",
                              ("task_id", "ok", "reason", "new_title"),
                              lambda o: f"Specified {o.task_id} → todo{_retitled_suffix(o)}")
@@ -1336,7 +1445,7 @@ _HANDLERS = {
     "assignees": _cmd_assignees, "notify-subscribe": _cmd_notify_subscribe,
     "notify-list": _cmd_notify_list, "notify-unsubscribe": _cmd_notify_unsubscribe,
     "context": _cmd_context, "specify": _cmd_specify, "decompose": _cmd_decompose,
-    "gc": _cmd_gc,
+    "gc": _cmd_gc, "refresh-pr-state": _cmd_refresh_pr_state,
 }
 
 

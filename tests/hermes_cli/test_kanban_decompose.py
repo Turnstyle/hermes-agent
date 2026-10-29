@@ -76,6 +76,62 @@ def _patch_list_profiles(names: list[str]):
     ]
 
 
+def test_foreign_fleet_mirror_is_not_listed_or_decomposed(kanban_home, monkeypatch):
+    monkeypatch.setenv("FLEET_KANBAN_ACTOR_NODE", "node-a")
+    with kbc.connect() as conn:
+        conn.execute("""CREATE TABLE fleet_kanban_issue_map (
+            local_task_id TEXT PRIMARY KEY, issue_id TEXT, raw_title TEXT,
+            canonical_body TEXT, source_node TEXT, current_node TEXT,
+            source_profile TEXT, deferred_snapshot TEXT, canonical_status TEXT
+        )""")
+        conn.execute("""CREATE TRIGGER fleet_kanban_task_insert AFTER INSERT ON tasks BEGIN
+            INSERT INTO fleet_kanban_issue_map(
+                local_task_id, issue_id, raw_title, canonical_body,
+                source_node, current_node, source_profile
+            ) VALUES(NEW.id, 'fk_' || lower(hex(randomblob(4))), NEW.title,
+                     NEW.body, 'node-a', NULL, 'p');
+        END""")
+        foreign_id = kb.create_task(conn, title="foreign", triage=True)
+        local_id = kb.create_task(conn, title="local", triage=True)
+        conn.execute(
+            "UPDATE fleet_kanban_issue_map SET current_node = 'node-b' WHERE local_task_id = ?",
+            (foreign_id,),
+        )
+        conn.commit()
+
+    listed = decomp.list_triage_ids()
+    assert foreign_id not in listed
+    assert local_id in listed
+
+    llm_payload = jsonlib.dumps({
+        "fanout": True,
+        "tasks": [{"title": "local child", "body": "work", "assignee": "orchestrator", "parents": []}],
+    })
+    patches = _patch_list_profiles(["orchestrator"])
+    for p in patches:
+        p.start()
+    try:
+        with _patch_aux_client(llm_payload) as aux:
+            foreign = decomp.decompose_task(foreign_id, author="auto-decomposer")
+            assert foreign.ok is False
+            assert "foreign Fleet mirror" in foreign.reason
+            aux.assert_not_called()
+            local = decomp.decompose_task(local_id, author="auto-decomposer")
+            assert local.ok is True, local.reason
+            aux.assert_called_once()
+    finally:
+        for p in patches:
+            p.stop()
+
+    with kbc.connect() as conn:
+        assert kb.get_task(conn, foreign_id).status == "triage"
+        assert conn.execute(
+            "SELECT COUNT(*) FROM task_links WHERE parent_id = ?", (foreign_id,),
+        ).fetchone()[0] == 0
+        assert len(local.child_ids) == 1
+        assert kb.get_task(conn, local.child_ids[0]) is not None
+
+
 def test_decompose_with_fanout_creates_children(kanban_home):
     with kbc.connect() as conn:
         tid = kb.create_task(conn, title="ship a feature", triage=True)

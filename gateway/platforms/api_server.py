@@ -43,6 +43,37 @@ def _prefix_names_served_profile(profile: str) -> bool:
         return False
 
 
+def _profile_alias_slug(text: str) -> str:
+    """Lowercase, non-alphanumeric runs -> '-' ("Web-Reviewer" and "web reviewer" -> "web-reviewer")."""
+    return re.sub(r"[^a-z0-9]+", "-", str(text or "").strip().lower()).strip("-")
+
+
+def _resolve_profile_alias(prefix: str, served_pairs) -> Optional[str]:
+    """Canonical served profile whose display name, Bot Chat title, or previous name slugs to
+    ``prefix``; ``None`` when nothing or more than one profile matches (fail closed)."""
+    want = _profile_alias_slug(prefix)
+    if not want:
+        return None
+    try:
+        from hermes_cli.profiles import read_profile_meta
+    except Exception:
+        return None
+    hits = set()
+    for name, home in served_pairs:
+        try:
+            meta = read_profile_meta(Path(home))
+        except Exception:
+            continue
+        names = [meta.get("display_name"), meta.get("bot_title"), *(meta.get("previous_names") or [])]
+        if any(_profile_alias_slug(n) == want for n in names if n):
+            hits.add(name)
+    if len(hits) == 1:
+        found = hits.pop()
+        logger.info("api_server: /p/%s/ resolved by alias to profile %s", prefix, found)
+        return found
+    return None
+
+
 # Per-request /p/<profile>/ selection: set by the profile-prefix middleware, read by handlers.
 _api_request_profile: ContextVar[Optional[str]] = ContextVar(
     "api_server_request_profile", default=None)
@@ -86,6 +117,8 @@ _CAPABILITY_ENDPOINTS = (
     ("run_approval", ("POST", "/v1/runs/{run_id}/approval")),
     ("run_steer", ("POST", "/v1/runs/{run_id}/steer")),
     ("run_stop", ("POST", "/v1/runs/{run_id}/stop")), ("skills", ("GET", "/v1/skills")),
+    ("peer_ping", ("POST", "/v1/peer/ping")),
+    ("peer_ping_status", ("GET", "/v1/peer/ping/{key}")),
     ("toolsets", ("GET", "/v1/toolsets")), ("sessions", ("GET", "/api/sessions")),
     ("session_create", ("POST", "/api/sessions")),
     ("session", ("GET", "/api/sessions/{session_id}")),
@@ -138,6 +171,7 @@ from gateway.display_config import resolve_display_setting
 from gateway.platforms import api_server_room_dispatch as _room_dispatch
 from gateway.platforms import api_server_room_grants as _room_grants
 from gateway.platforms import api_server_runs as _api_runs
+from gateway.platforms import api_server_peer_ping as _peer_ping
 from gateway.platforms.api_server_openai_routes import OpenAICompatRoutesMixin
 from gateway.platforms.api_server_memory_sessions import ApiServerMemorySessions
 from gateway.platforms.base import (
@@ -917,7 +951,12 @@ def _error_response(
     return web.json_response(_openai_error(message, err_type, param, code), status=status, headers=headers)
 
 
-def _invalid_request(message: str) -> web.Response:
+def _target_busy_response() -> "web.Response":
+    return _error_response("Target session is busy; retry this turn.", 409,
+                           code="target_busy", headers={"Retry-After": "30"})
+
+
+def _invalid_request(message: str) -> "web.Response":
     """400 with the bare ``{message, type}`` envelope the OpenAI-compatible validators use."""
     return web.json_response({"error": {"message": message, "type": "invalid_request_error"}}, status=400)
 
@@ -941,6 +980,31 @@ def _admit_api_agent_request(handler):
         draining = self._draining_response()
         if draining is not None:
             return draining
+        reservation = {"active": True}
+        token = _api_agent_request_reservation.set(reservation)
+        self._pending_agent_requests += 1
+        try:
+            return await handler(self, request, *args, **kwargs)
+        finally:
+            _release_pending_api_work(self, reservation)
+            _api_agent_request_reservation.reset(token)
+    return _wrapped
+
+
+def _admit_session_chat_or_queue(handler):
+    """Auth like ``_admit_api_agent_request``, but a draining gateway accepts a text
+    bot DM into the restart spool instead of answering 503. Other bodies still 503.
+    Accepted messages do not reserve a turn slot: drain must not wait on them."""
+    @wraps(handler)
+    async def _wrapped(self, request, *args, **kwargs):
+        auth_err = (
+            self._check_run_auth(request, permission="dispatch")
+            if _api_runs._uses_room_run_auth(self, request)
+            else self._check_auth(request))
+        if auth_err:
+            return auth_err
+        if self._gateway_is_draining():
+            return await self._queue_draining_session_chat(request)
         reservation = {"active": True}
         token = _api_agent_request_reservation.set(reservation)
         self._pending_agent_requests += 1
@@ -1318,6 +1382,52 @@ class APIServerAdapter(OpenAICompatRoutesMixin, BasePlatformAdapter):
             "Gateway is draining existing work; retry shortly.", 503, code="gateway_draining",
             headers={"Retry-After": "1"})
 
+    async def _queue_draining_session_chat(self, request: "web.Request") -> "web.Response":
+        """Persist a draining session-chat text into the restart spool, or 503.
+
+        ``_queue_during_drain_enabled`` is the existing restart-survivable gate.
+        The spool is the ``pending_messages`` payload ``recover_pending_to_db``
+        replays (``data.text`` + ``data.session_id``). Empty bodies still 503.
+        """
+        from gateway.run import _gateway_runner_ref
+        from gateway.shutdown_flush import _flush_value, _get_flush_dir
+
+        runner = _gateway_runner_ref()
+        enabled = getattr(runner, "_queue_during_drain_enabled", None)
+        draining = self._draining_response()
+        if draining is None:
+            draining = _error_response(
+                "Gateway is draining existing work; retry shortly.", 503,
+                code="gateway_draining", headers={"Retry-After": "1"})
+        if not callable(enabled) or not enabled():
+            return draining
+        try:
+            body = await request.json()
+        except Exception:
+            return draining
+        message = body.get("message") if isinstance(body, dict) else None
+        session_id = str(request.match_info.get("session_id") or "")
+        if not isinstance(message, str) or not message.strip() or not session_id:
+            return draining
+        message_id = uuid.uuid4().hex
+        from gateway.shutdown_flush import GATEWAY_DRAINING_REASON
+
+        wrote = _flush_value(
+            _get_flush_dir(),
+            "drain",
+            f"agent:api:{session_id}",
+            {"text": message, "session_id": session_id},
+            reason=GATEWAY_DRAINING_REASON,
+            message_id=message_id,
+            ts=int(time.time()),
+        )
+        if not wrote:
+            return draining
+        return web.json_response(
+            {"object": "hermes.session.chat.queued", "session_id": session_id,
+             "status": "queued", "message_id": message_id},
+            status=202, headers=self._session_headers(session_id, None))
+
     def _activate_admitted_request(self) -> None:
         """Transfer this request's drain reservation to agent bookkeeping."""
         reservation = _api_agent_request_reservation.get()
@@ -1556,12 +1666,43 @@ class APIServerAdapter(OpenAICompatRoutesMixin, BasePlatformAdapter):
                        "code": "gateway_auth_failed"}},
             status=401)
 
-    def _check_auth(self, request: web.Request) -> Optional[web.Response]:
+    def _accept_host_key_for_profiles(self) -> bool:
+        """Use the host adapter's startup policy, never the request profile's config.
+
+        Only a literal YAML boolean true opts in; strings and numeric values
+        preserve profile isolation. PlatformConfig.extra holds the merged host
+        configuration and its explicit extra value takes precedence.
+        """
+        return self.config.extra.get("accept_host_key_for_profiles") is True
+
+    def _check_auth(self, request: "web.Request") -> Optional["web.Response"]:
         """Validate the Bearer token; None when OK, else a 401. The no-key branch (connect()
         refuses to start without API_SERVER_KEY) exists for tests/manual wiring on the default
         listener only; named profiles fail closed rather than inherit the owner's key."""
         profile = _api_request_profile.get()
         expected_key = self._expected_api_key()
+        auth_header = request.headers.get("Authorization", "")
+        token = auth_header[7:].strip() if auth_header.startswith("Bearer ") else ""
+
+        # Preferred path: profile-scoped key (or host key for default listener)
+        if token and expected_key:
+            # Compare as bytes: compare_digest raises TypeError on non-ASCII str, and the
+            # token is raw client input — a stray byte must 401, not 500.
+            if hmac.compare_digest(token.encode(), expected_key.encode()):
+                return None
+
+        # Fleet fallback under explicit config switch only: accept host key for multiplexed profiles with loud warning
+        host_key = self._api_key or ""
+        if (self._accept_host_key_for_profiles() and token and host_key and profile and profile != "default"
+                and hmac.compare_digest(token.encode(), host_key.encode())):
+            logger.warning(
+                "API server accepted HOST key for profile %r (api_server.accept_host_key_for_profiles is enabled; "
+                "profile-scoped key %s). Next step: configure profile-scoped API_SERVER_KEY via Bot Maker or Keys Router; %s",
+                profile,
+                "differs" if expected_key else "missing",
+                self._request_audit_log_suffix(request))
+            return None
+
         if not expected_key:
             if not (profile and profile != "default"):
                 return None
@@ -1570,13 +1711,7 @@ class APIServerAdapter(OpenAICompatRoutesMixin, BasePlatformAdapter):
                 "API_SERVER_KEY is configured; %s",
                 profile, self._request_audit_log_suffix(request))
             return self._auth_failed_response()
-        auth_header = request.headers.get("Authorization", "")
-        if auth_header.startswith("Bearer "):
-            token = auth_header[7:].strip()
-            # Compare as bytes: compare_digest raises TypeError on non-ASCII str, and the
-            # token is raw client input — a stray byte must 401, not 500.
-            if hmac.compare_digest(token.encode(), expected_key.encode()):
-                return None
+
         logger.warning("API server rejected invalid API key: %s", self._request_audit_log_suffix(request))
         return self._auth_failed_response()
 
@@ -1656,10 +1791,16 @@ class APIServerAdapter(OpenAICompatRoutesMixin, BasePlatformAdapter):
             return None if _prefix_names_served_profile(profile) else _PROFILE_REJECTED
         try:
             from hermes_cli.profiles import profiles_to_serve
-            served = {name for name, _ in profiles_to_serve(multiplex=True)}
+            served_pairs = list(profiles_to_serve(multiplex=True))
         except Exception:
             return _PROFILE_REJECTED
-        return profile if profile in served else _PROFILE_REJECTED
+        served = {name for name, _ in served_pairs}
+        if profile in served:
+            return profile
+        # Peers address bots by the name the roster shows (display name / Bot Chat title) or a
+        # pre-rename id: map a UNIQUE slug match to the canonical served id; else fail closed.
+        alias = _resolve_profile_alias(profile, served_pairs)
+        return alias if alias else _PROFILE_REJECTED
 
     @staticmethod
     def _profile_scope(profile: Optional[str]):
@@ -1725,6 +1866,8 @@ class APIServerAdapter(OpenAICompatRoutesMixin, BasePlatformAdapter):
             ("GET", "/v1/models", self._handle_models),
             ("GET", "/api/model/options", self._handle_model_options),
             ("GET", "/v1/capabilities", self._handle_capabilities),
+            ("POST", "/v1/peer/ping", self._handle_peer_ping),
+            ("GET", "/v1/peer/ping/{key:.+}", self._handle_peer_ping_status),
             # Browser-control (gated on browser.extension_control.enabled + API key): POST
             # mints a short-lived ticket, WS consumes it; artifacts are bounded + scope-bound.
             ("POST", "/v1/browser-control/register", self._handle_browser_control_register),
@@ -1977,6 +2120,11 @@ class APIServerAdapter(OpenAICompatRoutesMixin, BasePlatformAdapter):
         "hermes-agent" upstream as a provider model id 400s)."""
         stored = session.get("model") if isinstance(session, dict) else None
         if not stored or stored == self._model_name:
+            return None
+        config = self._parse_session_model_config(session.get("model_config"))
+        gateway_runtime = config.get("gateway_runtime")
+        if isinstance(gateway_runtime, dict) and gateway_runtime.get("fallback_active"):
+            logger.info("session row model skipped: fallback_active")
             return None
         return stored
 
@@ -2266,9 +2414,10 @@ class APIServerAdapter(OpenAICompatRoutesMixin, BasePlatformAdapter):
         return model
 
     def _select_agent_runtime(
-        self, runtime_kwargs: dict[str, Any], model: str, *, requested_model: Optional[str],
-        requested_provider: Optional[str], route: Optional[dict[str, Any]], session_model: Optional[str],
-        confirmed_runtime_lock: bool, gateway_session_key: Optional[str], session_id: Optional[str]) -> tuple:
+        self, runtime_kwargs: Dict[str, Any], model: str, *, requested_model: Optional[str],
+        requested_provider: Optional[str], route: Optional[Dict[str, Any]], session_model: Optional[str],
+        confirmed_runtime_lock: bool, gateway_session_key: Optional[str], session_id: Optional[str],
+        runtime_from_fallback: bool = False) -> tuple:
         """Apply the model/provider precedence chain for one agent (mutates ``runtime_kwargs``):
         confirmed Browser lock > session ``/model`` override > session-persisted model >
         model_routes alias > per-request provider/model > global defaults. A confirmed lock
@@ -2286,18 +2435,33 @@ class APIServerAdapter(OpenAICompatRoutesMixin, BasePlatformAdapter):
         # Model-string precedence (override > session-persisted > global) is owned by
         # hermes_cli.model_switch.resolve_effective_model.
         from hermes_cli.model_switch import resolve_effective_model
+        from hermes_cli.models_detect import model_foreign_to_provider
+        foreign_row_model = bool(session_row_model and model_foreign_to_provider(session_row_model, current_provider))
+        override_runtime_applied = False
+        if session_override:
+            override_provider = _clean_request_string(session_override.get("provider"))
+            if override_provider and override_provider != current_provider and not session_override.get("api_key"):
+                override_model = resolve_effective_model(session_override, None, model)
+                override_runtime_applied = self._apply_provider_runtime(
+                    runtime_kwargs, override_provider, target_model=override_model)
+                if not override_runtime_applied:
+                    logger.warning(
+                        "api_server session /model override unavailable: session=%s provider=%s model=%s",
+                        session_key or "", override_provider, override_model)
+                    session_override = None
         if session_override:
             model = resolve_effective_model(session_override, None, model)
-            self._apply_provider_runtime(
-                runtime_kwargs,
-                _clean_request_string(session_override.get("provider")) or current_provider,
-                target_model=model)
+            if not override_runtime_applied:
+                self._apply_provider_runtime(
+                    runtime_kwargs,
+                    _clean_request_string(session_override.get("provider")) or current_provider,
+                    target_model=model)
             _apply_runtime_agent_overrides(runtime_kwargs, session_override)
             if route or request_model or request_provider:
                 logger.debug(
                     "api_server request selection skipped: session /model override wins for %s",
                     session_key or "")
-        elif session_row_model and not confirmed_runtime_lock:
+        elif session_row_model and not confirmed_runtime_lock and not runtime_from_fallback and not foreign_row_model:
             # A session-persisted raw model (no route alias) is a standing selection that pins
             # this session's turns ahead of per-request body values.
             self._apply_provider_runtime(
@@ -2308,6 +2472,11 @@ class APIServerAdapter(OpenAICompatRoutesMixin, BasePlatformAdapter):
                     "api_server request selection skipped: session-persisted model wins for %s",
                     session_key or "")
         else:
+            if session_row_model and not confirmed_runtime_lock and (runtime_from_fallback or foreign_row_model):
+                logger.info(
+                    "api_server session row model skipped: session=%s row_model=%s provider=%s reason=%s",
+                    session_key or "", session_row_model, current_provider,
+                    "runtime_fallback" if runtime_from_fallback else "foreign_provider")
             # The request's ``model`` selected the route, so its value is the ALIAS — never a
             # model name; a route with no ``model`` key keeps the global default.
             effective_model = (route_model or model) if route is not None else (request_model or model)
@@ -2363,13 +2532,15 @@ class APIServerAdapter(OpenAICompatRoutesMixin, BasePlatformAdapter):
         # must not collide with the ``**runtime_kwargs`` spread).
         model = runtime_kwargs.pop("model", None) or _resolve_gateway_model()
         runtime_kwargs.pop("_fallback_notice", None)  # raw API surface: the switch is already logged
+        fallback_entry = runtime_kwargs.pop("_fallback_entry", None)
         request_reasoning_config = _request_reasoning_config(model_options)
         request_service_tier = _request_service_tier(model_options)
         model, session_override, request_model, request_provider = self._select_agent_runtime(
             runtime_kwargs, model,
             requested_model=requested_model, requested_provider=requested_provider, route=route,
             session_model=session_model, confirmed_runtime_lock=confirmed_runtime_lock,
-            gateway_session_key=gateway_session_key, session_id=session_id)
+            gateway_session_key=gateway_session_key, session_id=session_id,
+            runtime_from_fallback=bool(fallback_entry))
         user_config = _load_gateway_config()
         enabled_toolsets = sorted(_get_platform_tools(user_config, "api_server"))
         # Same gate the messaging gateway and TUI apply: ``display.interim_assistant_messages``
@@ -2525,6 +2696,9 @@ class APIServerAdapter(OpenAICompatRoutesMixin, BasePlatformAdapter):
                 "chat_completions": True, "chat_completions_streaming": True,
                 "responses_api": True, "responses_streaming": True, "run_submission": True,
                 "runs_idempotency": _api_runs._idempotency_capabilities(self, store_type=RunIdempotencyStore),
+                "peer_ping": {"supported": True, "durable": True,
+                              "retention_seconds": _peer_ping.RETENTION_SECONDS,
+                              "max_body_bytes": _peer_ping.MAX_BODY_BYTES},
                 **_STATIC_FEATURE_FLAGS,
                 "cors": bool(self._cors_origins),
                 # Always advertised for feature-detection; enabled follows config.
@@ -2548,6 +2722,12 @@ class APIServerAdapter(OpenAICompatRoutesMixin, BasePlatformAdapter):
                         "cloud": "authenticated-gateway-rpc"}}},
             "endpoints": {name: {"method": m, "path": p} for name, (m, p) in _CAPABILITY_ENDPOINTS},
         })
+
+    async def _handle_peer_ping(self, request: "web.Request") -> "web.Response":
+        return await _peer_ping.handle_post(self, request)
+
+    async def _handle_peer_ping_status(self, request: "web.Request") -> "web.Response":
+        return await _peer_ping.handle_get(self, request)
 
     # -- Browser-extension control (authenticated local/VPS API) ----------------------
 
@@ -3353,11 +3533,21 @@ class APIServerAdapter(OpenAICompatRoutesMixin, BasePlatformAdapter):
         gateway_session_key, key_err = self._parse_session_key_header(request)
         if key_err is not None:
             return None, key_err
-        session_id = request.match_info["session_id"]
-        session, err = await self._get_existing_session_or_404(session_id)
+        body, err = await self._read_json_body(request)
         if err:
             return None, err
-        body, err = await self._read_json_body(request)
+        return await self._build_session_chat_ctx(
+            session_id=request.match_info["session_id"],
+            body=body,
+            gateway_session_key=gateway_session_key,
+        )
+
+    async def _build_session_chat_ctx(
+        self, *, session_id: str, body: Dict[str, Any],
+        gateway_session_key: Optional[str] = None,
+    ) -> tuple:
+        """Validate session chat inputs and build ``ctx`` for ``_run_agent`` (HTTP or startup replay)."""
+        session, err = await self._get_existing_session_or_404(session_id)
         if err:
             return None, err
         user_message, err = _session_chat_user_message(body)
@@ -3414,6 +3604,44 @@ class APIServerAdapter(OpenAICompatRoutesMixin, BasePlatformAdapter):
             "gateway_session_key": gateway_session_key, "session_id": session_id, "body": body,
             "user_message": user_message, "runtime_request": runtime_request,
             "lock_active": lock_active, "run_kwargs": run_kwargs}, None
+
+    async def dispatch_session_chat_turn(self, *, session_id: str, message: str) -> bool:
+        """Run one session-chat turn (same path as POST /api/sessions/{id}/chat when not draining).
+
+        Returns True only when the replayed turn succeeded; False when admission refuses, the turn
+        raises, or its final result (after the policy-gated retry) is a failure. False keeps the drain
+        spool for a later restart attempt, the message's only durable copy.
+        """
+        from tools.bot_failure_reasons import RETRY_NONE, result_retry_action
+
+        limited = self._concurrency_limited_response()
+        if limited is not None:
+            return False
+        ctx, err = await self._build_session_chat_ctx(
+            session_id=session_id, body={"message": message}, gateway_session_key=None)
+        if err is not None:
+            return False
+        handed_off = await self._answer_through_live_bot_chat(ctx)
+        if handed_off is not None:
+            return int(handed_off.status) < 500
+        sid = ctx["session_id"]
+        history = await self._conversation_history_for_session(sid)
+        try:
+            result, _usage = await self._run_agent(conversation_history=history, **ctx["run_kwargs"])
+            if result_retry_action(result) != RETRY_NONE:
+                history = await self._conversation_history_for_session(sid)
+                result, _usage = await self._run_agent(
+                    conversation_history=history, resume_unanswered_turn=True, **ctx["run_kwargs"])
+        except Exception:
+            logger.warning(
+                "Gateway-draining session chat replay failed for %s", sid, exc_info=True)
+            return False
+        if not isinstance(result, dict) or result.get("failed"):
+            logger.warning(
+                "Gateway-draining session chat replay turn failed for %s: %s",
+                sid, (result.get("error") if isinstance(result, dict) else result) or "no result")
+            return False
+        return True
 
     @staticmethod
     def _session_headers(session_id: str, gateway_session_key: Optional[str]) -> dict[str, str]:
@@ -3495,7 +3723,15 @@ class APIServerAdapter(OpenAICompatRoutesMixin, BasePlatformAdapter):
         admitted = await self._admit_to_live_bot_chat(session_id, ctx["user_message"], ctx["run_kwargs"]["turn_author"])
         if admitted is None:
             return None
-        record = await self._await_live_bot_chat_receipt(*admitted)
+        if ctx["body"].get("on_busy") == "queue":
+            from tools.bot_mode_dm import _FAST_ACK_SECONDS, _LIVE_WAIT_SECONDS
+            started = time.monotonic()
+            record = await self._await_live_bot_chat_receipt(*admitted, wait_seconds=_FAST_ACK_SECONDS)
+            if record["status"] == "claimed":
+                record = await self._await_live_bot_chat_receipt(
+                    admitted[0], record, wait_seconds=max(0.0, _LIVE_WAIT_SECONDS - (time.monotonic() - started)))
+        else:
+            record = await self._await_live_bot_chat_receipt(*admitted)
         delivery_id = record["delivery_id"]
         headers = self._session_headers(session_id, ctx["gateway_session_key"])
         if record["status"] == "settled":
@@ -3510,14 +3746,15 @@ class APIServerAdapter(OpenAICompatRoutesMixin, BasePlatformAdapter):
         return _error_response(record.get("error") or f"Bot Chat delivery {record['status']}", 502,
                                code=record.get("reason") or record["status"], headers=headers)
 
-    async def _await_live_bot_chat_receipt(self, home: Path, record: dict[str, Any], *, keepalive=None) -> dict[str, Any]:
+    async def _await_live_bot_chat_receipt(self, home: Path, record: Dict[str, Any], *, keepalive=None,
+                                           wait_seconds: Optional[float] = None) -> Dict[str, Any]:
         """Wait on the owner's mailbox record through the shared ``await_delivery_async`` primitive until it
         settles or the local DM budget runs out; ``keepalive`` (async) is called every SSE keepalive interval
         so a streaming caller's proxy keeps the socket."""
         from tools.bot_live_delivery import await_delivery_async
         from tools.bot_mode_dm import _LIVE_WAIT_SECONDS
         delivery_id = record["delivery_id"]
-        deadline = time.monotonic() + _LIVE_WAIT_SECONDS
+        deadline = time.monotonic() + (_LIVE_WAIT_SECONDS if wait_seconds is None else wait_seconds)
         while record["status"] in ("queued", "claimed"):
             remaining = deadline - time.monotonic()
             if remaining <= 0:
@@ -3528,7 +3765,54 @@ class APIServerAdapter(OpenAICompatRoutesMixin, BasePlatformAdapter):
                 await keepalive()
         return record
 
-    async def _stream_through_live_bot_chat(self, request: web.Request, ctx: dict[str, Any]) -> Optional[web.StreamResponse]:
+    async def _queue_busy_peer_dm(self, ctx: Dict[str, Any], *, confirmed_busy: bool = False) -> Optional["web.Response"]:
+        """Fast-ack a peer after its turn lease or API session lock proves the target is busy."""
+        from tools.bot_mode_dm import _FAST_ACK_SECONDS, _busy_sender, enqueue_busy_peer_dm
+        from tools.fleet_message_drain import bot_identity, recipient_drain_enabled
+
+        try:
+            db = await asyncio.wait_for(self._ensure_session_db_async(), _FAST_ACK_SECONDS)
+            if db is None:
+                return None
+            if not confirmed_busy:
+                deadline = time.monotonic() + _FAST_ACK_SECONDS
+                held = False
+                while True:
+                    remaining = deadline - time.monotonic()
+                    if remaining <= 0:
+                        if held:
+                            break
+                        return None
+                    holder = await asyncio.wait_for(
+                        asyncio.to_thread(db.session_turn_lease_holder, ctx["session_id"]), remaining)
+                    if not holder:
+                        return None
+                    held = True
+                    remaining = deadline - time.monotonic()
+                    if remaining <= 0:
+                        break
+                    await asyncio.sleep(min(0.2, remaining))
+        except Exception:
+            logger.warning("Busy peer DM lease probe failed; running the turn normally", exc_info=True)
+            return None
+
+        home = Path(db.db_path).parent
+        try:
+            recipient = bot_identity(home)
+            if not await asyncio.to_thread(recipient_drain_enabled, recipient, profile_home=home):
+                return None
+            sender = _busy_sender(ctx["run_kwargs"]["turn_author"])
+            message_id = await asyncio.to_thread(enqueue_busy_peer_dm, home, sender, ctx["user_message"])
+        except Exception:
+            logger.warning("Busy peer DM enqueue failed; running the turn normally", exc_info=True)
+            return None
+        return web.json_response(
+            {"object": "hermes.session.chat.queued", "session_id": ctx["session_id"],
+             "status": "queued", "message_id": message_id, "delivery_id": message_id,
+             "reason": "target_busy"}, status=202,
+            headers=self._session_headers(ctx["session_id"], ctx["gateway_session_key"]))
+
+    async def _stream_through_live_bot_chat(self, request: "web.Request", ctx: Dict[str, Any]) -> Optional["web.StreamResponse"]:
         """``_answer_through_live_bot_chat`` for the SSE sibling route: the owner's settled receipt is
         the run's single ``assistant.completed`` event; a receipt still open at the budget is a
         ``run.queued`` event (the 202 shape), a failed one an ``error`` event carrying the reason."""
@@ -3566,8 +3850,8 @@ class APIServerAdapter(OpenAICompatRoutesMixin, BasePlatformAdapter):
             logger.info("Session SSE client disconnected while a live Bot Chat held the turn")
         return response
 
-    @_admit_api_agent_request
-    async def _handle_session_chat(self, request: web.Request) -> web.Response:
+    @_admit_session_chat_or_queue
+    async def _handle_session_chat(self, request: "web.Request") -> "web.Response":
         """POST /api/sessions/{session_id}/chat — one synchronous agent turn (plus the delivery lanes'
         one bounded re-run of a transient failure; ``hermes peer dm`` is the client)."""
         from tools.bot_failure_reasons import RETRY_NONE, result_retry_action
@@ -3583,22 +3867,25 @@ class APIServerAdapter(OpenAICompatRoutesMixin, BasePlatformAdapter):
         handed_off = await self._answer_through_live_bot_chat(ctx)
         if handed_off is not None:
             return handed_off
+        if ctx["body"].get("on_busy") == "queue":
+            queued = await self._queue_busy_peer_dm(ctx)
+            if queued is not None:
+                return queued
         gateway_session_key = ctx["gateway_session_key"]
         session_id = ctx["session_id"]
         history = await self._conversation_history_for_session(session_id)
-        result, usage = await self._run_agent(conversation_history=history, **ctx["run_kwargs"])
-        # One policy-gated re-run of a transiently failed turn — the peer-DM transport's half of the
-        # retry the local (``tools.bot_mode_dm``) and relayed (``tui_gateway.methods_bot_relay``)
-        # delivery lanes already apply (#93091 item 5, #115325). Same policy, same gate: transient
-        # classes (429 / 5xx) re-run the SAME session once, a context overflow lets the re-run's
-        # pre-API compaction shrink the transcript first, and auth/quota/config/model never re-run. The
-        # store is read again first: the failed attempt's turn-start persist left the DM as the
-        # transcript's unanswered tail row, and the re-run resumes that row instead of appending a
-        # second copy of it. A turn that fails again reaches the peer client exactly as before.
-        if result_retry_action(result) != RETRY_NONE:
-            history = await self._conversation_history_for_session(session_id)
-            result, usage = await self._run_agent(
-                conversation_history=history, resume_unanswered_turn=True, **ctx["run_kwargs"])
+        from tools.bot_relay import TurnBusyError
+        try:
+            result, usage = await self._run_agent(conversation_history=history, **ctx["run_kwargs"])
+            # A transiently failed turn gets the peer transport's one policy-gated re-run.
+            # Reload history so the failed attempt's unanswered user row is adopted.
+            if result_retry_action(result) != RETRY_NONE:
+                history = await self._conversation_history_for_session(session_id)
+                result, usage = await self._run_agent(
+                    conversation_history=history, resume_unanswered_turn=True, **ctx["run_kwargs"])
+        except TurnBusyError:
+            queued = await self._queue_busy_peer_dm(ctx, confirmed_busy=True)
+            return queued if queued is not None else _target_busy_response()
         is_dict = isinstance(result, dict)
         effective_session_id = result.get("session_id") if is_dict else session_id
         final_response = _resolve_media_to_data_urls(
@@ -3611,8 +3898,8 @@ class APIServerAdapter(OpenAICompatRoutesMixin, BasePlatformAdapter):
              "runtime": self._effective_turn_runtime(ctx["runtime_request"], result, usage)},
             headers=headers)
 
-    @_admit_api_agent_request
-    async def _handle_session_chat_stream(self, request: web.Request) -> web.StreamResponse:
+    @_admit_session_chat_or_queue
+    async def _handle_session_chat_stream(self, request: "web.Request") -> "web.StreamResponse":
         """POST /api/sessions/{session_id}/chat/stream — SSE wrapper over _run_agent."""
         limited = self._concurrency_limited_response()
         if limited is not None:
@@ -3701,6 +3988,15 @@ class APIServerAdapter(OpenAICompatRoutesMixin, BasePlatformAdapter):
                 self._set_run_status(run_id, "cancelled", last_event="run.cancelled")
                 raise
             except Exception as exc:
+                from tools.bot_relay import TurnBusyError
+                if isinstance(exc, TurnBusyError):
+                    self._set_run_status(
+                        run_id, "failed", reason="target_busy", retry_after=30,
+                        last_event="error")
+                    await queue.put(_event_payload("error", {
+                        "message": "Target session is busy; retry this turn.",
+                        "code": "target_busy", "reason": "target_busy", "retry_after": 30}))
+                    return
                 logger.exception("[api_server] session chat stream failed")
                 self._set_run_status(
                     run_id, "failed", error=_redact_api_error_text(exc), last_event="run.failed")
@@ -4277,6 +4573,11 @@ class APIServerAdapter(OpenAICompatRoutesMixin, BasePlatformAdapter):
                     )
                     if relay_metadata:
                         conversation_kwargs["relay_metadata"] = relay_metadata
+                    from tools.bot_mode_dm import _agent_home
+                    from tools.fleet_message_drain import api_turn_lock, schedule_drain_agent_turn
+                    agent_home = _agent_home(agent)
+                    turn_lock = api_turn_lock(agent_home, session_id or getattr(agent, "session_id", None),
+                                              agent=agent)
                     approval_token = None
                     if approval_notify_callback is not None and approval_session_key:
                         # Same machinery as /v1/runs (_run_agent_sync): the contextvar scopes
@@ -4286,17 +4587,26 @@ class APIServerAdapter(OpenAICompatRoutesMixin, BasePlatformAdapter):
                         approval_token = set_current_session_key(approval_session_key)
                         register_gateway_notify(approval_session_key, approval_notify_callback)
                     try:
-                        with notification_turn(agent, muted=muted, session_id=session_id or ""):
-                            result = agent.run_conversation(**conversation_kwargs)
+                        with turn_lock:
+                            with notification_turn(agent, muted=muted, session_id=session_id or ""):
+                                result = agent.run_conversation(**conversation_kwargs)
+                            result, usage = self._finish_turn_result(
+                                agent, result, session_id, route=route, requested_runtime=requested_runtime,
+                                route_source=route_source, confirmed_runtime_lock=confirmed_runtime_lock)
+                        if (isinstance(result, dict) and not result.get("failed")
+                                and not result.get("partial") and not result.get("interrupted")
+                                and result.get("completed") is not False):
+                            try:
+                                schedule_drain_agent_turn(agent, agent_home, result.get("messages"),
+                                                          session_id=session_id)
+                            except Exception:
+                                logger.warning("api_server fleet message drain dispatch failed", exc_info=True)
                     finally:
                         if approval_token is not None:
                             from tools.approval_context import reset_current_session_key
                             _api_runs._unregister_approval_notify(approval_session_key)
                             with suppress(Exception):
                                 reset_current_session_key(approval_token)
-                    result, usage = self._finish_turn_result(
-                        agent, result, session_id, route=route, requested_runtime=requested_runtime,
-                        route_source=route_source, confirmed_runtime_lock=confirmed_runtime_lock)
                     if muted and isinstance(result, dict):
                         # Project presentation only after finishing the source outcome. Keep
                         # the agent's result, transcript, failure flags and usage intact.

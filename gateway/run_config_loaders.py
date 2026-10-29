@@ -235,9 +235,12 @@ class GatewayConfigLoadersMixin:
 
     @classmethod
     def _load_busy_input_mode(cls) -> str:
-        """Gateway drain-time busy-input behavior from env/config (default ``interrupt``)."""
+        """Gateway drain-time busy-input behavior from env/config (default ``queue``).
+
+        Turner 2026-09-28: a message arriving mid-turn must never kill the running turn by
+        default. ``interrupt`` stays available only when set explicitly."""
         mode = cls._env_or_cfg_str("HERMES_GATEWAY_BUSY_INPUT_MODE", "display", "busy_input_mode").lower()
-        return mode if mode in {"queue", "steer"} else "interrupt"
+        return mode if mode in {"queue", "steer", "interrupt"} else "queue"
 
     @classmethod
     def _load_busy_text_mode(cls) -> str:
@@ -549,29 +552,7 @@ class GatewayConfigLoadersMixin:
     def _apply_fallback_chain_to_agent(agent: Any, chain: list | None) -> None:
         """Keep a cached agent's fallback chain aligned with current config.
 
-        Skips the rewrite while a cooldown holds the agent on an activated fallback provider
-        (``restore_primary_runtime`` owns that lifecycle); otherwise replaces the chain so
-        mid-uptime ``fallback_providers`` edits apply without a restart.
-
-        When primary is active (or cooldown expired), replace the chain so mid-uptime ``fallback_providers``
-        edits take effect without requiring a gateway restart (#60955).
+        Replaced by unified apply_fallback_chain_to_agent in agent.agent_runtime_helpers (H20).
         """
-        if agent is None:
-            return
-        new_chain = list(chain or [])
-        rate_limited_until = getattr(agent, "_rate_limited_until", 0) or 0
-        if getattr(agent, "_fallback_activated", False) and rate_limited_until > time.monotonic():
-            return
-        old_chain = list(getattr(agent, "_fallback_chain", []) or [])
-        agent._fallback_chain = new_chain
-        agent._fallback_model = new_chain[0] if new_chain else None
-        if not getattr(agent, "_fallback_activated", False):
-            agent._fallback_index = 0
-        # A config edit means the user changed something — drop the session-scoped unavailability
-        # memo so re-configured entries (e.g. credentials added mid-uptime) get retried. Only on real
-        # content change, so the per-message no-op refresh keeps the memo's rate-limiting benefit.
-        # See #60955.
-        if new_chain != old_chain:
-            unavailable = getattr(agent, "_unavailable_fallback_keys", None)
-            if unavailable:
-                unavailable.clear()
+        from agent.agent_runtime_helpers import apply_fallback_chain_to_agent
+        apply_fallback_chain_to_agent(agent, chain=chain)
