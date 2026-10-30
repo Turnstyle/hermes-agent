@@ -13,6 +13,7 @@ COMMANDS = [
  ['python3','-B',str(HERE/'loader/build_overlay.py')],
  ['python3','-B',str(HERE/'loader/build_env_overlay.py')],
  ['python3','-B',str(HERE/'loader/test_overlay.py')],
+ ['python3','-B',str(HERE/'loader/test_stacked_age.py')],
  ['python3','-B',str(HERE/'loader/test_env_overlay.py')],
  ['python3','-B',str(HERE/'config/test_config.py')],
  ['python3','-B',str(HERE/'transport/build_overlay.py')],

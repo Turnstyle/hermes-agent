@@ -65,7 +65,7 @@ _SECRET_SOURCE_WRITES_BY_HOME: dict[str, dict[str, tuple[str, str, str | None]]]
 # re-parse + ASCII sweep re-run each time (Bitwarden's own cache only saves the network call).
 _APPLIED_HOMES: set[str] = set()
 # Start age BEFORE resolving: publishing a slow fetch must not restart its lifetime.
-_SECRET_SOURCE_MAX_AGE = 1800.0
+_SECRET_SOURCE_MAX_AGE = 60.0  # 1740 upstream + 60 outer <= 1800 end-to-end
 _SECRET_SOURCE_FETCHED_AT: dict[str, float] = {}
 _SECRET_SOURCE_CLOCK = time.monotonic
 _SECRET_SOURCE_CACHE_LOCK = threading.RLock()

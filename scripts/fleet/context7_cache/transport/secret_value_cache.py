@@ -17,7 +17,7 @@ import stat
 import time
 
 CACHE_DIR = Path('/Users/sheldon/.hermes/profiles/shld-keys-router/cache/secret-values-v1')
-MAX_TTL = 1800
+MAX_TTL = 1740  # Reserve 60 seconds for the env-loader publication cache.
 DEFAULT_TTL = 1740
 _VAULTS = ('op://keys-router/', 'op://2uadhfojbtwx2zlvpz4tw5375q/')
 _IDS = ('z75ikclocxoipbuaijaokcyaci', 'td6qii4vwjxhydnrkosz2sci6m', '6sluosa3usmgdkrzdduoq257ba')

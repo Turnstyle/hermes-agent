@@ -28,7 +28,7 @@ from agent.secret_sources.base import (
 logger = logging.getLogger(__name__)
 
 _OP_RUN_TIMEOUT = 30
-_ONEPASSWORD_MAX_CACHE_TTL = 1800.0
+_ONEPASSWORD_MAX_CACHE_TTL = 1740.0  # plus env-loader's 60-second window
 _PINNED_SHARED_CACHE_HELPER = "/Users/sheldon/.hermes/profiles/shld-keys-router/tools/key_op.py"
 
 
@@ -207,11 +207,11 @@ def fetch_onepassword_secrets(
 
     token_value = get_source_environment().get(token_env, "").strip()
     cache_key: _CacheKey = (_auth_fingerprint(token_env), account or "",
-                            str(home_path) if home_path is not None else "", _refs_fingerprint(valid))
+                            str(home_path) if home_path is not None else "", "age-budget-v2:" + _refs_fingerprint(valid))
 
     if use_cache:
         cached = _STORE.lookup(cache_key, cache_ttl_seconds, home_path)
-        if cached is not None:
+        if cached is not None and 0 <= time.time() - cached.fetched_at < cache_ttl_seconds:
             return dict(cached.secrets), warnings
 
     op = binary or find_op(binary_path)
@@ -220,6 +220,7 @@ def fetch_onepassword_secrets(
                            "(https://developer.1password.com/docs/cli/get-started/) or set "
                            "secrets.onepassword.binary_path to its absolute location.")
 
+    fetched_at = time.time()  # before any provider read; never re-age on publication
     secrets: dict[str, str] = {}
     read_errors = 0
     for name in sorted(valid):
@@ -229,8 +230,11 @@ def fetch_onepassword_secrets(
             warnings.append(str(exc))
             read_errors += 1
 
+    if not 0 <= time.time() - fetched_at < _ONEPASSWORD_MAX_CACHE_TTL:
+        return {}, warnings + ["1Password fetch exceeded freshness window"]
+
     if use_cache and not read_errors and secrets:
-        _STORE.store(cache_key, CachedFetch(secrets=dict(secrets), fetched_at=time.time()),
+        _STORE.store(cache_key, CachedFetch(secrets=dict(secrets), fetched_at=fetched_at),
                      cache_ttl_seconds, home_path)
 
     return secrets, warnings
@@ -321,7 +325,7 @@ class OnePasswordSource(SecretSource):
                                                          "(unset = desktop/interactive session)",
                                           "default": _DEFAULT_TOKEN_ENV},
             "binary_path": {"description": "Pin the op binary (empty = resolve via PATH)", "default": ""},
-            "cache_ttl_seconds": {"description": "Disk+memory cache TTL; max 1800 seconds; 0 disables", "default": 300},
+            "cache_ttl_seconds": {"description": "Disk+memory cache TTL; max 1740 seconds plus 60 outer; 0 disables", "default": 300},
             "override_existing": {"description": "Resolved values overwrite .env/shell values", "default": True},
         }
 

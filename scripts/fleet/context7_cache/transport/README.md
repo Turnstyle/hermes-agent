@@ -34,17 +34,18 @@ for the current API-key consumers, not the untouched legacy branch.
 
 ## Freshness and concurrent access
 
-Production default TTL is 1740 seconds; the absolute validation cap remains
-1800 seconds (finite positive numeric, not bool). Production resolve exposes
-no TTL override. The 60-second margin allows the normal 30-second cleanup pass
-to remove values before 1800 seconds, but does not guarantee an OS deadline.
+Production default and absolute validation cap are 1740 seconds (finite positive
+numeric, not bool). Production resolve exposes no TTL override. Older records
+with TTL greater than 1740 are invalidated on read. The 60-second margin is
+reserved for the single outer env-loader window, so aggregate age remains below
+1800; see ../loader/ENV_TTL.md. Cleanup is not an OS deadline.
 The whole miss/provider/atomic publication is protected by a per-reference flock.
 Eight spawned processes with different synthetic profile labels use one provider
 read for the canonical legacy/current alias. Profiles do not contribute to keys.
 Different non-LEGACY vault aliases are deliberately distinct identities.
 
 Records require an exact schema, version2, canonical ref, canonical base64 value,
-finite nonnegative timestamps, exact expiry and TTL <=1800. Both wall and
+finite nonnegative timestamps, exact expiry and TTL <=1740. Both wall and
 monotonic elapsed times must be nonnegative and below TTL, and agree within five
 seconds. Wall rollback/reboot monotonic rollback/large jumps invalidate a record.
 TTL starts before provider access. Expired/corrupt entries are removed before

@@ -100,6 +100,14 @@ class CacheTests(unittest.TestCase):
         self.assertEqual((metadata['miss'], metadata['provider_read'], metadata['hit']), (1, 1, 7))
         results.close()
 
+    def test_reject_old_longer_ttl_record(self):
+        self.get()
+        self.mutate(ttl=1800, expires=11800)
+        self.get()
+        self.assertEqual(self.calls, 2)
+        with self.assertRaises(ValueError):
+            self.get(ttl=1800)
+
     def test_exact_ttl_boundary_and_cleanup_without_read(self):
         self.get(ttl=10)
         self.now[:] = [10009.0, 1009.0]
@@ -112,11 +120,11 @@ class CacheTests(unittest.TestCase):
         self.assertEqual(self.calls, 2)
 
     def test_max_ttl(self):
-        for ttl in (0, -1, 1801, True, float('nan'), float('inf'), '30'):
+        for ttl in (0, -1, 1741, 1800, True, float('nan'), float('inf'), '30'):
             with self.subTest(ttl=ttl), self.assertRaises(ValueError):
                 self.get(ttl=ttl)
-        self.get(ttl=1800)
-        self.now[:] = [11800, 2800]
+        self.get(ttl=1740)
+        self.now[:] = [11740, 2740]
         self.get()
         self.assertEqual(self.calls, 2)
 

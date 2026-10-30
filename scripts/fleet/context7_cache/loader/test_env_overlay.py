@@ -94,12 +94,12 @@ class EnvOverlayTests(unittest.TestCase):
     def test_hydration_boundary_no_extra_reads_and_copy(self):
         first = self.hydrate()
         first['FAKE_KEY'] = 'mutated'
-        self.now += 1799.999
+        self.now += 59.999
         self.assertNotEqual(self.hydrate(), first)
         self.assertEqual(len(self.calls), 1)
         self.assertEqual(self.config_reads, 1)
         self.version = 2
-        self.now = 11800
+        self.now = 10060
         self.assertIn('-v2', self.hydrate()['FAKE_KEY'])
         self.assertEqual(len(self.calls), 2)
         self.assertNotIn('FAKE_KEY', self.env)
@@ -107,7 +107,7 @@ class EnvOverlayTests(unittest.TestCase):
     def test_snapshot_expires_without_fetch_or_ambient_fallback(self):
         self.hydrate()
         self.env['FAKE_KEY'] = 'ambient-wrong-profile'
-        self.now += 1800
+        self.now += 60
         self.assertEqual(self.snapshot(), {})
         self.assertEqual(len(self.calls), 1)
         self.assertFalse(self.n['_APPLIED_HOMES'])
@@ -115,7 +115,7 @@ class EnvOverlayTests(unittest.TestCase):
 
     def test_global_refresh_cannot_resnapshot_own_old_nonoverride_write(self):
         self.global_apply()
-        self.now += 1799
+        self.now += 59
         self.global_apply()
         self.assertEqual((len(self.calls), self.config_reads), (1, 1))
         self.version = 2
@@ -127,14 +127,14 @@ class EnvOverlayTests(unittest.TestCase):
 
     def test_failed_refresh_drops_expired_value_and_snapshot(self):
         self.global_apply()
-        self.now += 1800
+        self.now += 60
         self.failed = True
         self.global_apply()
         self.assertNotIn('FAKE_KEY', self.env)
         self.assertEqual(self.snapshot(), {})
         self.global_apply()
         self.assertEqual(len(self.calls), 2)  # global error guard remains bounded
-        self.now += 1800
+        self.now += 60
         self.failed = False
         self.version = 3
         self.global_apply()
@@ -142,7 +142,7 @@ class EnvOverlayTests(unittest.TestCase):
 
     def test_exception_refresh_has_no_stale_snapshot(self):
         self.global_apply()
-        self.now += 1800
+        self.now += 60
         self.raise_fetch = True
         self.global_apply()
         self.assertEqual(self.snapshot(), {})
@@ -151,7 +151,7 @@ class EnvOverlayTests(unittest.TestCase):
     def test_disabled_source_expires_and_revokes(self):
         self.global_apply()
         self.config = {}
-        self.now += 1800
+        self.now += 60
         self.global_apply()
         self.assertEqual(self.snapshot(), {})
         self.assertNotIn('FAKE_KEY', self.env)
@@ -160,9 +160,9 @@ class EnvOverlayTests(unittest.TestCase):
     def test_per_home_age_and_reset_isolation(self):
         self.hydrate()
         b = Path('/synthetic/home-b')
-        self.now += 900
+        self.now += 30
         other = self.hydrate(b)
-        self.now += 900
+        self.now += 30
         self.assertEqual(self.snapshot(), {})
         self.assertEqual(self.snapshot(b), other)
         self.n['reset_secret_source_cache'](self.home)
@@ -182,7 +182,7 @@ class EnvOverlayTests(unittest.TestCase):
             with ThreadPoolExecutor(max_workers=8) as pool:
                 values = list(pool.map(lambda _: self.hydrate(), range(16)))
             self.assertTrue(all(v == values[0] for v in values))
-            self.now += 1800
+            self.now += 60
         self.assertEqual((len(self.calls), self.config_reads), (2, 2))
 
     def test_concurrent_global_single_fetch_per_window(self):
@@ -190,14 +190,14 @@ class EnvOverlayTests(unittest.TestCase):
         for _ in range(2):
             with ThreadPoolExecutor(max_workers=8) as pool:
                 list(pool.map(lambda _: self.global_apply(), range(16)))
-            self.now += 1800
+            self.now += 60
         self.assertEqual((len(self.calls), self.config_reads), (2, 2))
 
     def test_slow_fetch_does_not_restart_age(self):
         registry = sys.modules['agent.secret_sources.registry']
         def slow(*args, **kwargs):
             report = self.apply(*args, **kwargs)
-            self.now += 1800
+            self.now += 60
             return report
         registry.apply_all = slow
         self.assertEqual(self.hydrate(), {})
@@ -211,7 +211,7 @@ class EnvOverlayTests(unittest.TestCase):
         source, value, _ = self.n['_SECRET_SOURCE_WRITES_BY_HOME'][key]['FAKE_KEY']
         self.n['_SECRET_SOURCE_WRITES_BY_HOME'][key]['FAKE_KEY'] = (source, value, '__MANAGED_PLACEHOLDER__')
         sys.modules['agent.secret_scope'].load_env_file = lambda p: {'FAKE_KEY': '__MANAGED_PLACEHOLDER__'}
-        self.now += 1800
+        self.now += 60
         self.assertEqual(self.snapshot(), {})
         self.assertEqual(self.env['FAKE_KEY'], '__MANAGED_PLACEHOLDER__')
         self.assertNotIn(key, self.n['_SECRET_SOURCE_WRITES_BY_HOME'])
@@ -219,7 +219,7 @@ class EnvOverlayTests(unittest.TestCase):
     def test_external_replacement_is_not_revoked(self):
         self.global_apply()
         self.env['FAKE_KEY'] = 'new-shell-owner'
-        self.now += 1800
+        self.now += 60
         self.assertEqual(self.snapshot(), {})
         self.assertEqual(self.env['FAKE_KEY'], 'new-shell-owner')
 
@@ -231,7 +231,7 @@ class EnvOverlayTests(unittest.TestCase):
         self.env['FAKE_KEY'] = 'placeholder'
         self.n['load_hermes_dotenv'](hermes_home=self.home, load_external_secrets=False)
         self.assertIn('-v1', self.env['FAKE_KEY'])
-        self.now += 1800
+        self.now += 60
         self.env['FAKE_KEY'] = 'placeholder'
         self.n['load_hermes_dotenv'](hermes_home=self.home, load_external_secrets=False)
         self.assertEqual(self.env['FAKE_KEY'], 'placeholder')

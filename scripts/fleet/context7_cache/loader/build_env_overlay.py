@@ -8,7 +8,7 @@ def overlay(source):
     source = replace_once(source, 'import threading\n', 'import threading\nimport time\n')
     source = replace_once(source, '_APPLIED_HOMES: set[str] = set()', '''_APPLIED_HOMES: set[str] = set()
 # Start age BEFORE resolving: publishing a slow fetch must not restart its lifetime.
-_SECRET_SOURCE_MAX_AGE = 1800.0
+_SECRET_SOURCE_MAX_AGE = 60.0  # 1740 upstream + 60 outer <= 1800 end-to-end
 _SECRET_SOURCE_FETCHED_AT: dict[str, float] = {}
 _SECRET_SOURCE_CLOCK = time.monotonic''')
     source = replace_once(source, 'def get_secret_source_values(hermes_home: str | os.PathLike) -> dict[str, str]:\n    """Return the external-secret value snapshot for ``hermes_home``."""\n    return dict(_SECRET_SOURCE_VALUES_BY_HOME.get(str(Path(hermes_home).resolve()), {}))', '''def _secret_source_cache_fresh(home_key: str) -> bool:

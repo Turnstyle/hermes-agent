@@ -7,14 +7,14 @@ Current task-only authority: direct owner request names Turnstyle/hermes-agent a
 Artifacts
 
 - transport/: exact live key_op.py patch, candidate, secure shared exact-ref cross-process cache, synthetic tests, hash manifest and proposed periodic cleanup adapter.
-- loader/: exact live onepassword.py patch caps TTL at1800 and bypasses outer profile cache for pinned helper to avoid layered TTL extension.
+- loader/: exact live onepassword.py patch caps source TTL at1740 and bypasses the intermediate profile cache for pinned helper. Env-loader adds only60 seconds.
 - config/: tested config transformer evidence; parent script now caps helper and ordinary TTLs and enables Context7 only in the two named delta targets.
 - restart/: one-line exact-source coordinated restart patch adds supported --yes inside existing window, mocked tests and CLI semantics evidence.
 
 Final candidate changes and honest limits
 
-- loader/env_loader.patch bounds applied-home guards, external-secret snapshots and dotenv restore to max1800 seconds; controllable-clock tests cover refresh, concurrency and profile isolation. See loader/ENV_TTL.md. This bounds loader residence, not undisclosed upstream original age.
-- Transport logical TTL defaults1740 seconds, hard cap1800. Physical cleanup is periodic30seconds plus OS scheduling/lock delay. Deputy must purge expired op_cache.json at deployment and prove a cleanup cycle; no hard host-suspend physical deadline is claimed. Independent reviewer must accept this limitation.
+- loader/env_loader.patch bounds applied-home guards, external-secret snapshots and dotenv restore to one shared 60-second window; ordinary source caches and shared transport enforce at most1740 seconds, giving original-provider end-to-end age below1800. See loader/ENV_TTL.md and test_stacked_age.py. Old-head deputy review is FAIL H01; this correction needs new exact-head re-review.
+- Transport logical TTL defaults1740 seconds, hard cap1740. Physical cleanup is periodic30seconds plus OS scheduling/lock delay. Deputy must purge expired op_cache.json at deployment and prove a cleanup cycle; no hard host-suspend physical deadline is claimed. Independent reviewer must accept this limitation.
 - Production helper automatically writes private0600 durable nonsecret hit/miss/provider-read counters. Separate-process tests use fake providers only; deputy owns real provider verification after deployment. No token cache added.
 - Same coordinated adapter now offers explicit --no-notices, suppressing outbound steers, wakes, notices and board/checkpoint comments while retaining census/drain/checkpoint/permission/lock/health policies. All mutations are mocked in author tests; no restart occurred.
 - .gitleaks.toml retains all default secret rules and excludes only exact known public SHA256 digests at exact two manifest paths, including prior PR10 digests. Hashes remain fully verifiable.

@@ -19,7 +19,7 @@ def replace_once(source, before, after):
 
 def overlay(source):
     source = replace_once(source, '_OP_RUN_TIMEOUT = 30', '''_OP_RUN_TIMEOUT = 30
-_ONEPASSWORD_MAX_CACHE_TTL = 1800.0
+_ONEPASSWORD_MAX_CACHE_TTL = 1740.0  # plus env-loader's 60-second window
 _PINNED_SHARED_CACHE_HELPER = "/Users/sheldon/.hermes/profiles/shld-keys-router/tools/key_op.py"
 
 
@@ -42,7 +42,12 @@ def _bounded_cache_ttl(value: object) -> float:
 ''')
     source = replace_once(source, '            binary=binary, cache_ttl_seconds=cache_ttl_seconds, home_path=home_path)', '            binary=binary, binary_path=binary_path, cache_ttl_seconds=cache_ttl_seconds, home_path=home_path)')
     source = replace_once(source, '                binary=binary, cache_ttl_seconds=coerce_float', '                binary=binary, binary_path=binary_path, cache_ttl_seconds=coerce_float')
-    source = replace_once(source, 'Disk+memory cache TTL; 0 disables', 'Disk+memory cache TTL; max 1800 seconds; 0 disables')
+    source = replace_once(source, 'Disk+memory cache TTL; 0 disables', 'Disk+memory cache TTL; max 1740 seconds plus 60 outer; 0 disables')
+    source = replace_once(source, '        if cached is not None:\n            return dict(cached.secrets), warnings', '        if cached is not None and 0 <= time.time() - cached.fetched_at < cache_ttl_seconds:\n            return dict(cached.secrets), warnings')
+    source = replace_once(source, '    secrets: dict[str, str] = {}\n    read_errors = 0', '    fetched_at = time.time()  # before any provider read; never re-age on publication\n    secrets: dict[str, str] = {}\n    read_errors = 0')
+    source = replace_once(source, '    if use_cache and not read_errors and secrets:', '    if not 0 <= time.time() - fetched_at < _ONEPASSWORD_MAX_CACHE_TTL:\n        return {}, warnings + ["1Password fetch exceeded freshness window"]\n\n    if use_cache and not read_errors and secrets:')
+    source = replace_once(source, '_refs_fingerprint(valid))', '"age-budget-v2:" + _refs_fingerprint(valid))')
+    source = replace_once(source, 'CachedFetch(secrets=dict(secrets), fetched_at=time.time())', 'CachedFetch(secrets=dict(secrets), fetched_at=fetched_at)')
     return source
 
 def main():

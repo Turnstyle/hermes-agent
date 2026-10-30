@@ -1,35 +1,23 @@
-# Incremental env_loader TTL correction — candidate only
+# H01: aggregate provider-age budget — candidate only
 
-`env_loader.patch` is a narrow overlay against the same captured exact-live `hermes_cli/env_loader.py` as the original 1Password lane. It is **not applied** to the live tree or the older branch module. Apply it only as a separately authorized integration step after checking `env_loader_manifest.json`. The original `onepassword.patch` remains unchanged and is disjoint.
+The controlling bound is end-to-end original-provider age below 1800 seconds on cache return, not a fresh 1800-second residence at every layer.
 
-## Behavior
+The shared helper transport enforces at most 1740 seconds, including rejection of older records declaring a longer TTL. The exact helper bypasses the intermediate ordinary 1Password memory/disk cache. Ordinary 1Password uses at most 1740 seconds across memory and disk together, with the same original timestamp on promotion. Its origin starts before the provider loop, not after publication. Future timestamps and excessively slow fetches fail closed. The age-budget-v2 cache-key namespace ignores legacy ordinary entries whose timestamps had the old publication-time semantics.
 
-- Applied-home guards, per-home external-secret snapshots, and authoritative dotenv restore share a monotonic 1800-second maximum lifetime. Age begins before source resolution; cache hits and publication do not restart it. At exactly 1800, or a negative clock delta, state is invalid.
-- Getters return an empty snapshot after expiry, without fetching or consulting ambient credentials. The next hydration/global apply resolves again. Snapshot access, hydration, global apply, and reset serialize on the existing reentrant lock.
-- Expiry clears both snapshot maps and the applied-home guard. It peels only still-matching source writes back to their pre-source baseline (or absence), including source writes over dotenv placeholders. Otherwise the old process write could shadow a non-overriding provider indefinitely. Later external owners' replacement values stay untouched.
-- A slow resolution consuming the entire lifetime cannot publish a usable snapshot. Global failure guards remain once-per-window; routed hydration failures remain immediately retryable, as before.
-- Fresh guard/snapshot hits perform no config, bootstrap-file, or provider reads. Per-home reset and expiry leave siblings' snapshots and clocks alone.
-- Desktop/delegated protection, literal `allow_unattended_helper is True`, profile-local token environment, dotenv baseline logic, and process/profile context resolution are unchanged. Tests compare ASTs of those functions in addition to behavioral guard checks. `HERMES_DELEGATED_CHILD_CONTEXT` is never unset; no board path is invoked or modified.
+The loader adds at most 60 seconds across routed hydration, process-global applied-home guards, snapshots, and dotenv restoration together. These are one clock, not independent windows. Both budgets start before resolution; no cache hit, promotion, or publication resets the originating timestamp. Thus a nearly expired source result cannot receive more than 60 seconds of outer residence: source age <1740 plus outer residence <60 gives aggregate age <1800. At exactly either boundary the relevant cache expires.
 
-## Reproduce from worktree root
+Expiry clears snapshots, restore state, and applied-home flags. Only still-matching process writes are peeled to their pre-source baseline; external replacements remain. Failure cannot reuse our expired process write as a non-overriding source value. Per-home locking, reset, concurrency, default desktop/delegated guards, explicit literal helper opt-in and profile-local environment remain unchanged. Fresh outer hits do not read configuration or providers. Source cache hits do not read the actual provider.
 
-```sh
-python3 -B scripts/fleet/context7_cache/loader/build_env_overlay.py
-python3 -B scripts/fleet/context7_cache/loader/test_env_overlay.py
-python3 -B scripts/fleet/context7_cache/loader/test_overlay.py
-patch --dry-run -p1 -d /Users/sheldon/.hermes/releases/stable-v0.22.5-carry-d4c5aec662c8/candidate < scripts/fleet/context7_cache/loader/env_loader.patch
-git diff --check -- scripts/fleet/context7_cache/loader
-```
+Run from the worktree root:
 
-The env suite has 20 passing tests; the original 1Password suite has 9. All providers, environments, bootstrap parsers, and worker/session modules in the env suite are synthetic. The dotenv idempotence test uses a synthetic tokenizer with the unchanged loader baseline/publication implementation; no installed python-dotenv is available in the bare Python toolchain. Full application imports/integration are intentionally not attempted because they can bootstrap real secrets. Existing original-suite “residual” tests describe the unchanged live source, not this new candidate.
+    python3 -B scripts/fleet/context7_cache/loader/build_overlay.py
+    python3 -B scripts/fleet/context7_cache/loader/build_env_overlay.py
+    python3 -B scripts/fleet/context7_cache/loader/test_overlay.py
+    python3 -B scripts/fleet/context7_cache/loader/test_env_overlay.py
+    python3 -B scripts/fleet/context7_cache/loader/test_stacked_age.py
 
-## Artifacts and limits
+The stacked regression composes the production shared transport, exact-source 1Password overlay and exact-source env-loader AST harness. It fills the source at 10000, joins a cold loader at 11739, confirms another hit at 11798 without provider reads, then checks original-provider age exactly 1800 at 11800. It covers routed/global/dotenv paths, ordinary memory and disk promotion, shared-helper hits, and failed refresh. All clocks, provider outputs and environments are synthetic; no installed package startup or credentials are used.
 
-- `build_env_overlay.py`: source-hash-checked incremental generator.
-- `env_loader.candidate.py`, `env_loader.patch`, `env_loader_manifest.json`: review source, narrow patch, hashes.
-- `test_env_overlay.py`: fake-clock boundary, refresh, failure/revocation, concurrency/reset, isolation, startup guard, and dotenv regression tests.
-- `env_verification.json`: actual execution receipts and read-only session identity evidence.
+Both narrow patches are generated against the hashed live source without installation. Rehash the live bases before any separately authorized deployment. The source/candidate/patch hashes are in source_manifest.json and env_loader_manifest.json. This correction changes both patches; older manifests and old-head verdicts do not authorize this head.
 
-Identity was read from this profile's `state.db` for session `20261030_174117_95b924`: model `gpt-6.1-sol`, billing provider `openai-codex`, billing mode `subscription_included`. No new model or child was launched.
-
-This bounds **loader residence age**, not an upstream provider result's undisclosed original fetch age. Provider/transport TTL enforcement remains their own layer's responsibility; no upstream freshness timestamp contract is introduced here. Expiration is checked on access, not by a background plaintext-memory sweeper; already-returned scope objects cannot be revoked by this module. Jev was not retried. No credentials, live writes, restarts, deployment, commits, pushes, messages, or board operations occurred.
+Limits: expiry is enforced on access, not background erasure. Already returned dicts, contextvars session copies, or child environments cannot be retroactively revoked by this loader. Third-party helpers with undisclosed independent caches are outside this two-path contract. Physical legacy-file cleanup remains deployment work. No live writes, merge, deployment, restart, communications or credential operations are part of these author checks. Independent deputy re-review is still required. Native Jev startup already failed in the parent; do not retry that credential path or invent advice.

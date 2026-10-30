@@ -51,7 +51,7 @@ class OverlayTests(unittest.TestCase):
         self.writes = 0
         self.store.disk.read = lambda *args: self.disk if self.disk and self.disk.is_fresh(args[1]) else None
         def write(key, entry, ttl, home):
-            self.assertLessEqual(ttl, 1800)
+            self.assertLessEqual(ttl, 1740)
             self.writes += 1
             self.disk = entry
         self.store.disk.write = write
@@ -66,13 +66,13 @@ class OverlayTests(unittest.TestCase):
         return self.n['fetch_onepassword_secrets'](references={'FAKE_KEY': 'op://fake/item/field'}, **kwargs)
 
     def test_bounds(self):
-        for value, expected in [(86400,1800),(1801,1800),(1800,1800),(300,300),(0,0),(-1,0),('86400',1800),(float('inf'),0),(float('-inf'),0),(float('nan'),0),('bad',0),(None,0)]:
+        for value, expected in [(86400,1740),(1801,1740),(1740,1740),(300,300),(0,0),(-1,0),('86400',1740),(float('inf'),0),(float('-inf'),0),(float('nan'),0),('bad',0),(None,0)]:
             with self.subTest(value=value):
                 self.assertEqual(self.n['_bounded_cache_ttl'](value), expected)
 
     def test_memory_and_disk_expire_without_age_reset(self):
         first = self.fetch(cache_ttl_seconds=86400)
-        self.clock.now += 1799
+        self.clock.now += 1739
         self.assertEqual(self.fetch(cache_ttl_seconds=86400), first)
         self.store.memory.clear()
         self.assertEqual(self.fetch(cache_ttl_seconds=86400), first)
@@ -87,7 +87,7 @@ class OverlayTests(unittest.TestCase):
         self.writes = 0
         for selector in ({'binary_path':build.HELPER}, {'binary':Path(build.HELPER)}):
             self.fetch(cache_ttl_seconds=86400, **selector)
-            self.clock.now += 1799
+            self.clock.now += 1739
             self.fetch(cache_ttl_seconds=86400, **selector)
         self.assertEqual(self.calls, 4)
         self.assertEqual(self.writes, 0)
@@ -106,6 +106,27 @@ class OverlayTests(unittest.TestCase):
         self.assertEqual(self.calls, 8)
         self.assertEqual(self.writes, 0)
         self.assertFalse(self.store.memory)
+
+    def test_slow_provider_origin_and_future_cache_fail_closed(self):
+        def slow(*args, **kwargs):
+            self.calls += 1
+            self.clock.now += 100
+            return 'synthetic-slow'
+        self.n['_run_op_read'] = slow
+        self.fetch(cache_ttl_seconds=1800)
+        self.assertEqual(self.disk.fetched_at, 10000)
+        self.clock.now = 11740
+        self.fetch(cache_ttl_seconds=1800)
+        self.assertEqual(self.calls, 2)
+        self.disk.fetched_at = self.clock.now + 1
+        self.fetch(cache_ttl_seconds=1800)
+        self.assertEqual(self.calls, 3)
+        self.n['_run_op_read'] = lambda *a, **kw: (setattr(self.clock, 'now', self.clock.now + 1740) or 'synthetic-too-old')
+        self.assertEqual(self.fetch(use_cache=False)[0], {})
+
+    def test_legacy_cache_namespace_invalidated(self):
+        self.fetch()
+        self.assertTrue(all(key[-1].startswith('age-budget-v2:') for key in self.store.memory))
 
     def test_public_wrappers_propagate_exact_pin(self):
         kwargs = dict(binary_path=build.HELPER, cache_ttl_seconds=86400)
