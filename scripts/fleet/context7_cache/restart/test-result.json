@@ -1,0 +1,12 @@
+{
+  "ok": true,
+  "tests_run": 8,
+  "failures": 0,
+  "errors": 0,
+  "skipped": 0,
+  "source_unchanged": true,
+  "one_line_patch_verified": true,
+  "outside_function_ast_unchanged": true,
+  "subprocess": "Mock only; no gateway or service-manager process invoked",
+  "stdout_stderr": "test_actual_cli_parser_flag_and_guard_function (synthetic_overlay_tests.AdapterTests) ... detail\nhint\nend\ndetail\nok\ntest_budget_refusal_without_coordinator_force_no_fallback (synthetic_overlay_tests.AdapterTests) ... ok\ntest_existing_budget_fallback_unchanged_mock_only (synthetic_overlay_tests.AdapterTests) ... ok\ntest_failure_no_bare_retry_or_force (synthetic_overlay_tests.AdapterTests) ... ok\ntest_patch_is_one_argv_change (synthetic_overlay_tests.AdapterTests) ... ok\ntest_regression_old_bare_command_refused_patched_accepted (synthetic_overlay_tests.AdapterTests) ... ok\ntest_timeout_no_retry_or_fallback (synthetic_overlay_tests.AdapterTests) ... ok\ntest_yes_default_scope_and_context (synthetic_overlay_tests.AdapterTests) ... ok\n\n----------------------------------------------------------------------\nRan 8 tests in 0.010s\n\nOK\n"
+}

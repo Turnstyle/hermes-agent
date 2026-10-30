@@ -1,0 +1,20 @@
+{
+  "schema": 1,
+  "deploy_authorized": false,
+  "source": "/Users/sheldon/.hermes/fleet-node-state/u3g/g3f/gateway_coordinated_restart.py",
+  "source_sha256": "df56ebff6a48c22b1a698d491da4195e2fe54d2d19f8df0133b31654eac3d3a8",
+  "source_bytes": 144310,
+  "overlay_sha256": "0f6cd7718abbb0f9dd11e4cdb4c69f03a2b28f96339280ae786b14a993cda77a",
+  "overlay_bytes": 144319,
+  "old_line": "    cmd = [hermes_bin(), \"-p\", \"default\", \"gateway\", \"restart\"]",
+  "new_line": "    cmd = [hermes_bin(), \"-p\", \"default\", \"gateway\", \"restart\", \"--yes\"]",
+  "function_lines": [
+    1490,
+    1525
+  ],
+  "patch_sha256": "c4fe0b0067bc42961b49992d84f8649f57ccff71cac2420486cb7393f092965d",
+  "fixture_sha256": "f256e54e1a30cb6a97d7dc5db1edf9c42c56e24a4a195645f7dcc8d48150b4aa",
+  "evidence_sha256": "2c17d21edda998b91a6a99ebcbe9deb37fce0e73b3404b1ed15452eeb4a01972",
+  "scope": "One argv literal inside existing run_restart; no call-site, coordination, child context, board safety, timeout, environment, error or fallback changes.",
+  "deployment_gate": "Deputy only: exact source hash must match; verify selected hermes_bin target implements the evidenced --yes semantics. No standalone adapter invocation."
+}

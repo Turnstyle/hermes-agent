@@ -1,0 +1,22 @@
+{
+  "ok": false,
+  "status": "not_invoked",
+  "advice": "missing",
+  "reason": "Task forbids commands loading secrets. Exact launcher imports hermes_cli.main, whose startup calls load_hermes_dotenv before dispatch. Only update skips external secret sources; jev does not. No credential/provider lookup or repair attempted.",
+  "requested_command_not_run": "hermes -p shld-mm-hermes-agent jev evaluate --file jev-request.json",
+  "provider": "not inspected",
+  "credential": "not inspected",
+  "answers": {},
+  "sizes": {
+    "state_bytes": 25054,
+    "questions_bytes": 6999,
+    "request_bytes": 32097,
+    "question_count": 24,
+    "focused_adapter_bytes": 2865,
+    "focused_state_bytes": 9822,
+    "state_breadth_ratio": 2.5508043168397476
+  },
+  "request_sha256": "0c9603af7f77e9e2d7c4f083a783d9dab88050b59dda763254cfaad4e8de841f",
+  "parse_rule_if_later_authorized": "result=json.JSONDecoder().raw_decode(out[out.index('{'):])[0]; require result.ok and exact returned/requested IDs before using advice; confidence < 0.50 is no signal; absent confidence unknown",
+  "state_breadth": "Broader context includes complete relevant adapter function, both coordinated flows, pause/drain, notice and callback boundaries, CLI parser/guard, launcher and dotenv source; no narrower affirmative-only state."
+}

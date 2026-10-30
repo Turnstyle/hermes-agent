@@ -1,0 +1,20 @@
+{
+  "ok": true,
+  "full_suite_tests": 19,
+  "full_suite_failures": 0,
+  "full_suite_errors": 0,
+  "dedup_stress_runs": 50,
+  "dedup_stress_failures": 0,
+  "dedup_stress_errors": 0,
+  "spawned_processes_per_dedup_test": 8,
+  "expected_provider_calls_per_dedup_test": 1,
+  "elapsed_seconds": 38.0485,
+  "manifest_sha256": "77db3bad4496fc82d9a51106d12467a584e1dc341235ca920d9bed7bea0bb1b4",
+  "baseline_verified_unchanged": true,
+  "tests_synthetic_only": true,
+  "live_source_main_router_and_custody_not_invoked_by_tests": true,
+  "jev_advice": "unavailable: required hermes CLI lacks jev subcommand; no repair attempted",
+  "jev_launcher_observation": "CLI stderr reported 1Password: applied 2 secrets; source of values or fresh vault reads not measured",
+  "python_executable": "/Library/Developer/CommandLineTools/usr/bin/python3",
+  "test_output": "test_atomic_failure_no_cache_or_temp (test_transport.CacheTests) ... ok\ntest_bad_values_auth_tokens_never_written (test_transport.CacheTests) ... ok\ntest_candidate_guards_and_fake_provider (test_transport.CacheTests) ... ok\ntest_cleanup_abandoned_temps_without_provider (test_transport.CacheTests) ... ok\ntest_cleanup_plist (test_transport.CacheTests) ... ok\ntest_clock_rollback_and_forward (test_transport.CacheTests) ... ok\ntest_exact_ttl_boundary_and_cleanup_without_read (test_transport.CacheTests) ... ok\ntest_hit_miss_metadata_and_modes (test_transport.CacheTests) ... ok\ntest_insecure_dir_permissions (test_transport.CacheTests) ... ok\ntest_invalid_records_refetch (test_transport.CacheTests) ... ok\ntest_max_ttl (test_transport.CacheTests) ... ok\ntest_multiprocess_cross_profile_alias_dedup (test_transport.CacheTests) ... ok\ntest_nonallowlisted_ref_no_provider (test_transport.CacheTests) ... ok\ntest_nonowner_rejected (test_transport.CacheTests) ... ok\ntest_per_ref_lock_names_are_distinct (test_transport.CacheTests) ... ok\ntest_provider_errors_not_cached_no_stale (test_transport.CacheTests) ... ok\ntest_slow_provider_not_cached (test_transport.CacheTests) ... ok\ntest_symlink_files_hardlink_and_permissions (test_transport.CacheTests) ... ok\ntest_symlink_leaf_and_parent (test_transport.CacheTests) ... ok\n\n----------------------------------------------------------------------\nRan 19 tests in 1.369s\n\nOK\n..................................................\n----------------------------------------------------------------------\nRan 50 tests in 36.679s\n\nOK\n"
+}

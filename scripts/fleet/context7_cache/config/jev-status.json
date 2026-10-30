@@ -1,0 +1,15 @@
+{
+  "ok": false,
+  "signal": "none",
+  "command_exit_code": 2,
+  "reason": "Installed native hermes CLI does not provide the jev command",
+  "request_questions": 24,
+  "canonical_state_bytes": 30343,
+  "json_raw_decode": "No opening JSON object returned; parse unavailable",
+  "exact_answer_ids": false,
+  "confidence": null,
+  "confidence_policy": "Below 0.50 is no signal; absent response is no signal",
+  "startup_notice": "Native CLI printed 1Password: applied 2 secrets before rejecting jev; no secret values printed or inspected. No repair or further native CLI invocation attempted.",
+  "request_path": "/Users/sheldon/.hermes/profiles/shld-mm-hermes-agent/cache/scratch/context7-cache-correction-20261030/config/jev-request.json",
+  "raw_result_path": "/Users/sheldon/.hermes/profiles/shld-mm-hermes-agent/cache/scratch/context7-cache-correction-20261030/config/jev-result.raw.txt"
+}

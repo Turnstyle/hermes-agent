@@ -1,0 +1,11 @@
+--- a/gateway_coordinated_restart.py
++++ b/gateway_coordinated_restart.py
+@@ -1488,7 +1488,7 @@
+ 
+ 
+ def run_restart(log) -> None:
+-    cmd = [hermes_bin(), "-p", "default", "gateway", "restart"]
++    cmd = [hermes_bin(), "-p", "default", "gateway", "restart", "--yes"]
+     log("restart", f"running {shlex.join(cmd)} (CLI wait budget bounded; Hermes owns interruption and resume_pending)")
+     # Do NOT add --force here: on `gateway restart` it means "start a separate gateway", not "override a guard".
+     try:

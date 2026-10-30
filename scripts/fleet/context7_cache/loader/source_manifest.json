@@ -1,0 +1,11 @@
+{
+  "source_root": "/Users/sheldon/.hermes/releases/stable-v0.22.5-carry-d4c5aec662c8/candidate",
+  "source_sha256": {
+    "agent/secret_sources/onepassword.py": "38ce0a80088e667e9ea994238fa7eddb760446e0f06eb6655571c4fa95980616",
+    "agent/secret_sources/_cache.py": "4300695452374470b7b1764fc4e239a20328d1e4399c5b985bea618e01052f12",
+    "hermes_cli/env_loader.py": "755ed19cd94bafff49390e005030880628af66cc753899142d123dd8f8f82aaa"
+  },
+  "candidate_sha256": "d42d89a27b54d8bd7006d8b1d80be19d8413a8b7c1107503669b1060d9865bce",
+  "patch_sha256": "09871ee188edc3d531b13d877e34afcbd6157f1c8ccce02c15956348cef9765e",
+  "installed": false
+}
