@@ -18,6 +18,7 @@ import time
 
 CACHE_DIR = Path('/Users/sheldon/.hermes/profiles/shld-keys-router/cache/secret-values-v1')
 MAX_TTL = 1800
+DEFAULT_TTL = 1740
 _VAULTS = ('op://keys-router/', 'op://2uadhfojbtwx2zlvpz4tw5375q/')
 _IDS = ('z75ikclocxoipbuaijaokcyaci', 'td6qii4vwjxhydnrkosz2sci6m', '6sluosa3usmgdkrzdduoq257ba')
 LEGACY_REFS = {'op://keys-router/jtp-bots-suite Jev API Key from TypeSafe AI/credential':
@@ -126,6 +127,12 @@ def _unique(pairs):
     return result
 
 
+def _now():
+    # Older Apple Python monotonic() has a process-local epoch. Persisted
+    # freshness requires the shared system-wide clock across independent readers.
+    return time.time(), time.clock_gettime(time.CLOCK_MONOTONIC)
+
+
 def _read(directory_fd, key, reference, wall, mono):
     try:
         fd = os.open(key + '.json', os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=directory_fd)
@@ -141,7 +148,7 @@ def _read(directory_fd, key, reference, wall, mono):
             return None
         try:
             r = json.loads(raw, object_pairs_hook=_unique)
-            if type(r) is not dict or set(r) != FIELDS or type(r['v']) is not int or r['v'] != 1 or r['ref'] != reference:
+            if type(r) is not dict or set(r) != FIELDS or type(r['v']) is not int or r['v'] != 2 or r['ref'] != reference:
                 return None
             for name in ('created', 'monotonic', 'expires', 'ttl'):
                 if type(r[name]) not in (int, float) or not math.isfinite(r[name]) or r[name] < 0:
@@ -181,13 +188,40 @@ def _atomic(directory_fd, key, record):
             pass
 
 
-def _event(callback, event, key):
-    # Only these fixed event names and opaque reference IDs; no values/errors/env.
+def _event(directory_fd, callback, event, key):
+    # Bounded per-reference counters, not an unbounded log. Called under flock.
+    # No reference text, value, value hash, error, auth token or environment.
+    fields = {'v', 'ref_id', 'hit', 'miss', 'provider_read', 'event'}
+    record = dict(v=1, ref_id=key, hit=0, miss=0, provider_read=0, event=event)
+    try:
+        fd = os.open(key + '.metadata.json', os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK,
+                     dir_fd=directory_fd)
+    except FileNotFoundError:
+        pass
+    else:
+        try:
+            if _regular(fd).st_size > 4096:
+                raise CacheSecurityError('invalid metadata')
+            with os.fdopen(os.dup(fd), 'rb') as stream:
+                previous = json.loads(stream.read(4097), object_pairs_hook=_unique)
+            if (type(previous) is not dict or set(previous) != fields
+                    or type(previous['v']) is not int or previous['v'] != 1
+                    or previous['ref_id'] != key
+                    or previous['event'] not in ('hit', 'miss', 'provider_read')
+                    or any(type(previous[n]) is not int or not 0 <= previous[n] < 2**63
+                           for n in ('hit', 'miss', 'provider_read'))):
+                raise CacheSecurityError('invalid metadata')
+            record = previous
+        finally:
+            os.close(fd)
+    record[event] = min(record[event] + 1, 2**63 - 1)
+    record['event'] = event
+    _atomic(directory_fd, key + '.metadata', record)
     if callback is not None:
         callback({'event': event, 'ref_id': key})
 
 
-def get(reference, provider, *, ttl=MAX_TTL, evidence=None, _directory=None, _clock=None):
+def get(reference, provider, *, ttl=DEFAULT_TTL, evidence=None, _directory=None, _clock=None):
     """Canonicalize first. Provider runs once per successful fill under per-ref flock.
 
     Underscore injection points exist only for offline tests, never environment/config.
@@ -195,7 +229,7 @@ def get(reference, provider, *, ttl=MAX_TTL, evidence=None, _directory=None, _cl
     reference = canonical(reference)
     if type(ttl) not in (int, float) or not math.isfinite(ttl) or not 0 < ttl <= MAX_TTL:
         raise ValueError('invalid TTL')
-    clock = _clock or (lambda: (time.time(), time.monotonic()))
+    clock = _clock or _now
     key = identity(reference)
     directory_fd = _dir(CACHE_DIR if _directory is None else _directory, create=True)
     try:
@@ -203,21 +237,21 @@ def get(reference, provider, *, ttl=MAX_TTL, evidence=None, _directory=None, _cl
             wall, mono = clock()
             cached = _read(directory_fd, key, reference, wall, mono)
             if cached is not None:
-                _event(evidence, 'hit', key)
+                _event(directory_fd, evidence, 'hit', key)
                 return cached
             # Remove expired/corrupt entries BEFORE provider invocation. Never stale.
             try:
                 os.unlink(key + '.json', dir_fd=directory_fd)
             except FileNotFoundError:
                 pass
-            _event(evidence, 'miss', key)
-            _event(evidence, 'provider_read', key)
+            _event(directory_fd, evidence, 'miss', key)
+            _event(directory_fd, evidence, 'provider_read', key)
             value = validate_value(provider(reference))
             # TTL starts before the read: slow providers cannot extend freshness.
             end_wall, end_mono = clock()
             if not (0 <= end_wall-wall < ttl and 0 <= end_mono-mono < ttl) or abs((end_wall-wall)-(end_mono-mono)) > 5:
                 raise ValueError('clock change or provider exceeded TTL')
-            _atomic(directory_fd, key, dict(v=1, ref=reference, created=wall,
+            _atomic(directory_fd, key, dict(v=2, ref=reference, created=wall,
                     monotonic=mono, expires=wall+ttl, ttl=ttl,
                     value=base64.b64encode(value).decode('ascii')))
             return value
@@ -225,7 +259,7 @@ def get(reference, provider, *, ttl=MAX_TTL, evidence=None, _directory=None, _cl
         os.close(directory_fd)
 
 
-def cleanup(*, _directory=None, _clock=None):
+def cleanup(*, purge=False, _directory=None, _clock=None):
     """Remove invalid/expired records under the same locks; never remove lock files.
 
     Locks persist to prevent inode-split races with waiting readers. Unknown files
@@ -234,15 +268,16 @@ def cleanup(*, _directory=None, _clock=None):
     directory_fd = _dir(CACHE_DIR if _directory is None else _directory, create=True)
     count = 0
     try:
-        wall, mono = (_clock or (lambda: (time.time(), time.monotonic())))()
+        clock = _clock or _now
         refs = {identity(r): canonical(r) for r in ALLOWED_REFS}
         names = os.listdir(directory_fd)
         for key, reference in refs.items():
             with _locked(directory_fd, key):
+                wall, mono = clock()
                 # A writer holds this same lock through publication. Any matching
                 # temp surviving acquisition is abandoned, not an active write.
                 for name in names:
-                    if re.fullmatch(re.escape(key) + r'\.[0-9a-f]{24}\.tmp', name):
+                    if re.fullmatch(re.escape(key) + r'(?:\.metadata)?\.[0-9a-f]{24}\.tmp', name):
                         try:
                             temp = os.open(name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=directory_fd)
                         except FileNotFoundError:
@@ -253,12 +288,15 @@ def cleanup(*, _directory=None, _clock=None):
                             count += 1
                         finally:
                             os.close(temp)
-                if _read(directory_fd, key, reference, wall, mono) is None:
+                # Validate file safety even for explicit purge; no provider calls.
+                cached = _read(directory_fd, key, reference, wall, mono)
+                if purge or cached is None:
                     try:
                         os.unlink(key + '.json', dir_fd=directory_fd)
                         count += 1
                     except FileNotFoundError:
                         pass
+        os.fsync(directory_fd)
         return count
     finally:
         os.close(directory_fd)
@@ -266,9 +304,9 @@ def cleanup(*, _directory=None, _clock=None):
 
 if __name__ == '__main__':
     import sys
-    if sys.argv[1:] != ['--cleanup']:
-        raise SystemExit('only --cleanup is supported')
+    if sys.argv[1:] not in (['--cleanup'], ['--purge']):
+        raise SystemExit('only --cleanup or --purge is supported')
     try:
-        cleanup()
+        cleanup(purge=sys.argv[1:] == ['--purge'])
     except Exception:
         raise SystemExit('cache cleanup unavailable')

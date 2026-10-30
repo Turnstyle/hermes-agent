@@ -1,5 +1,7 @@
 # Exact-live 1Password loader overlay — candidate only
 
+**Incremental TTL correction:** see [ENV_TTL.md](ENV_TTL.md) for the separately generated `env_loader.patch`, controllable-clock regression suite, and session identity evidence. The residuals below describe the original 1Password-only overlay and unchanged live source; the new env_loader candidate addresses applied-home/snapshot residence expiry without changing that live source.
+
 No live installation, config change, provider/op invocation, credential read, or commit performed. All artifacts in this directory. `onepassword.patch` is a narrow unified diff against the exact live source, not a branch replacement. `onepassword.candidate.py` is review material, not an installed module.
 
 ## Verified

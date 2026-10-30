@@ -2,6 +2,7 @@
 """All values/providers are synthetic. Never run live key_op main/router/custody."""
 import ast
 import base64
+from concurrent.futures import ThreadPoolExecutor
 import importlib.util
 import json
 import multiprocessing
@@ -9,7 +10,10 @@ import os
 from pathlib import Path
 import plistlib
 import stat
+import subprocess
+import sys
 import tempfile
+import threading
 import time
 import unittest
 from unittest import mock
@@ -19,6 +23,7 @@ REF = 'op://keys-router/jtp-bots-suite Context7 API Key/credential'
 LEGACY = next(iter(c.LEGACY_REFS))
 SCRATCH = Path('/Users/sheldon/.hermes/profiles/shld-mm-hermes-agent/cache/scratch/context7-cache-correction-20261030/transport')
 HERE = Path(__file__).resolve().parent
+PROCESS_PROOF = []
 
 
 def worker(path, ref, count, start, results):
@@ -89,7 +94,10 @@ class CacheTests(unittest.TestCase):
             self.assertEqual(p.exitcode, 0)
         self.assertEqual([results.get(timeout=2) for _ in refs], ['synthetic-key-only'] * len(refs))
         self.assertEqual(count.value, 1)
-        self.assertEqual(len(list(self.path.glob('*.json'))), 1)
+        self.assertEqual(len(list(self.path.glob('*.metadata.json'))), 1)
+        self.assertEqual(len(list(self.path.glob('*.json'))), 2)
+        metadata = json.loads(next(self.path.glob('*.metadata.json')).read_text())
+        self.assertEqual((metadata['miss'], metadata['provider_read'], metadata['hit']), (1, 1, 7))
         results.close()
 
     def test_exact_ttl_boundary_and_cleanup_without_read(self):
@@ -124,7 +132,7 @@ class CacheTests(unittest.TestCase):
                 self.record().unlink()
 
     def test_invalid_records_refetch(self):
-        cases = [dict(v=True), dict(v=2), dict(ref=LEGACY), dict(created=True), dict(created=float('nan')),
+        cases = [dict(v=True), dict(v=1), dict(ref=LEGACY), dict(created=True), dict(created=float('nan')),
                  dict(ttl=1801), dict(ttl=-1), dict(expires=10001), dict(value='%%%'),
                  dict(value=base64.b64encode(b'ops_not-allowed').decode()), dict(extra='unexpected'),
                  dict(value=base64.b64encode(b'x\ny').decode())]
@@ -225,7 +233,12 @@ class CacheTests(unittest.TestCase):
         self.assertEqual(self.calls, 1)
 
     def test_atomic_failure_no_cache_or_temp(self):
-        with mock.patch.object(c.os, 'replace', side_effect=OSError('synthetic failure')):
+        real_replace = c.os.replace
+        def fail_value(src, dst, **kw):
+            if dst == c.identity(REF) + '.json':
+                raise OSError('synthetic failure')
+            return real_replace(src, dst, **kw)
+        with mock.patch.object(c.os, 'replace', side_effect=fail_value):
             with self.assertRaises(OSError):
                 self.get()
         self.assertFalse(self.record().exists())
@@ -278,7 +291,95 @@ class CacheTests(unittest.TestCase):
         self.get(c.canonical(LEGACY))
         self.assertEqual(self.calls, 2)
         self.assertEqual(len(list(self.path.glob('*.lock'))), 2)
-        self.assertEqual(len(list(self.path.glob('*.json'))), 2)
+        self.assertEqual(len(list(self.path.glob('*.json'))), 4)
+
+    def test_production_candidate_two_separate_processes_durable_metadata(self):
+        script = '''import importlib.util, json, os, sys
+from pathlib import Path
+import secret_value_cache as c
+spec = importlib.util.spec_from_file_location('candidate', 'key_op.candidate.py')
+candidate = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(candidate)
+c.CACHE_DIR = Path(sys.argv[1])  # Offline injection; no environment override.
+reads = []
+candidate._current_provider_read = lambda ref, module: reads.append(ref) or b'synthetic-process-key'
+assert candidate.resolve(sys.argv[2], object()) == b'synthetic-process-key'
+m = json.loads((c.CACHE_DIR / (c.identity(sys.argv[2]) + '.metadata.json')).read_text())
+print(json.dumps(dict(pid=os.getpid(), reads=len(reads), metadata=m)))
+'''
+        proof = []
+        for ref in (LEGACY, c.canonical(LEGACY)):
+            p = subprocess.run([sys.executable, '-B', '-c', script, str(self.path), ref],
+                               cwd=HERE, capture_output=True, text=True, timeout=10, check=True)
+            proof.append(json.loads(p.stdout))
+        self.assertNotEqual(proof[0]['pid'], proof[1]['pid'])
+        self.assertEqual([p['reads'] for p in proof], [1, 0])
+        self.assertEqual([(p['metadata']['miss'], p['metadata']['provider_read'],
+                           p['metadata']['hit']) for p in proof], [(1, 1, 0), (1, 1, 1)])
+        for p in proof:
+            self.assertEqual(set(p['metadata']), {'v', 'ref_id', 'event', 'hit', 'miss', 'provider_read'})
+            self.assertNotIn('op://', json.dumps(p['metadata']))
+            self.assertNotIn('synthetic', json.dumps(p['metadata']))
+        for path in self.path.glob('*.metadata.json'):
+            self.assertEqual(stat.S_IMODE(path.stat().st_mode), 0o600)
+        value = json.loads(next(p for p in self.path.glob('*.json') if '.metadata.' not in p.name).read_text())
+        self.assertEqual(value['ttl'], 1740)
+        PROCESS_PROOF[:] = proof
+
+    def test_metadata_unsafe_or_corrupt_fails_closed(self):
+        self.get()
+        metadata = self.path / (c.identity(REF) + '.metadata.json')
+        metadata.chmod(0o644)
+        with self.assertRaises(c.CacheSecurityError):
+            self.get()
+        metadata.chmod(0o600)
+        metadata.write_text('{bad')
+        with self.assertRaises(ValueError):
+            self.get()
+        metadata.unlink()
+        metadata.symlink_to(self.record())
+        with self.assertRaises(OSError):
+            self.get()
+        self.assertEqual(self.calls, 1)
+
+    def test_default_retention_and_explicit_purge(self):
+        self.get()
+        self.assertEqual(json.loads(self.record().read_text())['ttl'], 1740)
+        lock = self.path / (c.identity(REF) + '.lock')
+        inode = lock.stat().st_ino
+        self.assertEqual(c.cleanup(purge=True, _directory=self.path, _clock=lambda: tuple(self.now)), 1)
+        self.assertFalse(self.record().exists())
+        self.assertEqual(lock.stat().st_ino, inode)
+        self.assertEqual(self.calls, 1)
+        self.get()
+        self.now[:] = [11740, 2740]
+        self.assertEqual(c.cleanup(_directory=self.path, _clock=lambda: tuple(self.now)), 1)
+        self.assertFalse(self.record().exists())
+
+    def test_concurrent_cleanup_waits_for_provider_lock(self):
+        entered, release, cleaning = threading.Event(), threading.Event(), threading.Event()
+        def provider(ref):
+            entered.set()
+            if not release.wait(3):
+                raise RuntimeError('synthetic synchronization timeout')
+            return b'synthetic-blocked-key'
+        def clean():
+            cleaning.set()
+            return c.cleanup(purge=True, _directory=self.path)
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            fill = pool.submit(c.get, REF, provider, _directory=self.path)
+            self.assertTrue(entered.wait(2))
+            purge = pool.submit(clean)
+            self.assertTrue(cleaning.wait(2))
+            try:
+                self.assertFalse(purge.done())
+            finally:
+                release.set()
+            self.assertEqual(fill.result(timeout=3), b'synthetic-blocked-key')
+            self.assertEqual(purge.result(timeout=3), 1)
+        self.assertFalse(self.record().exists())
+        metadata = json.loads((self.path / (c.identity(REF) + '.metadata.json')).read_text())
+        self.assertEqual((metadata['miss'], metadata['provider_read']), (1, 1))
 
     def test_cleanup_plist(self):
         p = plistlib.loads((HERE / 'cleanup.launchd.plist').read_bytes())

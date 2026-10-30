@@ -34,18 +34,24 @@ for the current API-key consumers, not the untouched legacy branch.
 
 ## Freshness and concurrent access
 
-Default/max TTL is 1800 seconds, validated as finite positive numeric (not bool).
+Production default TTL is 1740 seconds; the absolute validation cap remains
+1800 seconds (finite positive numeric, not bool). Production resolve exposes
+no TTL override. The 60-second margin allows the normal 30-second cleanup pass
+to remove values before 1800 seconds, but does not guarantee an OS deadline.
 The whole miss/provider/atomic publication is protected by a per-reference flock.
 Eight spawned processes with different synthetic profile labels use one provider
 read for the canonical legacy/current alias. Profiles do not contribute to keys.
 Different non-LEGACY vault aliases are deliberately distinct identities.
 
-Records require an exact schema, version, canonical ref, canonical base64 value,
+Records require an exact schema, version2, canonical ref, canonical base64 value,
 finite nonnegative timestamps, exact expiry and TTL <=1800. Both wall and
 monotonic elapsed times must be nonnegative and below TTL, and agree within five
 seconds. Wall rollback/reboot monotonic rollback/large jumps invalidate a record.
 TTL starts before provider access. Expired/corrupt entries are removed before
 provider access; failure never returns stale data or creates a negative cache.
+Version2 uses explicit system-wide CLOCK_MONOTONIC rather than older Apple
+Python's process-relative time.monotonic epoch. Version1 records are invalidated;
+the independent-process test caught and now guards this cross-process defect.
 Atomic private temp files are flushed/fsynced then replaced, and directory synced.
 Persistent lock files must not be deleted: deleting them splits waiting lockers.
 Crash-left temp files are never read as records; periodic cleanup removes
@@ -66,14 +72,38 @@ shutdown, scheduler failure or a blocked provider can delay physical deletion.
 This limitation must not be described as an exact wall-clock disk erasure.
 No daemon or launch agent was installed or run here.
 
+### Explicit deployment, rotation and rollback purge
+
+Deputy must quiesce cache consumers before deployment, credential rotation or
+rollback; otherwise a concurrent consumer may refill immediately after purge.
+Using the reviewed installed helper and its verified interpreter, explicitly run
+`/opt/homebrew/bin/python3 /Users/sheldon/.hermes/profiles/shld-keys-router/tools/secret_value_cache.py --purge`.
+This proposed command was NOT run against live state in this work. It removes
+known value records even when unexpired, and abandoned private temporary files,
+under the existing locks, without provider/auth access. Keep permanent lock
+inodes and the bounded nonsecret metadata; never delete a live cache directory
+or lock files. Verify no known value JSON or matching temporary files remain
+while consumers are stopped, then install/check the exact reviewed overlay and
+30-second cleanup agent before resuming consumers. On rotation purge before
+resumption; on rollback purge with this helper before removing it. Unknown files
+are not deleted automatically. Filesystem deletion is not secure erasure of
+snapshots/backups, and sleep/scheduling/blocked locks can exceed the margin.
+
 ## Evidence and offline reproduction
 
-The optional evidence callback receives only `{event, ref_id}` with fixed event
-names hit/miss/provider_read and SHA256 of the public canonical reference.
-No values, token contents, command arguments, exception text, ambient environment
-or raw reference are emitted. `provider_read` counts attempted reads, not success.
-No callback/log destination is enabled by default in the live-source overlay;
-later measurements must explicitly wire a trusted metadata-only collector.
+The production overlay now always persists `<refhash>.metadata.json`, private
+0600, atomic/fsynced under the same canonical-reference flock. Its exact schema
+is `{v, ref_id, event, hit, miss, provider_read}`: version, canonical reference
+SHA256, last fixed event and cumulative bounded counters (saturating at 2**63-1).
+There are no secret values, value hashes/refvalues, raw references, token
+contents, arguments, exceptions or environment. `provider_read` counts durable
+attempt intent, not successful reads; a crash after recording intent may precede
+the provider call. Corrupt/unsafe metadata fails closed. Metadata remains across
+cleanup/purge and occupies one bounded record per allowed canonical reference.
+The optional callback still receives only `{event, ref_id}` and is not required
+for production evidence. Two independent fake-provider processes invoke the
+actual candidate resolve path without a callback: first miss/read1, then hit
+with zero additional provider reads. Their PIDs/counters are in the receipt.
 
 From this folder, with existing Python and no installs:
 
@@ -87,14 +117,10 @@ scratch folder, and AST/static inspection/import of inert candidate definitions.
 They never call live key_op main, custody_env, router, op, gcloud, or read .env/auth.
 The simulated non-owner test patches stat because changing real file ownership
 would need privileges. launchd validation is artifact parsing, not installation.
-Jev request/result are retained only in the delegate's own scratch directory.
-The required `hermes -p shld-mm-hermes-agent jev evaluate --file` attempt failed:
-installed CLI has no `jev` subcommand (exit2). No repair or second call attempted.
-Its native launcher reported `1Password: applied 2 secrets`; this is a launcher
-side effect, not a direct test/provider read, and does not prove whether values
-came from cache or fresh vault reads. Do not claim this entire run had zero
-launcher secret resolution. The 24-question request has21990 canonical state
-bytes; parsed fallback result records advice unavailable and zero answers.
-Missing advice does not block deterministic verification or authorize deployment.
+Inherited parent context says Jev already failed twice. This run did not retry
+Jev, launch another model, repair credentials or invoke an auth launcher.
+Runtime-provided identity is gpt-6.1-sol / openai-codex, inherited subscription;
+this is supplied session evidence, not an independent billing/account check.
+Missing advice does not authorize deployment or imply live cache proof.
 `verify_offline.py` reruns the full synthetic suite plus50 eight-process dedup
 runs and saves actual results and the manifest hash in offline-verification.json.

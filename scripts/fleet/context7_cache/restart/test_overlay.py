@@ -23,7 +23,7 @@ def load_adapter(patched=True, platform='darwin', forced=False, result=None):
     node = ast.parse(fixture).body[0]
     assert isinstance(node, ast.FunctionDef) and node.name == 'run_restart'
     runner = Mock(return_value=result or types.SimpleNamespace(returncode=0, stdout='healthy\n', stderr=''))
-    env = {'SYNTHETIC_CONTEXT': 'preserved'}  # Never access the real environment.
+    env = {'SYNTHETIC_CONTEXT': 'preserved', 'HERMES_DELEGATED_CHILD_CONTEXT': 'synthetic-child'}  # Never access the real environment.
     namespace = {'hermes_bin': lambda: '/synthetic/hermes', 'shlex': shlex,
                  'subprocess': types.SimpleNamespace(run=runner, TimeoutExpired=subprocess.TimeoutExpired),
                  'os': types.SimpleNamespace(environ=env, getuid=lambda: 999),
@@ -42,8 +42,8 @@ class AdapterTests(unittest.TestCase):
         self.assertEqual(argv, ['/synthetic/hermes', '-p', 'default', 'gateway', 'restart', '--yes'])
         self.assertNotIn('--force', argv)
         self.assertNotIn('--all', argv)
-        self.assertEqual(runner.call_args.kwargs, {'capture_output': True, 'text': True, 'timeout': 120, 'env': {'SYNTHETIC_CONTEXT': 'preserved', 'GATEWAY_COORDINATED_RESTART': '1', 'HERMES_RESTART_AFTER_TURN_TIMEOUT': '1', 'HERMES_RESTART_DRAIN_TIMEOUT': '1'}})
-        self.assertEqual(ns['os'].environ, {'SYNTHETIC_CONTEXT': 'preserved'})
+        self.assertEqual(runner.call_args.kwargs, {'capture_output': True, 'text': True, 'timeout': 120, 'env': {'SYNTHETIC_CONTEXT': 'preserved', 'HERMES_DELEGATED_CHILD_CONTEXT': 'synthetic-child', 'GATEWAY_COORDINATED_RESTART': '1', 'HERMES_RESTART_AFTER_TURN_TIMEOUT': '1', 'HERMES_RESTART_DRAIN_TIMEOUT': '1'}})
+        self.assertEqual(ns['os'].environ, {'SYNTHETIC_CONTEXT': 'preserved', 'HERMES_DELEGATED_CHILD_CONTEXT': 'synthetic-child'})
 
     def test_regression_old_bare_command_refused_patched_accepted(self):
         def simulate(argv, **kwargs):
@@ -97,8 +97,14 @@ class AdapterTests(unittest.TestCase):
         lines = patch.decode().splitlines()
         removed = [s[1:] for s in lines if s.startswith('-') and not s.startswith('---')]
         added = [s[1:] for s in lines if s.startswith('+') and not s.startswith('+++')]
-        self.assertEqual(removed, [manifest['old_line']])
-        self.assertEqual(added, [manifest['new_line']])
+        self.assertIn(manifest['old_line'], removed)
+        self.assertIn(manifest['new_line'], added)
+        fixture = (ROOT / 'run_restart.before.txt').read_text()
+        before = ast.parse(fixture)
+        after = ast.parse(fixture.replace(manifest['old_line'], manifest['new_line'], 1))
+        # Within restart itself only the supported consent argv changes.
+        after.body[0].body[0] = before.body[0].body[0]
+        self.assertEqual(ast.dump(before), ast.dump(after))
 
     def test_actual_cli_parser_flag_and_guard_function(self):
         evidence = json.loads((ROOT / 'source-evidence.json').read_text())

@@ -1,0 +1,10 @@
+title = "Default rules with exact public source-digest false positives"
+[extend]
+useDefault = true
+
+[[allowlists]]
+description = "Public reproducible SHA256 file digests, not credential material; exact manifest paths AND exact known digests, including previous PR10 revision. All default detection remains enabled."
+condition = "AND"
+paths = ['''^scripts/fleet/context7_cache/(loader/source_manifest|transport/source-overlay-manifest)\.json$''']
+regexTarget = "secret"
+regexes = ['''^(38ce0a80088e667e9ea994238fa7eddb760446e0f06eb6655571c4fa95980616|2fd82bb3996d6b9ed723b414cf5cbb97f0e832599ee830c4168393f642acb9ff|c32015bf2278984b9b3563de1a9da944eceb672e95d542e7240e75415a63ec47|e5f1a148ad6fad83268ce3f960d9ac597e5b8b338b4e94893f4dcbb8d5375253)$''']

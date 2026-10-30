@@ -11,12 +11,13 @@ Artifacts
 - config/: tested config transformer evidence; parent script now caps helper and ordinary TTLs and enables Context7 only in the two named delta targets.
 - restart/: one-line exact-source coordinated restart patch adds supported --yes inside existing window, mocked tests and CLI semantics evidence.
 
-Known incomplete acceptance criteria
+Final candidate changes and honest limits
 
-- env_loader applied-home guards and secret snapshots currently have no TTL. Candidate does NOT yet prove ALL affected in-process snapshots expire within1800seconds. This must be resolved before approval. Do not infer end-to-end freshness from transport tests.
-- Physical expired-record deletion is periodic (30seconds plus scheduler/lock delay); logical reads reject expiry exactly. A strict physical retention maximum1800 is not proved.
-- Metadata event callback is tested, but production helper wiring for durable metadata-only hit/miss/provider-read measurement still requires review/completion. No real provider counts were measured here.
-- Coordinator has no general notice suppression. Omitting notify-cmd and wake-cmd none do not suppress steering/board comments. Do not invoke coordinator under this task's no-message/no-board constraint without a separately authorized route.
+- loader/env_loader.patch bounds applied-home guards, external-secret snapshots and dotenv restore to max1800 seconds; controllable-clock tests cover refresh, concurrency and profile isolation. See loader/ENV_TTL.md. This bounds loader residence, not undisclosed upstream original age.
+- Transport logical TTL defaults1740 seconds, hard cap1800. Physical cleanup is periodic30seconds plus OS scheduling/lock delay. Deputy must purge expired op_cache.json at deployment and prove a cleanup cycle; no hard host-suspend physical deadline is claimed. Independent reviewer must accept this limitation.
+- Production helper automatically writes private0600 durable nonsecret hit/miss/provider-read counters. Separate-process tests use fake providers only; deputy owns real provider verification after deployment. No token cache added.
+- Same coordinated adapter now offers explicit --no-notices, suppressing outbound steers, wakes, notices and board/checkpoint comments while retaining census/drain/checkpoint/permission/lock/health policies. All mutations are mocked in author tests; no restart occurred.
+- .gitleaks.toml retains all default secret rules and excludes only exact known public SHA256 digests at exact two manifest paths, including prior PR10 digests. Hashes remain fully verifiable.
 - No independent rule14 review performed. Writers were served gpt-6.1-sol via included subscription. Parent must resolve strongest available named reviewer using existing local registry evidence; registry availability and reviewer served-model remain unproved here. Unknown model cannot PASS.
 - Jev CLI unavailable. Two delegated attempts exited2 after native startup reported '1Password: applied 2 secrets'. No secret values printed. Fresh provider reads versus cached bootstrap were not measured. No repair or further CLI retry.
 

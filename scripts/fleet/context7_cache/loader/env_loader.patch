@@ -1,0 +1,165 @@
+--- a/hermes_cli/env_loader.py
++++ b/hermes_cli/env_loader.py
+@@ -9,6 +9,7 @@
+ import os
+ import sys
+ import threading
++import time
+ from collections.abc import Mapping
+ from pathlib import Path
+ 
+@@ -63,6 +64,10 @@
+ # several hot modules, so without this the Bitwarden status line prints 3-5x per startup and the config
+ # re-parse + ASCII sweep re-run each time (Bitwarden's own cache only saves the network call).
+ _APPLIED_HOMES: set[str] = set()
++# Start age BEFORE resolving: publishing a slow fetch must not restart its lifetime.
++_SECRET_SOURCE_MAX_AGE = 1800.0
++_SECRET_SOURCE_FETCHED_AT: dict[str, float] = {}
++_SECRET_SOURCE_CLOCK = time.monotonic
+ _SECRET_SOURCE_CACHE_LOCK = threading.RLock()
+ _ONEPASSWORD_SKIP_LOGGED = False
+ 
+@@ -237,9 +242,36 @@
+     return frozenset(_MANAGED_DOTENV_KEYS)
+ 
+ 
++def _secret_source_cache_fresh(home_key: str) -> bool:
++    """Locked freshness gate for guards, snapshots and dotenv restore; never fetches."""
++    started = _SECRET_SOURCE_FETCHED_AT.get(home_key)
++    if started is not None and 0 <= _SECRET_SOURCE_CLOCK() - started < _SECRET_SOURCE_MAX_AGE:
++        return True
++    _APPLIED_HOMES.discard(home_key)
++    _SECRET_SOURCE_FETCHED_AT.pop(home_key, None)
++    _SECRET_SOURCE_VALUES_BY_HOME.pop(home_key, None)
++    _SECRET_SOURCE_RESTORE_BY_HOME.pop(home_key, None)
++    # Do not let our expired process write become a non-overriding provider's
++    # "existing" value, or survive as an ambient fallback after a failed refresh.
++    # Unlike config revocation, expiry must also peel our own write over a
++    # dotenv placeholder: merely owning that NAME does not make the old secret fresh.
++    for name, (_source, value, prior) in _SECRET_SOURCE_WRITES_BY_HOME.get(home_key, {}).items():
++        if os.environ.get(name) == value:
++            if prior is None:
++                os.environ.pop(name, None)
++            else:
++                os.environ[name] = prior
++    _revoke_secret_source_writes(Path(home_key), keep=lambda _name, _source: False)
++    return False
++
++
+ def get_secret_source_values(hermes_home: str | os.PathLike) -> dict[str, str]:
+-    """Return the external-secret value snapshot for ``hermes_home``."""
+-    return dict(_SECRET_SOURCE_VALUES_BY_HOME.get(str(Path(hermes_home).resolve()), {}))
++    """Return a copy of this home's unexpired snapshot; never fetch or use ambient env."""
++    home_key = str(Path(hermes_home).resolve())
++    with _SECRET_SOURCE_CACHE_LOCK:
++        if not _secret_source_cache_fresh(home_key):
++            return {}
++        return dict(_SECRET_SOURCE_VALUES_BY_HOME.get(home_key, {}))
+ 
+ 
+ def hydrate_profile_secret_sources(hermes_home: str | os.PathLike) -> dict[str, str]:
+@@ -258,8 +290,10 @@
+     if worker_config_snapshot() is not None:
+         return {}
+     home_key = str(home.resolve())
+-    if home_key in _APPLIED_HOMES:
++    if _secret_source_cache_fresh(home_key) and home_key in _APPLIED_HOMES:
+         return get_secret_source_values(home)
++
++    fetched_at = _SECRET_SOURCE_CLOCK()
+ 
+     # A retry must not keep serving a partial result after the source is removed, disabled, or can no
+     # longer be evaluated. Publish only the snapshot established by this attempt.
+@@ -313,10 +347,17 @@
+         _SECRET_SOURCES[name] = applied.source
+         values[name] = value
+     _SECRET_SOURCE_VALUES_BY_HOME[home_key] = values
+-    return dict(values)
++    _SECRET_SOURCE_FETCHED_AT[home_key] = fetched_at
++    return get_secret_source_values(home)
+ 
+ 
+ def reset_secret_source_cache(hermes_home: str | os.PathLike | None = None) -> None:
++    """Serialize per-home or whole-process invalidation with source publication."""
++    with _SECRET_SOURCE_CACHE_LOCK:
++        _reset_secret_source_cache(hermes_home)
++
++
++def _reset_secret_source_cache(hermes_home: str | os.PathLike | None = None) -> None:
+     """Forget applied homes so the next load re-pulls (tests, long-running processes after config edits).
+ 
+     ``hermes_home`` limits the reset to ONE home: a multiplex gateway keeps every profile's snapshot in
+@@ -325,6 +366,7 @@
+     (#102041)."""
+     if hermes_home is None:
+         _APPLIED_HOMES.clear()
++        _SECRET_SOURCE_FETCHED_AT.clear()
+         _SECRET_SOURCES.clear()
+         _SOURCE_SUPPLIED_NAMES.clear()
+         _SECRET_SOURCE_VALUES_BY_HOME.clear()
+@@ -333,6 +375,7 @@
+         return
+     home_key = str(Path(hermes_home).resolve())
+     _APPLIED_HOMES.discard(home_key)
++    _SECRET_SOURCE_FETCHED_AT.pop(home_key, None)
+     _SECRET_SOURCE_VALUES_BY_HOME.pop(home_key, None)
+     _SECRET_SOURCE_RESTORE_BY_HOME.pop(home_key, None)
+ 
+@@ -655,10 +698,12 @@
+     # token) back over a value an external source resolved on an earlier call, and the source pass below is a
+     # once-per-home no-op — so the clobber stuck for the life of the process (#74265). Re-assert only what the
+     # source is authoritative for; managed scope, applied last with override=True, still wins on purpose.
+-    if _SECRET_SOURCE_RESTORE_BY_HOME:
+-        for name, value in _SECRET_SOURCE_RESTORE_BY_HOME.get(str(home_path.resolve()), {}).items():
+-            if os.environ.get(name) != value:
+-                os.environ[name] = value
++    with _SECRET_SOURCE_CACHE_LOCK:
++        home_key = str(home_path.resolve())
++        if _secret_source_cache_fresh(home_key):
++            for name, value in _SECRET_SOURCE_RESTORE_BY_HOME.get(home_key, {}).items():
++                if os.environ.get(name) != value:
++                    os.environ[name] = value
+ 
+     # External sources are skipped for the updater (dotenv + managed env still load): ``update`` must not
+     # import optional secret-manager libs (Bitwarden → cryptography → _rust.pyd) into the process replacing
+@@ -763,13 +808,21 @@
+ 
+ 
+ def _apply_external_secret_sources(home_path: Path) -> None:
++    """Serialize freshness checks and source publication with hydration/reset."""
++    with _SECRET_SOURCE_CACHE_LOCK:
++        _apply_external_secret_sources_locked(home_path)
++
++
++def _apply_external_secret_sources_locked(home_path: Path) -> None:
+     """Pull secrets from every enabled external source into env — AFTER dotenv (sources need .env bootstrap
+     tokens), BEFORE Hermes reads credentials; failures never block startup. Precedence/conflicts/provenance
+     live in ``registry.apply_all``; this wrapper owns the once-per-home guard, the post-apply ASCII sweep,
+     the ``_SECRET_SOURCES`` map and status lines."""
+     home_key = str(Path(home_path).resolve())
+-    if home_key in _APPLIED_HOMES:
+-        return
++    if _secret_source_cache_fresh(home_key) and home_key in _APPLIED_HOMES:
++        return
++
++    fetched_at = _SECRET_SOURCE_CLOCK()
+ 
+     # Neither early return marks the home applied: a malformed config.yaml would otherwise permanently
+     # disable secret loading for this process, and an unmarked home picks up a config change on the next
+@@ -820,6 +873,7 @@
+     # startup don't re-fetch / re-print (error retries are opt-in via reset_secret_source_cache()).
+     # Marking AFTER the attempt keeps the earlier failure paths retryable.
+     _APPLIED_HOMES.add(home_key)
++    _SECRET_SOURCE_FETCHED_AT[home_key] = fetched_at
+ 
+     if report.applied_any:
+         _sanitize_loaded_credentials()  # vault values carry the same copy-paste corruption risk as .env
+@@ -843,6 +897,8 @@
+         _SECRET_SOURCE_VALUES_BY_HOME[home_key] = values
+     _SECRET_SOURCE_RESTORE_BY_HOME[home_key] = {
+         n: values[n] for n, a in report.provenance.items() if a.authoritative and n in values}
++
++    _secret_source_cache_fresh(home_key)  # discard even a fetch that took the entire window
+ 
+     for src in report.sources:
+         if src.applied:
