@@ -1,0 +1,13 @@
+--- a/hermes_cli/env_loader.py
++++ b/hermes_cli/env_loader.py
+@@ -128,6 +128,10 @@
+     token_env = str(source.get("service_account_token_env") or "OP_SERVICE_ACCOUNT_TOKEN")
+     if source_env.get(token_env, "").strip():
+         return cfg
++    # Explicit operator assertion: the pinned helper authenticates itself with a service
++    # account and never prompts, so unattended starts may run it. Default stays protected.
++    if source.get("allow_unattended_helper") is True and str(source.get("binary_path") or "").strip():
++        return cfg
+     reason = _startup_onepassword_skip_reason()
+     if not reason:
+         return cfg
