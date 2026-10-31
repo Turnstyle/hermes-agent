@@ -730,6 +730,73 @@ def _submit_row_owner_key(staged: dict, session: dict) -> str:
     return recorded or _submit_row_target_key(session)
 
 
+def _submit_unbuilt_route(session: dict) -> tuple:
+    """``(provider, model)`` a not-yet-built session's agent will request: the overrides
+    ``_deferred_build_agent_kwargs`` hands the build, in ``_resolve_agent_model_runtime``'s precedence, priced
+    from the session and its profile's config alone (never a key, never the network). A resume route counts
+    when it names a provider (its routability probe can fetch models.dev). A provider left unset is config
+    ``model.provider`` (``resolve_requested_provider``'s step), except on the startup route of a launch model
+    seed: ``_resolve_startup_runtime`` resolves the seed through a lookup that reads a direct alias's key, so
+    that provider stays unknown (None), as ``_switch_away_provider`` reports it. Runs inside the session's
+    profile scope."""
+    resume = session.get("resume_runtime_overrides")
+    resume_model = resume.get("model_override") if isinstance(resume, dict) else None
+    resume_provider = resume_model.get("provider") if isinstance(resume_model, dict) else None
+    if isinstance(resume, dict) and (resume.get("provider_override") or resume_provider):
+        model_override, provider_override = resume.get("model_override"), resume.get("provider_override")
+    else:
+        model_override, provider_override = session.get("model_override"), None
+    if isinstance(model_override, dict) and model_override.get("model"):
+        return (model_override.get("provider") or provider_override or _config_model_target()[1] or None,
+                str(model_override["model"]))
+    model = model_override if isinstance(model_override, str) and model_override else _resolve_model()
+    if provider := provider_override or os.environ.get("HERMES_TUI_PROVIDER", "").strip():
+        return provider, model
+    return (None if _env_model_seed() else _config_model_target()[1] or None), model
+
+
+def _submit_route_needs_pin(provider: Any, model: Any) -> bool:
+    """Whether ``route_requires_rule`` prices this route by the profile pin: not Claude and no usable model."""
+    from agent.owner_prompt_policy import is_claude_route
+    return not is_claude_route(provider, model) and not (isinstance(model, str) and model.strip())
+
+
+def _submit_policy_runtime(session: dict) -> tuple:
+    """``(provider, model, pin)`` the submit-time delegate-rule decision prices: the route the session's next
+    turn runs, without building an agent, reading a credential or hydrating external secret sources. A live
+    agent answers with its admission route (the primary its turn start restores). Config is read only under
+    the session's OWN profile scope (an unscoped read prices the launch profile), and ``pin`` (the profile's
+    default route) only when the route alone cannot decide."""
+    from agent.owner_prompt_policy import admission_route, default_pin
+    agent = session.get("agent")
+    provider, model = admission_route(agent) if agent is not None else (None, None)
+    if not _submit_route_needs_pin(provider, model):
+        return provider, model, None
+    with _session_profile_runtime_scope(session, hydrate_secrets=False):
+        if agent is None:
+            provider, model = _submit_unbuilt_route(session)
+        return provider, model, default_pin() if _submit_route_needs_pin(provider, model) else None
+
+
+def _submit_row_needs_rule(session: dict, db, key: str, exclude_row_id: int | None = None) -> bool:
+    """The shared first-user-turn delegate-rule decision (``should_inject``) for a submit-time row of
+    session ``key`` (``exclude_row_id``: the row being re-decided). Never blocks a send: a profile scope that
+    fails to bind or release stores no rule, and the turn-start chokepoint adds it to a staged first row
+    that lacks it."""
+    from agent.owner_prompt_policy import is_first_user_turn, should_inject
+    # A copy, never ``history_lock``: the busy-queue accept and the drain call in already holding it.
+    history = list(session.get("history") or ())
+    # First turn before the route, so a later turn never prices it (profile scope + config) under that lock.
+    if not is_first_user_turn(history, db, key, exclude_row_id=exclude_row_id):
+        return False
+    try:
+        provider, model, pin = _submit_policy_runtime(session)
+    except Exception:
+        logger.warning("submit-time delegate-rule route unresolved; the turn start decides", exc_info=True)
+        return False
+    return should_inject(provider, model, history, db, key, exclude_row_id=exclude_row_id, pin=pin)
+
+
 def _write_submit_user_row(session: dict, text: Any, display_kind: str | None,
                            accept_metadata: dict | None = None) -> dict | None:
     """Write the submitted user turn to the transcript and RETURN the durable dict (stamped
@@ -737,7 +804,8 @@ def _write_submit_user_row(session: dict, text: Any, display_kind: str | None,
     :func:`_persist_submit_user_row`, shared by the busy-queue accept (which attaches the dict to
     the queue envelope, never the shared session slot a possibly-still-staged in-flight turn owns).
     ``accept_metadata`` merges into ``display_metadata`` (the busy-queue accept's never-drained
-    marker, retired by ``reopen_session`` — #125577).
+    marker, retired by ``reopen_session`` — #125577). A session's first user turn on a Claude route is
+    written with the delegate rule appended (:func:`_submit_row_needs_rule`).
     Returns None when nothing was written (no key / non-text / store unavailable / failed write)."""
     # ``session_key`` is only an "is this a real session" probe — the row is written to ``target`` below,
     # which a rotation can already have moved off ``session_key`` (#123545). One guard, one value: the
@@ -755,9 +823,12 @@ def _write_submit_user_row(session: dict, text: Any, display_kind: str | None,
         if db is None:
             return None
         target = _submit_row_target_key(session)
+        if _submit_row_needs_rule(session, db, target):
+            from agent.owner_prompt_policy import append_rule
+            staged["content"] = append_rule(text)
         try:
             staged["_row_id"] = db.append_message(
-                target, "user", content=text, display_kind=display_kind, timestamp=staged["timestamp"],
+                target, "user", content=staged["content"], display_kind=display_kind, timestamp=staged["timestamp"],
                 message_uid=stamp_message_uid(staged),  # the live dict the turn adopts carries the row's uid
                 display_metadata=staged.get("display_metadata"))
         except Exception as exc:
@@ -789,27 +860,40 @@ def _adopt_submit_user_row(session: dict, agent, persist_user_message: Any, text
     adopted by ``_stage_turn_user_message`` when the content matches). A prompt the prologue rewrote
     (@-expansion, image parts) first updates that row so the durable transcript replays what the model
     was sent and the ``api_content`` sidecar can address it; ``_row_id`` rides along for that stamp.
-    ``text`` is THIS turn's raw submit: a staged row from an earlier send (its turn ended before the agent
-    ran) is discarded untouched, so the DB row stays the user's message and never a synthesized turn's text."""
+    ``text`` is THIS turn's raw submit, alone or with the delegate rule its write appended: a staged row from
+    an earlier send (its turn ended before the agent ran) is discarded untouched, so the DB row stays the
+    user's message and never a synthesized turn's text. A stored rule is kept (never stripped); a raw row is
+    re-decided on this turn's route only while the session shows no earlier user message, the one case that
+    opens the store without a rewrite. Either way the turn-start chokepoint still adopts this dict."""
+    from agent.owner_prompt_policy import append_rule, apply_to_turn, has_prior_user_message, has_rule
     staged = session.pop("_submit_user_row", None)
-    if not isinstance(staged, dict) or agent is None or staged.get("content") != text:
+    if (not isinstance(staged, dict) or agent is None or not isinstance(text, str)
+            or staged.get("content") not in (text, append_rule(text))):
         return
-    if staged["content"] != persist_user_message:
+    ruled = has_rule(staged["content"])
+    if ruled:
+        persist_user_message = apply_to_turn(persist_user_message, None)[0]
+    redecide = not ruled and not has_prior_user_message(session.get("history"))
+    if redecide or staged["content"] != persist_user_message:
         from agent.session_persistence import _durable_content
         with _session_db(session) as db:
-            if db is None:
-                return
-            try:
-                # Address the row where it was actually WRITTEN (``_write_submit_user_row`` recorded it);
-                # a rotated-away ``session_key`` would miss that row's session_id and silently skip the
-                # rewrite, leaving the transcript replaying the raw keystrokes.
-                db.set_user_message_content(
-                    _submit_row_owner_key(staged, session), staged["_row_id"],
-                    _durable_content(persist_user_message))
-            except Exception:
-                logger.debug("submit-time user row update failed; the turn writes its own row", exc_info=True)
-                return
-        staged["content"] = persist_user_message
+            # Address the row where it was actually WRITTEN (``_write_submit_user_row`` recorded it); a
+            # rotated-away ``session_key`` would miss that row's session_id and silently skip the rewrite,
+            # leaving the transcript replaying the raw keystrokes.
+            key = _submit_row_owner_key(staged, session)
+            # No store, no new rule here: its rewrite could not land, and the turn-start chokepoint decides
+            # and fixes the adopted dict itself.
+            if redecide and db is not None and _submit_row_needs_rule(session, db, key, staged["_row_id"]):
+                persist_user_message = apply_to_turn(persist_user_message, None)[0]
+            if staged["content"] != persist_user_message:
+                if db is None:
+                    return
+                try:
+                    db.set_user_message_content(key, staged["_row_id"], _durable_content(persist_user_message))
+                except Exception:
+                    logger.debug("submit-time user row update failed; the turn writes its own row", exc_info=True)
+                    return
+                staged["content"] = persist_user_message
     from agent.session_persistence import _persist_lock
     with _persist_lock(agent):
         agent._pending_cli_user_message = staged

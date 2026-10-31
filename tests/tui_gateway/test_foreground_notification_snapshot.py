@@ -7,7 +7,11 @@ import hermes_yaml as yaml
 from agent.status_output import StatusOutputMixin
 from hermes_cli.cli_stream_mixin import CLIStreamMixin
 from tui_gateway import server
-from tests.tui_gateway.test_auto_continue import turn_env, marker_home, _session
+from tests.tui_gateway import test_auto_continue
+from tests.tui_gateway.test_auto_continue import _session
+
+turn_env = test_auto_continue.turn_env
+marker_home = test_auto_continue.marker_home
 
 
 class Agent(StatusOutputMixin):
@@ -23,11 +27,24 @@ class CLI(CLIStreamMixin):
         pass
 
 
-@pytest.mark.parametrize("initial", [False, True])
-@pytest.mark.parametrize("fail", [False, True])
-def test_tui_real_turn_snapshot_next_turn_and_child_threads(turn_env, marker_home, monkeypatch, initial, fail):
+@pytest.fixture
+def snapshot_profile_home(marker_home):
+    from hermes_state_registry import acquire, release
+
     home = marker_home / "snapshot-owner"
     home.mkdir()
+    # A built profile agent retains this registry owner across foreground turns.
+    owner_db = acquire(home / "state.db")
+    try:
+        yield home
+    finally:
+        release(owner_db)
+
+
+@pytest.mark.parametrize("initial", [False, True])
+@pytest.mark.parametrize("fail", [False, True])
+def test_tui_real_turn_snapshot_next_turn_and_child_threads(turn_env, snapshot_profile_home, monkeypatch, initial, fail):
+    home = snapshot_profile_home
     cfg = home / "config.yaml"
     def configure(value):
         cfg.write_text(yaml.safe_dump({"display": {"suppress_warning_notifications": value}}))

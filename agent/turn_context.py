@@ -26,6 +26,7 @@ from agent.lsp.deferred import forward_to_agent as forward_lsp_verdicts
 from agent.plugin_live_notes import pop_plugin_notices
 from agent.skills_index_delta import stage_skills_index_note
 from agent.message_metadata import PERSISTENCE_ONLY_MESSAGE_FIELDS, append_message, stamp_message_timestamp
+from agent.owner_prompt_policy import DELEGATE_RULE, apply_turn_start_policy, check_wire_messages
 from agent.model_metadata import (
     estimate_messages_tokens_rough,
     estimate_native_anthropic_request_tokens_rough,
@@ -222,6 +223,8 @@ def _maybe_title_session_at_turn_start(
                 break
         if title_user_message is not None:
             user_text = title_user_message.strip()
+        # The delegate rule on a session's first message is not what the session is about.
+        user_text = user_text.replace(DELEGATE_RULE, "").strip()
         if not user_text:
             return
         # The session row is created lazily; force it now or the title write matches
@@ -338,6 +341,10 @@ def export_current_turn_boundary(agent: Any, result: Any, user_message: Any) -> 
     turn_id = str(getattr(agent, "_current_turn_id", "") or "")
     if not isinstance(messages, list) or not turn_id or user_message is None:
         return result
+    # The prologue appended the owner's delegate rule to this turn's row (owner_prompt_policy).
+    ruled = getattr(agent, "_delegate_rule_turn_message", None)
+    if isinstance(ruled, (str, list)):
+        user_message = ruled
     idx = reanchor_current_turn_user_idx(messages, user_message)
     if idx < 0 or idx >= len(messages):
         return result
@@ -902,7 +909,8 @@ def _memory_query_text(original_user_message: Any) -> str:
     in parts, so keying off ``isinstance(str)`` collapsed it to ``""`` and ``is_trivial_prompt``
     skipped prefetch entirely. An image-only turn still flattens to ``""`` (trivial)."""
     if isinstance(original_user_message, (str, list)):
-        return flatten_message_text(original_user_message)
+        # The delegate rule is boilerplate: it would make a bare greeting look non-trivial.
+        return flatten_message_text(original_user_message).replace(DELEGATE_RULE, "")
     return ""
 
 
@@ -1084,6 +1092,11 @@ def build_turn_context(
         user_message = sanitize_surrogates(user_message)
     if isinstance(persist_user_message, str):
         persist_user_message = sanitize_surrogates(persist_user_message)
+    # The owner's delegate rule rides a Claude session's first user message: decided from the
+    # route restored above, before the persist override is bound and the user row staged.
+    user_message, persist_user_message = apply_turn_start_policy(
+        agent, user_message, persist_user_message, conversation_history,
+    )
 
     effective_task_id, turn_id = _bind_turn_identity(
         agent, task_id, stream_callback, persist_user_message,
@@ -1344,6 +1357,9 @@ def build_api_messages(
     # survives fresh request construction / process resume via session model_config.
     from agent.anthropic_thinking_replay import apply_rejected_thinking_suppression
     apply_rejected_thinking_suppression(agent, api_messages)
+    # Observe only: a Claude route whose first user message lacks the delegate rule (route
+    # changed after the first turn) warns; rewriting wire bytes here would diverge from storage.
+    check_wire_messages(agent, api_messages)
 
     # Final system message = cached prompt + ephemeral additions (API-time only).
     # Plugin/recall context goes into the user message, never the system prompt: the

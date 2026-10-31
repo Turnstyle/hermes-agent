@@ -824,19 +824,24 @@ def _absorb_turn_result(
     """Stamp, restore /moa, commit history, re-sync the session key; returns the history warning."""
     result, agent = st.result, st.agent
     if display_kind and isinstance(text, str):
-        # Post-turn fallback stamp of a synthesized turn's display kind (DB row + result).
+        # Post-turn fallback stamp of a synthesized turn's display kind (DB row + result). Only a session's
+        # first user row stores the text with the delegate rule appended, so the raw form is matched first.
+        from agent.owner_prompt_policy import append_rule
+        forms = (text, append_rule(text))
         db = getattr(agent, "_session_db", None)
         current_session_id = getattr(agent, "session_id", None) or session.get("session_key")
         if db is not None:
             try:
-                db.set_latest_matching_message_display_kind(
-                    current_session_id, role="user", content=text, display_kind=display_kind,
-                    display_metadata=display_metadata)
+                for content in forms:
+                    if db.set_latest_matching_message_display_kind(
+                            current_session_id, role="user", content=content, display_kind=display_kind,
+                            display_metadata=display_metadata):
+                        break
             except Exception:
                 logger.debug("failed to stamp synthetic display kind", exc_info=True)
         if isinstance(result, dict) and isinstance(result.get("messages"), list):
             for message in reversed(result["messages"]):
-                if message.get("role") == "user" and message.get("content") == text:
+                if message.get("role") == "user" and message.get("content") in forms:
                     message["display_kind"] = display_kind
                     if display_metadata:
                         message["display_metadata"] = display_metadata

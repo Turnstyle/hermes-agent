@@ -200,11 +200,23 @@ class CLIChatTurnMixin:
         return self._preprocess_images_with_vision(text, images)
 
     def _chat_stage_user_message(self, agent, message):
-        """Append the staged user dict to the transcript under the agent's persist lock."""
+        """Append the staged user dict to the transcript under the agent's persist lock; a Claude
+        session's first input is staged with the owner's delegate rule."""
         # Copy before appending: mutating ``agent._session_messages`` in this UI-only step
         # would expose a duplicate-prone snapshot to terminal-close persistence.
         if self.conversation_history is getattr(agent, "_session_messages", None):
             self.conversation_history = list(self.conversation_history)
+        # First-turn delegate rule through the turn-start chokepoint's resolver, so the prologue adopts
+        # this same dict: decided before the append (this input is not prior history) and outside the
+        # persist lock (the first-turn check may read the session DB). Over the gateway this dict is
+        # the viewer's copy (the gateway's turn start decides the stored row) and the store proxy
+        # refuses that read, so the history alone decides.
+        from agent.owner_prompt_policy import admission_route, append_rule, should_inject
+        from hermes_cli.gateway_session_store import GatewaySessionStore
+        store = getattr(agent, "_session_db", None)
+        with_rule = should_inject(*admission_route(agent), self.conversation_history,
+                                  None if isinstance(store, GatewaySessionStore) else store,
+                                  getattr(agent, "session_id", None))
         # Clear the prior turn's override before exposing the new staged input: a shutdown
         # before the worker prologue would otherwise persist old API-local text as this message.
         import contextlib
@@ -221,6 +233,8 @@ class CLIChatTurnMixin:
                 staged_user_message.update(content=str(message), display_kind=message.display_kind,
                                            display_metadata={"display_text": message.display_text,
                                                              "notification_category": message.notification_category})
+            if with_rule:
+                staged_user_message["content"] = append_rule(staged_user_message["content"])
             agent._pending_cli_user_message = staged_user_message
             self.conversation_history.append(staged_user_message)
 

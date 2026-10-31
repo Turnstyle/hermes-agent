@@ -14,7 +14,7 @@ def _resolve_model() -> str:
         return env
     m = _load_cfg().get("model", "")
     if isinstance(m, dict):
-        return str(m.get("default", "") or "").strip()
+        return str(m.get("default") or m.get("model") or "").strip()
     if isinstance(m, str) and m:
         return m.strip()
     # No env seed / config preference: the cost-safe silent default (cache-only read), never an unpicked flagship.
@@ -48,7 +48,7 @@ def _config_model_target() -> tuple[str, str]:
     cfg_model = _load_cfg().get("model")
     if isinstance(cfg_model, dict):
         provider = str(cfg_model.get("provider") or "").strip()
-        return str(cfg_model.get("default", "") or "").strip(), "" if provider.lower() == "auto" else provider
+        return str(cfg_model.get("default") or cfg_model.get("model") or "").strip(), "" if provider.lower() == "auto" else provider
     return (cfg_model.strip() if isinstance(cfg_model, str) else ""), ""
 
 

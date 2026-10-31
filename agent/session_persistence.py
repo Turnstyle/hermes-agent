@@ -20,6 +20,7 @@ from agent.context_compressor import (
 )
 from agent.lazy_forward import forward as _forward, forward_static as _forward_static
 from agent.memory_context import sanitize_context
+from agent.owner_prompt_policy import append_rule
 
 from agent.tool_dispatch_helpers import _is_multimodal_tool_result, _multimodal_text_summary
 from agent.trajectory import save_trajectory as _save_trajectory_to_file
@@ -126,9 +127,9 @@ def _durable_content(content: Any) -> Any:
     if not isinstance(content, list):
         return content
     txt = [
-        str(p.get("text", "")) if p.get("type") == "text" else _image_marker(p)
+        str(p.get("text", "")) if p.get("type") in ("text", "input_text") else _image_marker(p)
         for p in content
-        if isinstance(p, dict) and (p.get("type") == "text" or p.get("type") in _IMAGE_PART_TYPES)
+        if isinstance(p, dict) and (p.get("type") in ("text", "input_text") or p.get("type") in _IMAGE_PART_TYPES)
     ]
     return "\n".join(txt) if txt else None
 
@@ -175,7 +176,9 @@ def adopt_unanswered_turn(history: list[dict[str, Any]], query: Any, agent: Any)
     """
     idx = next((i for i in range(len(history) - 1, -1, -1)
                 if isinstance(history[i], dict) and history[i].get("role") == "user"), None)
-    if idx is None or history[idx].get("content") != query:
+    # A Claude session's first turn stored its DM with the owner's delegate rule appended (owner_prompt_policy).
+    ruled = append_rule(query) if isinstance(query, (str, list)) else query
+    if idx is None or history[idx].get("content") not in (query, ruled):
         return False
     if not all(isinstance(row, dict) and (row.get("role") == "tool" or (row.get("role") == "assistant" and row.get("tool_calls")))
                for row in history[idx + 1:]):

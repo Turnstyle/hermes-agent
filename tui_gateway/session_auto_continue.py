@@ -309,8 +309,11 @@ def _persist_queued_user_row(session: dict, envelope: dict, display_kind: str | 
     _ensure_session_db_row(session)
     staged = envelope.get("_submit_user_row")
     if isinstance(staged, dict) and isinstance(staged.get("_row_id"), int):
-        # Merge sync: the envelope text grew; the already-written row must not lag it.
-        if staged.get("content") != envelope.get("text"):
+        from agent.owner_prompt_policy import append_rule, has_rule
+        # Merge sync: the envelope text grew; the already-written row must not lag it, nor drop a delegate
+        # rule its accept-time write stored (never stripped; idempotent).
+        merged = append_rule(envelope["text"]) if has_rule(staged.get("content")) else envelope["text"]
+        if staged.get("content") != merged:
             with _session_db(session) as db:
                 if db is None:
                     return
@@ -323,7 +326,7 @@ def _persist_queued_user_row(session: dict, envelope: dict, display_kind: str | 
                     key = _submit_row_owner_key(staged, session)
                     live_id = db.resolve_active_row_id(key, staged["_row_id"])
                     updated = live_id is not None and bool(
-                        db.set_user_message_content(key, live_id, envelope["text"]))
+                        db.set_user_message_content(key, live_id, merged))
                 except Exception:
                     logger.debug("queued-prompt row merge update failed", exc_info=True)
                     return
@@ -333,7 +336,7 @@ def _persist_queued_user_row(session: dict, envelope: dict, display_kind: str | 
                 # the envelope claim a durable row that no longer exists.
                 envelope.pop("_submit_user_row", None)
                 return
-            staged["_row_id"], staged["content"] = live_id, envelope["text"]
+            staged["_row_id"], staged["content"] = live_id, merged
         return
     # ``display_metadata`` marker: ``reopen_session`` retires still-marked rows after a restart
     # discarded the in-memory queue (#125577); the drain's replacement row is unmarked.
@@ -366,11 +369,15 @@ def _replace_queued_user_row_for_turn(session: dict, queued: dict, is_dispatchin
     # The DISPATCHING envelope's replacement carries no marker (its turn adopts the row immediately);
     # still-queued envelopes keep the never-drained marker (#125577) so a restart between drains
     # retires the row rather than gluing the never-run prompt into the previous turn.
+    # The replacement decides the delegate rule like any submit row, but never drops one the accept-time
+    # row stored (that write saw no earlier user row); adoption matches the text with or without it.
+    from agent.owner_prompt_policy import append_rule, has_rule
+    text = append_rule(queued.get("text")) if has_rule(early.get("content")) else queued.get("text")
     if is_dispatching:
-        _persist_submit_user_row(session, queued.get("text"), queued.get("_queued_display_kind"))
+        _persist_submit_user_row(session, text, queued.get("_queued_display_kind"))
     else:
         from hermes_state_common import QUEUED_PROMPT_METADATA_KEY
-        _persist_submit_user_row(session, queued.get("text"), queued.get("_queued_display_kind"),
+        _persist_submit_user_row(session, text, queued.get("_queued_display_kind"),
                                  accept_metadata={QUEUED_PROMPT_METADATA_KEY: True})
     fresh = session.get("_submit_user_row")
     if not (isinstance(fresh, dict) and isinstance(fresh.get("_row_id"), int)):
