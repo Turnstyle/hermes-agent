@@ -351,6 +351,7 @@ KANBAN_GUIDANCE = (
     "- Do not assign follow-up work to yourself. Assign it to the right specialist profile.\n"
     "- Do not call `delegate_task` as a board substitute. `delegate_task` is for short reasoning subtasks inside your "
     "own run; board tasks are for cross-agent handoffs that outlive one API loop."
+    "\n\nUse 1 to 10 delegate_task sub-agents and don't do the work inside your main model. Finish the whole outcome in THIS turn. Don't end your turn while helpers are still working; collect their results. If a helper fails, send another. Stop only when done and proved, or at a blocker only Turner can clear (name it in one line)."
 )
 
 TOOL_USE_ENFORCEMENT_GUIDANCE = (
