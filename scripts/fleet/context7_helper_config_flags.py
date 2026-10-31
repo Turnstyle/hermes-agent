@@ -83,6 +83,21 @@ def field(node, key):
     return next((v for k, v in node.value if k.value == key), None)
 
 
+def literal_at(root, text, keys, tag, value):
+    """Prove an explicit scalar at its original path, not an alias/coercion."""
+    node = root
+    for key in keys:
+        if not isinstance(node, yaml.MappingNode):
+            return False
+        pair = next(((k, v) for k, v in node.value if k.value == key), None)
+        if pair is None or pair[1].start_mark.index < pair[0].end_mark.index:
+            return False
+        node = pair[1]
+    return (isinstance(node, yaml.ScalarNode)
+            and node.tag == 'tag:yaml.org,2002:' + tag
+            and text[node.start_mark.index:node.end_mark.index] == value)
+
+
 def plan(path):
     path = Path(path)
     raw, info = snapshot(path)
@@ -106,7 +121,22 @@ def plan(path):
         updates.append((('mcp_servers', 'context7', 'enabled'), True))
     if not updates:
         return None
-    parse(raw)  # Fail closed on anchors even for already-correct scoped configs.
+    # Read-only recognition follows path and duplicate-key validation, but must
+    # precede the anchor-refusing mutation parser. Never infer missing defaults.
+    if (helper and source.get('allow_unattended_helper') is True
+            and type(ttl) is int and ttl <= TTL
+            and literal_at(root, text,
+                           ('secrets', 'onepassword', 'allow_unattended_helper'),
+                           'bool', 'true')
+            and literal_at(root, text,
+                           ('secrets', 'onepassword', 'cache_ttl_seconds'),
+                           'int', str(ttl))
+            and (path.parent.name not in CONTEXT7_PROFILES
+                 or literal_at(root, text, ('mcp_servers', 'context7', 'enabled'),
+                               'bool', 'true'))):
+        return {"path": path, "raw": raw, "new": raw, "info": info,
+                "status": "already_set", "settings": []}
+    parse(raw)  # Anchors/aliases remain forbidden for every mutation.
     changes = []
     for keys, value in updates:
         current = expected
