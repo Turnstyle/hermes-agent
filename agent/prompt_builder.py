@@ -263,6 +263,13 @@ SKILLS_GUIDANCE = (
     "remaining `[SKILL_PRUNED]` markers for that same skill; they are historical artifacts of earlier compactions."
 )
 
+KANBAN_DELEGATION_RULE = (
+    "Use 1 to 10 delegate_task sub-agents and don't do the work inside your main model. "
+    "Finish the whole outcome in THIS turn. Don't end your turn while helpers are still "
+    "working; collect their results. If a helper fails, send another. Stop only when done "
+    "and proved, or at a blocker only Turner can clear (name it in one line)."
+)
+
 KANBAN_GUIDANCE = (
     "# Kanban task execution protocol\n"
     "You have been assigned ONE task from the shared board at `~/.hermes/kanban.db`. Your task id is in "
@@ -351,6 +358,7 @@ KANBAN_GUIDANCE = (
     "- Do not assign follow-up work to yourself. Assign it to the right specialist profile.\n"
     "- Do not call `delegate_task` as a board substitute. `delegate_task` is for short reasoning subtasks inside your "
     "own run; board tasks are for cross-agent handoffs that outlive one API loop."
+    + "\n\n" + KANBAN_DELEGATION_RULE
 )
 
 TOOL_USE_ENFORCEMENT_GUIDANCE = (
