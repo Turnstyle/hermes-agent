@@ -2559,6 +2559,17 @@ from hermes_cli.profile_cmd import cmd_profile
 
 def _dashboard_lifecycle_flags(args, token_file) -> None:
     """--status / --stop: report or kill running dashboards and exit (no deps needed)."""
+    exact = getattr(args, "retire_exact", None)
+    if exact:
+        if token_file or getattr(args, "stop", False) or getattr(args, "status", False):
+            raise SystemExit("--retire-exact cannot be combined with other lifecycle or token-file flags")
+        from hermes_cli.reader_release import release
+        try:
+            print(json.dumps(release(json.loads(Path(exact).read_text()))))
+        except Exception:
+            print('{"ok": false, "reason": "release-refused-or-unverified"}')
+            raise SystemExit(1) from None
+        raise SystemExit(0)
     if token_file and (getattr(args, "status", False) or getattr(args, "stop", False)):
         raise SystemExit("--ssh-session-token-file cannot be used with --status or --stop")
     if getattr(args, "status", False):

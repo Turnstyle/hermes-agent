@@ -40,6 +40,9 @@ def _add_server_runtime_args(parser) -> None:
     # manager / PID file: they scan the process table for `hermes dashboard|serve`
     # cmdlines and SIGTERM them — the same path `hermes update` uses.
     parser.add_argument(
+        "--retire-exact", metavar="MANIFEST", default=None,
+        help="Gracefully retire one exact Desktop reader using native credentials; never sends signals")
+    parser.add_argument(
         "--stop", action="store_true", help="Stop all running Hermes web server processes and exit")
     parser.add_argument(
         "--status", action="store_true", help="List running Hermes web server processes and exit")
