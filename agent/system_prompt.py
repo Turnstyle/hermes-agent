@@ -20,7 +20,7 @@ from typing import Any, Dict, List, Optional, Tuple
 from agent.delegation_context import owned_kanban_task
 from agent.prompt_builder import (
     DEFAULT_AGENT_IDENTITY, EXECUTION_GUIDANCE_MODELS, GOOGLE_MODEL_OPERATIONAL_GUIDANCE,
-    HERMES_AGENT_HELP_GUIDANCE, HERMES_AGENT_HELP_GUIDANCE_NO_SKILLS, KANBAN_GUIDANCE,
+    HERMES_AGENT_HELP_GUIDANCE, HERMES_AGENT_HELP_GUIDANCE_NO_SKILLS, KANBAN_DELEGATION_RULE, KANBAN_GUIDANCE,
     PARALLEL_TOOL_CALL_GUIDANCE, PLATFORM_HINTS, SESSION_SEARCH_GUIDANCE,
     SKILLS_GUIDANCE, STEER_CHANNEL_NOTE, TASK_COMPLETION_GUIDANCE, TELEGRAM_RICH_MESSAGES_HINT,
     TOOL_USE_ENFORCEMENT_GUIDANCE, TOOL_USE_ENFORCEMENT_MODELS, drain_truncation_warnings,
@@ -270,7 +270,7 @@ def _profile_name_for_home(home: Path) -> str:
         return "default"
 
 
-def _tool_guidance_block(agent: Any) -> Optional[str]:
+def _tool_guidance_block(agent: Any, existing_prompt: str = "") -> Optional[str]:
     """Tool-aware behavioral guidance, injected only when the tools are loaded."""
     names = agent.valid_tool_names
     # With both memory stores disabled no store is built, so the full guidance
@@ -292,8 +292,11 @@ def _tool_guidance_block(agent: Any) -> Optional[str]:
         memory_guidance,
         SESSION_SEARCH_GUIDANCE if "session_search" in names else None,
         SKILLS_GUIDANCE if "skill_manage" in names else None,
-        _kanban_guidance,
     ]
+    # Only omit our appended block; user/profile prose and the old protocol stay intact.
+    if _kanban_guidance and KANBAN_DELEGATION_RULE in _join_tier([existing_prompt, *tool_guidance]):
+        _kanban_guidance = _kanban_guidance.removesuffix("\n\n" + KANBAN_DELEGATION_RULE)
+    tool_guidance.append(_kanban_guidance)
     return " ".join(g for g in tool_guidance if g) or None
 
 
@@ -559,7 +562,7 @@ def _identity_parts(agent: Any, ctx_len: Optional[int]) -> Tuple[List[str], bool
     return ([_soul_content], True) if _soul_content else ([DEFAULT_AGENT_IDENTITY], False)
 
 
-def _guidance_parts(agent: Any) -> List[str]:
+def _guidance_parts(agent: Any, existing_prompt: str = "") -> List[str]:
     """Universal + tool-aware + model-gated guidance blocks, each gated by its config.yaml key."""
     parts: List[str] = []
     if agent.valid_tool_names:
@@ -569,8 +572,10 @@ def _guidance_parts(agent: Any) -> List[str]:
                 ("_parallel_tool_call_guidance", PARALLEL_TOOL_CALL_GUIDANCE),
             ) if getattr(agent, flag, True)
         ]
-    parts.append(_tool_guidance_block(agent))  # None/empty entries are dropped by _join_tier
+    _tool_guidance_slot = len(parts)
+    parts.append("")  # Filled after other guidance is known; _join_tier drops empty entries.
     if not agent.valid_tool_names:
+        parts[_tool_guidance_slot] = _tool_guidance_block(agent, existing_prompt) or ""
         return parts
     # Steering only lands inside tool results, so only reachable with tools.
     parts.append(STEER_CHANNEL_NOTE)
@@ -585,6 +590,7 @@ def _guidance_parts(agent: Any) -> List[str]:
     if _model_gate(getattr(agent, "_execution_guidance", "auto"), agent.model, EXECUTION_GUIDANCE_MODELS):
         from agent.prompt_builder import execution_guidance_text
         parts.append(execution_guidance_text())
+    parts[_tool_guidance_slot] = _tool_guidance_block(agent, _join_tier([existing_prompt, *parts])) or ""
     return parts
 
 
@@ -752,7 +758,9 @@ def build_system_prompt_parts(agent: Any, system_message: Optional[str] = None) 
     # index is built; this slot holds its position.
     _help_guidance_slot = len(stable_parts)
     stable_parts.append(HERMES_AGENT_HELP_GUIDANCE_NO_SKILLS)
-    stable_parts.extend(_guidance_parts(agent))
+    # Keep guidance in its original slot, but resolve it after ALL other tiers
+    # so an exact rule in caller, project, memory or plugin content also counts.
+    _guidance_slot = len(stable_parts)
     skills_prompt = _skills_prompt(agent)
     # Skill-pointer variant requires BOTH skill_view AND the hermes-agent skill
     # in the rendered index (pure string check — inherits the index's stability).
@@ -794,6 +802,8 @@ def build_system_prompt_parts(agent: Any, system_message: Optional[str] = None) 
         # Embedder hints are prose too; reserve the delimiter for the renderer.
         environment_hints = environment_hints.replace(_pb.RUNTIME_ENVIRONMENT_HEADING, "> " + _pb.RUNTIME_ENVIRONMENT_HEADING)
         volatile_parts.append(f"{_pb.RUNTIME_ENVIRONMENT_HEADING}\n\n{environment_hints}\n\n{_pb.RUNTIME_ENVIRONMENT_END}")
+    stable_parts[_guidance_slot:_guidance_slot] = _guidance_parts(
+        agent, _join_tier([*stable_parts, *context_parts, *volatile_parts]))
     return {"stable": _join_tier(stable_parts), "context": _join_tier(context_parts), "volatile": _join_tier(volatile_parts)}
 
 
