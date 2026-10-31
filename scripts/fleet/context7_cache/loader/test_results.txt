@@ -1,0 +1,14 @@
+test_bounds (__main__.OverlayTests) ... ok
+test_disabled_ttl_never_stores (__main__.OverlayTests) ... ok
+test_env_snapshot_has_no_ttl_residual (__main__.OverlayTests) ... ok
+test_exact_helper_bypasses_both_layers_even_with_old_entries (__main__.OverlayTests) ... ok
+test_guard_and_snapshot_residual_are_unchanged (__main__.OverlayTests) ... ok
+test_hash_mismatch_and_anchor_fail_closed (__main__.OverlayTests) ... ok
+test_memory_and_disk_expire_without_age_reset (__main__.OverlayTests) ... ok
+test_public_wrappers_propagate_exact_pin (__main__.OverlayTests) ... ok
+test_similar_path_not_exempt_and_cache_optout (__main__.OverlayTests) ... ok
+
+----------------------------------------------------------------------
+Ran 9 tests in 0.065s
+
+OK

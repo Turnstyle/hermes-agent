@@ -1,0 +1,48 @@
+--- a/gateway_coordinated_restart.py
++++ b/gateway_coordinated_restart.py
+@@ -442,0 +443,3 @@
++    if req.get("no_notices"):
++        log("wake", "outbound wakes suppressed (--no-notices)")
++        return {}
+@@ -1178,0 +1182 @@
++            "no_notices": bool(getattr(args, "no_notices", False)),
+@@ -1204,0 +1209,2 @@
++    if bool(r.get("no_notices")) != bool(getattr(args, "no_notices", False)):
++        raise Fail("Cannot join a request with a different --no-notices policy; nothing changed.")
+@@ -1334,0 +1341,4 @@
++    if rec.get("no_notices"):
++        return (f"Request {rec['id']}: --no-notices; outbound notice/steer/comment/wake/notify routes suppressed. "
++                f"Drain, census, checkpoint/deadline policy, permissions, locks and health checks remain. "
++                f"Status: python3 {SCRIPT} status")
+@@ -1409,0 +1420,3 @@
++    if req.get("no_notices"):
++        log("notice", "outbound notices suppressed (--no-notices)")
++        return
+@@ -1491 +1504 @@
+-    cmd = [hermes_bin(), "-p", "default", "gateway", "restart"]
++    cmd = [hermes_bin(), "-p", "default", "gateway", "restart", "--yes"]
+@@ -1634,0 +1648,6 @@
++        if req.get('no_notices'):
++            update_request(req['id'], deadline_checkpointed_at=iso(), deadline_checkpoint_cards=cards,
++                           deadline_checkpoint_results={}, deadline_checkpoint_posted_cards=[],
++                           deadline_checkpoint_notices_suppressed=True)
++            log('checkpoint', 'checkpoint census retained; outbound notices suppressed (--no-notices)')
++            return
+@@ -1749,0 +1769 @@
++    req["no_notices"] = bool(req.get("no_notices") or getattr(args, "no_notices", False))
+@@ -1815 +1835 @@
+-        key = None if dry else api_key()
++        key = None if dry or req.get("no_notices") else api_key()
+@@ -1938,2 +1958,3 @@
+-        atomic_write(NOTICE_FILE, json.dumps({"phase": "back", "request": rid, "text": text}))
+-        for p, tid in cards:
++        if not req.get("no_notices"):
++            atomic_write(NOTICE_FILE, json.dumps({"phase": "back", "request": rid, "text": text}))
++        for p, tid in ([] if req.get("no_notices") else cards):
+@@ -1954 +1975 @@
+-        if req.get("notify_cmd"):
++        if req.get("notify_cmd") and not req.get("no_notices"):
+@@ -2029,0 +2051 @@
++        r["no_notices"] = bool(r.get("no_notices") or getattr(args, "no_notices", False))
+@@ -2620,0 +2643 @@
++        sp.add_argument("--no-notices", action="store_true", help="suppress outbound notices, steers, checkpoint/card comments, wakes and notify-cmd; keep census, drain, checkpoint policy and health gates")

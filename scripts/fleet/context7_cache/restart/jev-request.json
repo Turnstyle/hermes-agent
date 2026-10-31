@@ -1,0 +1,376 @@
+{
+  "state": {
+    "run_tag": "context7-cache-restart-overlay-review-20261030",
+    "authority": "Review only. No restart, messages, board writes, secrets, live edits, config changes or deployment. Deputy alone may later deploy after authorization.",
+    "proposal": {
+      "schema": 1,
+      "deploy_authorized": false,
+      "source": "/Users/sheldon/.hermes/fleet-node-state/u3g/g3f/gateway_coordinated_restart.py",
+      "source_sha256": "df56ebff6a48c22b1a698d491da4195e2fe54d2d19f8df0133b31654eac3d3a8",
+      "source_bytes": 144310,
+      "overlay_sha256": "0f6cd7718abbb0f9dd11e4cdb4c69f03a2b28f96339280ae786b14a993cda77a",
+      "overlay_bytes": 144319,
+      "old_line": "    cmd = [hermes_bin(), \"-p\", \"default\", \"gateway\", \"restart\"]",
+      "new_line": "    cmd = [hermes_bin(), \"-p\", \"default\", \"gateway\", \"restart\", \"--yes\"]",
+      "function_lines": [
+        1490,
+        1525
+      ],
+      "patch_sha256": "c4fe0b0067bc42961b49992d84f8649f57ccff71cac2420486cb7393f092965d",
+      "fixture_sha256": "f256e54e1a30cb6a97d7dc5db1edf9c42c56e24a4a195645f7dcc8d48150b4aa",
+      "evidence_sha256": "2c17d21edda998b91a6a99ebcbe9deb37fce0e73b3404b1ed15452eeb4a01972",
+      "scope": "One argv literal inside existing run_restart; no call-site, coordination, child context, board safety, timeout, environment, error or fallback changes.",
+      "deployment_gate": "Deputy only: exact source hash must match; verify selected hermes_bin target implements the evidenced --yes semantics. No standalone adapter invocation."
+    },
+    "evidence": [
+      {
+        "path": "/Users/sheldon/.hermes/fleet-node-state/u3g/g3f/gateway_coordinated_restart.py",
+        "sha256": "df56ebff6a48c22b1a698d491da4195e2fe54d2d19f8df0133b31654eac3d3a8",
+        "bytes": 144310,
+        "excerpts": [
+          {
+            "start": 593,
+            "end": 602,
+            "text": "def hermes_bin() -> str:\n    # Services often run without ~/.local/bin on PATH; that link is the live install's own launcher,\n    # so check it before the old default folder (7 Oct 2026: the old folder held stale code).\n    cands = [os.environ.get(\"HERMES_BIN\"), shutil.which(\"hermes\"), str(Path.home() / \".local\" / \"bin\" / \"hermes\"),\n             str(HERMES_HOME / \"hermes-agent\" / \"hermes\")]\n    for c in cands:\n        if c and Path(c).exists():\n            return c\n    raise Fail(\"cannot find the hermes command. State: nothing changed. Fix: set HERMES_BIN=/path/to/hermes \"\n               \"or put hermes on PATH, then retry.\")"
+          },
+          {
+            "start": 1490,
+            "end": 1525,
+            "text": "def run_restart(log) -> None:\n    cmd = [hermes_bin(), \"-p\", \"default\", \"gateway\", \"restart\"]\n    log(\"restart\", f\"running {shlex.join(cmd)} (CLI wait budget bounded; Hermes owns interruption and resume_pending)\")\n    # Do NOT add --force here: on `gateway restart` it means \"start a separate gateway\", not \"override a guard\".\n    try:\n        r = subprocess.run(cmd, capture_output=True, text=True, timeout=RESTART_TIMEOUT_SECONDS,\n                           env=dict(os.environ, GATEWAY_COORDINATED_RESTART='1', HERMES_RESTART_AFTER_TURN_TIMEOUT='1', HERMES_RESTART_DRAIN_TIMEOUT='1'))\n    except subprocess.TimeoutExpired:\n        raise Fail(f\"`hermes gateway restart` ran longer than {RESTART_TIMEOUT_SECONDS}s. State: gateway may be down or \"\n                   f\"still draining; drain marker will be cleared. Fix: `hermes -p default gateway status`, then \"\n                   f\"`python3 {SCRIPT} request --reason \\\"retry\\\"`.\")\n    tail = (r.stdout + r.stderr).strip().splitlines()[-6:]\n    for line in tail:\n        log(\"restart\", f\"hermes: {line}\")\n    if r.returncode != 0 and \"Restart budget blocked\" in (r.stdout + r.stderr) and \\\n            bool(((load_state() or {}).get(\"request\") or {}).get(\"force\")):\n        # 7 Oct 2026: Hermes allows one intentional restart per hour. This request was made with --force and the\n        # gateway is already drained and idle, so restart through the service manager (what `hermes update` does).\n        # Without this, an urgent rollback within the hour is blocked.\n        if sys.platform == \"darwin\":\n            svc = [[\"launchctl\", \"kickstart\", \"-k\", f\"gui/{os.getuid()}/ai.hermes.gateway\"]]\n        else:\n            svc = [[\"systemctl\", \"--user\", \"reset-failed\", \"hermes-gateway.service\"],\n                   [\"systemctl\", \"--user\", \"restart\", \"hermes-gateway.service\"]]\n        for c in svc:\n            log(\"restart\", f\"Hermes restart budget is spent and this request is --force: running {shlex.join(c)}\")\n            r = subprocess.run(c, capture_output=True, text=True, timeout=RESTART_TIMEOUT_SECONDS)\n        for line in (r.stdout + r.stderr).strip().splitlines()[-4:]:\n            log(\"restart\", f\"service manager: {line}\")\n    if r.returncode != 0:\n        guard = (\"  TurnerBook has a local guard that refuses a second restart within 60 minutes unless hermes is given \"\n                 \"--force; wait it out (do not use --force here: on this command it starts a SEPARATE gateway). \"\n                 if sys.platform == \"darwin\" else \"\")\n        raise Fail(f\"`hermes gateway restart` exited {r.returncode}.{guard} State: gateway is whatever hermes left it \"\n                   f\"(check `hermes -p default gateway status`); drain marker cleared so bots can work. Fix: read the \"\n                   f\"hermes lines above, fix, then `python3 {SCRIPT} request --reason \\\"retry after failed restart\\\"`.\")"
+          },
+          {
+            "start": 1409,
+            "end": 1430,
+            "text": "def send_notices(work: dict, req: dict, gs, key, log, dry: bool) -> None:\n    text = notice_text(req)\n    base = api_base(gs)\n    if not dry:\n        atomic_write(NOTICE_FILE, json.dumps({\"phase\": \"coming\", \"request\": req[\"id\"], \"text\": text,\n                                              \"deadline_at\": req[\"deadline_at\"]}))\n    for profile, items in sorted(work[\"by_profile\"].items()):\n        for it in items:\n            if it[\"kind\"] == \"kanban worker\":\n                res = \"would comment on the card\" if dry else kanban_comment(it[\"task_id\"], text)\n                log(\"notice\", f\"{profile}: {it['detail']} -> {res}. (A card only sees the comment when it next reads the \"\n                              f\"card; the gateway restart may still cut it, and the dispatcher re-runs it.)\")\n            elif it.get(\"run_id\"):\n                res = \"would steer\" if dry else steer(base, key, it[\"run_id\"], text)\n                log(\"notice\", f\"{profile}: {it['session']} -> {res}\", loud=res.startswith(\"steer failed\"))\n            else:\n                log(\"notice\", f\"{profile}: {it['kind']} ({it['detail']}) CANNOT be reached mid-turn - Hermes lists no run id \"\n                              f\"for it, and Bot Chat/queued messages only arrive after the turn ends (and new turns are \"\n                              f\"refused while draining). It will see the notice only if it reads {NOTICE_FILE}. \"\n                              f\"It keeps running until it finishes or the deadline.\", loud=True)\n    if work[\"unnamed\"]:\n        log(\"notice\", f\"{work['unnamed']} unnamed API-run/deferred unit(s) cannot be addressed at all.\", loud=True)"
+          },
+          {
+            "start": 1780,
+            "end": 1798,
+            "text": "        log(\"pause\", \"would acquire owned ESTOP and every board dispatch lock; existing pause aborts safely\")\n    else:\n        pause.acquire()\n        # Publish before lock acquisition so a slow in-flight tick consumes the deadline.\n        req[\"deadline_minutes\"], req[\"deadline_at\"] = publish_initial_deadline(rid, req[\"deadline_minutes\"])\n        pause.barrier(req[\"deadline_at\"])\n\n    # (a) drain marker\n    foreign = read_marker()\n    owns_marker = True\n    if foreign and not str(foreign.get(\"principal\", \"\")).startswith(\"coordinated-restart:\"):\n        owns_marker = False\n        log(\"drain\", f\"a drain marker from {foreign.get('principal')!r} already exists; leaving it alone (we will not \"\n                     f\"clear it). Remove it with: rm {DRAIN_MARKER}\", loud=True)\n    elif dry:\n        log(\"drain\", f\"would write {DRAIN_MARKER}: {json.dumps(drain_marker_payload(principal, boot_epoch()))}\")\n    else:\n        write_marker(principal)\n        log(\"drain\", f\"wrote {DRAIN_MARKER}; gateway now refuses NEW turns, running turns continue\")"
+          },
+          {
+            "start": 1815,
+            "end": 1830,
+            "text": "        key = None if dry else api_key()\n        notified = notified_profiles(work)  # kept for step (j); see notified_profiles\n\n        if dry:\n            deadline_at = now() + req[\"deadline_minutes\"] * 60\n        else:   # one critical section: a joiner's shorter minutes cannot fall between the read and the write\n            deadline_at = req[\"deadline_at\"]\n        req[\"deadline_at\"] = deadline_at\n\n        if is_idle(work):\n            # (c)\n            log(\"idle\", \"nobody is working: going straight to the restart\")\n        else:\n            # (d)\n            log(\"evaluate\", restart_wait_guidance(), loud=True)\n            send_notices(work, req, gs, key, log, dry)"
+          },
+          {
+            "start": 1900,
+            "end": 1925,
+            "text": "            st[\"request\"][\"status\"] = \"restarting\"\n            save_state(st)\n        snap = collect_snapshot(False, lambda *a, **k: None)\n        gs = snap[\"gateway_state\"] or {}\n        pre = {\"pid\": gateway_pid(gs), \"served\": gs.get(\"served_profiles\") or [],\n               \"platforms\": [p for p, v in (gs.get(\"platforms\") or {}).items() if v.get(\"state\") == \"connected\"]}\n        interrupted, cards = cut_sets(who_is_working(snap))\n        stragglers = describe_work(who_is_working(snap))\n        with locked(STATE_LOCK):\n            st = load_state()\n            st[\"last_restart_at\"] = now()\n            save_state(st)\n        pause.check()\n        # Last fresh read, including workers finishing after their card was closed.\n        confirm_idle_or_deadline(req, log)\n        run_restart(log)\n\n        # (h) clear marker immediately (it survives a gateway-only restart)\n        if owns_marker:\n            clear_own_marker(principal)\n            log(\"drain\", \"drain marker cleared\")\n            owns_marker = False\n\n        # (i) verify\n        update_request(rid, status=\"verifying\")\n        ok, problems = verify(pre, log)"
+          },
+          {
+            "start": 1940,
+            "end": 1962,
+            "text": "            log(\"resume\", f\"{p}: card {tid} -> {kanban_comment(tid, text)}\")\n        if interrupted:\n            log(\"resume\", \"interrupted chat sessions are also resumed by Hermes itself (resume_pending); a bot that \"\n                          \"checkpointed reads its Session-notes entry per the gateway-restart-checkpoint skill\")\n        wake_bots(wake_profiles(interrupted, cards, notified), req, wake_cmd, log, False)\n\n        # (k) outcome\n        status = \"done\" if ok and not stragglers else \"done_with_warnings\"\n        outcome = (f\"Restart {rid} finished {iso()}: gateway \" + (\"healthy.\" if ok else \"NOT fully healthy: \" +\n                   \"; \".join(problems) + f\". Fix: hermes -p default gateway status; logs in {HERMES_HOME}/logs/.\") +\n                   (\" Interrupted while working: \" + \" | \".join(stragglers) if stragglers else \" Nobody was cut off.\"))\n        update_request(rid, status=status, outcome=outcome, step=\"finished\")\n        atomic_write(OUTCOME_FILE, outcome + \"\\n\")\n        log(\"outcome\", outcome, loud=not ok or bool(stragglers))\n        if req.get(\"notify_cmd\"):\n            try:\n                r = subprocess.run([*shlex.split(req[\"notify_cmd\"]), outcome], capture_output=True, text=True, timeout=60)\n                log(\"outcome\", f\"sent to requester via notify-cmd (exit {r.returncode})\")\n            except (OSError, subprocess.SubprocessError) as e:\n                log(\"outcome\", f\"notify-cmd failed ({e}); the outcome is in {OUTCOME_FILE}\", loud=True)\n        else:\n            log(\"outcome\", f\"no --notify-cmd route; requester reads it with `status` or {OUTCOME_FILE}\")\n    finally:"
+          },
+          {
+            "start": 2482,
+            "end": 2499,
+            "text": "        check_manifest(retained_record(rid))\n        update_request(rid, status='restarting', switch_cmd=req.get('switch_cmd'))\n        run_retained_callback(req, log)\n        acquire_auxiliary_best_effort(req, log)\n        pause.check()\n        check_manifest(retained_record(rid))\n        confirm_idle_or_deadline(req, log)\n        gs = read_gateway_state() or {}\n        pre = {'pid': gateway_pid(gs), 'served': gs.get('served_profiles') or [],\n               'platforms': [p for p, v in (gs.get('platforms') or {}).items() if v.get('state') == 'connected']}\n        run_restart(log)\n        update_request(rid, status='verifying')\n        ok, problems = verify(pre, log)\n        if not ok:\n            raise Fail('Gateway health failed; pause retained: ' + '; '.join(problems))\n        check_manifest(retained_record(rid))\n        acquire_auxiliary_best_effort(req, log)\n        update_request(rid, status='done', health_ok=True, outcome='Healthy. All pauses retained until explicit release.')"
+          },
+          {
+            "start": 2613,
+            "end": 2635,
+            "text": "    def common(sp, needs_reason):\n        sp.add_argument(\"--reason\", required=needs_reason, help=\"why a restart is needed (recorded and shown in status)\")\n        sp.add_argument(\"--by\", help=\"who is asking (default: $HERMES_PROFILE, else $USER)\")\n        sp.add_argument(\"--deadline-minutes\", type=float, default=DEFAULT_DEADLINE_MINUTES,\n                        help=f\"how long working bots get to checkpoint (default {DEFAULT_DEADLINE_MINUTES})\")\n        sp.add_argument(\"--min-gap-minutes\", type=float, default=MIN_GAP_MINUTES,\n                        help=f\"minimum time between restarts (default {MIN_GAP_MINUTES})\")\n        sp.add_argument(\"--force\", action=\"store_true\", help=\"skip the minimum gap (needs --reason; it is recorded)\")\n        sp.add_argument(\"--notify-cmd\", help=\"command that sends the outcome to the requester; the outcome text is \"\n                                             \"appended as its last argument, e.g. \\\"hermes peer dm local/max-cndr\\\"\")\n        sp.add_argument(\"--wake-cmd\", help=\"command that wakes one bot after the restart (default: hermes -p <bot> chat \"\n                                           \"--in ~ -c \\\"Bot Chat\\\" --create-if-missing -Q -q <text>). {profile} and \"\n                                           \"{text} are filled in; with no {text} the text is added as the last argument. \"\n                                           \"Run once per cut bot, 60 s at most each. \\\"none\\\" turns it off\")\n        sp.add_argument(\"--switch-cmd\", help=\"command run once after the gateway is idle and before it restarts, e.g. to switch \"\n                                             \"the Hermes checkout (`git -C <checkout> checkout -B <branch> <ref>`). Split \"\n                                             \"like --notify-cmd, no shell; 600 s limit; make it safe to run twice. A \"\n                                             \"non-zero exit stops the restart (status failed, step FAILED: switch-cmd)\")\n        sp.add_argument(\"--retain-pause\", action=\"store_true\", help=\"retain all pauses until explicit successful release\")\n        sp.add_argument(\"--resume-request\", help=\"recover this exact retained request after its processes exit\")\n        sp.add_argument(\"--switch-timeout\", type=float, default=600, help=\"callback budget in seconds; must exceed the sum of recipe budgets\")\n        sp.add_argument(\"--auxiliary-plan\", help=\"service fence plan JSON; defaults to state directory auxiliary-plan.json\")\n        sp.add_argument(\"--dry-run\", action=\"store_true\", help=\"do every read, print what would happen, change nothing\")"
+          }
+        ]
+      },
+      {
+        "path": "/Users/sheldon/.hermes/releases/stable-v0.22.5-carry-d4c5aec662c8/candidate/hermes_cli/subcommands/gateway.py",
+        "sha256": "18abc7e9b5bf7bf0eb5b47d9de20acf66934ab2847ce1606e029e1d8cbcdccc6",
+        "bytes": 15132,
+        "excerpts": [
+          {
+            "start": 11,
+            "end": 21,
+            "text": "# `start`/`restart` on a named profile refuse while the default multiplexer serves it (a second gateway\n# would double-bind its platforms); `gateway run` carries its own broader --force text.\n_FORCE_SERVED_PROFILE_HELP = (\n    \"Start a separate gateway for this profile even when the default multiplexer already serves it \"\n    \"(not recommended: two pollers on one bot token, port conflicts)\")\n\n# `stop`/`restart` ask before interrupting live turns, cron jobs or background delegations.\n_INTERRUPT_HELP = (\n    \"{verb} without asking even while sessions are live (turns, cron jobs, background delegations): \"\n    \"they are interrupted. Without it the command names the live work and asks y/N (refuses when \"\n    \"there is no terminal). --interrupt is the same flag\")"
+          },
+          {
+            "start": 141,
+            "end": 155,
+            "text": "    gateway_stop = gateway_subparsers.add_parser(\"stop\", help=\"Stop gateway service\")\n    _add_system_flag(gateway_stop)\n    _flag(gateway_stop, \"--all\", help=\"Stop ALL gateway processes across all profiles\")\n    _flag(gateway_stop, \"-y\", \"--yes\", \"--interrupt\", dest=\"interrupt\", help=_INTERRUPT_HELP.format(verb=\"stop\"))\n\n    gateway_restart = gateway_subparsers.add_parser(\"restart\", help=\"Restart gateway service\")\n    _add_system_flag(gateway_restart)\n    _flag(gateway_restart, \"--all\",\n        help=\"Kill ALL gateway processes across all profiles before restarting\")\n    _flag(gateway_restart, \"--force\", help=_FORCE_SERVED_PROFILE_HELP)\n    _flag(gateway_restart, \"-y\", \"--yes\", \"--interrupt\", dest=\"interrupt\", help=_INTERRUPT_HELP.format(verb=\"restart\"))\n    _flag(gateway_restart, \"--detach\", help=(\n        \"Without an installed service, start the replacement in the background (as `gateway ensure` \"\n        \"does) instead of in this terminal; used by apps that run the restart as a short-lived client\"))\n    _add_compat_platform_flag(gateway_restart)"
+          }
+        ]
+      },
+      {
+        "path": "/Users/sheldon/.hermes/releases/stable-v0.22.5-carry-d4c5aec662c8/candidate/hermes_cli/gateway_lifecycle_guards.py",
+        "sha256": "60b3d13e57e8bceb23b307cc8c4040e8aa90663d0b3911693ed82d7f453cbdba",
+        "bytes": 6700,
+        "excerpts": [
+          {
+            "start": 97,
+            "end": 129,
+            "text": "def refuse_while_sessions_live(verb: str, args, *, host_home: Optional[Path] = None, profile: Optional[str] = None) -> None:\n    \"\"\"Exit 1 naming the live work unless ``--interrupt`` was passed; with it, say what is interrupted.\n    ``host_home``/``profile``: a served profile's stop/restart unserves only that profile in the host,\n    so only its work counts.\"\"\"\n    if profile:\n        hint = f\"hermes -p {profile} gateway {{verb}} {INTERRUPT_FLAG}\"\n        # No answer (control socket down) proceeds: the park marker path exists for exactly that host.\n        lines = refusal_lines(verb, [Path(host_home)], profile=profile, flag_hint=hint)\n    else:\n        lines = refusal_lines(verb, _candidate_homes(getattr(args, \"system\", False)))\n    if not lines:\n        return\n    from hermes_cli.gateway import print_error, print_warning\n\n    if getattr(args, \"interrupt\", False):\n        print_warning(lines[0].replace(f\"Refusing to {verb} the gateway\", f\"--yes: {verb} proceeds\"))\n        for line in lines[1:-2]:\n            print(line)\n        return\n    if sys.stdin.isatty() and sys.stdout.isatty():\n        from hermes_cli.cli_output import prompt_yes_no\n\n        print_warning(lines[0].replace(f\"Refusing to {verb} the gateway\", f\"{verb.capitalize()} the gateway\"))\n        for line in lines[1:-2]:\n            print(line)\n        if prompt_yes_no(f\"Interrupt them and {verb} the gateway?\", default=False):\n            return\n        print(f\"  Cancelled: the gateway was not {'stopped' if verb == 'stop' else 'restarted'}.\")\n        sys.exit(1)\n    print_error(lines[0])\n    for line in lines[1:]:\n        print(line)\n    sys.exit(1)"
+          }
+        ]
+      },
+      {
+        "path": "/Users/sheldon/.hermes/releases/stable-v0.22.5-carry-d4c5aec662c8/candidate/hermes_cli/gateway.py",
+        "sha256": "dc2ac0d790d28a3c4b3c2aae6ad677c71618a3bbc5fe1db054d1eb31ffda4fdd",
+        "bytes": 270872,
+        "excerpts": [
+          {
+            "start": 5454,
+            "end": 5471,
+            "text": "def _cmd_restart(args):\n    _refuse_from_inside_gateway(\"restart\", \"restart loops\")\n    from hermes_cli.gateway_profile_lifecycle import profile_lifecycle\n    if profile_lifecycle(\"restart\", args):\n        return\n    system = getattr(args, \"system\", False)\n    restart_all = getattr(args, \"all\", False)\n    force = getattr(args, \"force\", False)\n    # `--all` targets the ONE host multiplexer and _restart_all does its own ownership check with\n    # the right one-liner; running the generic named-profile guard first made that branch\n    # unreachable for `-p X gateway restart --all` (it printed a bare `gateway restart` instead).\n    if not restart_all:\n        _guard_named_profile_under_multiplexer(force=force)\n    from hermes_cli.gateway_lifecycle_guards import refuse_while_sessions_live\n    refuse_while_sessions_live(\"restart\", args)\n    if restart_all and _dispatch_all_via_service_manager_if_s6(\"restart\"):\n        return\n    if not restart_all and _dispatch_via_service_manager_if_s6(\"restart\"):"
+          }
+        ]
+      },
+      {
+        "path": "/Users/sheldon/.hermes/releases/stable-v0.22.5-carry-d4c5aec662c8/candidate/hermes_cli/main.py",
+        "sha256": "2f63ce519e9c95596ac4aa808a496ab501a77bd47b209b1d662d68a3d5078f43",
+        "bytes": 150342,
+        "excerpts": [
+          {
+            "start": 708,
+            "end": 716,
+            "text": "# Load .env from ~/.hermes/.env first, then project root as dev fallback.\n# User-managed env files should override stale shell exports on restart.\nfrom hermes_cli.config import get_hermes_home\nfrom hermes_cli.env_loader import load_hermes_dotenv\n\n# ``update`` must not resolve external secret sources (Windows self-lock via cryptography, slow\n# helpers inside the import probe) \u2014 ``_early_recovery._should_skip_external_secret_sources``\n# owns that argv check for every dotenv load in the process. See #73381.\nload_hermes_dotenv(project_env=PROJECT_ROOT / \".env\")"
+          }
+        ]
+      },
+      {
+        "path": "/Users/sheldon/.hermes/releases/stable-v0.22.5-carry-d4c5aec662c8/candidate/hermes_cli/_early_recovery.py",
+        "sha256": "8b2b34d513562844280f5b3ceb2c738c4aa9ef729c9bedbe59555a89448345a7",
+        "bytes": 72806,
+        "excerpts": [
+          {
+            "start": 70,
+            "end": 81,
+            "text": "def _should_skip_external_secret_sources() -> bool:\n    \"\"\"True inside any ``hermes update`` process (and its import probes).\n\n    Every dotenv load in the process \u2014 ``hermes_cli.main``, ``run_agent``, ``cli`` \u2014 consults\n    this, so the updater never resolves external secret sources: on Windows they map\n    ``cryptography._rust.pyd`` into the process replacing that venv, and everywhere a slow\n    ``op``/``bws``/command helper (up to 120s per source) would run inside the updater's\n    120s critical-module import probe and be reported as an import-health timeout.\n    Profile flags are stripped before ``hermes_cli.main`` loads dotenv, so ``argv[1]`` is\n    the authoritative subcommand.\n    \"\"\"\n    return _UPDATE_RETRY_RECOVERED or sys.argv[1:2] == [\"update\"]"
+          }
+        ]
+      },
+      {
+        "path": "/Users/sheldon/.local/bin/hermes",
+        "sha256": "12f86f099447cdbb074eabede2b0002fa0bcf3cc6f12a96096a22df07462dd68",
+        "bytes": 115,
+        "excerpts": [
+          {
+            "start": 1,
+            "end": 2,
+            "text": "#!/bin/sh\nexec /Users/sheldon/.hermes/releases/stable-v0.22.0-carry-6a0df67dd320/candidate/.hermes/bin/hermes \"$@\""
+          }
+        ]
+      },
+      {
+        "path": "/Users/sheldon/.hermes/releases/stable-v0.22.0-carry-6a0df67dd320/candidate/.hermes/bin/hermes",
+        "sha256": "be87154d87af4843ec69bb90fac8dc59619cb5260b03a7d5a5f72a1845be9ac7",
+        "bytes": 7752,
+        "excerpts": [
+          {
+            "start": 1,
+            "end": 6,
+            "text": "#!/bin/sh\nexec /Users/sheldon/.hermes/tools/python-3.14.7+20260901-darwin-arm64/bin/python3 -I -c 'import os, re, sys\nimport contextlib, hashlib, io, pathlib, shutil, subprocess\nos.environ.pop('\"'\"'PYTHONHOME'\"'\"', None)\nos.environ.pop('\"'\"'PYTHONPATH'\"'\"', None)\nsys.path.insert(0, '\"'\"'/Users/sheldon/.hermes/releases/stable-v0.22.5-carry-d4c5aec662c8/candidate'\"'\"')"
+          },
+          {
+            "start": 120,
+            "end": 133,
+            "text": "if not os.environ.get('\"'\"'HERMES_HOME'\"'\"'):\n    from hermes_constants import get_default_hermes_root\n    os.environ['\"'\"'HERMES_HOME'\"'\"'] = str(get_default_hermes_root())\nif sys.argv[1:2] == ['\"'\"'--run-module'\"'\"']:\n    import runpy\n    if len(sys.argv) < 3: sys.exit('\"'\"'hermes: --run-module needs a module'\"'\"')\n    module = sys.argv.pop(2)\n    del sys.argv[1]\n    runpy.run_module(module, run_name='\"'\"'__main__'\"'\"', alter_sys=True)\n    sys.exit(0)\nfrom hermes_cli.main import main\nsys.argv[0] = re.sub(r'\"'\"'(-script\\.pyw|\\.exe)?$'\"'\"', '\"'\"''\"'\"', sys.argv[0])\nsys.exit(main())\n' \"$@\""
+          }
+        ]
+      }
+    ],
+    "limits": [
+      "Synthetic tests cannot prove health or actual interrupted-session recovery.",
+      "An existing coordinator-force service-manager fallback is preserved, not newly authorized.",
+      "No blanket notice suppression was found; wake-cmd none and omitted notify-cmd are only partial controls.",
+      "HERMES_BIN and PATH can choose a different executable; their live values were not read."
+    ],
+    "reported_incident_unverified": "Parent reports PID5719 from Oct29 and two failed reloads, latest r-20261030-152121-60b0; no live state inspected."
+  },
+  "questions": {
+    "R01": {
+      "type": "choice",
+      "instructions": "Does --yes express interrupt consent rather than separate-gateway force? Judge only the supplied exact source and distinguish validated mechanism from deployment authority.",
+      "criteria": {
+        "supported": "The supplied evidence supports the proposition.",
+        "contradicted": "The supplied evidence contradicts the proposition.",
+        "insufficient": "Evidence is incomplete or the scope differs."
+      }
+    },
+    "R02": {
+      "type": "score",
+      "instructions": "Is default profile targeting preserved without --all? Score evidentiary support, not operational approval.",
+      "criteria": [
+        "Unsupported",
+        "Weak",
+        "Mixed",
+        "Mostly supported",
+        "Directly supported"
+      ]
+    },
+    "R03": {
+      "type": "noul",
+      "instructions": "Is the one-line delta confined to the existing coordinated restart window? Explain the decisive evidence and material exception in a concise source-grounded answer."
+    },
+    "R04": {
+      "type": "choice",
+      "instructions": "Are drain markers, pause ownership and board dispatch gates unchanged? Judge only the supplied exact source and distinguish validated mechanism from deployment authority.",
+      "criteria": {
+        "supported": "The supplied evidence supports the proposition.",
+        "contradicted": "The supplied evidence contradicts the proposition.",
+        "insufficient": "Evidence is incomplete or the scope differs."
+      }
+    },
+    "R05": {
+      "type": "score",
+      "instructions": "Can the unmodified bare argv explain the reported non-TTY live-work refusal? Score evidentiary support, not operational approval.",
+      "criteria": [
+        "Unsupported",
+        "Weak",
+        "Mixed",
+        "Mostly supported",
+        "Directly supported"
+      ]
+    },
+    "R06": {
+      "type": "noul",
+      "instructions": "Is a broader claim of successful session recovery unsupported by offline mocks? Explain the decisive evidence and material exception in a concise source-grounded answer."
+    },
+    "R07": {
+      "type": "choice",
+      "instructions": "Does omitting notify-cmd still leave steering and board comments possible? Judge only the supplied exact source and distinguish validated mechanism from deployment authority.",
+      "criteria": {
+        "supported": "The supplied evidence supports the proposition.",
+        "contradicted": "The supplied evidence contradicts the proposition.",
+        "insufficient": "Evidence is incomplete or the scope differs."
+      }
+    },
+    "R08": {
+      "type": "score",
+      "instructions": "Does wake-cmd none disable only the wake route rather than all notices? Score evidentiary support, not operational approval.",
+      "criteria": [
+        "Unsupported",
+        "Weak",
+        "Mixed",
+        "Mostly supported",
+        "Directly supported"
+      ]
+    },
+    "R09": {
+      "type": "noul",
+      "instructions": "Is exact source hash matching required before deputy deployment? Explain the decisive evidence and material exception in a concise source-grounded answer."
+    },
+    "R10": {
+      "type": "choice",
+      "instructions": "Are timeout and nonzero-exit behavior preserved rather than auto-retried? Judge only the supplied exact source and distinguish validated mechanism from deployment authority.",
+      "criteria": {
+        "supported": "The supplied evidence supports the proposition.",
+        "contradicted": "The supplied evidence contradicts the proposition.",
+        "insufficient": "Evidence is incomplete or the scope differs."
+      }
+    },
+    "R11": {
+      "type": "score",
+      "instructions": "Is the existing coordinator-force budget fallback a residual risk, not a new change? Score evidentiary support, not operational approval.",
+      "criteria": [
+        "Unsupported",
+        "Weak",
+        "Mixed",
+        "Mostly supported",
+        "Directly supported"
+      ]
+    },
+    "R12": {
+      "type": "noul",
+      "instructions": "Does parser --force have different semantics from coordinator --force? Explain the decisive evidence and material exception in a concise source-grounded answer."
+    },
+    "R13": {
+      "type": "choice",
+      "instructions": "Can the retained flow still call the same run_restart after its own gates? Judge only the supplied exact source and distinguish validated mechanism from deployment authority.",
+      "criteria": {
+        "supported": "The supplied evidence supports the proposition.",
+        "contradicted": "The supplied evidence contradicts the proposition.",
+        "insufficient": "Evidence is incomplete or the scope differs."
+      }
+    },
+    "R14": {
+      "type": "score",
+      "instructions": "Does selected binary provenance need checking without reading environment secrets? Score evidentiary support, not operational approval.",
+      "criteria": [
+        "Unsupported",
+        "Weak",
+        "Mixed",
+        "Mostly supported",
+        "Directly supported"
+      ]
+    },
+    "R15": {
+      "type": "noul",
+      "instructions": "Does the launcher old directory name alone establish an old runtime? Explain the decisive evidence and material exception in a concise source-grounded answer."
+    },
+    "R16": {
+      "type": "choice",
+      "instructions": "Do launcher sys.path and main imports support the evidenced live release chain? Judge only the supplied exact source and distinguish validated mechanism from deployment authority.",
+      "criteria": {
+        "supported": "The supplied evidence supports the proposition.",
+        "contradicted": "The supplied evidence contradicts the proposition.",
+        "insufficient": "Evidence is incomplete or the scope differs."
+      }
+    },
+    "R17": {
+      "type": "score",
+      "instructions": "Would running the requested Jev CLI conflict with the no-dotenv startup rule? Score evidentiary support, not operational approval.",
+      "criteria": [
+        "Unsupported",
+        "Weak",
+        "Mixed",
+        "Mostly supported",
+        "Directly supported"
+      ]
+    },
+    "R18": {
+      "type": "noul",
+      "instructions": "Is declining Jev under that rule missing advice rather than a passing review? Explain the decisive evidence and material exception in a concise source-grounded answer."
+    },
+    "R19": {
+      "type": "choice",
+      "instructions": "Is actual restart verification outside this task authority? Judge only the supplied exact source and distinguish validated mechanism from deployment authority.",
+      "criteria": {
+        "supported": "The supplied evidence supports the proposition.",
+        "contradicted": "The supplied evidence contradicts the proposition.",
+        "insufficient": "Evidence is incomplete or the scope differs."
+      }
+    },
+    "R20": {
+      "type": "score",
+      "instructions": "Are inherited child environment flags preserved while real environment stays unread? Score evidentiary support, not operational approval.",
+      "criteria": [
+        "Unsupported",
+        "Weak",
+        "Mixed",
+        "Mostly supported",
+        "Directly supported"
+      ]
+    },
+    "R21": {
+      "type": "noul",
+      "instructions": "Would sending a coordinator request violate the no-board/no-message restriction? Explain the decisive evidence and material exception in a concise source-grounded answer."
+    },
+    "R22": {
+      "type": "choice",
+      "instructions": "Can we claim a universal suppression flag exists from these source excerpts? Judge only the supplied exact source and distinguish validated mechanism from deployment authority.",
+      "criteria": {
+        "supported": "The supplied evidence supports the proposition.",
+        "contradicted": "The supplied evidence contradicts the proposition.",
+        "insufficient": "Evidence is incomplete or the scope differs."
+      }
+    },
+    "R23": {
+      "type": "score",
+      "instructions": "Does adding --yes itself expand the drained window or create a new retry? Score evidentiary support, not operational approval.",
+      "criteria": [
+        "Unsupported",
+        "Weak",
+        "Mixed",
+        "Mostly supported",
+        "Directly supported"
+      ]
+    },
+    "R24": {
+      "type": "noul",
+      "instructions": "Is the reported historical PID a task input rather than independently verified state? Explain the decisive evidence and material exception in a concise source-grounded answer."
+    }
+  },
+  "long_context": false
+}

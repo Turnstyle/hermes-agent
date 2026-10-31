@@ -1,0 +1,36 @@
+--- a/tools/key_op.py
++++ b/tools/key_op.py
+@@ -55,6 +55,17 @@
+     return module
+ 
+ 
++def _current_provider_read(reference, module):
++    # Unchanged custody and desktop guards, now invoked only on a cache miss.
++    value = subprocess.run([module.OP, 'read', '--no-newline', '--', reference],
++                           stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
++                           stderr=subprocess.DEVNULL, env=custody_env(module),
++                           timeout=5, start_new_session=True)
++    if value.returncode or not value.stdout or len(value.stdout)>65536 or b'\n' in value.stdout or b'\r' in value.stdout:
++        raise RuntimeError()
++    return value.stdout
++
++
+ def resolve(reference, module):
+     if not isinstance(reference, str) or not REF.fullmatch(reference):
+         raise RuntimeError()
+@@ -62,13 +73,8 @@
+     if reference.startswith(KR_VAULTS):
+         if reference not in CURRENT_REFS:
+             raise RuntimeError()
+-        value = subprocess.run([module.OP, 'read', '--no-newline', '--', reference],
+-                               stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+-                               stderr=subprocess.DEVNULL, env=custody_env(module),
+-                               timeout=5, start_new_session=True)
+-        if value.returncode or not value.stdout or len(value.stdout)>65536 or b'\n' in value.stdout or b'\r' in value.stdout:
+-            raise RuntimeError()
+-        return value.stdout
++        from secret_value_cache import get
++        return get(reference, lambda canonical_ref: _current_provider_read(canonical_ref, module))
+     # The entire read, including bootstrap, is capped at five seconds.
+     deadline = time.monotonic() + 5
+     env = module.base_env()

@@ -1,0 +1,37 @@
+def run_restart(log) -> None:
+    cmd = [hermes_bin(), "-p", "default", "gateway", "restart"]
+    log("restart", f"running {shlex.join(cmd)} (CLI wait budget bounded; Hermes owns interruption and resume_pending)")
+    # Do NOT add --force here: on `gateway restart` it means "start a separate gateway", not "override a guard".
+    try:
+        r = subprocess.run(cmd, capture_output=True, text=True, timeout=RESTART_TIMEOUT_SECONDS,
+                           env=dict(os.environ, GATEWAY_COORDINATED_RESTART='1', HERMES_RESTART_AFTER_TURN_TIMEOUT='1', HERMES_RESTART_DRAIN_TIMEOUT='1'))
+    except subprocess.TimeoutExpired:
+        raise Fail(f"`hermes gateway restart` ran longer than {RESTART_TIMEOUT_SECONDS}s. State: gateway may be down or "
+                   f"still draining; drain marker will be cleared. Fix: `hermes -p default gateway status`, then "
+                   f"`python3 {SCRIPT} request --reason \"retry\"`.")
+    tail = (r.stdout + r.stderr).strip().splitlines()[-6:]
+    for line in tail:
+        log("restart", f"hermes: {line}")
+    if r.returncode != 0 and "Restart budget blocked" in (r.stdout + r.stderr) and \
+            bool(((load_state() or {}).get("request") or {}).get("force")):
+        # 7 Oct 2026: Hermes allows one intentional restart per hour. This request was made with --force and the
+        # gateway is already drained and idle, so restart through the service manager (what `hermes update` does).
+        # Without this, an urgent rollback within the hour is blocked.
+        if sys.platform == "darwin":
+            svc = [["launchctl", "kickstart", "-k", f"gui/{os.getuid()}/ai.hermes.gateway"]]
+        else:
+            svc = [["systemctl", "--user", "reset-failed", "hermes-gateway.service"],
+                   ["systemctl", "--user", "restart", "hermes-gateway.service"]]
+        for c in svc:
+            log("restart", f"Hermes restart budget is spent and this request is --force: running {shlex.join(c)}")
+            r = subprocess.run(c, capture_output=True, text=True, timeout=RESTART_TIMEOUT_SECONDS)
+        for line in (r.stdout + r.stderr).strip().splitlines()[-4:]:
+            log("restart", f"service manager: {line}")
+    if r.returncode != 0:
+        guard = ("  TurnerBook has a local guard that refuses a second restart within 60 minutes unless hermes is given "
+                 "--force; wait it out (do not use --force here: on this command it starts a SEPARATE gateway). "
+                 if sys.platform == "darwin" else "")
+        raise Fail(f"`hermes gateway restart` exited {r.returncode}.{guard} State: gateway is whatever hermes left it "
+                   f"(check `hermes -p default gateway status`); drain marker cleared so bots can work. Fix: read the "
+                   f"hermes lines above, fix, then `python3 {SCRIPT} request --reason \"retry after failed restart\"`.")
+

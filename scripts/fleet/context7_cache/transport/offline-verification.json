@@ -1,0 +1,54 @@
+{
+  "ok": true,
+  "full_suite_tests": 23,
+  "full_suite_failures": 0,
+  "full_suite_errors": 0,
+  "dedup_stress_runs": 50,
+  "dedup_stress_failures": 0,
+  "dedup_stress_errors": 0,
+  "spawned_processes_per_dedup_test": 8,
+  "expected_provider_calls_per_dedup_test": 1,
+  "elapsed_seconds": 25.9609,
+  "manifest_sha256": "c3f2d196f168a199b985e84ebea07c9ceee60b385a37feb1434c13bf687b88e8",
+  "baseline_verified_unchanged": true,
+  "tests_synthetic_only": true,
+  "separate_process_candidate_proof": [
+    {
+      "pid": 14847,
+      "reads": 1,
+      "metadata": {
+        "event": "provider_read",
+        "hit": 0,
+        "miss": 1,
+        "provider_read": 1,
+        "ref_id": "a89d6aebcb030fdbb3eaf595eba6e3871016513043e5f221a1dd5cda57ce4413",
+        "v": 1
+      }
+    },
+    {
+      "pid": 14865,
+      "reads": 0,
+      "metadata": {
+        "event": "hit",
+        "hit": 1,
+        "miss": 1,
+        "provider_read": 1,
+        "ref_id": "a89d6aebcb030fdbb3eaf595eba6e3871016513043e5f221a1dd5cda57ce4413",
+        "v": 1
+      }
+    }
+  ],
+  "production_default_ttl_seconds": 1740,
+  "maximum_ttl_seconds": 1800,
+  "cleanup_interval_seconds": 30,
+  "runtime_identity": {
+    "model": "gpt-6.1-sol",
+    "provider": "openai-codex",
+    "evidence": "inherited runtime context; no independent account/billing verification",
+    "session_id": "local-6f423c16abc12c709e21d4f54105355f3492efca10dffb58f7966ecc1fd13b33"
+  },
+  "live_source_main_router_and_custody_not_invoked_by_tests": true,
+  "jev_advice": "parent reports two prior failures; no retry, launcher or credential repair in this run",
+  "python_executable": "/Users/sheldon/.hermes/webui-venv/bin/python",
+  "test_output": "test_atomic_failure_no_cache_or_temp (test_transport.CacheTests.test_atomic_failure_no_cache_or_temp) ... ok\ntest_bad_values_auth_tokens_never_written (test_transport.CacheTests.test_bad_values_auth_tokens_never_written) ... ok\ntest_candidate_guards_and_fake_provider (test_transport.CacheTests.test_candidate_guards_and_fake_provider) ... ok\ntest_cleanup_abandoned_temps_without_provider (test_transport.CacheTests.test_cleanup_abandoned_temps_without_provider) ... ok\ntest_cleanup_plist (test_transport.CacheTests.test_cleanup_plist) ... ok\ntest_clock_rollback_and_forward (test_transport.CacheTests.test_clock_rollback_and_forward) ... ok\ntest_concurrent_cleanup_waits_for_provider_lock (test_transport.CacheTests.test_concurrent_cleanup_waits_for_provider_lock) ... ok\ntest_default_retention_and_explicit_purge (test_transport.CacheTests.test_default_retention_and_explicit_purge) ... ok\ntest_exact_ttl_boundary_and_cleanup_without_read (test_transport.CacheTests.test_exact_ttl_boundary_and_cleanup_without_read) ... ok\ntest_hit_miss_metadata_and_modes (test_transport.CacheTests.test_hit_miss_metadata_and_modes) ... ok\ntest_insecure_dir_permissions (test_transport.CacheTests.test_insecure_dir_permissions) ... ok\ntest_invalid_records_refetch (test_transport.CacheTests.test_invalid_records_refetch) ... ok\ntest_max_ttl (test_transport.CacheTests.test_max_ttl) ... ok\ntest_metadata_unsafe_or_corrupt_fails_closed (test_transport.CacheTests.test_metadata_unsafe_or_corrupt_fails_closed) ... ok\ntest_multiprocess_cross_profile_alias_dedup (test_transport.CacheTests.test_multiprocess_cross_profile_alias_dedup) ... ok\ntest_nonallowlisted_ref_no_provider (test_transport.CacheTests.test_nonallowlisted_ref_no_provider) ... ok\ntest_nonowner_rejected (test_transport.CacheTests.test_nonowner_rejected) ... ok\ntest_per_ref_lock_names_are_distinct (test_transport.CacheTests.test_per_ref_lock_names_are_distinct) ... ok\ntest_production_candidate_two_separate_processes_durable_metadata (test_transport.CacheTests.test_production_candidate_two_separate_processes_durable_metadata) ... ok\ntest_provider_errors_not_cached_no_stale (test_transport.CacheTests.test_provider_errors_not_cached_no_stale) ... ok\ntest_slow_provider_not_cached (test_transport.CacheTests.test_slow_provider_not_cached) ... ok\ntest_symlink_files_hardlink_and_permissions (test_transport.CacheTests.test_symlink_files_hardlink_and_permissions) ... ok\ntest_symlink_leaf_and_parent (test_transport.CacheTests.test_symlink_leaf_and_parent) ... ok\n\n----------------------------------------------------------------------\nRan 23 tests in 0.894s\n\nOK\n..................................................\n----------------------------------------------------------------------\nRan 50 tests in 25.067s\n\nOK\n"
+}

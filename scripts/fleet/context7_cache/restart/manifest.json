@@ -1,0 +1,40 @@
+{
+  "schema": 2,
+  "deploy_authorized": false,
+  "source": "/Users/sheldon/.hermes/fleet-node-state/u3g/g3f/gateway_coordinated_restart.py",
+  "source_sha256": "df56ebff6a48c22b1a698d491da4195e2fe54d2d19f8df0133b31654eac3d3a8",
+  "source_bytes": 144310,
+  "overlay_sha256": "5b88d6a7d200d63b0ac85ae77e76b434154cda3919053073f48ec1dea31a21b7",
+  "overlay_bytes": 146042,
+  "old_line": "    cmd = [hermes_bin(), \"-p\", \"default\", \"gateway\", \"restart\"]",
+  "new_line": "    cmd = [hermes_bin(), \"-p\", \"default\", \"gateway\", \"restart\", \"--yes\"]",
+  "function_lines": [
+    1490,
+    1525
+  ],
+  "patch_sha256": "d14ff841deec1144a3530e0373b672c3e0373ff1b834b1f23e04380e2ce50a20",
+  "fixture_sha256": "f256e54e1a30cb6a97d7dc5db1edf9c42c56e24a4a195645f7dcc8d48150b4aa",
+  "evidence_sha256": "bf8f16fc8a46dbdb7581d81ea1e62a82d6bbb93f5b9c3c96bbed850321ffb2f4",
+  "changed_functions": [
+    "_coordinate",
+    "build_parser",
+    "cmd_run",
+    "coordinate",
+    "deadline_checkpoint",
+    "new_request_record",
+    "refuse_if_underway",
+    "request_plan_text",
+    "run_restart",
+    "send_notices",
+    "wake_bots"
+  ],
+  "scope": "Explicit opt-in no-notices policy plus supported --yes argv; no drain, census, deadline permission, lock, health or native-child guard change.",
+  "deployment_gate": "Review only. Deputy must revalidate exact source and selected executable; no deployment authority.",
+  "identity_evidence": {
+    "source": "inherited runtime context; no provider or credential query",
+    "model": "gpt-6.1-sol",
+    "provider": "openai-codex",
+    "platform": "subagent",
+    "subscription": "inherited subscription only; billing not independently queried"
+  }
+}

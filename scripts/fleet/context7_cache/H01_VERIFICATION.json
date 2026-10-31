@@ -1,0 +1,57 @@
+{
+  "kind": "H01_AUTHOR_CHECKS_NOT_REVIEW_PASS",
+  "baseline_head": "f5caa2bb6e43d707866a0c9873c95c39aefe2397",
+  "results": {
+    "op": {
+      "tests": 11,
+      "ok": true,
+      "log": "/Users/sheldon/.hermes/profiles/shld-mm-hermes-agent/cache/scratch/h01-op-tests.txt",
+      "log_sha256": "ba5ae1784738aae36b2f6d4910178f620344d7ad074dc3dc7757620dca13c60c"
+    },
+    "env": {
+      "tests": 20,
+      "ok": true,
+      "log": "/Users/sheldon/.hermes/profiles/shld-mm-hermes-agent/cache/scratch/h01-env-tests.txt",
+      "log_sha256": "e8bb19211767a852c25bc80fa8bb9c6e2a2444b8c23a6df3cead1d8311490816"
+    },
+    "config": {
+      "tests": 29,
+      "ok": true,
+      "log": "/Users/sheldon/.hermes/profiles/shld-mm-hermes-agent/cache/scratch/h01-config-tests.txt",
+      "log_sha256": "720bdd9f1441bd5ba6c6a5f3e4140b999029da78b591363936cb6698938fbd57"
+    },
+    "transport": {
+      "tests": 24,
+      "ok": true,
+      "log": "/Users/sheldon/.hermes/profiles/shld-mm-hermes-agent/cache/scratch/h01-transport-tests.txt",
+      "log_sha256": "b3e14d36fa32ab622b980436c088474c9f4cc0401a8e3c7c4423c251b921ccc3"
+    },
+    "restart": {
+      "tests": 19,
+      "ok": true,
+      "log": "/Users/sheldon/.hermes/profiles/shld-mm-hermes-agent/cache/scratch/h01-restart-tests.txt",
+      "log_sha256": "22cd67166b4d76b0560665f31c81fa5414df22f309e3ee8c6039f94df91ceedc"
+    },
+    "stacked": {
+      "tests": 3,
+      "ok": true,
+      "red_log": "/Users/sheldon/.hermes/profiles/shld-mm-hermes-agent/cache/scratch/h01-red.txt",
+      "green_log": "/Users/sheldon/.hermes/profiles/shld-mm-hermes-agent/cache/scratch/h01-green.txt",
+      "red_sha256": "b4f00ef5ea35cdd669ab54e3e4129d7998ac9ab083698e712c5add4191dce53a",
+      "green_sha256": "e0912c508e674707d22fb89ceefc2d3f93eae0a4bc0c6f8e072b59770118937d"
+    }
+  },
+  "total_tests": 106,
+  "gitleaks_findings": 0,
+  "real_provider_calls": 0,
+  "aggregate_budget_seconds": 1800,
+  "required_check_policy_reads": {
+    "branch_protection": "HTTP404 Branch not protected",
+    "effective_branch_rules": [],
+    "gh_pr_checks_required": "no required checks reported; exit1"
+  },
+  "review": "same deputy must independently review new exact pushed head; old head FAIL retained",
+  "jev": "24 questions preserved in own scratch, not sent; prior failed native route not retried",
+  "diff_check": "patch-as-data blank context lines retained; no patch semantics changed just to suppress whitespace report",
+  "stress": "50-run transport stress not repeated for this bounded correction"
+}

@@ -1,0 +1,67 @@
+{
+  "installed": false,
+  "identity_evidence": {
+    "source": "profile state.db read-only exact session",
+    "session_id": "20261030_174117_95b924",
+    "model": "gpt-6.1-sol",
+    "billing_provider": "openai-codex",
+    "billing_mode": "subscription_included",
+    "parent_session_id": "local-6f423c16abc12c709e21d4f54105355f3492efca10dffb58f7966ecc1fd13b33"
+  },
+  "receipts": [
+    {
+      "command": [
+        "python3",
+        "-B",
+        "/Users/sheldon/.hermes/hermes-agent-worktrees/ai_shld_shld-mm-hermes-agent_c-20261030-c017ad_cache-correction/scripts/fleet/context7_cache/loader/build_env_overlay.py"
+      ],
+      "returncode": 0,
+      "stdout": "{\n  \"source_root\": \"/Users/sheldon/.hermes/releases/stable-v0.22.5-carry-d4c5aec662c8/candidate\",\n  \"source_path\": \"hermes_cli/env_loader.py\",\n  \"source_sha256\": \"755ed19cd94bafff49390e005030880628af66cc753899142d123dd8f8f82aaa\",\n  \"candidate_sha256\": \"86c14845f07a709524fc9370bd3815991e744e3ef590df96d41ee3a27f4fed2d\",\n  \"patch_sha256\": \"2a648af920ec38efe6dfadb50fedbb4cca15cf043a9cd91d31ef6630ed93ffef\",\n  \"installed\": false\n}\n",
+      "stderr": ""
+    },
+    {
+      "command": [
+        "python3",
+        "-B",
+        "/Users/sheldon/.hermes/hermes-agent-worktrees/ai_shld_shld-mm-hermes-agent_c-20261030-c017ad_cache-correction/scripts/fleet/context7_cache/loader/test_env_overlay.py"
+      ],
+      "returncode": 0,
+      "stdout": "",
+      "stderr": "test_clock_rollback_fails_closed (__main__.EnvOverlayTests) ... ok\ntest_concurrent_global_single_fetch_per_window (__main__.EnvOverlayTests) ... ok\ntest_concurrent_hydrate_single_fetch_per_window (__main__.EnvOverlayTests) ... ok\ntest_desktop_and_delegated_guards_execute_unchanged (__main__.EnvOverlayTests) ... ok\ntest_disabled_source_expires_and_revokes (__main__.EnvOverlayTests) ... ok\ntest_dotenv_restore_checks_age_even_when_external_fetch_disabled (__main__.EnvOverlayTests) ... ok\ntest_dotenv_self_reference_baseline_remains_idempotent (__main__.EnvOverlayTests) ... ok\ntest_exception_refresh_has_no_stale_snapshot (__main__.EnvOverlayTests) ... ok\ntest_expiry_peels_own_secret_even_when_dotenv_owns_name (__main__.EnvOverlayTests) ... ok\ntest_external_replacement_is_not_revoked (__main__.EnvOverlayTests) ... ok\ntest_failed_refresh_drops_expired_value_and_snapshot (__main__.EnvOverlayTests) ... ok\ntest_generated_artifact_hashes (__main__.EnvOverlayTests) ... ok\ntest_global_refresh_cannot_resnapshot_own_old_nonoverride_write (__main__.EnvOverlayTests) ... ok\ntest_hydration_boundary_no_extra_reads_and_copy (__main__.EnvOverlayTests) ... ok\ntest_literal_optin_and_profile_token_context (__main__.EnvOverlayTests) ... ok\ntest_per_home_age_and_reset_isolation (__main__.EnvOverlayTests) ... ok\ntest_preserved_functions_byte_equivalent_ast (__main__.EnvOverlayTests) ... ok\ntest_reset_waits_for_inflight_publication (__main__.EnvOverlayTests) ... ok\ntest_slow_fetch_does_not_restart_age (__main__.EnvOverlayTests) ... ok\ntest_snapshot_expires_without_fetch_or_ambient_fallback (__main__.EnvOverlayTests) ... ok\n\n----------------------------------------------------------------------\nRan 20 tests in 0.554s\n\nOK\n"
+    },
+    {
+      "command": [
+        "python3",
+        "-B",
+        "/Users/sheldon/.hermes/hermes-agent-worktrees/ai_shld_shld-mm-hermes-agent_c-20261030-c017ad_cache-correction/scripts/fleet/context7_cache/loader/test_overlay.py"
+      ],
+      "returncode": 0,
+      "stdout": "",
+      "stderr": "test_bounds (__main__.OverlayTests) ... ok\ntest_disabled_ttl_never_stores (__main__.OverlayTests) ... ok\ntest_env_snapshot_has_no_ttl_residual (__main__.OverlayTests) ... ok\ntest_exact_helper_bypasses_both_layers_even_with_old_entries (__main__.OverlayTests) ... ok\ntest_guard_and_snapshot_residual_are_unchanged (__main__.OverlayTests) ... ok\ntest_hash_mismatch_and_anchor_fail_closed (__main__.OverlayTests) ... ok\ntest_memory_and_disk_expire_without_age_reset (__main__.OverlayTests) ... ok\ntest_public_wrappers_propagate_exact_pin (__main__.OverlayTests) ... ok\ntest_similar_path_not_exempt_and_cache_optout (__main__.OverlayTests) ... ok\n\n----------------------------------------------------------------------\nRan 9 tests in 0.066s\n\nOK\n"
+    },
+    {
+      "command": [
+        "patch",
+        "--dry-run",
+        "-p1",
+        "-d",
+        "/Users/sheldon/.hermes/releases/stable-v0.22.5-carry-d4c5aec662c8/candidate"
+      ],
+      "returncode": 0,
+      "stdout": "patching file 'hermes_cli/env_loader.py'\n",
+      "stderr": ""
+    },
+    {
+      "command": [
+        "git",
+        "diff",
+        "--check",
+        "--",
+        "scripts/fleet/context7_cache/loader"
+      ],
+      "returncode": 0,
+      "stdout": "",
+      "stderr": ""
+    }
+  ]
+}
