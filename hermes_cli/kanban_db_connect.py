@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import contextlib
 import hashlib
+import os
 import random
 import re
 import secrets
@@ -28,7 +29,197 @@ from typing import Optional
 # Connection helpers
 # ---------------------------------------------------------------------------
 
-_INITIALIZED_PATHS: set[str] = set()
+# canonical path -> (conn, st_dev, st_ino)
+_WAL_KEEPALIVES: dict[str, tuple[sqlite3.Connection, int, int]] = {}
+_WAL_KEEPALIVE_LOCK = threading.RLock()
+_KEEPALIVE_LOGGED: set[str] = set()
+
+
+def _wal_keepalive_enabled() -> bool:
+    val = os.environ.get("HERMES_KANBAN_WAL_KEEPALIVE", "").strip().lower()
+    return val not in {"0", "false", "no", "off"}
+
+
+def _canonical_db_key(path: Path | str) -> str:
+    try:
+        return str(Path(path).resolve())
+    except OSError:
+        return str(path)
+
+
+def is_wal_keepalive_active(db_path: Optional[Path | str] = None, *, board: Optional[str] = None) -> bool:
+    """Whether a WAL keepalive connection is actively open for this board."""
+    path = Path(db_path) if db_path is not None else _kb.kanban_db_path(board=board)
+    key = _canonical_db_key(path)
+    with _WAL_KEEPALIVE_LOCK:
+        entry = _WAL_KEEPALIVES.get(key)
+        if entry is None:
+            return False
+        conn, _, _ = entry
+        try:
+            conn.execute("SELECT 1")
+            return True
+        except Exception:
+            return False
+
+
+def close_wal_keepalive(db_path: Optional[Path | str] = None, *, board: Optional[str] = None) -> bool:
+    """Close and untrack the WAL keepalive connection for this board, if any.
+    Returns True if an active connection was closed."""
+    path = Path(db_path) if db_path is not None else _kb.kanban_db_path(board=board)
+    key = _canonical_db_key(path)
+    with _WAL_KEEPALIVE_LOCK:
+        entry = _WAL_KEEPALIVES.pop(key, None)
+        if entry is None:
+            return False
+        conn, _, _ = entry
+        with contextlib.suppress(Exception):
+            conn.close()
+        return True
+
+
+def close_all_wal_keepalives() -> None:
+    """Close and untrack all WAL keepalive connections in this process."""
+    with _WAL_KEEPALIVE_LOCK:
+        keys = list(_WAL_KEEPALIVES.keys())
+        for key in keys:
+            entry = _WAL_KEEPALIVES.pop(key, None)
+            if entry is not None:
+                conn, _, _ = entry
+                with contextlib.suppress(Exception):
+                    conn.close()
+
+
+def ensure_wal_keepalive(db_path: Optional[Path | str] = None, *, board: Optional[str] = None) -> Optional[sqlite3.Connection]:
+    """Ensure a long-lived, NO-TRANSACTION keepalive connection is held for this board.
+
+    Keeps SQLite's WAL companion files (-wal and -shm) alive across writers so read-only
+    openers do not fail with SQLITE_CANTOPEN (error 14, 'unable to open database file').
+    Requirements:
+    (a) Never holds open read or write transactions: opened with isolation_level=None and
+        PRAGMA query_only=ON, so it never blocks checkpoints or writers.
+    (b) Tracked via connect_tracked so byte probes are refused while open, protecting POSIX
+        locks from silent cancellation.
+    (c) Closed before repair/backup/file replace; validates file inode and reopens on new file.
+    (d) Opt-out via HERMES_KANBAN_WAL_KEEPALIVE=0; logs once per board at INFO level.
+    (e) Does not create missing boards and does not run schema/migration writes.
+    """
+    if not _wal_keepalive_enabled():
+        return None
+
+    path = Path(db_path) if db_path is not None else _kb.kanban_db_path(board=board)
+    try:
+        resolved = path.resolve()
+        stat = resolved.stat()
+    except OSError:
+        return None
+    if stat.st_size == 0 or not resolved.is_file():
+        return None
+
+    key = str(resolved)
+    with _WAL_KEEPALIVE_LOCK:
+        existing = _WAL_KEEPALIVES.get(key)
+        if existing is not None:
+            conn, recorded_dev, recorded_ino = existing
+            if recorded_dev == stat.st_dev and recorded_ino == stat.st_ino:
+                return conn
+            # Inode changed! File was replaced on disk. Close old keepalive.
+            _WAL_KEEPALIVES.pop(key, None)
+            with contextlib.suppress(Exception):
+                conn.close()
+
+        from hermes_cli.sqlite_safe_read import connect_tracked
+        busy_timeout_ms = _resolve_busy_timeout_ms()
+        conn = connect_tracked(
+            resolved,
+            connect_fn=sqlite3.connect,
+            isolation_level=None,
+            timeout=busy_timeout_ms / 1000.0,
+        )
+        try:
+            conn.execute(f"PRAGMA busy_timeout={busy_timeout_ms}")
+            conn.execute("PRAGMA query_only=ON")
+            conn.execute("SELECT 1 FROM sqlite_master LIMIT 1").fetchone()
+        except BaseException:
+            with contextlib.suppress(Exception):
+                conn.close()
+            raise
+
+        _WAL_KEEPALIVES[key] = (conn, stat.st_dev, stat.st_ino)
+        if key not in _KEEPALIVE_LOGGED:
+            _KEEPALIVE_LOGGED.add(key)
+            _kb._log.info("kanban WAL keepalive started for board %s (%s)", board or resolved.name, key)
+        return conn
+
+
+class _InitializedPathsSet(set):
+    """Path set that closes any WAL keepalive when a board's initialization state is discarded."""
+
+    def discard(self, element: Any) -> None:
+        super().discard(element)
+        with contextlib.suppress(Exception):
+            close_wal_keepalive(str(element))
+
+    def remove(self, element: Any) -> None:
+        super().remove(element)
+        with contextlib.suppress(Exception):
+            close_wal_keepalive(str(element))
+
+    def clear(self) -> None:
+        super().clear()
+        with contextlib.suppress(Exception):
+            close_all_wal_keepalives()
+
+
+def open_readonly_with_retry(
+    db_path: Path | str,
+    *,
+    timeout: float = 8.0,
+    initial_delay: float = 0.05,
+    max_delay: float = 0.5,
+    connect_timeout: float = 2.0,
+    query_only: bool = True,
+    factory: type = sqlite3.Connection,
+) -> sqlite3.Connection:
+    """Open a SQLite database in read-only mode with bounded retry on SQLITE_CANTOPEN.
+
+    When the last connection to a WAL database closes, SQLite deletes -wal and -shm.
+    A read-only opener cannot create them and fails with 'unable to open database file'
+    (SQLITE_CANTOPEN, error 14) until a writer reopens the database. This helper retries
+    with short backoff for up to ~8s total, forcing the first read inside the retry loop
+    because sqlite3.connect alone does not touch the file. Non-CANTOPEN errors are NOT
+    retried.
+    """
+    path = Path(db_path).resolve()
+    uri = path.as_uri() + "?mode=ro"
+    deadline = time.monotonic() + max(0.1, timeout)
+    delay = max(0.01, initial_delay)
+
+    while True:
+        conn = None
+        try:
+            conn = sqlite3.connect(uri, uri=True, timeout=connect_timeout, factory=factory)
+            if query_only:
+                conn.execute("PRAGMA query_only=ON")
+            # Force the first read inside the retry loop: sqlite3.connect alone does not touch the file!
+            conn.execute("PRAGMA schema_version").fetchone()
+            return conn
+        except sqlite3.OperationalError as exc:
+            if conn is not None:
+                with contextlib.suppress(Exception):
+                    conn.close()
+            msg = str(exc).lower()
+            if "unable to open database file" not in msg:
+                raise
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise
+            sleep_time = min(delay, remaining)
+            time.sleep(sleep_time)
+            delay = min(delay * 2.0, max_delay)
+
+
+_INITIALIZED_PATHS: set[str] = _InitializedPathsSet()
 _INIT_LOCK = threading.RLock()
 _SQLITE_HEADER = b"SQLite format 3\x00"
 DEFAULT_BUSY_TIMEOUT_MS = 120_000
@@ -88,7 +279,7 @@ def _try_lock_nb(handle) -> bool:
         import msvcrt
 
         handle.seek(0)
-        getattr(msvcrt, "locking")(handle.fileno(), getattr(msvcrt, "LK_NBLCK"), 1)
+        msvcrt.locking(handle.fileno(), msvcrt.LK_NBLCK, 1)
     else:
         import fcntl
 
@@ -105,7 +296,7 @@ def _unlock(handle) -> None:
         import msvcrt
 
         handle.seek(0)
-        getattr(msvcrt, "locking")(handle.fileno(), getattr(msvcrt, "LK_UNLCK"), 1)
+        msvcrt.locking(handle.fileno(), msvcrt.LK_UNLCK, 1)
     else:
         import fcntl
 
@@ -168,7 +359,7 @@ def _dispatch_tick_lock(db_path: Path):
     multi-writer corruption; this is defense-in-depth behind
     ``_guard_supervised_gateway_conflict``. Non-blocking on purpose: the
     gateway's async watcher must never stall; the loser retries next interval.
-    Without ``fcntl``/``msvcrt`` it degrades to a no-op (yields ``True``).
+    An unavailable lock implementation or lock file refuses the tick.
 
     Motivation (issue #35240): a ``hermes gateway run --replace`` / ``gateway restart`` invoked from a shell
     on a systemd/launchd host can leave an orphan gateway whose dispatcher escapes the service cgroup,
@@ -185,13 +376,12 @@ def _dispatch_tick_lock(db_path: Path):
         handle = lock_path.open("a+b")
         try:
             acquired = _try_lock_nb(handle)
-        except (OSError, AttributeError):
+        except (OSError, AttributeError, ImportError) as exc:
             acquired = False
-    except OSError:
-        # Can't even open the lock file (permissions, read-only FS): degrade to
-        # a no-op so a probe failure never blocks dispatch.
-        acquired = True
-        handle = None
+            _kb._log.warning("kanban dispatch lock unavailable (%s)", type(exc).__name__)
+    except OSError as exc:
+        acquired = False
+        _kb._log.warning("kanban dispatch lock could not be opened (%s)", type(exc).__name__)
     try:
         yield acquired
     finally:
@@ -353,6 +543,7 @@ def _backup_corrupt_db(path: Path) -> Optional[Path]:
     # Pin the resolved parent (``resolve()`` collapses ``..`` and symlinks); we
     # only ever write inside it.
     resolved = path.resolve()
+    close_wal_keepalive(resolved)
     parent = resolved.parent
     base_name = resolved.name  # basename only
     # Fingerprinting reads the whole file — a close()-on-a-database-file hazard
@@ -504,8 +695,43 @@ def _probe_for_corruption(resolved: Path) -> tuple[Optional[list[str]], Optional
     return messages, f"integrity_check returned {messages[0] if messages else '<no row>'!r}"
 
 
+DEFAULT_INTEGRITY_CHECK_MAX_BYTES = 2 << 30  # 2 GiB, matching backup.py
+
+
+def _probe_connect_health(path: Path) -> tuple[Optional[list[str]], Optional[str]]:
+    """Bound connect-time work; explicit repair still owns a full integrity scan."""
+    if path.stat().st_size <= DEFAULT_INTEGRITY_CHECK_MAX_BYTES:
+        return _probe_for_corruption(path)
+
+    try:
+        _validate_sqlite_header(path)
+        probe = _sqlite_connect(path)
+        try:
+            probe.execute("PRAGMA schema_version").fetchone()
+            # Do not use _schema_is_present: it swallows DatabaseError, including
+            # OperationalError, which must propagate without quarantine here.
+            row = probe.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='table' AND name='tasks' LIMIT 1"
+            ).fetchone()
+            if row is None:
+                raise sqlite3.DatabaseError("kanban schema is missing the tasks table")
+        finally:
+            probe.close()
+    except sqlite3.OperationalError:
+        raise
+    except sqlite3.DatabaseError as exc:
+        return None, f"sqlite structural probe failed: {exc}"
+    _kb._log.info(
+        "kanban DB %s exceeds integrity check ceiling (%s bytes); skipped full "
+        "PRAGMA integrity_check after header + schema probe. "
+        "Use `hermes kanban repair` for a full integrity scan.",
+        path, DEFAULT_INTEGRITY_CHECK_MAX_BYTES,
+    )
+    return ["ok"], None
+
+
 def _guard_existing_db_is_healthy(path: Path) -> None:
-    """Run ``PRAGMA integrity_check`` on an existing non-empty DB file.
+    """Check an existing non-empty DB, using a structural probe above the size ceiling.
 
     Narrow auto-repair when the failure is ONLY index-scoped (table b-trees
     intact): content-addressed corrupt backup FIRST, REINDEX under the
@@ -523,11 +749,12 @@ def _guard_existing_db_is_healthy(path: Path) -> None:
         return
     if _missing_or_empty(resolved) or str(resolved) in _INITIALIZED_PATHS:
         return
-    messages, reason = _probe_for_corruption(resolved)
+    messages, reason = _probe_connect_health(resolved)
     if reason is None:
         return
     # Quarantine FIRST — both the repair and fail-closed paths preserve the
     # pre-touch bytes before anything mutates the file.
+    close_wal_keepalive(resolved)
     backup = _backup_corrupt_db(resolved)
     index_names = _repairable_index_names(messages or [])
     if index_names:
@@ -581,6 +808,8 @@ def repair_db(db_path: Optional[Path] = None, *, board: Optional[str] = None) ->
         resolved = path
     if _missing_or_empty(resolved):
         return RepairResult(status="missing", db_path=resolved)
+
+    close_wal_keepalive(resolved)
 
     with _cross_process_init_lock(resolved):
         messages, reason = _probe_for_corruption(resolved)
@@ -639,6 +868,7 @@ def _open_configured(path: Path, under_lock) -> tuple[sqlite3.Connection, Any]:
     conn = _sqlite_connect(path)
     try:
         conn.row_factory = sqlite3.Row
+        conn.text_factory = _kb._lossy_text
         with _INIT_LOCK:
             # WAL doesn't work on network filesystems; the helper falls back to
             # DELETE with one ERROR log (see hermes_state_wal._WAL_INCOMPAT_MARKERS).
@@ -664,6 +894,54 @@ def _open_configured(path: Path, under_lock) -> tuple[sqlite3.Connection, Any]:
     return conn, out
 
 
+def _refuse_dead_board_resurrection(path: Path, board: Optional[str]) -> None:
+    """Refuse to create a fresh DB for a board that is not live.
+
+    ``board=None`` (or ``default``) is unaffected — except that a None board
+    can still *resolve* through the current-board context (``--board`` scope,
+    ``HERMES_KANBAN_BOARD``, the ``current`` file) to a named board dir; an
+    ``archived`` tombstone in that dir gets the same refusal. For any other
+    slug whose DB file does not exist yet, opening it would mkdir the board
+    directory and leave an empty DB-only stub — exactly how archived boards
+    (moved to ``_archived/`` with an ``archived`` tombstone ``board.json``) and
+    hard-deleted boards (no directory left at all) used to reappear as empty
+    active boards via stale dashboard/gateway read paths (#43243). Creation
+    is the job of :func:`kanban_db.create_board` (which writes the metadata
+    first); read paths get an actionable error instead of a resurrected board.
+    """
+    if path.exists():
+        return  # existing DB: a plain open, never a resurrection
+    if board is None:
+        # Default-DB and env-pinned paths never sit under a board dir, so a
+        # board.json here means the current-board context resolved to that
+        # board's dir; refuse only the archived case (a fresh home has no
+        # board.json next to its kanban.db, so creation still self-heals).
+        tombstone = path.parent / "board.json"
+        if tombstone.exists():
+            import json
+            try:
+                raw = json.loads(tombstone.read_text(encoding="utf-8-sig"))
+            except (OSError, ValueError):
+                return
+            if isinstance(raw, dict) and raw.get("archived"):
+                raise ValueError(
+                    f"kanban board {path.parent.name!r} is archived; "
+                    "refusing to recreate its database"
+                )
+        return
+    try:
+        slug = _kb._normalize_board_slug(board)
+    except ValueError:
+        return  # malformed slug: let the later open surface the error
+    if not slug or slug == _kb.DEFAULT_BOARD:
+        return
+    meta = _kb.read_board_metadata(slug)
+    if meta.get("archived"):
+        raise ValueError(f"kanban board {slug!r} is archived; refusing to recreate its database")
+    if not _kb.board_metadata_path(slug).exists():
+        raise ValueError(f"kanban board {slug!r} does not exist; create it with `hermes kanban boards create {slug}`")
+
+
 def connect(db_path: Optional[Path] = None, *, board: Optional[str] = None) -> sqlite3.Connection:
     """Open (and initialize if needed) the kanban DB. WAL is (re)enabled on
     every connection so a re-created file stays robust; the first connection
@@ -672,16 +950,18 @@ def connect(db_path: Optional[Path] = None, *, board: Optional[str] = None) -> s
     :func:`kanban_db_path` (``HERMES_KANBAN_DB`` -> ``HERMES_KANBAN_BOARD`` ->
     ``<root>/kanban/current`` -> ``default``)."""
     path = db_path if db_path is not None else _kb.kanban_db_path(board=board)
-    from agent.delegation_context import is_delegated_child_process_context
-    if is_delegated_child_process_context():
+    from agent.delegation_context import kanban_path_is_fenced
+    if kanban_path_is_fenced(path):
         # Reads must not enter schema/backfill write transactions. Never create a
         # missing board or migrate on a descendant's behalf; the owner initializes it.
-        conn = sqlite3.connect(path.resolve().as_uri() + "?mode=ro", uri=True)
+        conn = open_readonly_with_retry(path)
         conn.row_factory = sqlite3.Row
+        conn.text_factory = _kb._lossy_text
         if not _schema_is_present(conn):
             conn.close()
             raise PermissionError("Kanban descendants require an initialized board; ask its owner to initialize it")
         return conn
+    _refuse_dead_board_resurrection(path, board)
     path.parent.mkdir(parents=True, exist_ok=True)
 
     # Fast path: once THIS process has initialized this path, skip the
@@ -716,7 +996,7 @@ def connect(db_path: Optional[Path] = None, *, board: Optional[str] = None) -> s
         from hermes_state import preflight_db_writability
         preflight_db_writability(path, db_label=f"kanban.db ({path.name})")
         # Cheap byte-level header check before any sqlite connection, then the
-        # full integrity probe (cached per path via _INITIALIZED_PATHS).
+        # size-bounded health probe (cached per path via _INITIALIZED_PATHS).
         _validate_sqlite_header(path)
         _guard_existing_db_is_healthy(path)
         resolved = str(path.resolve())
@@ -725,7 +1005,18 @@ def connect(db_path: Optional[Path] = None, *, board: Optional[str] = None) -> s
             # Idempotent; runs under _INIT_LOCK so same-process dispatcher
             # threads can't race the ALTER TABLE pass with stale PRAGMA snapshots.
             if resolved not in _INITIALIZED_PATHS:
-                conn.executescript(_kb.SCHEMA_SQL)
+                # Plain SQLite importers do not take our init lock. Install the
+                # status triggers and seed boundaries under one SQLite write lock.
+                # executescript would commit write_txn before running the schema.
+                with write_txn(conn):
+                    statement = ""
+                    for line in _kb.SCHEMA_SQL.splitlines(keepends=True):
+                        statement += line
+                        if sqlite3.complete_statement(statement):
+                            conn.execute(statement)
+                            statement = ""
+                    if statement.strip():
+                        raise sqlite3.OperationalError("incomplete Kanban schema statement")
                 _migrate_add_optional_columns(conn)
                 _INITIALIZED_PATHS.add(resolved)
 
@@ -750,12 +1041,30 @@ def connect_closing(db_path: Optional[Path] = None, *, board: Optional[str] = No
             conn.close()
 
 
+@contextlib.contextmanager
+def connect_readonly_closing(db_path: Optional[Path] = None, *, board: Optional[str] = None):
+    """Open an existing live board without initialization or write transactions."""
+    path = db_path if db_path is not None else _kb.kanban_db_path(board=board)
+    if not path.is_file():
+        raise ValueError(f"Kanban board is not initialized: {path}")
+    conn = open_readonly_with_retry(path)
+    try:
+        conn.row_factory = sqlite3.Row
+        conn.text_factory = _kb._lossy_text
+        if not _schema_is_present(conn):
+            raise ValueError(f"Kanban board is not initialized: {path}")
+        yield conn
+    finally:
+        conn.close()
+
+
 def init_db(db_path: Optional[Path] = None, *, board: Optional[str] = None) -> Path:
     """Create the schema if it doesn't exist; return the path used. Unlike
     :func:`connect`'s cached first-time auto-init, this always re-runs the
     migration pass — callers that know the on-disk schema may have drifted
     (tests writing legacy event kinds, external upgrades) use it to force it."""
     path = db_path if db_path is not None else _kb.kanban_db_path(board=board)
+    _refuse_dead_board_resurrection(path, board)
     path.parent.mkdir(parents=True, exist_ok=True)
     # Clear the cache entry so connect() re-runs schema + migrations.
     with _INIT_LOCK:
@@ -764,6 +1073,26 @@ def init_db(db_path: Optional[Path] = None, *, board: Optional[str] = None) -> P
         pass
     return path
 
+
+# Nullable/defaulted columns of the v1 ``tasks`` CREATE TABLE that external
+# harnesses seeding a board with a reduced schema have omitted. Hermes's own
+# DBs always carry them, so this is a no-op there; without it a board that
+# also has ``task_runs`` fails every ``connect()`` inside
+# ``_backfill_legacy_inflight_runs`` ("no such column: claim_lock") — before
+# ``_INITIALIZED_PATHS`` caches, so the dispatcher re-raises each tick (#112953).
+# DDL must match SCHEMA_SQL exactly.
+_BASE_TASK_COLUMNS = (
+    ("body", "body TEXT"),
+    ("assignee", "assignee TEXT"),
+    ("priority", "priority INTEGER DEFAULT 0"),
+    ("created_by", "created_by TEXT"),
+    ("started_at", "started_at INTEGER"),
+    ("completed_at", "completed_at INTEGER"),
+    ("workspace_kind", "workspace_kind TEXT NOT NULL DEFAULT 'scratch'"),
+    ("workspace_path", "workspace_path TEXT"),
+    ("claim_lock", "claim_lock TEXT"),
+    ("claim_expires", "claim_expires INTEGER"),
+)
 
 # Additive ``tasks`` columns in the order legacy DBs receive them (= physical
 # column order for ``SELECT *`` on migrated boards).
@@ -813,6 +1142,8 @@ _LATER_TASK_COLUMNS = (
     # Typed block reason (VALID_BLOCK_KINDS); NULL = generic human blocker.
     ("block_kind", "block_kind TEXT"),
     ("block_recurrences", "block_recurrences INTEGER NOT NULL DEFAULT 0"),
+    # Spawn-time start fingerprint of worker_pid (PID-reuse guard; NULL = legacy row).
+    ("worker_started_at", "worker_started_at INTEGER"),
 )
 
 _NOTIFY_SUB_COLUMNS = (
@@ -827,6 +1158,12 @@ _NOTIFY_SUB_COLUMNS = (
     ("delivery_metadata", "delivery_metadata TEXT"),
 )
 
+_TASK_RUN_COLUMNS = (
+    # Spawn-time start fingerprint of the run's worker_pid (PID-reuse guard for the
+    # terminal-worker reaper; NULL = legacy row, never signalled).
+    ("worker_started_at", "worker_started_at INTEGER"),
+)
+
 
 def _column_names(conn: sqlite3.Connection, table: str) -> set[str]:
     return {row["name"] for row in conn.execute(f"PRAGMA table_info({table})")}
@@ -839,9 +1176,14 @@ def _table_exists(conn: sqlite3.Connection, table: str) -> bool:
 
 
 def _migrate_add_optional_columns(conn: sqlite3.Connection) -> None:
-    """Add columns introduced after v1 to legacy DBs (called via ``init_db``)."""
+    """Atomically add and backfill legacy columns; retry cannot skip a copy."""
+    with write_txn(conn):
+        _migrate_add_optional_columns_in_txn(conn)
+
+
+def _migrate_add_optional_columns_in_txn(conn: sqlite3.Connection) -> None:
     cols = _column_names(conn, "tasks")
-    for name, ddl in _EARLY_TASK_COLUMNS:
+    for name, ddl in _BASE_TASK_COLUMNS + _EARLY_TASK_COLUMNS:
         if name not in cols:
             _add_column_if_missing(conn, "tasks", name, ddl)
 
@@ -861,16 +1203,14 @@ def _migrate_add_optional_columns(conn: sqlite3.Connection) -> None:
                 conn.execute(copy_sql)
     for name, ddl in _LATER_TASK_COLUMNS:
         if name not in cols:
-            if name == "model_override":
-                conn.execute("ALTER TABLE tasks ADD COLUMN model_override TEXT")
-            else:
-                _add_column_if_missing(conn, "tasks", name, ddl)
+            _add_column_if_missing(conn, "tasks", name, ddl)
 
     # Indexes over additive ``tasks`` columns must be created AFTER the columns
     # exist: ``executescript`` parses each statement against the live schema,
     # so a ``CREATE INDEX`` over a missing column in SCHEMA_SQL would abort
     # init on legacy boards before the ALTER TABLE pass runs. ``IF NOT EXISTS``
     # keeps re-running here cheap and correct on fresh DBs.
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_tasks_assignee_status ON tasks(assignee, status)")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_tasks_tenant ON tasks(tenant)")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_tasks_idempotency ON tasks(idempotency_key)")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_tasks_session_id ON tasks(session_id)")
@@ -901,6 +1241,10 @@ def _migrate_add_optional_columns(conn: sqlite3.Connection) -> None:
                 )
 
     if _table_exists(conn, "task_runs"):
+        run_cols = _column_names(conn, "task_runs")
+        for name, ddl in _TASK_RUN_COLUMNS:
+            if name not in run_cols:
+                _add_column_if_missing(conn, "task_runs", name, ddl)
         _backfill_legacy_inflight_runs(conn)
 
     # One-shot event-kind rename: old names still worked but were awkward on
@@ -922,7 +1266,7 @@ def _backfill_legacy_inflight_runs(conn: sqlite3.Connection) -> None:
     write_txn serializes against concurrent dispatchers, and the per-row
     UPDATE uses ``current_run_id IS NULL`` as a CAS guard so a racing claim
     can't produce an orphaned row."""
-    with write_txn(conn):
+    with write_txn(conn, allow_nested=True):
         inflight = conn.execute(
             "SELECT id, assignee, claim_lock, claim_expires, worker_pid, "
             "       max_runtime_seconds, last_heartbeat_at, started_at "
@@ -1000,7 +1344,7 @@ _REBUILD_SPECS = {
         " id INTEGER PRIMARY KEY AUTOINCREMENT,"
         " task_id TEXT NOT NULL, profile TEXT, step_key TEXT,"
         " status TEXT NOT NULL, claim_lock TEXT, claim_expires INTEGER,"
-        " worker_pid INTEGER, max_runtime_seconds INTEGER,"
+        " worker_pid INTEGER, worker_started_at INTEGER, max_runtime_seconds INTEGER,"
         " last_heartbeat_at INTEGER, started_at INTEGER NOT NULL,"
         " ended_at INTEGER, outcome TEXT, summary TEXT, metadata TEXT,"
         " error TEXT)",
@@ -1056,8 +1400,19 @@ def _rebuild_drifted_tables(conn: sqlite3.Connection) -> None:
     if not drifted:
         return
 
-    conn.execute("BEGIN IMMEDIATE")
-    try:
+    with write_txn(conn, allow_nested=True):
+        block_triggers = []
+        if "task_events" in drifted:
+            # SQLite rewrites trigger references on RENAME, and this migration
+            # renumbers event IDs. Restore both triggers and boundaries together.
+            block_triggers = conn.execute(
+                "SELECT name, sql FROM sqlite_master WHERE type = 'trigger' "
+                "AND name IN ('task_block_entry_insert', 'task_block_entry_update')"
+            ).fetchall()
+            for trigger in block_triggers:
+                conn.execute(f"DROP TRIGGER {trigger['name']}")
+            if block_triggers:
+                conn.execute("DELETE FROM task_block_entries")
         for table in drifted:
             create_sql, index_sqls = _REBUILD_SPECS[table]
             old_cols = [c["name"] for c in conn.execute(f"PRAGMA table_info({table})")]
@@ -1080,11 +1435,15 @@ def _rebuild_drifted_tables(conn: sqlite3.Connection) -> None:
             conn.execute(f"DROP TABLE {table}_legacy")
             for index_sql in index_sqls:
                 conn.execute(index_sql)
-        conn.execute("COMMIT")
-    except Exception:
-        with contextlib.suppress(sqlite3.OperationalError):
-            conn.execute("ROLLBACK")
-        raise
+        if block_triggers:
+            conn.execute(
+                "INSERT INTO task_block_entries (task_id, event_id) "
+                "SELECT t.id, COALESCE((SELECT MAX(e.id) FROM task_events e "
+                "WHERE e.task_id = t.id), 0) FROM tasks t WHERE t.status = 'blocked'"
+            )
+            for trigger in block_triggers:
+                conn.execute(trigger["sql"])
+
 
 
 def _check_file_length_invariant(conn: sqlite3.Connection) -> None:
@@ -1144,6 +1503,17 @@ def _execute_boundary_with_retry(conn: sqlite3.Connection, sql: str) -> None:
             time.sleep(random.uniform(_BUSY_RETRY_MIN_S, _BUSY_RETRY_MAX_S))
 
 
+def _main_db_file(conn: sqlite3.Connection) -> Optional[str]:
+    """Filesystem path of *conn*'s main database (None for in-memory / unreadable)."""
+    try:
+        for _seq, name, file in conn.execute("PRAGMA database_list") or ():
+            if name == "main":
+                return file or None
+    except (sqlite3.Error, TypeError, ValueError):
+        pass
+    return None
+
+
 @contextlib.contextmanager
 def write_txn(conn: sqlite3.Connection, *, allow_nested: bool = False):
     """IMMEDIATE write transaction; a claim CAS inside is atomic — at most one
@@ -1155,7 +1525,9 @@ def write_txn(conn: sqlite3.Connection, *, allow_nested: bool = False):
     (``complete_task`` & co.) must never run under an open outer transaction,
     since those side effects would fire while the outer txn can still roll back.
     """
-    _kb._assert_not_delegated_child_mutation()
+    _kb._assert_not_delegated_child_mutation(_main_db_file(conn))
+    from hermes_cli.kanban_board_ops_transactions import composes_connection
+    allow_nested = allow_nested or composes_connection(conn)
     if getattr(conn, "in_transaction", False):
         if not allow_nested:
             raise RuntimeError(
@@ -1201,4 +1573,4 @@ def write_txn(conn: sqlite3.Connection, *, allow_nested: bool = False):
 
 # Late-bound origin namespace (see module docstring); imported LAST so this
 # module is fully populated before ``kanban_db`` imports from it.
-from hermes_cli import kanban_db as _kb  # noqa: E402
+from hermes_cli import kanban_db as _kb

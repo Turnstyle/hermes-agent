@@ -13,6 +13,7 @@ import argparse
 from hermes_cli import kanban_db as kb
 from hermes_cli import kanban_db_dispatch as kbd
 from hermes_cli import kanban_db_notify as kbn
+from hermes_cli.kanban_pr_state import PR_REFRESH_MAX, PR_REFRESH_TIMEOUT_SECONDS
 
 
 def _arg(*flags: str, **kw):
@@ -40,6 +41,18 @@ def _json_flag(**kw):
 
 def _reason(help: str):
     return _arg("--reason", help=help)
+
+
+def _nonnegative_int(value: str) -> int:
+    """argparse type for retention days: a negative window builds a future cutoff
+    that matches every row, so reject it at the CLI boundary before any sweep."""
+    try:
+        parsed = int(value)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError("must be an integer") from exc
+    if parsed < 0:
+        raise argparse.ArgumentTypeError("retention days must be >= 0 (0 disables that sweep)")
+    return parsed
 
 
 def _run_state_args(type_help: str):
@@ -148,10 +161,15 @@ _SPECS = [
     _cmd("create", [
         _arg("title", help="Task title"),
         _arg("--body", help="Optional opening post"),
+        _arg("--body-file", metavar="PATH",
+             help="Read the opening post from a file ('-' = stdin), so bodies with embedded "
+                  "newlines or flag-like lines survive shell quoting. "
+                  "Mutually exclusive with --body."),
         _arg("--assignee", help="Profile name to assign"),
         _arg("--parent", action="append", default=[], help="Parent task id (repeatable)"),
-        _arg("--workspace", default="scratch",
-             help="scratch | worktree | worktree:<path> | dir:<path> (default: scratch)"),
+        _arg("--workspace",
+             help="scratch | worktree | worktree:<path> | dir:<path> (default: scratch; "
+                  "an explicit 'scratch' also opts out of a project-scoped board's project)"),
         _arg("--branch", help="Branch name for worktree tasks, e.g. wt/t6-wire"),
         _arg("--project",
              help="Link to a project (id or slug). Anchors the task's "
@@ -241,6 +259,16 @@ _SPECS = [
                   "--provider <name>). Cleared together with the model."),
     ], help="Set or clear a task's model/provider override (takes effect on the next dispatch)"),
     _cmd("reclaim", [_TASK_ID, _RECLAIM_REASON], help="Release an active worker claim on a running task"),
+    _cmd("recover-ghost", [
+        _TASK_ID,
+        _arg("--run", type=int, required=True, dest="run_id", help="Expected running task_runs id"),
+        _arg("--apply", action="store_true", help="Apply the recovery after rechecking under a write lock"),
+        _arg("--done", action="store_true", help="Record completion evidence (Fleet: handoff only)"),
+        _arg("--evidence", help="Non-empty evidence required with --done"),
+        _arg("--expect", help="Expected dry-run fingerprint"),
+        _arg("--wait", type=_nonnegative_int, help="Seconds to wait for Fleet sync (default 60)"),
+        _json_flag(),
+    ], help="Safely recover a claimless running task (dry-run by default)"),
     _cmd("reassign", [
         _TASK_ID,
         _arg("profile", help="New profile name (or 'none' to unassign)"),
@@ -283,12 +311,18 @@ _SPECS = [
         _arg("--metadata",
              help='JSON dict of structured facts (e.g. \'{"changed_files": [...], '
                   '"tests_run": 12}\'). Stored on the closing run.'),
+        _arg("--force", action="store_true",
+             help="Override the live-claim guard: complete a running, claimed task "
+                  "even without owning its run (closes the worker's run)."),
     ], help="Mark one or more tasks done"),
     _cmd("edit", [
         _TASK_ID,
-        _arg("--result", required=True, help="Backfilled task result text for a done task"),
+        _arg("--title", help="Replace the task title"),
+        _arg("--body", help="Replace the task body"),
+        _arg("--priority", type=int, help="Replace the task priority"),
+        _arg("--result", help="Backfilled task result text for a done task"),
         *_STEP_HANDOFF,
-    ], help="Edit recovery fields on an already-completed task"),
+    ], help="Edit task fields or recovery fields on an already-completed task"),
     _cmd("block", [
         _TASK_ID,
         _arg("reason", nargs="*", help="Reason (also appended as a comment)"),
@@ -306,9 +340,11 @@ _SPECS = [
         _bulk_ids("schedule"),
     ], help="Park one or more tasks in Scheduled (waiting on time, not human input)"),
     _cmd("unblock", [
-        _reason("Optional reason/note — recorded as a comment before unblocking. Quote multi-word reasons."),
+        _arg("--to-todo", action="store_true", help="Move a currently blocked card to todo without immediate promotion."),
+        _arg("--expected-blocked-event-id", type=int, help="Refuse unless latest blocked event matches this ID (0 asserts no blocked history)."),
+        _reason("Reason/note (required for triage holds), recorded atomically with unblocking. Quote multi-word reasons."),
         _TASK_IDS,
-    ], help="Return blocked/scheduled tasks to ready, or todo while parents remain open"),
+    ], help="Resume blocked/scheduled tasks (parent-gated); clear triage holds without promotion"),
     _cmd("request-review", [
         _TASK_ID,
         _arg("--summary", help="What was implemented and how it was verified — shown to the reviewer."),
@@ -328,7 +364,6 @@ _SPECS = [
         _TASK_ID,
         _arg("reason", nargs="*", help="Audit-trail reason (recorded on the task_events row)"),
         _bulk_ids("promote"),
-        _arg("--force", action="store_true", help="Promote even if parent dependencies are not yet done/archived"),
         _arg("--dry-run", action="store_true", help="Validate the promotion without mutating state"),
         _arg("--json", dest="json", action="store_true", help="Emit machine-readable JSON result"),
     ], help="Manually move one or more todo/blocked tasks to ready (recovery path)"),
@@ -339,13 +374,19 @@ _SPECS = [
     ], help="Archive one or more tasks"),
     _cmd("tail", [_TASK_ID, _arg("--interval", type=float, default=1.0)], help="Follow a task's event stream"),
     _cmd("dispatch", [
-        _arg("--dry-run", action="store_true", help="Don't actually spawn processes; just print what would happen"),
+        _arg("--dry-run", action="store_true", help="Read-only diagnostic; skip reclaim and promotion"),
         _arg("--max", type=int, help="Cap number of spawns this pass"),
         _arg("--failure-limit", type=int, default=kbd.DEFAULT_FAILURE_LIMIT,
              help=f"Auto-block a task after this many consecutive non-success attempts "
                   f"(spawn_failed, timed_out, or crashed; default: {kbd.DEFAULT_FAILURE_LIMIT})"),
         _json_flag(),
     ], help="One dispatcher pass: reclaim stale, promote ready, spawn workers"),
+    _cmd("refresh-pr-state", [
+        _arg("--max-prs", type=int, default=PR_REFRESH_MAX,
+             help="Maximum PRs to query once (1-20; default: 20)"),
+        _arg("--timeout", type=float, default=PR_REFRESH_TIMEOUT_SECONDS,
+             help="Per-PR gh timeout in seconds (0-5; default: 5)"),
+    ], help="Refresh local PR-state cache for ready cards; never runs in dispatcher"),
     _cmd("daemon", [
         _arg("--interval", type=float, default=60.0, help="Seconds between dispatch ticks (default: 60)"),
         _arg("--max", type=int, help="Cap number of spawns per tick"),
@@ -373,6 +414,10 @@ _SPECS = [
              help="Originating source chat_type, recorded so the active-wake delivery "
                   "modes resolve the operator's real session. Omit to leave an "
                   "existing sub unchanged (new subs default to 'dm')."),
+        _arg("--parent-chat-id",
+             help="Parent channel ID for a thread or forum post, used for multiplex profile routing."),
+        _arg("--guild-id",
+             help="Discord guild ID, used for multiplex profile routing."),
         _arg("--notifier-profile",
              help="Profile gateway that owns/delivers this subscription (default: active profile)"),
         # choices: single source of truth shared with the DB/watcher enum.
@@ -399,19 +444,29 @@ _SPECS = [
          help="List known profiles + per-profile task counts (union of ~/.hermes/profiles/ and current assignees on the board)"),
     _cmd("context", [_TASK_ID],
          help="Print the full context a worker sees for a task (title + body + parent results + comments)."),
-    _cmd("specify", _triage_sweep_args("specify", "Specify", "specifier"),
-         help="Flesh out a triage-column task into a concrete spec (title + "
-              "body) and promote it to todo. Uses the auxiliary LLM "
-              "configured under auxiliary.triage_specifier."),
+    _cmd("specify", [
+        *_triage_sweep_args("specify", "Specify", "specifier"),
+        _arg("--keep-spec", action="store_true",
+             help="Bypass auxiliary LLM specification; keep title and body verbatim and promote triage to todo. "
+                  "Requires a single task_id, --expect-sha256, and --author. Incompatible with --all."),
+        _arg("--expect-sha256", metavar="HEX",
+             help="Verify task content hash before promotion. Expected "
+                  'SHA-256 of the UTF-8 bytes of compact JSON [title,body] (ensure_ascii=False, separators (",",":"), no trailing newline; null body distinct from empty string). '
+                  "Refuses promotion if hash mismatches. Requires --keep-spec."),
+    ],
+    help="Flesh out a triage-column task into a concrete spec (title + "
+         "body) and promote it to todo. Uses the auxiliary LLM "
+         "configured under auxiliary.triage_specifier (or --keep-spec to skip)."),
     _cmd("decompose", _triage_sweep_args("decompose", "Decompose", "decomposer"),
          help="Decompose a triage-column task into a graph of child tasks "
               "routed to specialist profiles by description. Falls back "
               "to specify-style single-task promotion when the task "
               "doesn't benefit from fan-out. Uses auxiliary.kanban_decomposer."),
     _cmd("gc", [
-        _arg("--event-retention-days", type=int, default=30,
-             help="Delete task_events older than N days for terminal tasks (default: 30)"),
-        _arg("--log-retention-days", type=int, default=30, help="Delete worker log files older than N days (default: 30)"),
+        _arg("--event-retention-days", type=_nonnegative_int, default=30,
+             help="Delete task_events older than N days for terminal tasks (default: 30; 0 disables)"),
+        _arg("--log-retention-days", type=_nonnegative_int, default=30,
+             help="Delete worker log files older than N days (default: 30; 0 disables)"),
     ], help="Garbage-collect archived-task workspaces, old events, and old logs"),
     _cmd("repair", [_json_flag(help="Emit the repair report as JSON")],
          help="Check kanban.db integrity and auto-repair index-only corruption",
@@ -435,8 +490,7 @@ def build_parser(parent_subparsers: argparse._SubParsersAction) -> argparse.Argu
         description="Durable SQLite-backed task board shared across Hermes profiles. "
                     "Tasks are claimed atomically, can depend on other tasks, and "
                     "are executed by a named profile in an isolated workspace. "
-                    "See https://hermes-agent.nousresearch.com/docs/user-guide/features/kanban "
-                    "or docs/hermes-kanban-v1-spec.pdf for the full design.",
+                    "See https://hermes-agent.nousresearch.com/docs/user-guide/features/kanban.",
     )
     # --board scopes every subcommand to one board's DB; when omitted the
     # resolution is HERMES_KANBAN_BOARD, then the persisted current-board

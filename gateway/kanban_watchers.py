@@ -37,6 +37,35 @@ _GC_INTERVAL_SECONDS = 3600.0
 _HEALTH_WINDOW = 6
 
 
+def _eligible_work_stalled(dispatcher: Any, results: Optional[list], placeholder_log: dict) -> bool:
+    """One tick's health probe: True when eligible ready work failed to start.
+
+    Failures on eligible cards count even while another card is policy-held or spawns; policy
+    holds, capacity, placeholder assignees and foreign Fleet mirrors are not a stall.
+    """
+    from hermes_cli import kanban_db_dispatch as _kbd
+    ready_counts = dispatcher.ready_counts()
+    _log_placeholder_ready(ready_counts.get("placeholder", 0), placeholder_log)
+    held = _kbd.describe_suppression(res for _slug, res in (results or []))
+    if held:
+        logger.info("kanban dispatcher: dispatch held back: %s (non-paging)", held)
+    return _kbd.eligible_work_stalled(results or [], ready_counts.get("spawnable", 0))
+
+
+def _log_placeholder_ready(count: int, state: dict) -> None:
+    """INFO (non-paging) when ready work waits on a placeholder assignee: on change or every 5 min."""
+    now = int(time.time())
+    if count > 0:
+        if count != state["count"] or now - state["at"] >= 300:
+            logger.info(
+                "kanban dispatcher: %d ready task(s) assigned to placeholder profile(s) "
+                "(non-paging, waiting for assignment)", count,
+            )
+            state.update(count=count, at=now)
+    elif state["count"] > 0:
+        state["count"] = 0
+
+
 class GatewayKanbanWatchersMixin:
     """Kanban watcher / notifier / dispatcher loops for GatewayRunner."""
 
@@ -47,6 +76,9 @@ class GatewayKanbanWatchersMixin:
         """Clear notifier-visible ownership before releasing the OS lock."""
         handle = getattr(self, "_kanban_dispatcher_lock_handle", None)
         self._kanban_dispatcher_lock_handle = None
+        # The dispatcher's WAL keepalive readers die with its lock: a successor process opens its own.
+        from hermes_cli import kanban_db_connect as _kbc
+        _kbc.close_all_wal_keepalives()
         _release_singleton_lock(handle)
 
     async def _sleep_between_ticks(self, interval: float) -> None:
@@ -68,6 +100,18 @@ class GatewayKanbanWatchersMixin:
         dispatcher respawned a crashed task). All SQLite work runs in a thread;
         one tick's failure never stops the next.
         """
+        try:
+            from hermes_cli.config import load_config as _load_config
+
+            cfg = _load_config()
+            kanban_cfg = cfg.get("kanban", {}) if isinstance(cfg, dict) else {}
+        except Exception as exc:
+            logger.warning("kanban notifier: cannot load config (%s); continuing enabled", exc)
+            kanban_cfg = {}
+        if not kanban_cfg.get("notify_in_gateway", True):
+            logger.info("kanban notifier: disabled via config kanban.notify_in_gateway=false")
+            return
+
         from gateway.config import Platform as _Platform
         try:
             from hermes_cli import kanban_db as _kb
@@ -110,16 +154,22 @@ class GatewayKanbanWatchersMixin:
 
     def _kanban_sub_op(self, board: Optional[str], op: str, sub: dict, **extra: Any) -> None:
         """Sync helper (runs in to_thread): call ``kanban_db_notify.<op>`` for one subscription on its board."""
+        from hermes_cli import kanban_db as _kb
         from hermes_cli import kanban_db_connect as _kbc
         from hermes_cli import kanban_db_notify as _kbn
-        conn = _kbc.connect(board=board)
-        try:
-            getattr(_kbn, op)(
-                conn, task_id=sub["task_id"], platform=sub["platform"], chat_id=sub["chat_id"],
-                thread_id=sub.get("thread_id") or "", **extra,
-            )
-        finally:
-            conn.close()
+        # Cursor writes are machine flow: the sub's board slug must resolve
+        # through the env pin on a dispatcher-pinned box (same as the notifier
+        # tick), or advance/rewind land on a per-slug DB the notifier never
+        # reads and cursors silently reset.
+        with _kb.pin_first_board_resolution():
+            conn = _kbc.connect(board=board)
+            try:
+                getattr(_kbn, op)(
+                    conn, task_id=sub["task_id"], platform=sub["platform"], chat_id=sub["chat_id"],
+                    thread_id=sub.get("thread_id") or "", **extra,
+                )
+            finally:
+                conn.close()
 
     def _kanban_advance(self, sub: dict, cursor: int, board: Optional[str] = None) -> None:
         self._kanban_sub_op(board, "advance_notify_cursor", sub, new_cursor=cursor)
@@ -140,15 +190,21 @@ class GatewayKanbanWatchersMixin:
         reference only), and upload errors are logged, never raised.
         """
         raw_paths: list[str] = []
+        prose_paths: list[str] = []
         if isinstance(event_payload, dict):
             raw = event_payload.get("artifacts")
             if isinstance(raw, (list, tuple)):
                 raw_paths += [item for item in raw if isinstance(item, str)]
             summary = event_payload.get("summary")
             if isinstance(summary, str) and summary:
-                raw_paths += adapter.extract_local_files(summary)[0]
+                prose_paths += adapter.extract_local_files(summary)[0]
         if task is not None and getattr(task, "result", None):
-            raw_paths += adapter.extract_local_files(str(task.result))[0]
+            prose_paths += adapter.extract_local_files(str(task.result))[0]
+        # A staged copy and the scratch original it was copied from are the
+        # same deliverable; on a review handoff the original still exists, so
+        # prose mentions of it must not upload the file a second time.
+        staged_names = {os.path.basename(p) for p in raw_paths}
+        raw_paths += [p for p in prose_paths if os.path.basename(p) not in staged_names]
         candidates: list[str] = []
         for path in raw_paths:
             expanded = os.path.expanduser(path) if path else ""
@@ -254,6 +310,9 @@ class GatewayKanbanWatchersMixin:
         # broken PATH, missing venv, or credential loss.
         bad_ticks = 0
         last_warn_at = 0
+        placeholder_log = {"count": -1, "at": 0}
+        any_spawned = False
+        results: Optional[list] = None
         dispatcher = _KanbanDispatcher(_kb, settings)
 
         logger.info("kanban dispatcher: embedded in gateway (interval=%.1fs)", interval)
@@ -282,16 +341,25 @@ class GatewayKanbanWatchersMixin:
                         await _to_thread_process_service(dispatcher.auto_decompose_tick, _ad_per_tick)
                     results = await _to_thread_process_service(dispatcher.tick_once)
                     any_spawned = _log_spawn_results(results)
-                    ready_pending = await _to_thread_process_service(dispatcher.ready_nonempty)
-                    bad_ticks = bad_ticks + 1 if ready_pending and not any_spawned else 0
+                    stalled = await _to_thread_process_service(
+                        _eligible_work_stalled, dispatcher, results, placeholder_log)
+                    bad_ticks = bad_ticks + 1 if stalled else 0
+                    # Fleet Board Ops rides this timer: deterministic DB-only actions plus passive
+                    # exception notices. A silent no-op unless this gateway's process profile is the
+                    # admitted executor; bounded per board and never raises into this loop.
+                    from gateway.kanban_board_ops import tick as _board_ops_tick
+                    await _board_ops_tick(self, _kb)
                 now = int(time.time())
                 if bad_ticks >= _HEALTH_WINDOW and now - last_warn_at >= 300:
+                    held = _kbd.describe_suppression(res for _slug, res in (results or []))
                     logger.warning(
                         "kanban dispatcher stuck: ready queue non-empty for "
-                        "%d consecutive ticks but 0 workers spawned. Check "
+                        "%d consecutive ticks but %s.%s Check "
                         "profile health (venv, PATH, credentials) and "
                         "`hermes kanban list --status ready`.",
                         bad_ticks,
+                        "eligible tasks failing despite active spawns" if any_spawned else "0 workers spawned",
+                        f" Last tick held back: {held}." if held else "",
                     )
                     last_warn_at = now
             except asyncio.CancelledError:
@@ -304,30 +372,3 @@ class GatewayKanbanWatchersMixin:
             await self._sleep_between_ticks(interval)
 
         self._release_kanban_dispatcher_lock()
-
-
-# ---- BEGIN PLUGIN-COMPAT (revert-scheduled; see COMPAT_MANIFEST.md) ----
-# Names external plugins imported from this module before the Sep 2026 decomposition.
-# Internal code MUST NOT use these (scripts/check_compat_pointers.py fails CI if it does).
-# The whole block is removed by reverting the commit that added it.
-from typing import Callable  # noqa: F401,E402
-from contextvars import Context  # noqa: F401,E402
-import logging  # noqa: F401,E402
-import re  # noqa: F401,E402
-import sqlite3  # noqa: F401,E402
-
-
-_PLUGIN_COMPAT_LAZY = {
-    't': ('agent.i18n', 't'),
-}
-
-
-def __getattr__(name):  # PEP 562 — lazy so no import cycles
-    target = _PLUGIN_COMPAT_LAZY.get(name)
-    if target is None:
-        raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
-    import importlib
-    from hermes_cli.plugin_compat import warn_once
-    warn_once(__name__, name, *target)
-    return getattr(importlib.import_module(target[0]), target[1])
-# ---- END PLUGIN-COMPAT ----

@@ -12,6 +12,7 @@ import os
 import sqlite3
 import time
 from dataclasses import asdict, dataclass
+from pathlib import Path
 from typing import Any, Optional
 
 from gateway.kanban_watchers_common import _board_slugs, _positive_int_setting, logger
@@ -137,7 +138,9 @@ class _KanbanDispatcher:
         return _board_slugs(self.kb)
 
     def board_db_fingerprint(self, slug: str) -> tuple[str, int | None, int | None]:
-        path = self.kb.kanban_db_path(slug)
+        from hermes_cli import kanban_db as _kb
+        with _kb.pin_first_board_resolution():
+            path = self.kb.kanban_db_path(slug)
         try:
             resolved = str(path.expanduser().resolve())
         except Exception:
@@ -181,13 +184,29 @@ class _KanbanDispatcher:
         if not self._quarantine_lifted(slug, fingerprint):
             return None
         kwargs = {k: v for k, v in asdict(self.settings).items() if k != "interval"}
+        db_path = None
         try:
             # No explicit init_db(): connect() runs the migration once per
             # process (see the matching note in the notifier collector).
-            conn = _kbc().connect(board=slug)
-            return _kbd().dispatch_once(conn, board=slug, **kwargs)
+            # Pin-first: the tick is machine flow — on a box whose env pins
+            # HERMES_KANBAN_DB every enumerated slug must resolve to the pinned
+            # file, or the dispatcher reads per-slug DBs nobody writes.
+            from hermes_cli import kanban_db as _kb
+            with _kb.pin_first_board_resolution():
+                db_path = self.kb.kanban_db_path(slug)
+                # One resolution for the tick, its connection and its keepalive: anchoring a
+                # second lookup could hold a different (default) DB's -wal/-shm instead.
+                conn = _kbc().connect(db_path, board=slug)
+                # After connect (which creates/migrates a fresh board) and before the tick or any
+                # observer reads: read-only openers need this board's WAL side files to exist.
+                _kbc().ensure_wal_keepalive(db_path=db_path, board=slug)
+                return _kbd().dispatch_once(conn, board=slug, **kwargs)
         except Exception as exc:
             if self.is_corrupt_board_db_error(exc):
+                # The WAL keepalive reader would otherwise pin the quarantined file's inode
+                # (and its -wal/-shm) open until the gateway restarts.
+                if db_path is not None:
+                    _kbc().close_wal_keepalive(db_path=db_path, board=slug)
                 self.disabled_corrupt_boards[slug] = (fingerprint, time.monotonic())
                 logger.error(
                     "kanban dispatcher: board %s database %s is not a valid "
@@ -220,19 +239,49 @@ class _KanbanDispatcher:
         """
         kbd = _kbd()
         _review_probe = kbd.review_dispatch_enabled()
-        for slug in self._board_slugs():
-            conn = None
-            try:
-                conn = _kbc().connect(board=slug)
-                if kbd.has_spawnable_ready(conn) or (_review_probe and kbd.has_spawnable_review(conn)):
-                    return True
-            except Exception:
-                continue
-            finally:
-                if conn is not None:
-                    with contextlib.suppress(Exception):
-                        conn.close()
+        from hermes_cli import kanban_db as _kb
+        with _kb.pin_first_board_resolution():
+            for slug in self._board_slugs():
+                conn = None
+                try:
+                    conn = _kbc().connect(board=slug)
+                    if kbd.has_spawnable_ready(conn) or (_review_probe and kbd.has_spawnable_review(conn)):
+                        return True
+                except Exception:
+                    continue
+                finally:
+                    if conn is not None:
+                        with contextlib.suppress(Exception):
+                            conn.close()
         return False
+
+    def ready_counts(self) -> dict[str, int]:
+        """Spawnable and placeholder ready (and, with review dispatch, review) counts across boards.
+
+        ``spawnable`` is the work this node would actually start (fleet mirrors, control-plane
+        lanes and placeholder assignees excluded); ``placeholder`` is a non-paging diagnostic.
+        """
+        kbd = _kbd()
+        review_probe = kbd.review_dispatch_enabled()
+        counts = {"spawnable": 0, "placeholder": 0}
+        from hermes_cli import kanban_db as _kb
+        with _kb.pin_first_board_resolution():
+            for slug in self._board_slugs():
+                conn = None
+                try:
+                    conn = _kbc().connect(board=slug)
+                    counts["spawnable"] += kbd.count_spawnable_ready(conn)
+                    counts["placeholder"] += kbd.count_placeholder_ready(conn)
+                    if review_probe:
+                        counts["spawnable"] += kbd.count_spawnable_review(conn)
+                        counts["placeholder"] += kbd.count_placeholder_review(conn)
+                except Exception:
+                    continue
+                finally:
+                    if conn is not None:
+                        with contextlib.suppress(Exception):
+                            conn.close()
+        return counts
 
     def auto_decompose_tick(self, auto_decompose_per_tick: int) -> int:
         """Auto-decompose up to N triage tasks across all boards into ready workgraphs.
@@ -247,29 +296,31 @@ class _KanbanDispatcher:
             return 0
         attempted = 0
         successes = 0
-        for slug in self._board_slugs():
-            if attempted >= auto_decompose_per_tick:
-                break
-            # Pin the board via env for the call: the decomposer connects
-            # with no board kwarg (same pattern as the dashboard specify endpoint).
-            prev_env = os.environ.get("HERMES_KANBAN_BOARD")
-            try:
-                os.environ["HERMES_KANBAN_BOARD"] = slug
+        from hermes_cli import kanban_db as _kb
+        with _default_profile_secret_scope(), _kb.pin_first_board_resolution():
+            for slug in self._board_slugs():
+                if attempted >= auto_decompose_per_tick:
+                    break
+                # Pin the board via env for the call: the decomposer connects
+                # with no board kwarg (same pattern as the dashboard specify endpoint).
+                prev_env = os.environ.get("HERMES_KANBAN_BOARD")
                 try:
-                    triage_ids = _decomp.list_triage_ids()
-                except Exception as exc:
-                    logger.debug("kanban auto-decompose: list_triage_ids failed on board %s (%s)", slug, exc)
-                    triage_ids = []
-                for tid in triage_ids:
-                    if attempted >= auto_decompose_per_tick:
-                        break
-                    attempted += 1
-                    successes += self._decompose_one(_decomp, slug, tid)
-            finally:
-                if prev_env is None:
-                    os.environ.pop("HERMES_KANBAN_BOARD", None)
-                else:
-                    os.environ["HERMES_KANBAN_BOARD"] = prev_env
+                    os.environ["HERMES_KANBAN_BOARD"] = slug
+                    try:
+                        triage_ids = _decomp.list_triage_ids()
+                    except Exception as exc:
+                        logger.debug("kanban auto-decompose: list_triage_ids failed on board %s (%s)", slug, exc)
+                        triage_ids = []
+                    for tid in triage_ids:
+                        if attempted >= auto_decompose_per_tick:
+                            break
+                        attempted += 1
+                        successes += self._decompose_one(_decomp, slug, tid)
+                finally:
+                    if prev_env is None:
+                        os.environ.pop("HERMES_KANBAN_BOARD", None)
+                    else:
+                        os.environ["HERMES_KANBAN_BOARD"] = prev_env
         return successes
 
     @staticmethod
@@ -291,20 +342,80 @@ class _KanbanDispatcher:
         return 1
 
 
+@contextlib.contextmanager
+def _default_profile_secret_scope():
+    """Install the gateway launch profile's secret scope while multiplexing is on.
+
+    The tick runs via ``_to_thread_process_service`` in a fresh context, so no
+    per-turn scope exists and ``get_secret`` fails closed. The decomposer's aux
+    LLM reads ``auxiliary.*`` from ``get_hermes_home()``, so its credentials come
+    from that same home. No-op for single-profile gateways.
+    """
+    from agent.secret_scope import is_multiplex_active, reset_secret_scope, set_secret_scope
+    from hermes_constants import get_hermes_home
+    from tui_gateway.launch_profile_policy import owner_secret_scope
+
+    if not is_multiplex_active():
+        yield
+        return
+    token = set_secret_scope(owner_secret_scope(Path(get_hermes_home())), profile_home=str(get_hermes_home()))
+    try:
+        yield
+    finally:
+        reset_secret_scope(token)
+
+
+# slug -> (placeholder-skipped count, last INFO epoch): the line repeats only on change or every 5 min.
+_LAST_PLACEHOLDER_LOG: dict[str, tuple[int, float]] = {}
+
+
+def _log_fence_refusals(slug: str, res: Any, now: float) -> None:
+    """Per-row claim/reclaim refusals (lifecycle fences, unverified ownership): WARNING once per
+    task per hour, otherwise debug — an expected fence must not page every tick."""
+    from hermes_cli.kanban_db_dispatch_fence import _fence_log_due
+    for step in ("claim", "reclaim"):
+        errors = getattr(res, f"{step}_errors", None) or []
+        if not errors:
+            continue
+        due = [(tid, err) for tid, err in errors if _fence_log_due(f"{step}-summary", tid, now)]
+        shown = due or errors
+        (logger.warning if due else logger.debug)(
+            "kanban dispatcher [%s]: %d %s refusal(s): %s",
+            slug, len(shown), step, "; ".join(f"{tid}: {err}" for tid, err in shown),
+        )
+
+
 def _log_spawn_results(results: Optional[list]) -> bool:
     """Log per-board spawn summaries; returns whether any board spawned."""
     any_spawned = False
+    now = time.time()
     for slug, res in (results or []):
-        if res is not None and getattr(res, "spawned", None):
+        if res is None:
+            continue
+        _log_fence_refusals(slug, res, now)
+        skipped_placeholder = getattr(res, "skipped_placeholder", None) or []
+        if getattr(res, "spawned", None):
             any_spawned = True
             # Quiet by default: an idle gateway stays silent.
             logger.info(
                 "kanban dispatcher [%s]: spawned=%d reclaimed=%d "
-                "crashed=%d timed_out=%d promoted=%d auto_blocked=%d",
+                "crashed=%d timed_out=%d promoted=%d auto_blocked=%d placeholder=%d",
                 slug, len(res.spawned), res.reclaimed,
                 len(res.crashed) if hasattr(res.crashed, "__len__") else 0,
                 len(res.timed_out) if hasattr(res.timed_out, "__len__") else 0,
                 res.promoted,
                 len(res.auto_blocked) if hasattr(res.auto_blocked, "__len__") else 0,
+                len(skipped_placeholder),
             )
+        elif skipped_placeholder:
+            last = _LAST_PLACEHOLDER_LOG.get(slug)
+            if last is None or last[0] != len(skipped_placeholder) or (now - last[1]) >= 300:
+                logger.info(
+                    "kanban dispatcher [%s]: %d placeholder-assigned task(s) skipped "
+                    "(non-paging, waiting for assignment)",
+                    slug, len(skipped_placeholder),
+                )
+                _LAST_PLACEHOLDER_LOG[slug] = (len(skipped_placeholder), now)
+        else:
+            _LAST_PLACEHOLDER_LOG.pop(slug, None)
     return any_spawned
