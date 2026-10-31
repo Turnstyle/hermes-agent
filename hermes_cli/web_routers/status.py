@@ -157,9 +157,18 @@ async def post_health_retirement(request: Request):
         body = await request.json()
     except ValueError:
         raise HTTPException(status_code=400, detail="JSON body required")
-    if not isinstance(body, dict) or body.get("action") not in ("prepare", "commit", "cancel"):
-        raise HTTPException(status_code=400, detail="action must be prepare, commit, or cancel")
+    actions = ("prepare", "commit", "cancel", "identity", "prepare-exit", "exit")
+    if not isinstance(body, dict) or body.get("action") not in actions:
+        raise HTTPException(status_code=400, detail="unsupported retirement action")
     action = body["action"]
+    if action in ("identity", "prepare-exit", "exit"):
+        owner = getattr(app.state, "reader_exit", None)
+        if owner is None:
+            raise HTTPException(status_code=409, detail="graceful exit not owned by this runtime")
+        if action == "identity":
+            return {"ok": True, "identity": owner.identity}
+        operation = owner.prepare if action == "prepare-exit" else owner.exit
+        return await run_in_threadpool(operation, body, retirement)
     if action == "prepare":
         return await run_in_threadpool(retirement.prepare)
     token = body.get("token")

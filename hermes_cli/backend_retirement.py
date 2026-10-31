@@ -91,6 +91,24 @@ class RetirementFence:
             self._committed = True
             return {"ok": True}
 
+    def exit_ready(self, token):
+        """Recheck the drained committed permit; never reopen admission on failure."""
+        from hermes_cli.web_server_idle_proof import idle_proof
+
+        with self._lock:
+            if not token or token != self._token or not self._committed or self._active:
+                return False
+        try:
+            idle = idle_proof()["idle"] is True
+        except Exception:
+            return False
+        with self._lock:
+            return idle and token == self._token and self._committed and not self._active
+
+    def is_committed(self):
+        with self._lock:
+            return self._committed
+
     def cancel(self, token):
         with self._lock:
             self._expire()

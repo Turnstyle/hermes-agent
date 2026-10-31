@@ -1327,6 +1327,8 @@ def _on_server_started(
 
     actual_port = _read_bound_port(server, fallback=port)
     app.state.bound_port = actual_port
+    if getattr(app.state, "reader_exit", None) is not None:
+        app.state.reader_exit.identity["port"] = actual_port
     # Published by /api/host/identity: an attaching `hermes dashboard` must never be routed to a
     # headless backend (a URL with no UI behind it).
     app.state.serves_spa = not headless
@@ -1520,6 +1522,13 @@ def start_server(
     app.state.initial_profile = str(initial_profile or "")
 
     config, server = _build_uvicorn_server(host, port, ssh_isolated=bool(ssh_session_token))
+
+    # Only the process that owns this uvicorn server may request its exit.
+    # This is never installed on an API-parent gateway.
+    if is_desktop_owned_backend():
+        from hermes_cli.reader_release import ReaderExit
+        from gateway.host_rendezvous import ROLE_DESKTOP_SERVE
+        app.state.reader_exit = ReaderExit(server, port, ROLE_DESKTOP_SERVE)
 
     # Flush-on-kill guard (#94724): chaining SIGTERM/SIGINT handlers persist
     # in-memory transcripts to state.db before shutdown. Installed BEFORE
