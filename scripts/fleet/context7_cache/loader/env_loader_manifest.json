@@ -2,7 +2,7 @@
   "source_root": "/Users/sheldon/.hermes/releases/stable-v0.22.5-carry-d4c5aec662c8/candidate",
   "source_path": "hermes_cli/env_loader.py",
   "source_sha256": "755ed19cd94bafff49390e005030880628af66cc753899142d123dd8f8f82aaa",
-  "candidate_sha256": "7536f5e7c3f3b9dc298331bb30ac4e61d733e94314900f33af52cb06e890a6b3",
-  "patch_sha256": "f2f2daa14a4c68d21bdcc9027a25e0d60c2decfdd1da0bc890a8eba2b34b1f43",
+  "candidate_sha256": "e2d9019c389c2dd0779a9132673aec70cb847a4c027d38b16e5f72e3214e6fc0",
+  "patch_sha256": "b744fe548060518dc56e882c0d43b45e25001d62290ade2fd9f2f03df5819938",
   "installed": false
 }

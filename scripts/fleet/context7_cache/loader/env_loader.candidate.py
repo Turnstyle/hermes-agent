@@ -371,7 +371,8 @@ def _reset_secret_source_cache(hermes_home: str | os.PathLike | None = None) -> 
         _SOURCE_SUPPLIED_NAMES.clear()
         _SECRET_SOURCE_VALUES_BY_HOME.clear()
         _SECRET_SOURCE_RESTORE_BY_HOME.clear()
-        _SECRET_SOURCE_WRITES_BY_HOME.clear()
+        # Retain write provenance across reset, just as per-home reset does.
+        # Freshness invalidation will revoke still-owned writes before refresh.
         return
     home_key = str(Path(hermes_home).resolve())
     _APPLIED_HOMES.discard(home_key)

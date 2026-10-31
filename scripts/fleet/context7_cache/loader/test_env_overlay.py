@@ -157,6 +157,72 @@ class EnvOverlayTests(unittest.TestCase):
         self.assertNotIn('FAKE_KEY', self.env)
         self.assertEqual(len(self.calls), 1)
 
+    def test_whole_process_reset_global_refresh_nonoverride(self):
+        self.global_apply()
+        original = self.env['FAKE_KEY']
+        self.now = 10001
+        self.n['reset_secret_source_cache']()
+        self.now = 11800
+        self.version = 2
+        self.global_apply()
+        self.assertNotEqual(self.env.get('FAKE_KEY'), original)
+        self.assertIn('-v2', self.env['FAKE_KEY'])
+        self.assertEqual(self.snapshot(), {'FAKE_KEY': self.env['FAKE_KEY']})
+
+    def test_whole_process_reset_global_refresh_failure(self):
+        self.global_apply()
+        self.now = 10001
+        self.n['reset_secret_source_cache']()
+        self.now = 11800
+        self.failed = True
+        self.global_apply()
+        self.assertNotIn('FAKE_KEY', self.env)
+        self.assertEqual(self.snapshot(), {})
+
+    def test_whole_process_reset_global_refresh_exception(self):
+        self.global_apply()
+        self.now = 10001
+        self.n['reset_secret_source_cache']()
+        self.now = 11800
+        self.raise_fetch = True
+        self.global_apply()
+        self.assertNotIn('FAKE_KEY', self.env)
+        self.assertEqual(self.snapshot(), {})
+
+    def test_whole_process_reset_preserves_external_replacement(self):
+        self.global_apply()
+        self.env['FAKE_KEY'] = 'new-shell-owner'
+        self.n['reset_secret_source_cache']()
+        self.failed = True
+        self.global_apply()
+        self.assertEqual(self.env['FAKE_KEY'], 'new-shell-owner')
+        self.assertEqual(self.snapshot(), {})
+
+    def test_whole_process_reset_restores_prior_dotenv_baseline(self):
+        self.global_apply()
+        key = str(self.home.resolve())
+        source, value, _ = self.n['_SECRET_SOURCE_WRITES_BY_HOME'][key]['FAKE_KEY']
+        self.n['_SECRET_SOURCE_WRITES_BY_HOME'][key]['FAKE_KEY'] = (source, value, '__MANAGED_PLACEHOLDER__')
+        sys.modules['agent.secret_scope'].load_env_file = lambda p: {'FAKE_KEY': '__MANAGED_PLACEHOLDER__'}
+        self.n['reset_secret_source_cache']()
+        self.raise_fetch = True
+        self.global_apply()
+        self.assertEqual(self.env['FAKE_KEY'], '__MANAGED_PLACEHOLDER__')
+        self.assertEqual(self.snapshot(), {})
+        self.assertNotIn(key, self.n['_SECRET_SOURCE_WRITES_BY_HOME'])
+
+    def test_per_home_reset_preserves_global_write_ownership_and_other_home(self):
+        self.global_apply()
+        other_home = Path('/synthetic/home-b')
+        other = self.hydrate(other_home)
+        self.n['reset_secret_source_cache'](self.home)
+        self.failed = True
+        self.global_apply()
+        self.assertNotIn('FAKE_KEY', self.env)
+        self.assertEqual(self.snapshot(), {})
+        self.assertEqual(self.snapshot(other_home), other)
+        self.assertEqual(self.env['HERMES_DELEGATED_CHILD_CONTEXT'], '/synthetic/parent')
+
     def test_per_home_age_and_reset_isolation(self):
         self.hydrate()
         b = Path('/synthetic/home-b')

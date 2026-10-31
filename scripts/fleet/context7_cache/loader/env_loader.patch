@@ -89,7 +89,7 @@
      """Forget applied homes so the next load re-pulls (tests, long-running processes after config edits).
  
      ``hermes_home`` limits the reset to ONE home: a multiplex gateway keeps every profile's snapshot in
-@@ -325,6 +366,7 @@
+@@ -325,14 +366,17 @@
      (#102041)."""
      if hermes_home is None:
          _APPLIED_HOMES.clear()
@@ -97,7 +97,10 @@
          _SECRET_SOURCES.clear()
          _SOURCE_SUPPLIED_NAMES.clear()
          _SECRET_SOURCE_VALUES_BY_HOME.clear()
-@@ -333,6 +375,7 @@
+         _SECRET_SOURCE_RESTORE_BY_HOME.clear()
+-        _SECRET_SOURCE_WRITES_BY_HOME.clear()
++        # Retain write provenance across reset, just as per-home reset does.
++        # Freshness invalidation will revoke still-owned writes before refresh.
          return
      home_key = str(Path(hermes_home).resolve())
      _APPLIED_HOMES.discard(home_key)
@@ -105,7 +108,7 @@
      _SECRET_SOURCE_VALUES_BY_HOME.pop(home_key, None)
      _SECRET_SOURCE_RESTORE_BY_HOME.pop(home_key, None)
  
-@@ -655,10 +698,12 @@
+@@ -655,10 +699,12 @@
      # token) back over a value an external source resolved on an earlier call, and the source pass below is a
      # once-per-home no-op — so the clobber stuck for the life of the process (#74265). Re-assert only what the
      # source is authoritative for; managed scope, applied last with override=True, still wins on purpose.
@@ -122,7 +125,7 @@
  
      # External sources are skipped for the updater (dotenv + managed env still load): ``update`` must not
      # import optional secret-manager libs (Bitwarden → cryptography → _rust.pyd) into the process replacing
-@@ -763,13 +808,21 @@
+@@ -763,13 +809,21 @@
  
  
  def _apply_external_secret_sources(home_path: Path) -> None:
@@ -146,7 +149,7 @@
  
      # Neither early return marks the home applied: a malformed config.yaml would otherwise permanently
      # disable secret loading for this process, and an unmarked home picks up a config change on the next
-@@ -820,6 +873,7 @@
+@@ -820,6 +874,7 @@
      # startup don't re-fetch / re-print (error retries are opt-in via reset_secret_source_cache()).
      # Marking AFTER the attempt keeps the earlier failure paths retryable.
      _APPLIED_HOMES.add(home_key)
@@ -154,7 +157,7 @@
  
      if report.applied_any:
          _sanitize_loaded_credentials()  # vault values carry the same copy-paste corruption risk as .env
-@@ -843,6 +897,8 @@
+@@ -843,6 +898,8 @@
          _SECRET_SOURCE_VALUES_BY_HOME[home_key] = values
      _SECRET_SOURCE_RESTORE_BY_HOME[home_key] = {
          n: values[n] for n, a in report.provenance.items() if a.authoritative and n in values}

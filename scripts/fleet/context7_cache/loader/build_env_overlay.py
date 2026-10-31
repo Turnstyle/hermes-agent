@@ -45,7 +45,12 @@ def get_secret_source_values(hermes_home: str | os.PathLike) -> dict[str, str]:
     # Both private hydration and process-global paths use a single captured start.
     source = replace_once(source, '    # A retry must not keep serving a partial result', '    fetched_at = _SECRET_SOURCE_CLOCK()\n\n    # A retry must not keep serving a partial result')
     source = replace_once(source, '    _SECRET_SOURCE_VALUES_BY_HOME[home_key] = values\n    return dict(values)', '    _SECRET_SOURCE_VALUES_BY_HOME[home_key] = values\n    _SECRET_SOURCE_FETCHED_AT[home_key] = fetched_at\n    return get_secret_source_values(home)')
-    # Reset must serialize with publication; keep the established reset semantics.
+    # Reset invalidates freshness, not ownership: the next locked gate must
+    # peel any still-owned process write before it can be treated as ambient.
+    source = replace_once(source, '        _SECRET_SOURCE_WRITES_BY_HOME.clear()\n', '''        # Retain write provenance across reset, just as per-home reset does.
+        # Freshness invalidation will revoke still-owned writes before refresh.
+''')
+    # Reset must serialize with publication.
     source = replace_once(source, 'def reset_secret_source_cache(hermes_home: str | os.PathLike | None = None) -> None:', '''def reset_secret_source_cache(hermes_home: str | os.PathLike | None = None) -> None:
     """Serialize per-home or whole-process invalidation with source publication."""
     with _SECRET_SOURCE_CACHE_LOCK:
