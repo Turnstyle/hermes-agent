@@ -247,11 +247,12 @@ def _maybe_title_session_at_turn_start(
             for k in ("model", "provider", "base_url", "api_key", "api_mode", "session_id")
         }
         # See #19027.
+        from agent.owner_prompt_policy import clean_messages
         upgrade = maybe_auto_title(
             session_db,
             session_id,
             user_text,
-            conversation_history=messages,
+            conversation_history=clean_messages(messages),
             failure_callback=(
                 getattr(agent, "_title_failure_callback", None)
                 or getattr(agent, "_emit_auxiliary_failure", None)

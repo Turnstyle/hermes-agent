@@ -211,7 +211,7 @@ class CLIChatTurnMixin:
         # persist lock (the first-turn check may read the session DB). Over the gateway this dict is
         # the viewer's copy (the gateway's turn start decides the stored row) and the store proxy
         # refuses that read, so the history alone decides.
-        from agent.owner_prompt_policy import admission_route, append_rule, should_inject
+        from agent.owner_prompt_policy import admission_route, append_rule, has_rule, should_inject
         from hermes_cli.gateway_session_store import GatewaySessionStore
         store = getattr(agent, "_session_db", None)
         with_rule = should_inject(*admission_route(agent), self.conversation_history,
@@ -235,6 +235,7 @@ class CLIChatTurnMixin:
                                                              "notification_category": message.notification_category})
             if with_rule:
                 staged_user_message["content"] = append_rule(staged_user_message["content"])
+                staged_user_message["_delegate_rule_speculative"] = not has_rule(message)
             agent._pending_cli_user_message = staged_user_message
             self.conversation_history.append(staged_user_message)
 

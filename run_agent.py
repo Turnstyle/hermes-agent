@@ -905,12 +905,13 @@ class AIAgent(
         if interrupted or not (self._memory_manager and final_response and original_user_message):
             return
         # Flatten multimodal parts to text (newline-joined for memory).
-        user_text = _summarize_user_message_for_log(original_user_message, sep="\n")
+        from agent.owner_prompt_policy import clean_messages, strip_rule
+        user_text = _summarize_user_message_for_log(strip_rule(original_user_message), sep="\n").strip()
         response_text = _summarize_user_message_for_log(final_response, sep="\n")
         if not (user_text and response_text):
             return
         try:
-            sync_kwargs = {"session_id": self.session_id or "", **({"messages": messages} if messages is not None else {})}
+            sync_kwargs = {"session_id": self.session_id or "", **({"messages": clean_messages(messages)} if messages is not None else {})}
             # Stashed by build_turn_context() for this turn, None on a human turn.
             turn_author = getattr(self, "_turn_author", None)
             if turn_author is not None:

@@ -44,6 +44,8 @@ def _append_moa_context(agent: Any, api_messages: Any, moa_config: Any, original
         from agent.message_content import flatten_message_text as _flatten_mt
         from agent.moa_loop import _preset_temperature, aggregate_moa_context
 
+        from agent.owner_prompt_policy import clean_messages, strip_rule
+        original_user_message = strip_rule(original_user_message)
         _moa_context = aggregate_moa_context(
             user_prompt=(
                 original_user_message
@@ -52,7 +54,7 @@ def _append_moa_context(agent: Any, api_messages: Any, moa_config: Any, original
                 # str()-ing parts, which would leak base64 image payloads.
                 else _flatten_mt(original_user_message)
             ),
-            api_messages=api_messages,
+            api_messages=clean_messages(api_messages),
             reference_models=moa_config.get("reference_models") or [],
             aggregator=moa_config.get("aggregator") or {},
             temperature=_preset_temperature(moa_config, "reference_temperature"),

@@ -36,10 +36,10 @@ def config_pin(path: Path) -> tuple[str, str]:
         raise ValueError("config must be a mapping")
     model = cfg.get("model")
     if isinstance(model, str):
-        return "", model.strip()
+        return str(cfg.get("provider") or "").strip(), model.strip()
     if not isinstance(model, dict):
         return "", ""
-    provider = str(model.get("provider") or "").strip()
+    provider = str(model.get("provider") or cfg.get("provider") or "").strip()
     target = model.get("default") or model.get("model") or model.get("name") or ""
     if isinstance(target, dict):
         if provider.lower() in ("", "auto"):
@@ -61,6 +61,11 @@ def _session_route(row: dict[str, Any]) -> tuple[Any, Any]:
 
 
 def _decoded_content(value: Any) -> Any:
+    if isinstance(value, str) and value.startswith("\x00json:"):
+        try:
+            return json.loads(value[len("\x00json:"):])
+        except ValueError:
+            return value
     if isinstance(value, str) and value.lstrip().startswith("["):
         try:
             decoded = json.loads(value)
@@ -84,6 +89,8 @@ def audit_database(path: Path, since: float = 0) -> dict[str, Any]:
         conn.execute("PRAGMA query_only=ON")
         conn.row_factory = sqlite3.Row
         pin = None
+        columns = {row[1] for row in conn.execute("PRAGMA table_info(messages)")}
+        active_filter = " AND COALESCE(active, 1) = 1" if "active" in columns else ""
         for raw in conn.execute("SELECT * FROM sessions WHERE started_at >= ? ORDER BY started_at, id", (since,)):
             row = dict(raw)
             try:
@@ -95,7 +102,7 @@ def audit_database(path: Path, since: float = 0) -> dict[str, Any]:
                     result["skipped_nonclaude"] += 1
                     continue
                 first = conn.execute(
-                    "SELECT content FROM messages WHERE session_id = ? AND role = 'user' ORDER BY id LIMIT 1",
+                    "SELECT content FROM messages WHERE session_id = ? AND role = 'user'" + active_filter + " ORDER BY id LIMIT 1",
                     (row["id"],)).fetchone()
                 status = "present" if first and has_rule(_decoded_content(first["content"])) else "missing"
                 source = str(row.get("source") or "unknown")

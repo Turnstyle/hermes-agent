@@ -371,8 +371,7 @@ def _replace_queued_user_row_for_turn(session: dict, queued: dict, is_dispatchin
     # retires the row rather than gluing the never-run prompt into the previous turn.
     # The replacement decides the delegate rule like any submit row, but never drops one the accept-time
     # row stored (that write saw no earlier user row); adoption matches the text with or without it.
-    from agent.owner_prompt_policy import append_rule, has_rule
-    text = append_rule(queued.get("text")) if has_rule(early.get("content")) else queued.get("text")
+    text = queued.get("text")
     if is_dispatching:
         _persist_submit_user_row(session, text, queued.get("_queued_display_kind"))
     else:

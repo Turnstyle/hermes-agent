@@ -75,7 +75,7 @@ def default_pin() -> tuple[str, str]:
         model, nested_provider = split_model_config_default(
             model_cfg.get("default") or model_cfg.get("model"))
         provider = str(model_cfg.get("provider") or "").strip()
-        return (provider if provider not in ("", "auto") else nested_provider or provider), model
+        return (provider if provider.lower() not in ("", "auto") else nested_provider or provider), model
     except Exception:
         logger.warning("delegate rule: default model pin unreadable; treating it as unset", exc_info=True)
         return "", ""
@@ -84,6 +84,9 @@ def default_pin() -> tuple[str, str]:
 def route_requires_rule(provider: Any, model: Any, *, pin: Optional[tuple[str, str]] = None) -> bool:
     """Claude by the resolved route; only a route without a usable model consults the profile
     pin (``pin`` lets a caller that already read it inside the right profile scope pass it)."""
+    # A virtual provider's model is a preset name, not an inference model.
+    if str(provider or "").strip().lower() == "moa":
+        return False
     if is_claude_route(provider, model):
         return True
     if isinstance(model, str) and model.strip():
@@ -128,6 +131,30 @@ def has_prior_user_message(history: Any) -> bool:
     return any(isinstance(msg, dict) and msg.get("role") == "user" for msg in history or ())
 
 
+def strip_rule(content: Any) -> Any:
+    """Clean consumer copy; never alter media or the durable/wire transcript."""
+    if isinstance(content, str):
+        return content.replace(DELEGATE_RULE, "").strip()
+    if isinstance(content, list):
+        result = copy.deepcopy(content)
+        for part in result:
+            if isinstance(part, dict) and part.get("type") in _TEXT_BLOCK_TYPES and isinstance(part.get("text"), str):
+                part["text"] = strip_rule(part["text"])
+        return result
+    return content
+
+
+def clean_messages(messages: Any) -> Any:
+    """Rule-free copies for external memory and toolless reference models."""
+    result = copy.deepcopy(messages)
+    for message in result or ():
+        if isinstance(message, dict) and message.get("role") == "user":
+            for key in ("content", "api_content"):
+                if key in message:
+                    message[key] = strip_rule(message[key])
+    return result
+
+
 def session_has_user_row(db: Any, session_id: Any, *, exclude_row_id: Optional[int] = None) -> bool:
     """Whether ANY earlier user row exists, including typed, inactive and archived rows.
 
@@ -138,11 +165,19 @@ def session_has_user_row(db: Any, session_id: Any, *, exclude_row_id: Optional[i
     if db is None or not session_id:
         return False
     try:
-        return db._read_one(
-            "SELECT id FROM messages WHERE session_id = ? AND role = 'user' "
-            "AND (? IS NULL OR id != ?) LIMIT 1",
+        from hermes_state_common import QUEUED_PROMPT_METADATA_KEY
+        import json
+        rows = db._read_all(
+            "SELECT id, display_metadata FROM messages WHERE session_id = ? AND role = 'user' "
+            "AND (? IS NULL OR id != ?)",
             (session_id, exclude_row_id, exclude_row_id),
-        ) is not None
+        )
+        for row in rows:
+            metadata = row["display_metadata"]
+            metadata = json.loads(metadata) if isinstance(metadata, str) and metadata else metadata or {}
+            if not isinstance(metadata, dict) or not metadata.get(QUEUED_PROMPT_METADATA_KEY):
+                return True
+        return False
     except Exception:
         logger.warning("delegate rule: user-row probe failed for session=%s", session_id, exc_info=True)
         return False
@@ -260,6 +295,20 @@ def _turn_start_values(
 ) -> tuple[Any, Any]:
     raw = persist_user_message if persist_user_message is not None else user_message
     staged = _staged_row_of_this_turn(agent, raw)
+    if (staged is not None and staged.get("_delegate_rule_speculative")
+            and not route_requires_rule(agent.provider, agent.model)
+            and not has_prior_user_message([msg for msg in conversation_history or () if msg is not staged])):
+        from agent.session_persistence import _durable_content, _persist_lock
+        db = getattr(agent, "_session_db", None)
+        with _persist_lock(agent):
+            clean = strip_rule(staged["content"])
+            row_id = _int_row_id(staged)
+            if db is not None and row_id is not None:
+                if not db.set_user_message_content(agent.session_id, row_id, _durable_content(clean)):
+                    raise RuntimeError("speculative delegate rule row could not be reconciled")
+            staged["content"] = clean
+            staged.pop("_delegate_rule_speculative", None)
+        return strip_rule(user_message), strip_rule(persist_user_message)
     if staged is not None and has_rule(staged.get("content")):
         # An earlier writer stored the rule: never strip it, and keep this turn equal to the
         # staged row so it is adopted rather than written twice.

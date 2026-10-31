@@ -13,8 +13,10 @@ canonical config loader. An explicit non-Claude model does not inherit a Claude 
 
 The turn prologue applies the policy after primary runtime restoration and before
 binding the persistence override. Earlier CLI and Desktop writers use the same decision.
-The database check counts every stored user row, including typed, inactive and archived
-rows. Only the staged row adopted by the current turn is excluded from that check.
+The database check counts stored user rows, including typed, inactive and archived
+rows, except still-queued accept-time rows (which are not the in-flight opener) and
+the staged row adopted by the current turn. A busy queue acceptance never decides
+first-turn policy; the dispatch replacement does.
 
 The rule is appended after two newlines to string content, or as a final text block to
 list content. Existing media blocks stay intact. An exact occurrence anywhere in a
@@ -33,7 +35,9 @@ An admission route can differ from the route restored at turn start. The prologu
 reconciles a matching staged first row before sending it. This includes a Desktop row
 already written at submit time, under the agent's persistence lock. It does not rewrite
 generic history. If an early writer included the rule and the eventual route is
-non-Claude, the staged rule is retained to preserve row identity and replay.
+non-Claude, a rule tagged as speculative injection is removed from the staged row
+and its matching durable content without changing the row identity. Caller-supplied
+rules and historical rows are not rewritten.
 
 ## Launch paths
 
@@ -125,8 +129,10 @@ repaired. Opaque aliases behind another provider can under-match; unrelated IDs 
 `claude` can over-match. Credential-selected routes and concurrent config changes are not
 proven equivalent to an admission-time route decision.
 
-MoA virtual sessions and their inner proposer/aggregator calls remain untouched. The inner
-calls do not create stored user sessions and do not pass through this policy. An offline
+MoA virtual sessions are excluded even when the preset is Claude-named. Inner
+reference requests receive rule-free copied user prompts and transcript context; the
+outer durable/wire transcript remains unchanged. The inner calls do not create stored
+user sessions and do not pass through this policy. An offline
 MoA test verifies both Claude-named slots still run without this rule.
 
 This is a text-presence policy, not proof that a model executes delegates, honors a count,
@@ -157,8 +163,9 @@ can be combined with `--all-profiles`. The latter includes the root `state.db` a
 `profiles/*/state.db` files. With no root argument it uses the default Hermes root.
 
 The script opens SQLite with `mode=ro` and `PRAGMA query_only=ON`; it never instantiates
-SessionDB or migrates a database. It examines the first inserted `role='user'` row, including
-inactive and archived history. It reports exact-rule present/missing totals by profile and
+SessionDB or migrates a database. It examines the first active `role='user'` row (or
+first inserted row on legacy schemas lacking `active`), decoding native JSON parts.
+It reports exact-rule present/missing totals by profile and
 source, non-Claude skips and errors as JSON. A Claude session without a user row counts as
 missing. Missing or malformed databases are errors, and the command exits 0. Configuration
 errors are reported when a default pin is needed; an absent config supplies no pin.
@@ -169,3 +176,13 @@ string, `model.default`, legacy `model.model`, and nested model/provider forms. 
 current file's pin, not historical route proof or a managed-overlay resolution. A model
 stored on the session takes precedence. The script never reads credentials or calls a
 provider. It reports text presence, not delegation behavior.
+
+## Repair regression scope
+
+`tests/agent/test_delegate_rule_review_repairs.py` covers completed-turn external
+memory sync/prefetch text and transcript stripping, trivial-prompt gating, an image-only
+Desktop opener racing queued text through replacement/adoption/persistence and wire
+observation, MoA preset and reference-copy isolation, resolved non-Claude speculative
+row reconciliation, API exported-anchor boundaries and invalid-anchor fallback, AUTO
+nested pins, Desktop dict/env resolver paths, native-list/active-row audit, and
+title/turn-start memory consumer inputs. No live provider proof is implied.

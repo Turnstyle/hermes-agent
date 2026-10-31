@@ -51,6 +51,12 @@ def response_turn_start_index(
         return 0
     if result.get('_messages_are_turn_suffix'):
         return 0
+    exported = result.get("current_turn_user_idx")
+    if (isinstance(exported, int) and not isinstance(exported, bool)
+            and 0 <= exported < len(agent_messages)
+            and isinstance(agent_messages[exported], dict)
+            and agent_messages[exported].get("role") == "user"):
+        return exported + 1
     user_idx = reanchor_current_turn_user_idx(agent_messages, user_message)
     if user_idx >= 0:
         return user_idx + 1

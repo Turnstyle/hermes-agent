@@ -752,7 +752,8 @@ def _submit_unbuilt_route(session: dict) -> tuple:
     model = model_override if isinstance(model_override, str) and model_override else _resolve_model()
     if provider := provider_override or os.environ.get("HERMES_TUI_PROVIDER", "").strip():
         return provider, model
-    return (None if _env_model_seed() else _config_model_target()[1] or None), model
+    # Preserve configured provider without startup alias/key resolution.
+    return (_config_model_target()[1] or None), model
 
 
 def _submit_route_needs_pin(provider: Any, model: Any) -> bool:
@@ -823,9 +824,10 @@ def _write_submit_user_row(session: dict, text: Any, display_kind: str | None,
         if db is None:
             return None
         target = _submit_row_target_key(session)
-        if _submit_row_needs_rule(session, db, target):
-            from agent.owner_prompt_policy import append_rule
+        if not (accept_metadata and session.get("running")) and _submit_row_needs_rule(session, db, target):
+            from agent.owner_prompt_policy import append_rule, has_rule
             staged["content"] = append_rule(text)
+            staged["_delegate_rule_speculative"] = not has_rule(text)
         try:
             staged["_row_id"] = db.append_message(
                 target, "user", content=staged["content"], display_kind=display_kind, timestamp=staged["timestamp"],
@@ -865,15 +867,19 @@ def _adopt_submit_user_row(session: dict, agent, persist_user_message: Any, text
     user's message and never a synthesized turn's text. A stored rule is kept (never stripped); a raw row is
     re-decided on this turn's route only while the session shows no earlier user message, the one case that
     opens the store without a rewrite. Either way the turn-start chokepoint still adopts this dict."""
-    from agent.owner_prompt_policy import append_rule, apply_to_turn, has_prior_user_message, has_rule
+    from agent.owner_prompt_policy import append_rule, apply_to_turn, has_prior_user_message, has_rule, route_requires_rule, strip_rule
     staged = session.pop("_submit_user_row", None)
     if (not isinstance(staged, dict) or agent is None or not isinstance(text, str)
             or staged.get("content") not in (text, append_rule(text))):
         return
     ruled = has_rule(staged["content"])
+    speculative_fallback = bool(staged.get("_delegate_rule_speculative")) and not route_requires_rule(agent.provider, agent.model)
+    if ruled and speculative_fallback:
+        persist_user_message = strip_rule(persist_user_message)
+        ruled = False
     if ruled:
         persist_user_message = apply_to_turn(persist_user_message, None)[0]
-    redecide = not ruled and not has_prior_user_message(session.get("history"))
+    redecide = not ruled and not speculative_fallback and not has_prior_user_message(session.get("history"))
     if redecide or staged["content"] != persist_user_message:
         from agent.session_persistence import _durable_content
         with _session_db(session) as db:
