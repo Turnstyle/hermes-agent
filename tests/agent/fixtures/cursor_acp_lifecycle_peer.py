@@ -27,12 +27,15 @@ options = [{"id": name, "category": name, "currentValue": value,
             "options": [{"value": value}]} for name, value in (("model", "default[]"), ("mode", "ask"))]
 if scenario == "stall-setup":
     signal.signal(signal.SIGTERM, signal.SIG_IGN)
+pending_prompt = None
 for line in sys.stdin:
     msg = json.loads(line)
     method = msg.get("method")
     record(method=method)
     result = {}
     if method == "session/new":
+        if scenario == "setup-exit":
+            sys.exit(1)  # before delivery: retry/fallback is safe
         result = {"sessionId": "local", "configOptions": options}
     elif method == "session/set_config_option":
         if scenario == "stall-setup":
@@ -47,6 +50,7 @@ for line in sys.stdin:
                 time.sleep(1)
     elif method == "session/prompt":
         if scenario.startswith("chunk-"):
+            pending_prompt = msg["id"]
             print(json.dumps({"method": "session/update", "params": {"sessionId": "local", "update": {
                 "sessionUpdate": "agent_message_chunk", "content": {"type": "text", "text": "partial answer "}}}}), flush=True)
             if scenario == "chunk-exit":
@@ -90,7 +94,19 @@ for line in sys.stdin:
             break
         continue
     elif method == "session/cancel":
-        continue  # No acknowledgment: cancellation must still be bounded.
+        # Real Cursor answers the pending prompt with stopReason=cancelled (ACP spec) and may keep streaming
+        # text until it does. Other scenarios stay silent: cancellation must still be bounded.
+        if scenario in ("chunk-ackcancel", "chunk-latetext", "chunk-lateend") and pending_prompt is not None:
+            late = ["rest of answer "] if scenario == "chunk-lateend" else (
+                [f"late-text-{n} " for n in range(3)] if scenario == "chunk-latetext" else [])
+            for text in late:
+                print(json.dumps({"method": "session/update", "params": {"sessionId": "local", "update": {
+                    "sessionUpdate": "agent_message_chunk", "content": {"type": "text", "text": text}}}}), flush=True)
+                time.sleep(.05)
+            stop = "end_turn" if scenario == "chunk-lateend" else "cancelled"
+            print(json.dumps({"id": pending_prompt, "result": {"stopReason": stop}}), flush=True)
+            pending_prompt = None
+        continue
     print(json.dumps({"id": msg["id"], "result": result}), flush=True)
 if scenario in ("stall-setup", "success-ignore-eof", "timeout-ignore-eof"):
     while True:

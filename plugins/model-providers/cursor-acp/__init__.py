@@ -8,6 +8,7 @@ from providers.base import ProviderProfile
 
 def _classify_error(error, **kwargs):
     if (getattr(error, "cursor_prompt_delivered", False)
+            or getattr(error, "no_auto_replay", False)  # tagged by Hermes' watchdog sites after delivery
             or getattr(error, "code", None) == "cursor_cleanup_failed"
             or getattr(error, "cursor_cleanup_failed", False)):
         return {"reason": "incomplete_response", "retryable": False, "should_fallback": False}
@@ -42,5 +43,5 @@ class CursorACPProfile(ProviderProfile):
 register_provider(CursorACPProfile(
     name="cursor-acp", api_mode="chat_completions", env_vars=(), base_url="acp://cursor",
     auth_type="external_process", process_command="cursor-agent", process_args=("acp",),
-    classify_api_error=_classify_error,
+    classify_api_error=_classify_error, no_auto_replay=True,
 ))

@@ -129,6 +129,21 @@ def check_api_response(
         logging.debug(f"API Response received - Model: {resp_model}, Usage: {response.usage if hasattr(response, 'usage') else 'N/A'}")
 
     response_invalid, error_details = validate_response_shape(agent, response)
+    from agent.turn_recovery import provider_forbids_response_replay
+    if provider_forbids_response_replay(agent):
+        from agent.turn_response_policy import finish_delivered_response_if_required
+        terminal = finish_delivered_response_if_required(
+            agent, response=response, response_invalid=response_invalid, error_details=error_details,
+            messages=messages, api_calls=api_call_count, conversation_history=conversation_history,
+            usage_context=dict(api_call_count=api_call_count, api_duration=api_duration,
+                               compression_attempts=compression_attempts,
+                               max_compression_attempts=max_compression_attempts),
+            hook_context=dict(api_messages=api_messages, api_call_count=api_call_count,
+                              api_duration=api_duration, api_start_time=api_start_time,
+                              api_request_id=api_request_id, effective_task_id=effective_task_id,
+                              turn_id=turn_id))
+        if terminal is not None:
+            return _verdict("return", terminal)
     if response_invalid:
         _iv = retry_invalid_response(
             agent, response=response, error_details=error_details, _retry=_retry,

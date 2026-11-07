@@ -1021,6 +1021,12 @@ def direct_api_call(agent, api_kwargs: dict):
                 reason="request_complete" if succeeded else "request_error_cleanup")
 
 
+def _client_prompt_deliveries(client) -> int:
+    """A request client's monotonic delivered-prompt count; 0 for providers that do not expose one."""
+    count = getattr(client, "prompt_deliveries", 0)
+    return count if type(count) is int else 0
+
+
 class _RequestClientRegistry:
     """Per-request client / stream-handle registry shared by the request worker
     and the stranger threads (interrupt loop, stale detector) that may abort it.
@@ -1045,10 +1051,29 @@ class _RequestClientRegistry:
         self.owner_tid = None
         self.diag = None  # per-attempt stream diagnostics (streaming path)
         self.lock = threading.Lock()
+        self._delivered = False  # latched: some client of this request reported a delivered prompt
+        self._deliveries_at_checkout = 0
+
+    def _latch_delivery(self) -> None:
+        """Caller holds ``self.lock``. Record deliveries the current client made since checkout."""
+        if self.client is not None and _client_prompt_deliveries(self.client) > self._deliveries_at_checkout:
+            self._delivered = True
+
+    def prompt_delivered(self) -> bool:
+        """True once a provider that counts deliveries (``prompt_deliveries``) received this request's prompt.
+
+        Delivery is irreversible and may have caused native effects, so a watchdog that cancels the
+        request afterwards must not let any retry, continuation or fallback re-issue it. The verdict
+        outlives ``close_once`` (the owner thread pops the client on its way out)."""
+        with self.lock:
+            self._latch_delivery()
+            return self._delivered
 
     def set_client(self, client, *, kind: str = "openai"):
         with self.lock:
+            self._latch_delivery()
             self.client, self.kind, self.owner_tid = client, kind, threading.get_ident()
+            self._deliveries_at_checkout = _client_prompt_deliveries(client)
         return client
 
     @staticmethod
@@ -1074,6 +1099,7 @@ class _RequestClientRegistry:
 
     def close_once(self, reason: str) -> None:
         with self.lock:
+            self._latch_delivery()
             request_client, request_kind, owner_tid = self.client, self.kind, self.owner_tid
             stranger_thread = (
                 request_kind != "stream"
@@ -2298,6 +2324,10 @@ _SUMMARY_ATTEMPT_BUILDERS = {"codex_responses": _codex_summary_attempt, "anthrop
 
 def handle_max_iterations(agent, messages: list, api_call_count: int) -> str:
     """Request a summary when max iterations are reached. Returns the final response text."""
+    from agent.turn_recovery import provider_forbids_response_replay
+    if provider_forbids_response_replay(agent):
+        from agent.turn_response_policy import no_replay_notice
+        return no_replay_notice(agent, "the iteration limit was reached before a final answer")
     warning = f"⚠️  Reached maximum iterations ({agent.max_iterations}). Requesting summary..."
     if getattr(agent, "suppress_status_output", False):
         # Strict machine-readable mode (-Q, oneshot): keep diagnostics off stdout. quiet_mode is
@@ -3199,7 +3229,16 @@ class _StreamingCall(StreamingWaitMonitor):
         tool_calls.materialize()
         self._close_managed_stream()
         if self._stream_attempt_was_cancelled(stream_attempt_id):
-            raise _httpx.RemoteProtocolError(f"stream attempt {stream_attempt_id} was superseded")
+            # A watchdog cancelled this attempt. If the provider already received the prompt, the provider's
+            # own tagging cannot be relied on (the relay closes a cancelled stream on its next chunk, which
+            # only raises GeneratorExit), so Hermes tags the error it owns.
+            delivered = self.clients.prompt_delivered()
+            superseded = _httpx.RemoteProtocolError(
+                f"stream attempt {stream_attempt_id} was cancelled by Hermes' stream watchdog after the provider "
+                "received the prompt" if delivered else f"stream attempt {stream_attempt_id} was superseded")
+            if delivered:
+                superseded.no_auto_replay = True
+            raise superseded
         if stream.final_response is not None:
             return self._adopt_final_response(stream.final_response)
         return self._finish_chat_stream(stream, role, content_parts, reasoning_parts, tool_calls_acc,
@@ -3527,6 +3566,14 @@ class _StreamingCall(StreamingWaitMonitor):
             return False
         # A provider may already have performed native effects, even when no
         # visible delta reached Hermes. Every automatic re-issue is unsafe.
+        from agent.turn_recovery import provider_forbids_response_replay
+        if provider_forbids_response_replay(self.agent) and (
+            self.clients.prompt_delivered() or self.deltas_were_sent["yes"]
+        ):
+            # Local decoder/emitter failures need not carry the native client's
+            # exception attributes. Positive request custody still forbids both
+            # same-prefix replay and downgrade, even for thinking/tool-only deltas.
+            e.no_auto_replay = True
         if getattr(e, "no_auto_replay", False):
             self.result["error"] = e
             return False

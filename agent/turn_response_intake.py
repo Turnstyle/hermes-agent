@@ -14,6 +14,7 @@ from typing import Any, Dict, Optional
 
 from agent.provider_projection import splice_provider_projection
 from agent.trajectory import has_incomplete_scratchpad
+from agent.turn_recovery import provider_forbids_response_replay
 from agent.turn_truncation import (
     CODEX_FALLBACK_ACTIVATED, continue_codex_incomplete, normalize_response_for_agent, partial_result,
 )
@@ -159,17 +160,20 @@ def normalize_model_response(
     if has_incomplete_scratchpad(content or ""):
         agent._incomplete_scratchpad_retries += 1
         agent._buffer_vprint("⚠️  Incomplete <REASONING_SCRATCHPAD> detected (opened but never closed)")
-        if agent._incomplete_scratchpad_retries <= 2:
+        no_replay = provider_forbids_response_replay(agent)
+        if agent._incomplete_scratchpad_retries <= 2 and not no_replay:
             agent._buffer_vprint(f"🔄 Retrying API call ({agent._incomplete_scratchpad_retries}/2)...")
             return _verdict("continue")  # don't add the broken message
+        reason = ("Incomplete REASONING_SCRATCHPAD; delivered prompt was not resent automatically"
+                  if no_replay else "Incomplete REASONING_SCRATCHPAD after 2 retries")
         agent._flush_status_buffer()
-        agent._vprint(f"{agent.log_prefix}❌ Max retries (2) for incomplete scratchpad. Saving as partial.", force=True, diagnostic=True)
+        agent._vprint(f"{agent.log_prefix}❌ {reason}. Saving as partial.", force=True, diagnostic=True)
         agent._incomplete_scratchpad_retries = 0
         rolled_back_messages = agent._get_messages_up_to_last_assistant(messages)
         agent._cleanup_task_resources(effective_task_id)
         agent._persist_session(messages, conversation_history)
         return _verdict("return", partial_result(
-            rolled_back_messages, api_call_count, "Incomplete REASONING_SCRATCHPAD after 2 retries"
+            rolled_back_messages, api_call_count, reason
         ))
     agent._incomplete_scratchpad_retries = 0
 
