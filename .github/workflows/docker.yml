@@ -100,7 +100,7 @@ jobs:
     name: Detect affected areas
     needs: [mode]
     if: needs.mode.outputs.release != 'true'
-    runs-on: blacksmith-4vcpu-ubuntu-2404
+    runs-on: ubuntu-latest
     timeout-minutes: 10
     outputs:
       build: ${{ steps.gate.outputs.build }}
