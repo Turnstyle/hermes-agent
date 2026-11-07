@@ -44,6 +44,17 @@ def _api(endpoint: str, *, query: str | None = None, paginate: bool = False,
         # or missing grant), not a transient API failure. Persist only the status
         # code + endpoint, never gh's stderr (credentials/host details).
         denied = re.search(r"HTTP (40[134])", exc.stderr or "")
+        if (denied and denied[1] == "403" and exc.returncode != 4 and query is None
+                and re.fullmatch(r"repos/[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+/rules/branches/[^/?]+(?:\?per_page=100)?", endpoint)):
+            try:
+                evidence = json.loads(exc.stdout or "")
+            except (ValueError, TypeError):
+                evidence = None
+            if paginate and isinstance(evidence, list) and len(evidence) == 1 and isinstance(evidence[0], dict):
+                evidence = evidence[0]
+            if (isinstance(evidence, dict) and evidence.get("status") in (None, "403", 403)
+                    and evidence.get("message") == "Upgrade to GitHub Pro or make this repository public to enable this feature."):
+                return [[]] if paginate else []
         if denied:
             raise _GateAuthError(f"HTTP {denied[1]} on {endpoint.split('?')[0]}") from None
         if exc.returncode == 4:  # gh's authentication-required exit: this profile has no login
@@ -132,27 +143,54 @@ def collect_acceptance(contract: str, published_pr: str | None,
         if not re.fullmatch(r"[0-9a-f]{40}", sha) or pr["state"] not in {"OPEN", "MERGED"}:
             raise ValueError("PR is closed or current head is unavailable")
         protection = (pr.get("baseRef") or {}).get("branchProtectionRule") or {}
-        required = {(r["context"], (r.get("app") or {}).get("databaseId")) for r in protection.get("requiredStatusChecks", [])}
+        protected_checks = protection.get("requiredStatusChecks", [])
+        if not isinstance(protected_checks, list):
+            raise ValueError("Malformed branch protection checks")
+        required = {(r["context"], (r.get("app") or {}).get("databaseId")) for r in protected_checks}
         rules = _api(f"repos/{repo}/rules/branches/{quote(branch, safe='')}?per_page=100",
                      paginate=True, profile_home=profile_home)
+        if not isinstance(rules, list) or not rules or any(not isinstance(page, list) for page in rules):
+            raise ValueError("Malformed rules pagination")
         for page in rules:
             for rule in page:
+                if not isinstance(rule, dict) or not isinstance(rule.get("type"), str) or not rule["type"]:
+                    raise ValueError("Malformed branch rule")
                 if rule["type"] == "required_status_checks":
-                    required.update((r["context"], r.get("integration_id"))
-                                    for r in rule["parameters"]["required_status_checks"])
+                    rule_checks = rule["parameters"]["required_status_checks"]
+                    if not isinstance(rule_checks, list):
+                        raise ValueError("Malformed ruleset checks")
+                    required.update((r["context"], r.get("integration_id")) for r in rule_checks)
         receipt["required"] = [{"context": c, "app_id": a} for c, a in sorted(required, key=str)]
-        if not required:
-            receipt["detail"] = "No repository-required checks are configured; explicitly use a local-only contract for non-CI tasks."
-            return receipt
         pages = _api(f"repos/{repo}/commits/{sha}/check-runs?per_page=100&filter=latest",
                      paginate=True, profile_home=profile_home)
+        if (not isinstance(pages, list) or not pages or any(
+                not isinstance(page, dict) or type(page.get("total_count")) is not int
+                or page["total_count"] < 0 or not isinstance(page.get("check_runs"), list)
+                or page["total_count"] != pages[0]["total_count"] for page in pages)):
+            raise ValueError("Malformed check-run pagination")
         runs = [run for page in pages for run in page["check_runs"]]
-        if len({r["id"] for r in runs}) != pages[0]["total_count"]:
+        if len({r["id"] for r in runs}) != pages[0]["total_count"] or len(runs) != pages[0]["total_count"]:
             raise ValueError("Incomplete check-run pagination")
-        statuses = [{**s, "sha": sha} for page in _api(f"repos/{repo}/commits/{sha}/statuses?per_page=100",
-                                                       paginate=True, profile_home=profile_home) for s in page]
+        status_pages = _api(f"repos/{repo}/commits/{sha}/statuses?per_page=100",
+                            paginate=True, profile_home=profile_home)
+        if not isinstance(status_pages, list) or not status_pages or any(not isinstance(page, list) for page in status_pages):
+            raise ValueError("Malformed status pagination")
+        statuses = [{"sha": sha, **s} for page in status_pages for s in page]
+        contexts = required
+        if not required:
+            if any(not isinstance(r, dict) or type(r.get("id")) is not int or r["id"] <= 0
+                   or not isinstance(r.get("name"), str) or not r["name"]
+                   or "conclusion" not in r or "status" not in r or "head_sha" not in r
+                   or not isinstance(r.get("app"), dict) or type(r["app"].get("id")) is not int
+                   for r in runs):
+                raise ValueError("Malformed check run")
+            if any(type(s.get("id")) is not int or s["id"] <= 0
+                   or not isinstance(s.get("context"), str) or not s["context"]
+                   or not isinstance(s.get("state"), str) or s.get("sha") != sha for s in statuses):
+                raise ValueError("Malformed legacy status")
+            contexts = {(r["name"], None) for r in runs} | {(s["context"], None) for s in statuses}
         outcomes = []
-        for context, app_id in sorted(required, key=str):
+        for context, app_id in sorted(contexts, key=str):
             matching = [r for r in runs if r["name"] == context and
                         (app_id in (None, -1) or r["app"]["id"] == app_id)]
             # A legacy status can satisfy an unpinned context, but never a check pinned to an app.
@@ -184,7 +222,7 @@ def collect_acceptance(contract: str, published_pr: str | None,
                        detail=f"GitHub refused the acceptance read ({exc}) as {login}; "
                               "fix that profile's GitHub credentials/access to the repository, then retry completion.")
         return receipt
-    except (OSError, subprocess.SubprocessError, ValueError, KeyError, TypeError, IndexError):
+    except (OSError, subprocess.SubprocessError, ValueError, KeyError, TypeError, IndexError, AttributeError):
         # Never persist gh stderr (credentials/host details); the failed phase is actionable.
         receipt.update(classification="infra", detail="GitHub acceptance evidence unavailable or incomplete; check gh authentication/API access and retry.")
         return receipt
