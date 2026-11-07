@@ -37,6 +37,35 @@ _GC_INTERVAL_SECONDS = 3600.0
 _HEALTH_WINDOW = 6
 
 
+def _eligible_work_stalled(dispatcher: Any, results: Optional[list], placeholder_log: dict) -> bool:
+    """One tick's health probe: True when eligible ready work failed to start.
+
+    Failures on eligible cards count even while another card is policy-held or spawns; policy
+    holds, capacity, placeholder assignees and foreign Fleet mirrors are not a stall.
+    """
+    from hermes_cli import kanban_db_dispatch as _kbd
+    ready_counts = dispatcher.ready_counts()
+    _log_placeholder_ready(ready_counts.get("placeholder", 0), placeholder_log)
+    held = _kbd.describe_suppression(res for _slug, res in (results or []))
+    if held:
+        logger.info("kanban dispatcher: dispatch held back: %s (non-paging)", held)
+    return _kbd.eligible_work_stalled(results or [], ready_counts.get("spawnable", 0))
+
+
+def _log_placeholder_ready(count: int, state: dict) -> None:
+    """INFO (non-paging) when ready work waits on a placeholder assignee: on change or every 5 min."""
+    now = int(time.time())
+    if count > 0:
+        if count != state["count"] or now - state["at"] >= 300:
+            logger.info(
+                "kanban dispatcher: %d ready task(s) assigned to placeholder profile(s) "
+                "(non-paging, waiting for assignment)", count,
+            )
+            state.update(count=count, at=now)
+    elif state["count"] > 0:
+        state["count"] = 0
+
+
 class GatewayKanbanWatchersMixin:
     """Kanban watcher / notifier / dispatcher loops for GatewayRunner."""
 
@@ -47,6 +76,9 @@ class GatewayKanbanWatchersMixin:
         """Clear notifier-visible ownership before releasing the OS lock."""
         handle = getattr(self, "_kanban_dispatcher_lock_handle", None)
         self._kanban_dispatcher_lock_handle = None
+        # The dispatcher's WAL keepalive readers die with its lock: a successor process opens its own.
+        from hermes_cli import kanban_db_connect as _kbc
+        _kbc.close_all_wal_keepalives()
         _release_singleton_lock(handle)
 
     async def _sleep_between_ticks(self, interval: float) -> None:
@@ -278,6 +310,8 @@ class GatewayKanbanWatchersMixin:
         # broken PATH, missing venv, or credential loss.
         bad_ticks = 0
         last_warn_at = 0
+        placeholder_log = {"count": -1, "at": 0}
+        any_spawned = False
         results: Optional[list] = None
         dispatcher = _KanbanDispatcher(_kb, settings)
 
@@ -307,17 +341,25 @@ class GatewayKanbanWatchersMixin:
                         await _to_thread_process_service(dispatcher.auto_decompose_tick, _ad_per_tick)
                     results = await _to_thread_process_service(dispatcher.tick_once)
                     any_spawned = _log_spawn_results(results)
-                    ready_pending = await _to_thread_process_service(dispatcher.ready_nonempty)
-                    bad_ticks = bad_ticks + 1 if ready_pending and not any_spawned else 0
+                    stalled = await _to_thread_process_service(
+                        _eligible_work_stalled, dispatcher, results, placeholder_log)
+                    bad_ticks = bad_ticks + 1 if stalled else 0
+                    # Fleet Board Ops rides this timer: deterministic DB-only actions plus passive
+                    # exception notices. A silent no-op unless this gateway's process profile is the
+                    # admitted executor; bounded per board and never raises into this loop.
+                    from gateway.kanban_board_ops import tick as _board_ops_tick
+                    await _board_ops_tick(self, _kb)
                 now = int(time.time())
                 if bad_ticks >= _HEALTH_WINDOW and now - last_warn_at >= 300:
                     held = _kbd.describe_suppression(res for _slug, res in (results or []))
                     logger.warning(
                         "kanban dispatcher stuck: ready queue non-empty for "
-                        "%d consecutive ticks but 0 workers spawned.%s Check "
+                        "%d consecutive ticks but %s.%s Check "
                         "profile health (venv, PATH, credentials) and "
                         "`hermes kanban list --status ready`.",
-                        bad_ticks, f" Last tick held back: {held}." if held else "",
+                        bad_ticks,
+                        "eligible tasks failing despite active spawns" if any_spawned else "0 workers spawned",
+                        f" Last tick held back: {held}." if held else "",
                     )
                     last_warn_at = now
             except asyncio.CancelledError:

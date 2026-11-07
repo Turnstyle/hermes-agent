@@ -37,6 +37,7 @@ from agent.auxiliary_error_shapes import (
     _botocore_error, _exc_http_status, _is_invalid_aux_response_error, _is_statusless_structured_provider_error,
 )
 from agent.auxiliary_managed_local import _is_managed_local_endpoint
+from agent.auxiliary_stream_error import raise_on_error_frame
 from agent.auxiliary_reasoning_floor import remember_reasoning_floor, with_reasoning_floor
 from agent.auxiliary_structured_output import _route_key, _without_structured_output_format, remember_structured_output_rejection
 from agent.codex_headers import (
@@ -7138,6 +7139,7 @@ class _ChatStreamAccumulator:
         # Count the reading before the deadline check it extends.
         read_more = progress is not None and self._prompt_reading.tick(progress)
         self._check_deadlines()
+        raise_on_error_frame(chunk)  # never an empty "successful" completion from an error frame
         self.resp_id = getattr(chunk, "id", None) or self.resp_id
         self.resp_model = getattr(chunk, "model", None) or self.resp_model
         chunk_usage = getattr(chunk, "usage", None)

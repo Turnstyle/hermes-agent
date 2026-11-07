@@ -285,6 +285,13 @@ def _run_worker_turns(agent, frame, history):
         code = turn_exit_code(None, kanban_worker=True, **credential_failure_flags(exc))
         raise
     finally:
+        # A hand-back is neutral only over a settled last turn: a failed one keeps its own exit
+        # (78 parks the provider, 1 charges a failure), never a stale budget flag's 79.
+        if code != 0:
+            context.pop('handback', None)
+        elif context.get('handback'):
+            from hermes_cli.kanban_budget_handback import KANBAN_BUDGET_HANDBACK_EXIT_CODE
+            code = KANBAN_BUDGET_HANDBACK_EXIT_CODE
         _record_worker_result(context, code, last_output)
 
 
@@ -309,7 +316,8 @@ def _record_worker_result(context, code, last_output):
             # result in the immutable attempt event stream instead.
             kb._append_event(conn, context['task_id'], 'worker_result',
                 {'pid': os.getpid(), 'claim_lock': context['claim_lock'], 'exit_code': code,
-                 'last_output': last_output}, run_id=context['run_id'])
+                 'last_output': last_output, **({'handback': context['handback']} if context.get('handback') else {})},
+                run_id=context['run_id'])
 
 
 def record_worker_loss(policy, reason, *, pid=None, bound=False):
@@ -379,6 +387,21 @@ def worker_exit_code(path, params):
 # file "work kanban task t_..." and the worker's progress notes as the human's own turns (#137406).
 # Not a ``bot:<profile>`` id: a Bot Mode profile named ``kanban`` would share its memory key.
 KANBAN_TURN_AUTHOR = {'id': 'kanban:dispatcher', 'name': 'Kanban dispatcher', 'is_bot': True}
+# ``hermes_cli.goals.run_kanban_goal_loop``'s block reason when the card's turn budget runs out.
+_TURN_BUDGET_SPENT = 'Goal-mode worker exhausted its turn budget'
+
+
+def _hand_back_budget(context, reason, result):
+    """Neutral hand-back (``kanban_budget_handback``): only the interpreter the owner's
+    ``worker_bound`` receipt names under this claim may record it, on its own ``worker_result``;
+    the dead-worker sweep closes the run. False leaves the block path."""
+    from hermes_cli.kanban_db_connect import connect_closing
+    with connect_closing(Path(context['db'])) as conn:
+        if not _bound_worker_matches(conn, context):
+            return False
+    summary = str(result.get('final_response') or '') if isinstance(result, dict) else ''
+    context['handback'] = {'reason': reason, 'summary': summary[-3000:]}
+    return True
 
 
 def _run_task_turns(agent, frame, history, context):
@@ -412,13 +435,20 @@ def _run_task_turns(agent, frame, history, context):
         with connect_closing() as conn:
             return kb.goal_run_status(conn, context['task_id'], context['run_id'])
     def block(reason):
+        # A spent turn budget is a slice, not a verdict: the bound worker hands its run back.
+        if reason.startswith(_TURN_BUDGET_SPENT) and _hand_back_budget(context, reason, result):
+            return
         with connect_closing() as conn:
             kb.block_task(conn, context['task_id'], reason=reason, expected_run_id=context['run_id'])
     def turn(prompt):
         nonlocal result
         result = agent.run_conversation(prompt, conversation_history=agent._session_db.get_messages_as_conversation(agent.session_id),
                                         turn_author=KANBAN_TURN_AUTHOR)
-        return result.get('final_response', '')
+        # The one-shot worker's run_turn shape: an unsettled continuation stops the loop before
+        # another verdict can spend the budget into a hand-back over the real failure.
+        return {'response': result.get('final_response') or '',
+                'failed': turn_exit_code(result, kanban_worker=True) != 0,
+                'failure_reason': result.get('failure_reason')}
     run_kanban_goal_loop(task_id=context['task_id'], goal_text=context['goal_text'], run_turn=turn,
         task_status_fn=status, block_fn=block, max_turns=context['goal_max_turns'] or DEFAULT_MAX_TURNS,
         first_response=result.get('final_response', ''))

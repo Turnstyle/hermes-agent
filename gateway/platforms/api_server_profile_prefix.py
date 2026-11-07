@@ -73,4 +73,7 @@ def resolve_request_profile(adapter: Any, request: Any):
         return profile
     if alias and "default" in served and _handle_is_free():
         return "default"
+    if not alias:
+        from gateway.platforms.api_server_profile_alias import resolve_served_profile
+        return resolve_served_profile(profile, _PROFILE_REJECTED)
     return _PROFILE_REJECTED

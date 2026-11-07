@@ -15,6 +15,9 @@ from pathlib import Path
 def _macos_codesigning_identity_valid(security: str, identity: str) -> bool:
     """True when `identity` is among VALID (``-v``) code-signing identities — the plain listing also
     shows untrusted certs codesign refuses. Idempotency probe + postcondition. Never raises."""
+    from agent.keychain_policy import keychain_access_forbidden
+    if keychain_access_forbidden():
+        return False
     try:
         result = subprocess.run(
             [security, "find-identity", "-v", "-p", "codesigning"], capture_output=True, text=True, encoding="utf-8", errors="replace", check=False,
@@ -28,6 +31,9 @@ def _macos_codesigning_identity_valid(security: str, identity: str) -> bool:
 def _macos_create_signing_identity(
     openssl: str, security: str, codesign: str, keychain: str, identity: str) -> bool:
     """Create a self-signed code-signing cert (10 years), import it with codesign access, trust it for codeSign."""
+    from agent.keychain_policy import keychain_access_forbidden
+    if keychain_access_forbidden():
+        return False
     tmp_dir = Path(tempfile.mkdtemp(prefix="hermes-tcc-"))
     try:
         key = tmp_dir / "sign.key"
@@ -108,6 +114,10 @@ def _desktop_macos_setup_tcc_identity(identity: str = "Hermes Local Signing") ->
     mechanism). Idempotent; never raises."""
     from hermes_cli.main import PROJECT_ROOT
     from hermes_cli.main_desktop import _desktop_macos_relaunchable_fixup, _desktop_packaged_executable
+    from agent.keychain_policy import keychain_access_forbidden
+    if keychain_access_forbidden():
+        print("  (auth.no_keychain forbids keychain signing-identity setup)")
+        return False
     if sys.platform != "darwin":
         print("  (--setup-tcc-identity is macOS-only; skipping)")
         return False

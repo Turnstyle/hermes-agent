@@ -414,6 +414,38 @@ def _settle_pre_upgrade_claim(root: Path | str, path: Path, env_id: str, label: 
         "the recipient before resending."))
 
 
+def read_claimed_envelope(root: Path | str, envelope_id: str) -> dict:
+    """The claimed envelope for ``envelope_id`` (``{}`` when absent or unreadable). The reply op
+    carries only the failure text, so this is how the sender learns WHICH target failed."""
+    safe = str(envelope_id or "").strip()
+    if not re.match(r"^[0-9a-f]{32}$", safe):
+        return {}
+    with contextlib.suppress(OSError, ValueError):
+        data = json.loads((relay_root(root) / CLAIMED_DIR / f"{safe}.json").read_text(encoding="utf-8-sig"))
+        if isinstance(data, dict):
+            return data
+    return {}
+
+
+def relayed_failure_error(error: str, envelope: Optional[dict] = None) -> str:
+    """Honest, actionable copy for a target-scope failure that came back FROM a relay target: the
+    failure is on THAT install, so restarting the sender's gateway cannot fix it."""
+    from tools.bot_failure_reasons import TARGET_SCOPE_UNRESOLVED, classify_agent_error
+
+    raw = str(error or "")
+    env = envelope if isinstance(envelope, dict) else {}
+    connection = str(env.get("target_connection") or "").strip()
+    if not connection or classify_agent_error(raw) != TARGET_SCOPE_UNRESOLVED:
+        return raw
+    profile = str(env.get("target_profile") or "").strip() or "default"
+    handle = str(env.get("target_handle") or "").strip()
+    who = f"@{handle} " if handle else ""
+    return (f"Delivery to {who}on '{connection}' failed on THAT install, not on this one: its delivery into "
+            f"profile '{profile}' could not resolve that profile's scope, so no turn was created there and "
+            "nothing was sent to a model. Restarting this gateway cannot fix it. Update that install, or "
+            "address a profile on it that resolves its own home.")
+
+
 def write_reply(root: Path | str, envelope_id: str, *, reply: str = "", error: str = "", reason: str = "") -> Path:
     """Persist the relayed reply (or delivery error) for the waiter. ``reason`` (typed
     code, ``tools.bot_failure_reasons``) is classified from ``error`` when omitted.

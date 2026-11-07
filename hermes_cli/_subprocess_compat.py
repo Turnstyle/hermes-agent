@@ -236,9 +236,32 @@ def no_prompt_git_kwargs() -> dict:
     env = dict(os.environ)
     env["GIT_TERMINAL_PROMPT"] = "0"
     env["GCM_INTERACTIVE"] = "Never"
+    try:
+        from agent.keychain_policy import keychain_access_forbidden
+        forbidden = keychain_access_forbidden()
+    except ImportError:
+        forbidden = _bootstrap_config_mentions_no_keychain()
+    if forbidden:  # auth.no_keychain: no configured helper/askpass may read an OS store either
+        env = noninteractive_git_env(env)
+        env.pop("GIT_ASKPASS", None)
+        env.pop("SSH_ASKPASS", None)
     # Every network git spawn (fetch/pull/shallow heal) runs under a console-less
     # desktop backend on Windows; hide the per-spawn console (#117781).
     return {"stdin": subprocess.DEVNULL, "env": env, "creationflags": windows_hide_flags()}
+
+def _bootstrap_config_mentions_no_keychain() -> bool:
+    """The update hand-off's bootstrap interpreter has no YAML parser: a profile config that
+    mentions ``no_keychain`` at all is treated as opted in (fail closed); one that never names
+    it cannot have enabled the policy, so its helpers keep authenticating as upstream."""
+    from hermes_constants import get_hermes_home
+
+    try:
+        return "no_keychain" in (get_hermes_home() / "config.yaml").read_text(encoding="utf-8-sig")
+    except FileNotFoundError:
+        return False
+    except (OSError, UnicodeDecodeError):
+        return True
+
 
 def suppress_platform_ver_console() -> None:
     """Stub ``platform._syscmd_ver`` on Windows so it never flashes a console. No-op elsewhere.

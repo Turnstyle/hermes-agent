@@ -13,6 +13,7 @@ import argparse
 from hermes_cli import kanban_db as kb
 from hermes_cli import kanban_db_dispatch as kbd
 from hermes_cli import kanban_db_notify as kbn
+from hermes_cli.kanban_pr_state import PR_REFRESH_MAX, PR_REFRESH_TIMEOUT_SECONDS
 
 
 def _arg(*flags: str, **kw):
@@ -258,6 +259,16 @@ _SPECS = [
                   "--provider <name>). Cleared together with the model."),
     ], help="Set or clear a task's model/provider override (takes effect on the next dispatch)"),
     _cmd("reclaim", [_TASK_ID, _RECLAIM_REASON], help="Release an active worker claim on a running task"),
+    _cmd("recover-ghost", [
+        _TASK_ID,
+        _arg("--run", type=int, required=True, dest="run_id", help="Expected running task_runs id"),
+        _arg("--apply", action="store_true", help="Apply the recovery after rechecking under a write lock"),
+        _arg("--done", action="store_true", help="Record completion evidence (Fleet: handoff only)"),
+        _arg("--evidence", help="Non-empty evidence required with --done"),
+        _arg("--expect", help="Expected dry-run fingerprint"),
+        _arg("--wait", type=_nonnegative_int, help="Seconds to wait for Fleet sync (default 60)"),
+        _json_flag(),
+    ], help="Safely recover a claimless running task (dry-run by default)"),
     _cmd("reassign", [
         _TASK_ID,
         _arg("profile", help="New profile name (or 'none' to unassign)"),
@@ -329,9 +340,11 @@ _SPECS = [
         _bulk_ids("schedule"),
     ], help="Park one or more tasks in Scheduled (waiting on time, not human input)"),
     _cmd("unblock", [
-        _reason("Optional reason/note — recorded as a comment before unblocking. Quote multi-word reasons."),
+        _arg("--to-todo", action="store_true", help="Move a currently blocked card to todo without immediate promotion."),
+        _arg("--expected-blocked-event-id", type=int, help="Refuse unless latest blocked event matches this ID (0 asserts no blocked history)."),
+        _reason("Reason/note (required for triage holds), recorded atomically with unblocking. Quote multi-word reasons."),
         _TASK_IDS,
-    ], help="Return blocked/scheduled tasks to ready, or todo while parents remain open"),
+    ], help="Resume blocked/scheduled tasks (parent-gated); clear triage holds without promotion"),
     _cmd("request-review", [
         _TASK_ID,
         _arg("--summary", help="What was implemented and how it was verified — shown to the reviewer."),
@@ -361,13 +374,19 @@ _SPECS = [
     ], help="Archive one or more tasks"),
     _cmd("tail", [_TASK_ID, _arg("--interval", type=float, default=1.0)], help="Follow a task's event stream"),
     _cmd("dispatch", [
-        _arg("--dry-run", action="store_true", help="Don't actually spawn processes; just print what would happen"),
+        _arg("--dry-run", action="store_true", help="Read-only diagnostic; skip reclaim and promotion"),
         _arg("--max", type=int, help="Cap number of spawns this pass"),
         _arg("--failure-limit", type=int, default=kbd.DEFAULT_FAILURE_LIMIT,
              help=f"Auto-block a task after this many consecutive non-success attempts "
                   f"(spawn_failed, timed_out, or crashed; default: {kbd.DEFAULT_FAILURE_LIMIT})"),
         _json_flag(),
     ], help="One dispatcher pass: reclaim stale, promote ready, spawn workers"),
+    _cmd("refresh-pr-state", [
+        _arg("--max-prs", type=int, default=PR_REFRESH_MAX,
+             help="Maximum PRs to query once (1-20; default: 20)"),
+        _arg("--timeout", type=float, default=PR_REFRESH_TIMEOUT_SECONDS,
+             help="Per-PR gh timeout in seconds (0-5; default: 5)"),
+    ], help="Refresh local PR-state cache for ready cards; never runs in dispatcher"),
     _cmd("daemon", [
         _arg("--interval", type=float, default=60.0, help="Seconds between dispatch ticks (default: 60)"),
         _arg("--max", type=int, help="Cap number of spawns per tick"),
@@ -425,10 +444,19 @@ _SPECS = [
          help="List known profiles + per-profile task counts (union of ~/.hermes/profiles/ and current assignees on the board)"),
     _cmd("context", [_TASK_ID],
          help="Print the full context a worker sees for a task (title + body + parent results + comments)."),
-    _cmd("specify", _triage_sweep_args("specify", "Specify", "specifier"),
-         help="Flesh out a triage-column task into a concrete spec (title + "
-              "body) and promote it to todo. Uses the auxiliary LLM "
-              "configured under auxiliary.triage_specifier."),
+    _cmd("specify", [
+        *_triage_sweep_args("specify", "Specify", "specifier"),
+        _arg("--keep-spec", action="store_true",
+             help="Bypass auxiliary LLM specification; keep title and body verbatim and promote triage to todo. "
+                  "Requires a single task_id, --expect-sha256, and --author. Incompatible with --all."),
+        _arg("--expect-sha256", metavar="HEX",
+             help="Verify task content hash before promotion. Expected "
+                  'SHA-256 of the UTF-8 bytes of compact JSON [title,body] (ensure_ascii=False, separators (",",":"), no trailing newline; null body distinct from empty string). '
+                  "Refuses promotion if hash mismatches. Requires --keep-spec."),
+    ],
+    help="Flesh out a triage-column task into a concrete spec (title + "
+         "body) and promote it to todo. Uses the auxiliary LLM "
+         "configured under auxiliary.triage_specifier (or --keep-spec to skip)."),
     _cmd("decompose", _triage_sweep_args("decompose", "Decompose", "decomposer"),
          help="Decompose a triage-column task into a graph of child tasks "
               "routed to specialist profiles by description. Falls back "

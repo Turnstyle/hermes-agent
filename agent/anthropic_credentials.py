@@ -29,6 +29,10 @@ from typing import Any, Dict, Optional
 from hermes_constants import get_hermes_home
 from utils import atomic_json_write, base_url_hostname
 from agent.secret_scope import get_secret as _get_secret
+from agent.keychain_policy import (
+    NoKeychainError, access_only_anthropic_credential, keychain_access_forbidden, no_keychain_enabled,
+    reject_keychain_operation,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -265,7 +269,7 @@ def _find_claude_code_keychain_item() -> Optional[tuple[str, dict[str, Any]]]:
     account matters because ``add-generic-password -U`` matches on account AND service — writing
     under another account would create a second item instead of updating the one Claude Code reads.
     """
-    if platform.system() != "Darwin":
+    if keychain_access_forbidden() or platform.system() != "Darwin":
         return None
     try:
         result = subprocess.run(
@@ -295,7 +299,7 @@ def _read_claude_code_keychain_payload() -> Optional[dict[str, Any]]:
     write can merge the rotated token triple over the existing metadata
     (``subscriptionType`` / ``rateLimitTier`` / ``scopes``) instead of clobbering it.
     """
-    if platform.system() != "Darwin":
+    if keychain_access_forbidden() or platform.system() != "Darwin":
         return None
     try:
         result = subprocess.run(
@@ -352,6 +356,8 @@ def claude_code_credentials_path() -> Path:
 
 
 def _read_claude_code_credentials_from_file() -> Optional[dict[str, Any]]:
+    if no_keychain_enabled():
+        return None
     data = _load_json_if_exists(claude_code_credentials_path(), "~/.claude/.credentials.json")
     return _claude_oauth_record(data, "claude_code_credentials_file") if data is not None else None
 
@@ -364,7 +370,7 @@ def read_claude_code_credentials() -> Optional[dict[str, Any]]:
     This is the only reader of the borrowed login, so ``auth.adopt_external_logins: false`` is enforced here:
     every resolver, pool seed/sync and 401 refresher then sees "no Claude Code login" and never touches the file."""
     from agent.credential_sources import adopt_external_logins_enabled
-    if not adopt_external_logins_enabled():
+    if no_keychain_enabled() or not adopt_external_logins_enabled():
         return None
     kc_creds = _read_claude_code_credentials_from_keychain()
     file_creds = _read_claude_code_credentials_from_file()
@@ -457,6 +463,7 @@ def _oauth_token_state(result: dict[str, Any], *, fallback_refresh_token: str = 
 
 def refresh_anthropic_oauth_pure(refresh_token: str, *, use_json: bool = False) -> dict[str, Any]:
     """Refresh an Anthropic OAuth token without mutating local credential files."""
+    reject_keychain_operation("Anthropic refresh-grant use")
     import urllib.parse
     if not refresh_token:
         raise ValueError("refresh_token is required")
@@ -475,6 +482,7 @@ def _refresh_oauth_token(creds: dict[str, Any]) -> Optional[str]:
     Claude Code refreshes on its own schedule, so we first re-read the live sources and adopt an already-rotated
     token instead of racing it into ``invalid_grant``. Read, decision, POST and write-back share the pool's
     path-keyed cross-process lock (else two profiles can spend one refresh token)."""
+    reject_keychain_operation("borrowed Claude refresh")
     try:
         from hermes_cli.auth import AUTH_LOCK_TIMEOUT_SECONDS, _auth_store_lock, env_float
         refresh_timeout_seconds = env_float("HERMES_ANTHROPIC_REFRESH_TIMEOUT_SECONDS", 20)
@@ -547,6 +555,7 @@ def _write_claude_code_credentials(
     """Commit refreshed credentials to ~/.claude/.credentials.json; ``CredentialPersistError`` on any failure (a
     corrupt existing file included). *scopes* (or the previously stored scopes) are persisted because Claude Code
     >=2.1.81 gates on ``"user:inference"`` being present."""
+    reject_keychain_operation("borrowed Claude credential writes")
     cred_path = claude_code_credentials_path()
     try:
         existing = json.loads(cred_path.read_text(encoding="utf-8-sig")) if cred_path.exists() else {}
@@ -590,7 +599,7 @@ def _mirror_claude_code_credentials_to_keychain(
     different login (``CLAUDE_CONFIG_DIR``) or a rotation Claude Code already made, and clobbering it
     would be the bug in the other direction. Best-effort: never raises, never creates an item.
     """
-    if platform.system() != "Darwin":
+    if keychain_access_forbidden() or platform.system() != "Darwin":
         return
     try:
         item = _find_claude_code_keychain_item()
@@ -619,6 +628,8 @@ def _mirror_claude_code_credentials_to_keychain(
 
 def _resolve_claude_code_token_from_credentials(creds: Optional[dict[str, Any]] = None) -> Optional[str]:
     """Resolve a token from Claude Code credential files, refreshing if needed."""
+    if no_keychain_enabled():
+        return None
     creds = creds or read_claude_code_credentials()
     if not creds:
         return None
@@ -655,6 +666,8 @@ def _resolve_anthropic_pool_token(*, skip_borrowed: bool = False) -> Optional[st
     try:
         from agent.credential_pool import AUTH_TYPE_OAUTH, load_pool
         entries, _pending = load_pool("anthropic")._available_entries(clear_expired=False, refresh=False)
+    except NoKeychainError:
+        raise
     except Exception:
         logger.debug("Failed to read Anthropic credential_pool", exc_info=True)
         return None
@@ -690,6 +703,8 @@ def _available_anthropic_token(token: Optional[str], model: Optional[str]) -> Op
         from agent.credential_pool import load_pool
         if load_pool("anthropic").token_is_blocked(token, model=model):
             return None
+    except NoKeychainError:
+        raise
     except Exception:
         # Credential discovery must remain available when the pool store is
         # unavailable or malformed.
@@ -702,6 +717,8 @@ def resolve_anthropic_token(*, model: Optional[str] = None) -> Optional[str]:
 
     With *model*, a token the credential pool has benched for that model resolves to ``None``
     instead of being handed straight back to the caller that just saw it rate-limited."""
+    if no_keychain_enabled():
+        return access_only_anthropic_credential()["access_token"]
     _read_creds = functools.cache(read_claude_code_credentials)  # read the file at most once per resolve
     token = _first_env("ANTHROPIC_TOKEN", "CLAUDE_CODE_OAUTH_TOKEN")
     if token:
@@ -720,6 +737,7 @@ def resolve_anthropic_token(*, model: Optional[str] = None) -> Optional[str]:
 
 def run_oauth_setup_token() -> Optional[str]:
     """Run 'claude setup-token' interactively; the resulting token or None. FileNotFoundError if no 'claude' CLI."""
+    reject_keychain_operation("delegated Claude CLI credential setup")
     from agent.anthropic_adapter import find_claude_code_cli  # late: the adapter imports this module
     claude_path = find_claude_code_cli("claude")
     if not claude_path:
@@ -762,6 +780,7 @@ def _generate_pkce() -> tuple:
 
 def run_hermes_oauth_login_pure() -> Optional[dict[str, Any]]:
     """Run Hermes-native OAuth PKCE flow and return credential state."""
+    reject_keychain_operation("interactive Anthropic refresh-grant setup")
     import webbrowser
     from urllib.parse import urlencode
     verifier, challenge = _generate_pkce()
@@ -817,6 +836,8 @@ def run_hermes_oauth_login_pure() -> Optional[dict[str, Any]]:
 
 def read_hermes_oauth_credentials() -> Optional[dict[str, Any]]:
     """Read Hermes-managed OAuth credentials from ~/.hermes/.anthropic_oauth.json."""
+    if no_keychain_enabled():
+        return None
     data = _load_json_if_exists(_get_hermes_oauth_file(), "Hermes OAuth credentials")
     return data if data is not None and data.get("accessToken") else None
 
@@ -828,6 +849,7 @@ def _write_hermes_oauth_credentials(
     ``target`` lets a named profile commit a grant it BORROWED from the global root back to the ROOT singleton
     instead of forking a copy under its own HERMES_HOME; without this write-through the next ``load_pool()``
     re-seeds the stale (consumed) pair from the file over the rotated pool entry."""
+    reject_keychain_operation("Anthropic refresh-grant persistence")
     _commit_private_json(
         target if target is not None else _get_hermes_oauth_file(),
         {"accessToken": access_token, "refreshToken": refresh_token, "expiresAt": expires_at_ms},

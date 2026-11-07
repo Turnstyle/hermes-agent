@@ -32,6 +32,9 @@ logger = logging.getLogger(__name__)
 TRANSCRIPT_CAP_DROP_REASON = "transcript_cap_drop"
 # Reason tag for agent-history snapshots: kept for manual operator recovery, never replayed.
 AGENT_HISTORY_REASON = "shutdown-with-unpersisted-agent-history"
+# Reason tag for API session chats accepted while the gateway drained for a restart (#63529): admitted
+# as canonical turns after startup (gateway/platforms/api_server_drain_spool.py), never as raw rows.
+GATEWAY_DRAINING_REASON = "gateway_draining"
 # Suffix for a spool file whose row the database rejected; no replay glob matches it.
 QUARANTINE_SUFFIX = ".bad"
 # Monotonic tiebreaker so same-second spool files replay in drop order.
@@ -383,6 +386,8 @@ def _recover_one_payload(session_db, path: Path, payload: dict[str, Any], *,
                          session_resolver=None, blocked_sessions: dict[str, int]) -> bool:
     """Append one flush payload to ``session_db``; False when it was not replayed (the file is kept,
     or quarantined when the database rejected the row itself)."""
+    if payload.get("reason") == GATEWAY_DRAINING_REASON:
+        return False  # a user row without its turn would read as answered: the drain-spool replay owns it
     # Cap-dropped transcript payloads carry the full message dict keyed by session_id: replay it
     # directly (#78182). This handles spool files that were never drained before a restart.
     if payload.get("reason") == TRANSCRIPT_CAP_DROP_REASON:

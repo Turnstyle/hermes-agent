@@ -124,10 +124,10 @@ def message_agent_tool_schema() -> dict:
     }
 
 
-def message_agent_authorized(agent: Any) -> bool:
-    """The ``message_agent`` gate: a protocol-enabled agent whose session is a managed
-    Bot-Mode canonical Bot Chat. Session-stable, so it is prompt-cache safe to re-evaluate
-    on every tool-snapshot rebuild. Never raises."""
+def is_canonical_bot_chat(agent: Any) -> bool:
+    """A protocol-enabled agent whose session is a managed Bot-Mode canonical Bot Chat. The
+    strict gate: Bot-Chat-only machinery keys on this, never on the wider
+    ``message_agent_authorized``. Never raises."""
     try:
         if not getattr(agent, "_bot_mode_protocol", True):
             return False
@@ -136,6 +136,82 @@ def message_agent_authorized(agent: Any) -> bool:
         # Managed-install check, NOT section non-emptiness: a SOUL.md carrying the
         # legacy protocol text gets an empty section but must still get the tool.
         return _session_title(agent) == BOT_CHAT_TITLE and is_bot_mode_managed(_agent_home(agent))
+    except Exception:  # pragma: no cover — must never break a turn
+        logger.debug("is_canonical_bot_chat failed", exc_info=True)
+        return False
+
+
+# Per-profile opt-in letting a messaging-gateway session (Slack, a Meet voice bridge, ...) carry
+# message_agent: ``bot_mode.message_agent_platforms`` in the PROFILE's own config.yaml, a list of
+# gateway platform names (``agent.platform``). These surfaces can never be opted in: the local
+# CLI/TUI has a Bot Chat, and the rest are internal runners with no human-facing reply route.
+_SURFACE_CFG_KEY = "message_agent_platforms"
+_SURFACE_NEVER = frozenset({"", "cli", "tui", "cron", "subagent", "batch", "kanban"})
+
+
+def is_kanban_worker(agent: Any) -> bool:
+    """A dispatcher-spawned kanban worker (the dispatcher stamps the session source); an inherited
+    card id alone is insufficient. Workers get one-way queued messaging with card reply routing."""
+    platform = str(getattr(agent, "platform", "") or "").strip().lower()
+    if platform in {"cron", "subagent", "batch", "tui"}:
+        return False
+    from gateway.session_context import get_session_env
+
+    source = str(getattr(agent, "_session_source", "") or get_session_env("HERMES_SESSION_SOURCE", "")).strip().lower()
+    return platform == "kanban" or source == "kanban"
+
+
+def message_agent_surfaces(home: str | os.PathLike | None) -> frozenset[str]:
+    """Platforms the profile at ``home`` opted into for message_agent outside Bot Chat (lower-cased,
+    never-list removed). Empty on any read problem. Never raises."""
+    try:
+        from tools.bot_mode_probe import _read_yaml_dict
+
+        cfg = _read_yaml_dict(Path(str(home)) / "config.yaml", _SURFACE_CFG_KEY) if home else None
+        raw = ((cfg or {}).get("bot_mode") or {}).get(_SURFACE_CFG_KEY)
+        if isinstance(raw, str):
+            raw = [raw]
+        if not isinstance(raw, (list, tuple)):
+            return frozenset()
+        return frozenset(str(p).strip().lower() for p in raw if str(p).strip()) - _SURFACE_NEVER
+    except Exception:  # pragma: no cover — defensive
+        logger.debug("message_agent_surfaces read failed", exc_info=True)
+        return frozenset()
+
+
+def _surface_authorized(agent: Any) -> bool:
+    """A non-Bot-Chat gateway session on a managed install whose profile opted its platform in.
+    Memoized on the agent per resolved home, so the tool list stays byte-stable for the session
+    (prompt-cache safe): a config edit takes effect on the next session, never mid-session."""
+    home = _agent_home(agent)
+    memo = getattr(agent, "_message_agent_surface_ok", None)
+    if isinstance(memo, dict) and isinstance(memo.get(home), bool):
+        return memo[home]
+    ok = False
+    try:
+        platform = str(getattr(agent, "platform", "") or "").strip().lower()
+        if platform and platform not in _SURFACE_NEVER and getattr(agent, "_bot_mode_protocol", True):
+            from tools.bot_mode_probe import is_bot_mode_managed
+
+            ok = platform in message_agent_surfaces(home) and is_bot_mode_managed(home)
+    except Exception:  # pragma: no cover — must never break a turn
+        logger.debug("message_agent surface gate failed", exc_info=True)
+    with contextlib.suppress(Exception):
+        if not isinstance(memo, dict):
+            memo = agent._message_agent_surface_ok = {}
+        memo[home] = ok
+    return ok
+
+
+def message_agent_authorized(agent: Any) -> bool:
+    """The ``message_agent`` gate: the canonical Bot Chat (``is_canonical_bot_chat``), a kanban
+    worker (``is_kanban_worker``), or a gateway session whose platform the profile opted in via
+    ``bot_mode.message_agent_platforms``. Session-stable, so it is prompt-cache safe to re-evaluate
+    on every tool-snapshot rebuild. Never raises."""
+    try:
+        if not getattr(agent, "_bot_mode_protocol", True):
+            return False
+        return is_canonical_bot_chat(agent) or _surface_authorized(agent) or is_kanban_worker(agent)
     except Exception:  # pragma: no cover — must never break a turn
         logger.debug("message_agent_authorized failed", exc_info=True)
         return False
@@ -248,9 +324,10 @@ def message_agent_tool(target: str = "", message: str = "", task_id: Optional[st
             _profile_name as _self_profile_name, _roster, is_bot_mode_managed,
         )
 
-        if _session_title(agent) != BOT_CHAT_TITLE:
-            return _err("message_agent is only available in a Bot Mode 'Bot Chat' session. "
-                        "This session is not one; do not retry.")
+        if not _dm_surface_allowed(agent, BOT_CHAT_TITLE):
+            return _err("message_agent is only available in a Bot Mode 'Bot Chat' session (or a gateway "
+                        "platform listed in this profile's bot_mode.message_agent_platforms). "
+                        "This session is neither; do not retry.")
         if not is_bot_mode_managed(home):
             return _err("This install is not Bot-Mode-managed (no bot roster); "
                         "message_agent is unavailable. Do not retry.")
@@ -302,6 +379,10 @@ def _dispatch(raw_target: str, content: str, sender: Sender, *, wake: Any) -> st
 
     root, me, roster_homes, peers = sender.root, sender.me, sender.roster_homes, sender.peers
     roster = list(roster_homes)
+    if is_kanban_worker(sender.agent):
+        from tools.fleet_message_sender import worker_one_way
+        return worker_one_way(sender.agent, me=me, home=sender.home, raw_target=raw_target, root=root,
+                              roster_homes=roster_homes, content=content, body=content)
     delivery = dict(task_id=sender.task_id, agent=sender.agent, wake=wake)
     # Attribution for the recipient's memory hooks; the text prefix stays the human-facing signature.
     author = {"id": f"bot:{me}", "name": _handle(me, roster), "is_bot": True, **sender.chain}
@@ -362,6 +443,14 @@ def _dispatch(raw_target: str, content: str, sender: Sender, *, wake: Any) -> st
     # profile for the runner's home lookup and is never executed.
     return _start_delivery([_hermes_cli(), "-p", resolved], content, f"@{_handle(resolved, roster)}",
                            stdin_file=False, profile_home=roster_homes[resolved], author=author, **delivery)
+
+
+def _dm_surface_allowed(agent: Any, bot_chat_title: str) -> bool:
+    """The dispatch-time surface gate (``message_agent_authorized``'s session half, re-checked so a
+    forged call fails): the Bot Chat title, an opted-in gateway platform, or a kanban worker."""
+    return _session_title(agent) == bot_chat_title or _surface_authorized(agent) or is_kanban_worker(agent)
+
+
 
 
 def _try_relay_delivery(root: Path, raw_target: str, content: str, me: str, *,
@@ -768,7 +857,10 @@ def _start_delivery(argv: list[str], content: str, label: str, *, stdin_file: bo
         try:
             record = _admit_live_dm(profile_home, dm_file, author)
         except LiveTargetUnavailableError as exc:
-            return _settled_no_send(dm_file, exc)
+            # A definite no-send: a recipient draining the fleet queue gets it durably queued instead.
+            from tools.fleet_message_sender import queue_after_no_send
+            return queue_after_no_send(_settled_no_send(dm_file, exc), recipient_home=profile_home, body=content,
+                                       author=author, label=label)
         except Exception as exc:
             return json.dumps({"status": "ambiguous", "delivery_id": _dm_delivery_id(dm_file),
                 "error": f"Live delivery admission could not be confirmed: {exc}. Do not resend.",
@@ -950,13 +1042,17 @@ def _wait_reply_main(reply_path: str, label: str, budget_seconds: str) -> int:
         if os.path.exists(reply_path):
             with open(reply_path, encoding="utf-8-sig") as fh:
                 d = json.load(fh)
+            code = str(d.get("reason") or "").strip()
             if d.get("error"):
                 # Typed reason code rides ahead of the free text so the sender can branch on it
                 # without parsing provider prose. See #93091.
-                code = str(d.get("reason") or "").strip()
                 tag = f" [reason: {code}]" if code else ""
-                print(f"Delivery to {label} failed{tag}: {d['error']}")
+                print(f"Delivery to {label} failed{tag}: {_relayed_error_text(reply_path, d['error'])}")
                 return 1
+            if code == "reply_not_relayed":  # tools.bot_failure_reasons.REPLY_NOT_RELAYED (stdlib-only lane)
+                print(f"Queued for {label}, not yet answered [reason: {code}]: the message was admitted and "
+                      f"will run there; do NOT resend. {d.get('reply') or ''}".rstrip())
+                return 0
             print(f"Reply from {label}:")
             print(d.get("reply") or "(empty reply)")
             return 0
@@ -965,6 +1061,18 @@ def _wait_reply_main(reply_path: str, label: str, budget_seconds: str) -> int:
     print(f"No reply from {label} within {budget_seconds}s. The message may still be delivered when "
           "the Desktop reconnects; do not resend blindly.")
     return 1
+
+
+def _relayed_error_text(reply_path: str, error: str) -> str:
+    """The relay target's failure, rewritten into actionable copy when it is that install's own
+    target-scope failure. The waiter may run on a bare interpreter without Hermes dependencies:
+    then the target's own text stands."""
+    try:
+        from tools.bot_relay import read_claimed_envelope, relayed_failure_error
+    except ImportError:
+        return error
+    root = Path(reply_path).parent.parent.parent
+    return relayed_failure_error(error, read_claimed_envelope(root, Path(reply_path).stem))
 
 
 def _delivery_main(args: list[str]) -> int:
