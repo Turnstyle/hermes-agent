@@ -170,6 +170,7 @@ class CursorACPClient:
         self._cwd = str(Path(acp_cwd or os.getcwd()).resolve())
         self._timeout = _effective_timeout(timeout)
         self._sessions = set()
+        self._released_deliveries = 0
         self._lock = threading.Lock()
         self._cancelled = False
         self.cleanup_error = None
@@ -184,6 +185,12 @@ class CursorACPClient:
             self._sessions.add(session)
             return session
 
+    @property
+    def prompt_deliveries(self):
+        """Monotonic count of prompts this client delivered, whether or not their session is still open."""
+        with self._lock:
+            return self._released_deliveries + sum(1 for session in self._sessions if session.prompt_delivered)
+
     def _release(self, session, primary_error=None):
         try:
             session.close()
@@ -197,7 +204,9 @@ class CursorACPClient:
             logger.warning("Cursor ACP cleanup failed; original outcome retained and replay disabled.")
         else:
             with self._lock:
-                self._sessions.discard(session)
+                if session in self._sessions:
+                    self._sessions.discard(session)
+                    self._released_deliveries += bool(session.prompt_delivered)
                 if not self._sessions:
                     self.cleanup_error = None
 
@@ -283,6 +292,14 @@ class CursorACPClient:
                     thoughts.append(delta.reasoning_content)
         finally:
             result.close()
+        if result.cursor_stop_reason == "cancelled":
+            # Cursor answers a cancel with a normal end of stream. The collected text is a partial,
+            # never a finished answer, and the delivered prompt must not be resent.
+            error = RuntimeError(
+                "Cursor ACP turn was cancelled before it finished; the answer is incomplete "
+                f"(stop reason: cancelled; native tool events: {len(result.cursor_native_tool_events)}).")
+            error.cursor_prompt_delivered = error.no_auto_replay = True
+            raise error
         reasoning = "".join(thoughts) or None
         return SimpleNamespace(model=model, usage=result.usage,
             cursor_native_tool_events=result.cursor_native_tool_events, cursor_usage=result.cursor_usage,

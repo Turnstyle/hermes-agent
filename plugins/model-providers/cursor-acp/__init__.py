@@ -8,6 +8,7 @@ from providers.base import ProviderProfile
 
 def _classify_error(error, **kwargs):
     if (getattr(error, "cursor_prompt_delivered", False)
+            or getattr(error, "no_auto_replay", False)  # tagged by Hermes' watchdog sites after delivery
             or getattr(error, "code", None) == "cursor_cleanup_failed"
             or getattr(error, "cursor_cleanup_failed", False)):
         return {"reason": "incomplete_response", "retryable": False, "should_fallback": False}

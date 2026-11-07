@@ -113,7 +113,11 @@ class _NonStreamRequest:
         # Wait briefly for the worker to notice the closed connection.
         self.thread.join(timeout=2.0)
         if self.result["error"] is None and self.result["response"] is None:
-            self.result["error"] = TimeoutError(timeout_message)
+            error = TimeoutError(timeout_message)
+            if self.clients.prompt_delivered():
+                # The worker is still blocked inside a request whose prompt the provider already received.
+                error.no_auto_replay = True
+            self.result["error"] = error
 
     def _model(self) -> str:
         return self.api_kwargs.get("model", "unknown")
@@ -312,7 +316,13 @@ class _NonStreamRequest:
             if agent._interrupt_requested:
                 self._interrupt(elapsed)
         if self.result["error"] is not None:
-            raise self.result["error"]
+            error = self.result["error"]
+            if getattr(error, "no_auto_replay", False) and isinstance(error, InterruptedError):
+                # A watchdog closed the session (explicit stops raise from ``_interrupt``): a failure, not a stop.
+                stopped = RuntimeError(str(error))
+                stopped.__dict__.update(error.__dict__)
+                raise stopped from error
+            raise error
         # Success — the provider proved responsive: clear the breaker (#58962).
         if self.result["response"] is not None:
             h._reset_stale_streak(agent)
