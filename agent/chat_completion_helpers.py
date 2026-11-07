@@ -2324,6 +2324,10 @@ _SUMMARY_ATTEMPT_BUILDERS = {"codex_responses": _codex_summary_attempt, "anthrop
 
 def handle_max_iterations(agent, messages: list, api_call_count: int) -> str:
     """Request a summary when max iterations are reached. Returns the final response text."""
+    from agent.turn_recovery import provider_forbids_response_replay
+    if provider_forbids_response_replay(agent):
+        from agent.turn_response_policy import no_replay_notice
+        return no_replay_notice(agent, "the iteration limit was reached before a final answer")
     warning = f"⚠️  Reached maximum iterations ({agent.max_iterations}). Requesting summary..."
     if getattr(agent, "suppress_status_output", False):
         # Strict machine-readable mode (-Q, oneshot): keep diagnostics off stdout. quiet_mode is
@@ -3562,6 +3566,14 @@ class _StreamingCall(StreamingWaitMonitor):
             return False
         # A provider may already have performed native effects, even when no
         # visible delta reached Hermes. Every automatic re-issue is unsafe.
+        from agent.turn_recovery import provider_forbids_response_replay
+        if provider_forbids_response_replay(self.agent) and (
+            self.clients.prompt_delivered() or self.deltas_were_sent["yes"]
+        ):
+            # Local decoder/emitter failures need not carry the native client's
+            # exception attributes. Positive request custody still forbids both
+            # same-prefix replay and downgrade, even for thinking/tool-only deltas.
+            e.no_auto_replay = True
         if getattr(e, "no_auto_replay", False):
             self.result["error"] = e
             return False

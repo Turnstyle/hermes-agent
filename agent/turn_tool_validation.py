@@ -103,6 +103,14 @@ def validate_tool_calls(
     _mixed_invalid_batch = bool(invalid_tool_calls) and any(
         tc.function.name in valid_names for tc in tool_calls
     )
+    if invalid_tool_calls:
+        from agent.turn_recovery import provider_forbids_response_replay
+        if provider_forbids_response_replay(agent):
+            from agent.turn_response_policy import terminal_delivered_response
+            return _verdict("return", terminal_delivered_response(
+                agent, messages=messages, api_calls=api_call_count, normalized=assistant_message,
+                conversation_history=conversation_history,
+                reason="it returned an unknown tool name"))
     if _mixed_invalid_batch:
         agent._invalid_tool_retries = 0
         _n_valid = sum(1 for tc in tool_calls if tc.function.name in valid_names)
@@ -161,6 +169,13 @@ def validate_tool_calls(
                 invalid_json_args.append((tc.function.name, str(e)))
 
     if invalid_json_args:
+        from agent.turn_recovery import provider_forbids_response_replay
+        if provider_forbids_response_replay(agent):
+            from agent.turn_response_policy import terminal_delivered_response
+            return _verdict("return", terminal_delivered_response(
+                agent, messages=messages, api_calls=api_call_count, normalized=assistant_message,
+                conversation_history=conversation_history,
+                reason="it returned malformed tool-call arguments"))
         invalid_names = {n for n, _ in invalid_json_args}
         # Routers may rewrite finish_reason "length" → "tool_calls", hiding
         # truncation; args not ending in } or ] (stripped) were cut off

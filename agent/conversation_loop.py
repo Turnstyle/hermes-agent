@@ -1462,6 +1462,28 @@ def _run_phase(fn, agent, state: _LoopState, **extra):
     return verdict
 
 
+def _finalize_response_policy_result(agent, s: _LoopState, result: Dict[str, Any]) -> Dict[str, Any]:
+    """Policy exits still owe normal turn cleanup, output hooks and durable finalization.
+
+    Non-policy early exits keep their existing behavior. A nonempty terminal answer
+    prevents finalization from issuing an iteration-limit summary request.
+    """
+    if result.get("_response_replay_policy") is not True:
+        return result
+    result.pop("_response_replay_policy")
+    s.final_response = result["final_response"]
+    s.failed = result.get("failed", False)
+    s._turn_exit_reason = "response_replay_forbidden" if result.get("error") else "completed"
+    finalized = finalize_turn(agent, **{
+        name: getattr(s, name)
+        for name in inspect.signature(finalize_turn).parameters if name != "agent"
+    })
+    # Preserve the typed honest terminal-error contract; keep the finalizer's output
+    # text/messages (including plugin transforms) and resource/lifecycle receipts.
+    finalized.update({k: v for k, v in result.items() if k not in {"messages", "final_response"}})
+    return finalized
+
+
 def _run_api_retry_loop(agent, s: _LoopState) -> Optional[Dict[str, Any]]:
     """One API call with its retry/recovery loop (guard → build → call → check, error handlers).
 
@@ -1473,10 +1495,12 @@ def _run_api_retry_loop(agent, s: _LoopState) -> Optional[Dict[str, Any]]:
             return _ng.result
         if _ng.action == "break":
             return None
+        response_returned = False
         try:
             _run_phase(build_api_request, agent, s)
             if _run_phase(perform_api_call, agent, s).action == "break":
                 return None
+            response_returned = True
             _rc = _run_phase(check_api_response, agent, s)
             if _rc.action == "return":
                 return _rc.result
@@ -1486,6 +1510,13 @@ def _run_api_retry_loop(agent, s: _LoopState) -> Optional[Dict[str, Any]]:
             if _run_phase(handle_api_interrupt, agent, s).action == "break":
                 return None
         except Exception as api_error:
+            from agent.turn_recovery import provider_forbids_response_replay
+            if response_returned and provider_forbids_response_replay(agent):
+                from agent.turn_response_policy import terminal_delivered_response
+                return terminal_delivered_response(
+                    agent, messages=s.messages, api_calls=s.api_call_count,
+                    conversation_history=s.conversation_history,
+                    reason=f"local response processing failed ({type(api_error).__name__})")
             _ae = _run_phase(handle_api_error, agent, s, api_error=api_error)
             if _ae.action == "return":
                 return _ae.result
@@ -1612,7 +1643,7 @@ def _run_conversation_turn(
 
         early_result = _run_api_retry_loop(agent, s)
         if early_result is not None:
-            return early_result
+            return _finalize_response_policy_result(agent, s, early_result)
 
         _rs = _run_phase(apply_retry_restarts, agent, s)
         if _rs.action == "break":
@@ -1620,6 +1651,7 @@ def _run_conversation_turn(
         if _rs.action == "continue":
             continue
 
+        response_tail = len(s.messages)
         try:
             _ri = _run_phase(normalize_model_response, agent, s)
             if _ri.action == "return":
@@ -1630,12 +1662,22 @@ def _run_conversation_turn(
                 run_tool_round if s.assistant_message.tool_calls else finish_text_response, agent, s
             )
             if _v.action == "return":
-                return _v.result
+                return _finalize_response_policy_result(agent, s, _v.result)
             if _v.action == "break":
                 break
             if _v.action == "continue":
                 continue
         except Exception as e:
+            from agent.turn_recovery import provider_forbids_response_replay
+            if provider_forbids_response_replay(agent) and not any(
+                m.get("role") == "tool" for m in s.messages[response_tail:]
+            ):
+                from agent.turn_response_policy import terminal_delivered_response
+                terminal = terminal_delivered_response(
+                    agent, messages=s.messages, api_calls=s.api_call_count,
+                    conversation_history=s.conversation_history,
+                    reason=f"local response/tool processing failed ({type(e).__name__})")
+                return _finalize_response_policy_result(agent, s, terminal)
             if _run_phase(handle_outer_loop_error, agent, s, e=e).action == "break":
                 break
 
