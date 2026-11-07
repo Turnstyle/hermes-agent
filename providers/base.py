@@ -143,6 +143,10 @@ class ProviderProfile:
     # patch catalog metadata; explicit user overrides still win. Exact model IDs.
     model_capabilities: dict[str, dict[str, Any]] = field(default_factory=dict)
 
+    # Delivered prompts may perform native effects. Successful answers from these
+    # providers must not be re-issued by text-based response recovery heuristics.
+    no_auto_replay: bool = False
+
     # ── Hooks (override in subclass for complex providers) ───
 
     def fetch_account_usage(

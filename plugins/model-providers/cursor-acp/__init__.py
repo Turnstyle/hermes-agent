@@ -43,5 +43,5 @@ class CursorACPProfile(ProviderProfile):
 register_provider(CursorACPProfile(
     name="cursor-acp", api_mode="chat_completions", env_vars=(), base_url="acp://cursor",
     auth_type="external_process", process_command="cursor-agent", process_args=("acp",),
-    classify_api_error=_classify_error,
+    classify_api_error=_classify_error, no_auto_replay=True,
 ))

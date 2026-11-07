@@ -1513,6 +1513,14 @@ def classify_codex_soft_failure(agent: Any, response: Any) -> Tuple[Any, Dict[st
     return classified, agent._extract_api_error_context(exc)
 
 
+def provider_forbids_response_replay(agent: Any) -> bool:
+    """Successful answers are delivered prompts, even without token usage evidence."""
+    from providers import get_provider_profile
+
+    profile = get_provider_profile(getattr(agent, "provider", ""))
+    return getattr(profile, "no_auto_replay", False) is True
+
+
 def validate_response_shape(agent: Any, response: Any) -> Tuple[bool, List[str]]:
     """Validate the raw provider response via the transport; ``(response_invalid,
     error_details)``. A Codex ``failed``/``cancelled`` status (e.g. quota exhaustion) is
@@ -1520,6 +1528,13 @@ def validate_response_shape(agent: Any, response: Any) -> Tuple[bool, List[str]]
     ``output_text`` is deferred to normalization."""
     if agent._get_transport().validate_response(response):
         return False, []
+    # Native-agent routes cannot emit an HTTP router shim. With unknown usage,
+    # those exact words are still a delivered model answer, not a retry signal.
+    if agent.api_mode == "chat_completions" and provider_forbids_response_replay(agent):
+        from agent.transports.chat_completions import is_router_timeout_shim
+
+        if is_router_timeout_shim(response):
+            return False, []
     if response is None:
         return True, ["response is None"]
     if agent.api_mode == "codex_responses":
