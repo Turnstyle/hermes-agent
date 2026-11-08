@@ -561,7 +561,6 @@ def create_titled_session(title):
     params = _creation_policy({})
     params["cwd"] = _launch_cwd()
     params["source"] = "cli"  # main's titled row is `cli` (hermes_cli.main._create_titled_session)
-    params["row_cwd"] = ""
     try:
         store = session_store()
         params.update(store.client_env())

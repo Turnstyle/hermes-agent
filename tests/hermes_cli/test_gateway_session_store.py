@@ -507,7 +507,7 @@ def test_row_cwd_is_mains_stamp_while_the_tools_run_in_terminal_cwd(store, monke
     assert [p for m, p in client.calls if m == "session.create"][-1]["row_cwd"] == ""
     monkeypatch.setattr(gss, "session_store", lambda: db)
     gss.create_titled_session("Fresh Named")
-    assert [p for m, p in client.calls if m == "session.create"][-1]["row_cwd"] == ""
+    assert "row_cwd" not in [p for m, p in client.calls if m == "session.create"][-1]
     monkeypatch.setenv("TERMINAL_ENV", "docker")  # main stamps no host cwd for a remote backend
     db.create({"toolsets": ["file"]})
     assert [p for m, p in client.calls if m == "session.create"][-1]["row_cwd"] == ""
