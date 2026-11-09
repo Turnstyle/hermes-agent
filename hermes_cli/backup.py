@@ -183,9 +183,9 @@ class _SQLiteSnapshotError(RuntimeError):
 
 
 @contextmanager
-def _backup_operation_lock(hermes_home: Path, timeout_seconds: float = 0.25):
+def _backup_operation_lock(hermes_home: Path, timeout_seconds: float = 0.25, *, lock_name=".backup.lock"):
     """Acquire one cross-process backup slot for full and quick snapshots."""
-    lock_path = hermes_home / ".backup.lock"
+    lock_path = hermes_home / lock_name
     lock_path.parent.mkdir(parents=True, exist_ok=True)
     handle = lock_path.open("a+b")
     acquired = False
@@ -1122,6 +1122,7 @@ _QUICK_STATE_FILES = (
 )
 
 _QUICK_DEFAULT_KEEP = 20
+_QUICK_MAX_TOTAL_BYTES = 8 << 30  # install-wide logical bytes; recovery anchors win over cap
 
 
 def _quick_snapshot_root(hermes_home: Optional[Path] = None) -> Path:
@@ -1237,15 +1238,27 @@ def create_quick_snapshot(
     keep: Optional[int] = None,
     max_file_size: Optional[int] = None,
 ) -> Optional[str]:
-    """Create one atomic quick snapshot while holding the shared backup slot."""
+    """Create an atomic quick snapshot, refusing admission rather than erasing recovery.
+
+    See backup_retention for finite install scope, logical byte accounting and
+    conservative orphan policy. Existing manifest/restore fields are unchanged.
+    """
+    from hermes_cli.backup_retention import prepare_capture
+    require_file_tooling("State snapshots")
     home = hermes_home or get_hermes_home()
-    with _backup_operation_lock(home):
-        return _create_quick_snapshot_locked(
-            label=label,
-            hermes_home=home,
-            keep=keep,
-            max_file_size=max_file_size,
-        )
+    scope = get_default_hermes_root(home=home)
+    with _backup_operation_lock(scope, lock_name=".quick-snapshot.lock"):
+        with _backup_operation_lock(home):
+            with prepare_capture(home, scope, _QUICK_STATE_FILES, max_file_size,
+                                 _QUICK_MAX_TOTAL_BYTES, _backup_operation_lock) as prepared:
+                if prepared is None:
+                    print("  ⚠ Snapshot refused: byte budget or accounting uncertainty; recovery preserved")
+                    return None
+                staging, roots = prepared
+                return _create_quick_snapshot_locked(
+                    label=label, hermes_home=home, keep=keep,
+                    max_file_size=max_file_size, staging_dir=staging, budget_roots=roots,
+                )
 
 
 def _create_quick_snapshot_locked(
@@ -1253,6 +1266,7 @@ def _create_quick_snapshot_locked(
     hermes_home: Optional[Path] = None,
     keep: Optional[int] = None,
     max_file_size: Optional[int] = None,
+    *, staging_dir: Path, budget_roots: list[Path],
 ) -> Optional[str]:
     """Create a quick state snapshot of critical files.
 
@@ -1272,6 +1286,7 @@ def _create_quick_snapshot_locked(
     Returns:
         Snapshot ID (timestamp-based), or None if no files found.
     """
+    from hermes_cli.backup_retention import next_sequence, quick_directory_files, retain
     home = hermes_home or get_hermes_home()
     root = _quick_snapshot_root(home)
 
@@ -1305,12 +1320,8 @@ def _create_quick_snapshot_locked(
         snap_id = f"{base_snap_id}-{suffix}"
         suffix += 1
     snap_dir = root / snap_id
-    staging_dir = root / f".{snap_id}.{os.getpid()}.partial"
-    shutil.rmtree(staging_dir, ignore_errors=True)
-    root.mkdir(parents=True, exist_ok=True, mode=0o700)
-    if os.name != "nt":
-        os.chmod(root, 0o700)
-    staging_dir.mkdir(mode=0o700, exist_ok=False)
+    if not snap_dir.is_relative_to(root) or snap_dir.parent != root:
+        raise ValueError("Snapshot label must be a single path component")
     logger.info("quick snapshot phase=copy status=started id=%s", snap_id)
 
     manifest: dict[str, int] = {}  # rel_path -> file size
@@ -1330,7 +1341,7 @@ def _create_quick_snapshot_locked(
             # Walk the directory and record each file individually in the
             # manifest so restore can treat them uniformly.  Empty dirs are
             # skipped (nothing to snapshot).
-            for sub in src.rglob("*"):
+            for sub in quick_directory_files(src):
                 if not sub.is_file():
                     continue
                 sub_rel = sub.relative_to(home).as_posix()
@@ -1429,6 +1440,7 @@ def _create_quick_snapshot_locked(
     # Write manifest
     meta = {
         "id": snap_id,
+        "capture_sequence": next_sequence(root),
         "timestamp": ts,
         "label": label,
         "file_count": len(manifest),
@@ -1454,33 +1466,23 @@ def _create_quick_snapshot_locked(
             elif path.is_file():
                 os.chmod(path, 0o600)
 
+    # Re-account actual staged bytes before publication. The candidate cannot
+    # replace any protected recovery until it is published successfully.
+    try:
+        fits, _ = retain(budget_roots, _QUICK_DEFAULT_KEEP if keep is None else keep,
+                         _QUICK_MAX_TOTAL_BYTES, prune_root=root)
+    except OSError:
+        fits = False
+    if not fits:
+        shutil.rmtree(staging_dir)
+        print("  ⚠ Snapshot refused: actual bytes exceed budget; recovery preserved")
+        return None
     os.replace(staging_dir, snap_dir)
-
-    # Auto-prune. Defaults preserve historical manual /snapshot behavior; callers
-    # with known high-churn safety snapshots (for example pre-update) can pass a
-    # smaller keep value so large state.db copies do not accumulate indefinitely.
-    # #68805 review: skip pruning when a present DB failed to capture OR was
-    # skipped for size — either way the snapshot is incomplete and the older
-    # snapshot may contain the only recoverable database.
-    incomplete = failed_dbs or oversized_skipped
-    if not incomplete:
-        _prune_quick_snapshots(root, keep=_QUICK_DEFAULT_KEEP if keep is None else keep)
-    else:
-        if oversized_skipped:
-            print(
-                "  ⚠ Skipping snapshot prune: DB file(s) skipped for size: "
-                + ", ".join(oversized_skipped)
-            )
-            logger.warning(
-                "Quick snapshot skipped oversized DB file(s): %s",
-                ", ".join(oversized_skipped),
-            )
-        logger.warning(
-            "Skipping snapshot prune because %d DB(s) failed to capture "
-            "and/or %d were oversized — preserving older snapshots as "
-            "recovery source",
-            len(failed_dbs), len(oversized_skipped),
-        )
+    try:
+        retain(budget_roots, _QUICK_DEFAULT_KEEP if keep is None else keep,
+               _QUICK_MAX_TOTAL_BYTES, prune_root=root)
+    except OSError as exc:
+        logger.warning("Snapshot published; retention uncertainty: %s", exc)
 
     logger.info(
         "quick snapshot phase=copy status=complete id=%s files=%d bytes=%d",
@@ -1999,37 +2001,31 @@ def restore_cron_jobs_all_profiles(
 
 
 def _prune_quick_snapshots(root: Path, keep: int = _QUICK_DEFAULT_KEEP) -> int:
-    """Remove oldest quick snapshots beyond the keep limit. Returns count deleted."""
-    if not root.exists():
+    """Count/byte pruning never overrides current, complete or per-DB recovery."""
+    from hermes_cli.backup_retention import retain
+    try:
+        return retain([root], keep, _QUICK_MAX_TOTAL_BYTES)[1]
+    except OSError as exc:
+        logger.warning("Snapshot pruning refused: %s", exc)
         return 0
-
-    dirs = sorted(
-        (
-            d
-            for d in root.iterdir()
-            if d.is_dir() and not d.name.startswith(".") and not d.name.endswith(".partial")
-        ),
-        key=lambda d: d.name,
-        reverse=True,
-    )
-
-    deleted = 0
-    for d in dirs[keep:]:
-        try:
-            shutil.rmtree(d)
-            deleted += 1
-        except OSError as exc:
-            logger.warning("Failed to prune snapshot %s: %s", d.name, exc)
-
-    return deleted
 
 
 def prune_quick_snapshots(
     keep: int = _QUICK_DEFAULT_KEEP,
     hermes_home: Optional[Path] = None,
 ) -> int:
-    """Manually prune quick snapshots. Returns count deleted."""
-    return _prune_quick_snapshots(_quick_snapshot_root(hermes_home), keep=keep)
+    """Prune in the same finite, serialized install scope as capture."""
+    from hermes_cli.backup_retention import retain, snapshot_roots
+    home = hermes_home or get_hermes_home()
+    scope = get_default_hermes_root(home=home)
+    with _backup_operation_lock(scope, lock_name=".quick-snapshot.lock"):
+        with _backup_operation_lock(home):
+            try:
+                return retain(snapshot_roots(scope, home), keep, _QUICK_MAX_TOTAL_BYTES,
+                              prune_root=_quick_snapshot_root(home))[1]
+            except OSError as exc:
+                logger.warning("Snapshot pruning refused: %s", exc)
+                return 0
 
 
 def run_quick_backup(args) -> None:
