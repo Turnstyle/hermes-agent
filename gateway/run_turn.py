@@ -1509,7 +1509,9 @@ class GatewayTurnMixin(GatewayBackgroundMixin, GatewayTurnPrepareMixin, GatewayT
             if _agent.model == _cfg_model or self._is_intentional_model_switch(session_key, _agent, _cfg_model):
                 return
         _agent._evicted_on_fallback = session_key or True
-        self._evict_cached_agent(session_key)
+        # The completed worker is still registered as running until outer turn
+        # settlement. Keep ownership there so cache-pop does not skip teardown.
+        self._evict_cached_agent(session_key, release_after_turn=True)
 
     async def _run_agent_finalize_streaming_tts(self, turn_ctx: TurnContext, adapter: Any) -> None:
         """Finalize the streaming-TTS consumer on the outer event-loop thread (covers early returns
