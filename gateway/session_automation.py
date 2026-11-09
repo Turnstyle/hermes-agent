@@ -428,7 +428,8 @@ def automation_display_metadata(metadata):
 # proof at execution from the target the pre-claim check validated, and the turn's resolver reads it.
 _AUTOMATION_METADATA = frozenset({'gateway_session_key', 'gateway_session_id', 'automation_identities',
     'turn_author', 'notification_origin', 'original_trigger_message_id', 'notification_category',
-    'display_kind', 'display_text', 'gateway_proven_session_id', 'gateway_completion_ids', 'heartbeat_tick'})
+    'display_kind', 'display_text', 'gateway_proven_session_id', 'gateway_completion_ids', 'heartbeat_tick',
+    'task_notice_id', 'task_notice_digest'})
 
 
 def admission_display(payload):
@@ -467,6 +468,8 @@ def snapshot_automation(authority, adapter, event, identity):
         raise RuntimeStoreError('invalid_params')
     notification = (automation_notification_metadata(event.metadata) | automation_display_metadata(event.metadata)
                     | _tick_metadata(event.metadata))
+    from gateway.session_task_notifications import task_notice_metadata
+    notification.update(task_notice_metadata(event.metadata))
     entry = _owner(runner, event, authority)
     from gateway.session_detached import detached_route_of
     if event.source.platform == Platform.LOCAL or detached_route_of(event.source):
@@ -551,6 +554,8 @@ def snapshot_local_automation(authority, adapter, event, identity, entry):
     descriptor = {'identity': identity, 'owner': ref.session_id,
                   'route': entry.session_key, 'target': entry.session_id}
     descriptor.update(automation_notification_metadata(event.metadata))
+    from gateway.session_task_notifications import task_notice_metadata
+    descriptor.update(task_notice_metadata(event.metadata))
     descriptor.update(automation_display_metadata(event.metadata))
     descriptor.update(_tick_metadata(event.metadata))
     if event.metadata.get('turn_author') is not None:
@@ -639,6 +644,23 @@ async def admit_automation(authority, adapter, event, identity, replaces=None, f
 _ROUTE_WAKE_PRODUCERS = frozenset({'kanban-wake', 'loop-tick'})
 
 
+def _is_route_wake(row, automation):
+    """Only trusted route wakes move across rotation, including stable task notices."""
+    if not automation:
+        return False
+    from gateway.session_task_notifications import task_notice_metadata
+    try:
+        notice = task_notice_metadata(automation)
+    except RuntimeStoreError:
+        return False
+    if notice:
+        return row['request_id'] == notice['task_notice_id'] == automation.get('identity')
+    if not row['request_id'].startswith('['):
+        return False
+    identity = json.loads(row['request_id'])
+    return isinstance(identity, list) and identity[:1] in ([p] for p in _ROUTE_WAKE_PRODUCERS)
+
+
 def route_owner_lock(runner, session_id):
     """*session_id*'s live owner's ``mutation_lock`` (a no-op without one). Held across a route
     rotation and ``move_route_wakes``: its drain refuses a wake on the rotated route, so it must not
@@ -678,9 +700,8 @@ async def move_route_wakes(runner, session_key, old_session_id):
     actor = SessionActor('messaging-control', authority.profile_id, frozenset({'session:submit', 'session:control'}), 'reset')
     for row in rows:
         automation = row['payload'].get('native_text_v1', {}).get('automation', {})
-        identity = json.loads(row['request_id']) if automation and row['request_id'].startswith('[') else None
         if (row['status'] != 'queued' or row['principal_id'] != 'automation:' + session_key
-                or not isinstance(identity, list) or identity[:1] not in ([p] for p in _ROUTE_WAKE_PRODUCERS)):
+                or not _is_route_wake(row, automation)):
             continue
         try:
             await authority.cancel_queued(actor, old, row['admission_id'])
@@ -834,7 +855,14 @@ async def admit_route_wake(runner, adapter, source, text, producer, metadata=Non
     if authority is None or entry is None:
         return False
     import uuid
-    identity = json.dumps([producer, key, uuid.uuid4().hex], separators=(',', ':'))
+    metadata = dict(metadata or {})
+    from gateway.session_task_notifications import replayed_notice, task_notice_metadata
+    notice = task_notice_metadata(metadata)
+    identity = notice.get('task_notice_id') or json.dumps([producer, key, uuid.uuid4().hex], separators=(',', ':'))
+    if notice:
+        authority._require_admission_open()
+        if replayed_notice(authority, _route_owner(authority, entry), key, identity, text, metadata):
+            return True
     if source.platform == Platform.LOCAL or detached_route_of(source):
         # A local route (or a conversation its chat moved past, answered by its app viewers) has no
         # messaging provenance to borrow: its wake rides local_automation_v1 on the live session's own

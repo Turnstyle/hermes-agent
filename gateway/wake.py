@@ -125,13 +125,24 @@ def _runner_draining(adapter: Any) -> bool:
 
 
 async def deliver_wake(adapter: Any, *, text: str, session_id: str = "", source: Any = None,
-                       notification_category: str = "result", profile: Optional[str] = None) -> None:
+                       notification_category: str = "result", profile: Optional[str] = None,
+                       notification_identity: Optional[dict] = None) -> None:
     """Deliver a wake turn to the session behind ``adapter``. ``session_id`` is the RAW session id
     (``X-Hermes-Session-Id`` / state.db key) — required for non-push adapters. ``source`` is the
     ``SessionSource`` for the synthetic event — required for push-capable adapters. ``profile``
     names the served profile that canonically owns a non-push destination; a non-default value is
     delivered in-process under the caller's profile scope (see ``_self_post_chat_completion``).
     Raises on failure so the caller can rewind/retry."""
+    from gateway.session_task_notifications import deliver_task_notification
+    if notification_identity is not None and not isinstance(notification_identity, dict):
+        raise WakeNotAccepted('invalid task notification identity', reason='invalid_params')
+    # Resolve raw native destinations before the API path: the API writer intentionally refuses
+    # CLI/Desktop history. A recognized owner's refusal must never become a second-writer attempt.
+    if not adapter_supports_push(adapter):
+        if await deliver_task_notification(adapter, session_id=session_id, text=text,
+                                           category=notification_category, identity=notification_identity,
+                                           profile=profile):
+            return
     if adapter_supports_push(adapter):
         if source is None:
             raise ValueError("deliver_wake: push-capable adapter requires a SessionSource")
@@ -141,11 +152,23 @@ async def deliver_wake(adapter: Any, *, text: str, session_id: str = "", source:
             from gateway.session_automation import admit_route_wake
             from hermes_state_runtime import RuntimeStoreError
             category = {"notification_category": notification_category} if notification_category != "result" else {}
+            if notification_identity is not None:
+                from gateway.session_task_notifications import notice_key
+                from hermes_state_runtime import RuntimeStoreError
+                try:
+                    identity, digest = notice_key(notification_identity, text, notification_category,
+                                                 bind_text=notification_identity.get('rendered_from_task') is not True)
+                except RuntimeStoreError as exc:
+                    raise WakeNotAccepted(str(exc), reason=exc.reason) from exc
+                category.update(task_notice_id=identity, task_notice_digest=digest)
             try:
                 if await admit_route_wake(runner, adapter, source, text, "kanban-wake", category):
                     return  # committed to the session FIFO: never interrupts the admitted turn
             except RuntimeStoreError as exc:
                 raise WakeNotAccepted(str(exc), reason=exc.reason) from exc
+        if source.platform.value == 'local':
+            raise WakeNotAccepted('native destination has no accepting authority',
+                                  reason='runtime_coordination_required')
         synth_event = MessageEvent(text=text, message_type=MessageType.TEXT, source=source, internal=True,
                                    metadata={"notification_category": notification_category})
         await admit_internal_event(adapter, synth_event)

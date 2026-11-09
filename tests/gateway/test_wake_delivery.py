@@ -12,6 +12,8 @@ import asyncio
 
 import pytest
 
+import hermes_bootstrap  # settle bootstrap before the per-test home-I/O guard
+
 from gateway.config import Platform
 from gateway.session import SessionSource
 from gateway.wake import deliver_wake, adapter_supports_push
@@ -30,14 +32,32 @@ class PushAdapter:
 class ApiServerLikeAdapter:
     supports_async_delivery = False
 
-    def __init__(self, host="0.0.0.0", port=0, key="test-key", model="hermes"):
+    def __init__(self, host="0.0.0.0", port=0, key="test-key", model="hermes", db=None):
         self._host = host
         self._port = port
         self._api_key = key
         self._model_name = model
+        self._db = db
+
+    def _ensure_session_db(self):
+        return self._db
 
     async def handle_message(self, event):  # pragma: no cover — must NOT be hit
         raise AssertionError("non-push adapter must not receive handle_message wakes")
+
+
+@pytest.fixture
+def api_db(tmp_path):
+    """Positive ordinary-API provenance; absence of native authority is not proof."""
+    from hermes_state import SessionDB
+
+    db = SessionDB(tmp_path / "state.db")
+    db.create_session("raw-sid-42", source="api_server")
+    db.create_session("sid", source="api_server")
+    try:
+        yield db
+    finally:
+        db.close()
 
 
 def _source():
@@ -67,7 +87,7 @@ async def _serve(handler):
     return runner, port
 
 
-def test_deliver_wake_non_push_self_posts_raw_session_id(monkeypatch):
+def test_deliver_wake_non_push_self_posts_raw_session_id(monkeypatch, api_db):
     """The self-post carries the RAW session id header + bearer auth and a
     single user message with stream=false — the exact entry point real
     gateway turns use."""
@@ -84,7 +104,7 @@ def test_deliver_wake_non_push_self_posts_raw_session_id(monkeypatch):
     async def run():
         runner, port = await _serve(handler)
         try:
-            adapter = ApiServerLikeAdapter(host="0.0.0.0", port=port, key="sekrit")
+            adapter = ApiServerLikeAdapter(host="0.0.0.0", port=port, key="sekrit", db=api_db)
             await deliver_wake(adapter, text="task done — wake", session_id="raw-sid-42")
         finally:
             await runner.cleanup()
@@ -98,7 +118,7 @@ def test_deliver_wake_non_push_self_posts_raw_session_id(monkeypatch):
     ]
 
 
-def test_deliver_wake_retries_429_then_succeeds(monkeypatch):
+def test_deliver_wake_retries_429_then_succeeds(monkeypatch, api_db):
     """HTTP 429 (max_concurrent_runs cap) is transient — retried with backoff."""
     from aiohttp import web
 
@@ -116,13 +136,52 @@ def test_deliver_wake_retries_429_then_succeeds(monkeypatch):
     async def run():
         runner, port = await _serve(handler)
         try:
-            adapter = ApiServerLikeAdapter(port=port)
+            adapter = ApiServerLikeAdapter(port=port, db=api_db)
             await deliver_wake(adapter, text="x", session_id="sid")
         finally:
             await runner.cleanup()
 
     asyncio.run(run())
     assert calls["n"] == 2
+
+
+@pytest.mark.parametrize("source", ["api_server", "bot_room"])
+def test_known_api_row_without_native_authority_keeps_self_post(tmp_path, monkeypatch, source):
+    """A real scoped API row, not an unbound adapter mock, permits legacy delivery."""
+    from unittest.mock import AsyncMock
+    from hermes_state import SessionDB
+    import gateway.wake as wake_mod
+
+    db = SessionDB(tmp_path / "state.db")
+    db.create_session("ordinary-api", source=source)
+    adapter = ApiServerLikeAdapter(db=db)
+    post = AsyncMock()
+    monkeypatch.setattr(wake_mod, "_self_post_chat_completion", post)
+    try:
+        asyncio.run(deliver_wake(adapter, text="handoff", session_id="ordinary-api"))
+        post.assert_awaited_once_with(adapter, text="handoff", session_id="ordinary-api")
+    finally:
+        db.close()
+
+
+@pytest.mark.parametrize("source", [None, "cli", "webui"])
+def test_unproven_or_native_row_without_authority_never_self_posts(tmp_path, monkeypatch, source):
+    from unittest.mock import AsyncMock
+    from hermes_state import SessionDB
+    from gateway.wake import WakeNotAccepted
+    import gateway.wake as wake_mod
+
+    db = SessionDB(tmp_path / "state.db")
+    if source is not None:
+        db.create_session("unproven", source=source)
+    post = AsyncMock()
+    monkeypatch.setattr(wake_mod, "_self_post_chat_completion", post)
+    try:
+        with pytest.raises(WakeNotAccepted):
+            asyncio.run(deliver_wake(ApiServerLikeAdapter(db=db), text="handoff", session_id="unproven"))
+        post.assert_not_awaited()
+    finally:
+        db.close()
 
 
 def test_persist_delegation_delivery_appends_delivery_row(tmp_path):

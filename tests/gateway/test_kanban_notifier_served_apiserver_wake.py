@@ -109,13 +109,29 @@ def served(tmp_path, monkeypatch):
     monkeypatch.setenv("HERMES_KANBAN_DB", str(tmp_path / "board.db"))
     monkeypatch.setattr(Path, "home", lambda: tmp_path)
     monkeypatch.setattr("hermes_constants.get_default_hermes_root", lambda: root)
-    return SimpleNamespace(root=root, builder=root / "profiles" / "builder", atlas=root / "profiles" / "atlas")
+    # Match the real adapter: resolve the DB under the CURRENT owner scope, never
+    # reuse the default store as proof for builder (or builder's proof for atlas).
+    databases = {}
+
+    def scoped_session_db(self):
+        home = Path(get_hermes_home())
+        if home not in databases:
+            databases[home] = SessionDB(home / "state.db", read_only=True)
+        return databases[home]
+
+    monkeypatch.setattr(RecordingApiServerAdapter, "_ensure_session_db", scoped_session_db,
+                        raising=False)
+    try:
+        yield SimpleNamespace(root=root, builder=root / "profiles" / "builder", atlas=root / "profiles" / "atlas")
+    finally:
+        for db in databases.values():
+            db.close()
 
 
 def _own_session(home: Path, session_id: str, profile_name: str) -> None:
     db = SessionDB(home / "state.db")
     try:
-        db.create_session(session_id, source="webui", profile_name=profile_name)
+        db.create_session(session_id, source="api_server", profile_name=profile_name)
     finally:
         db.close()
 
@@ -234,10 +250,10 @@ def test_internal_session_turn_targets_the_live_session_under_the_owner_profile(
     parent, tip = "20260918_010000_parent", "20260918_020000_tip"
     db = SessionDB(served.builder / "state.db")
     try:
-        db.create_session(parent, source="webui", profile_name="builder")
+        db.create_session(parent, source="api_server", profile_name="builder")
         db.append_message(parent, "user", "old turn")
         db.end_session(parent, "compression")
-        db.create_session(tip, source="webui", profile_name="builder", parent_session_id=parent)
+        db.create_session(tip, source="api_server", profile_name="builder", parent_session_id=parent)
         db.append_message(tip, "user", "live turn")
         assert db.resolve_resume_session_id(parent) == tip, "fixture must produce a live tip"
     finally:

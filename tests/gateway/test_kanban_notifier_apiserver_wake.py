@@ -10,6 +10,8 @@ Covers the wrong-session-wake / silent-loss fixes:
 
 import asyncio
 
+import pytest
+
 from gateway.config import Platform
 from gateway.platforms.base import SendResult
 from gateway.run import GatewayRunner
@@ -33,13 +35,17 @@ class SoftFailAdapter:
 class ApiServerLikeAdapter:
     supports_async_delivery = False
 
-    def __init__(self):
+    def __init__(self, db):
+        self._db = db
         self._host = "127.0.0.1"
         self._port = 8642
         self._api_key = "k"
         self._model_name = "hermes"
         self.handle_message_calls = []
         self.send_calls = 0
+
+    def _ensure_session_db(self):
+        return self._db
 
     async def send(self, chat_id, text, metadata=None):
         self.send_calls += 1
@@ -50,6 +56,20 @@ class ApiServerLikeAdapter:
 
     async def handle_message(self, event):
         self.handle_message_calls.append(event)
+
+
+@pytest.fixture
+def api_adapter(tmp_path):
+    """Only subscription destinations have proven API provenance, not the worker id."""
+    from hermes_state import SessionDB
+
+    db = SessionDB(tmp_path / "state.db")
+    for session_id in ("origin-session", "origin-a", "origin-b"):
+        db.create_session(session_id, source="api_server")
+    try:
+        yield ApiServerLikeAdapter(db)
+    finally:
+        db.close()
 
 
 async def _run_one_notifier_tick(monkeypatch, runner):
@@ -102,7 +122,7 @@ def _unseen_terminal_events(tid, platform, chat_id):
         conn.close()
 
 
-def test_apiserver_sub_wakes_subscription_destination_via_self_post(tmp_path, monkeypatch):
+def test_apiserver_sub_wakes_subscription_destination_via_self_post(tmp_path, monkeypatch, api_adapter):
     """An api_server subscription wakes its chat_id destination, not the
     task's worker-session provenance or a build_session_key()-derived session."""
     monkeypatch.setenv("HERMES_KANBAN_DB", str(tmp_path / "apiserver.db"))
@@ -120,7 +140,7 @@ def test_apiserver_sub_wakes_subscription_destination_via_self_post(tmp_path, mo
 
     monkeypatch.setattr(wake_mod, "_self_post_chat_completion", fake_self_post)
 
-    adapter = ApiServerLikeAdapter()
+    adapter = api_adapter
     runner = _make_runner({Platform.API_SERVER: adapter})
     asyncio.run(_run_one_notifier_tick(monkeypatch, runner))
 
@@ -145,7 +165,7 @@ def test_apiserver_sub_wakes_subscription_destination_via_self_post(tmp_path, mo
 
 
 def test_apiserver_subscriptions_have_independent_wake_destinations(
-    tmp_path, monkeypatch,
+    tmp_path, monkeypatch, api_adapter,
 ):
     monkeypatch.setenv("HERMES_KANBAN_DB", str(tmp_path / "apiserver-multi.db"))
     kb.init_db()
@@ -176,7 +196,7 @@ def test_apiserver_subscriptions_have_independent_wake_destinations(
     import gateway.wake as wake_mod
 
     monkeypatch.setattr(wake_mod, "_self_post_chat_completion", fake_self_post)
-    runner = _make_runner({Platform.API_SERVER: ApiServerLikeAdapter()})
+    runner = _make_runner({Platform.API_SERVER: api_adapter})
     asyncio.run(_run_one_notifier_tick(monkeypatch, runner))
 
     assert sorted(post["session_id"] for post in posts) == ["origin-a", "origin-b"]
@@ -186,7 +206,7 @@ def test_apiserver_subscriptions_have_independent_wake_destinations(
 
 
 def test_apiserver_wake_failure_rewinds_then_retries_destination(
-    tmp_path, monkeypatch,
+    tmp_path, monkeypatch, api_adapter,
 ):
     monkeypatch.setenv("HERMES_KANBAN_DB", str(tmp_path / "apiserver-retry.db"))
     kb.init_db()
@@ -207,7 +227,7 @@ def test_apiserver_wake_failure_rewinds_then_retries_destination(
         "_self_post_chat_completion",
         fail_once_then_succeed,
     )
-    runner = _make_runner({Platform.API_SERVER: ApiServerLikeAdapter()})
+    runner = _make_runner({Platform.API_SERVER: api_adapter})
 
     asyncio.run(_run_one_notifier_tick(monkeypatch, runner))
     assert _unseen_terminal_events(tid, "api_server", "origin-session")

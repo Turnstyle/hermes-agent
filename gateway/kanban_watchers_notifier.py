@@ -320,7 +320,8 @@ class _Collector:
         task = self.kb.get_task(conn, sub["task_id"])
         logger.debug("kanban notifier: claimed %d event(s) for %s on board %s cursor %s→%s",
                      len(events), sub["task_id"], slug, old_cursor, cursor)
-        return {"sub": sub, "old_cursor": old_cursor, "cursor": cursor, "events": events, "task": task, "board": slug}
+        return {"sub": sub, "old_cursor": old_cursor, "cursor": cursor, "events": events, "task": task, "board": slug,
+                "board_identity": str(Path(conn.execute('PRAGMA database_list').fetchone()[2]).resolve())}
 
     def collect_board(self, slug: str) -> None:
         """Claim events on one board, appending delivery dicts to ``deliveries``."""
@@ -516,6 +517,7 @@ class _KanbanNotification:
         self.sub_key = (sub["task_id"], sub["platform"], sub["chat_id"], sub.get("thread_id") or "")
         mode = sub.get("delivery_mode") or "notify"
         self.wake_agent = mode in ("notify+wake", "wake")
+        self.notification_identity = None
         self.send_passive = mode != "wake"
         # Worker handoff carried into the synthetic wake turn so the woken
         # creator doesn't re-decompose work already on the board.
@@ -640,7 +642,8 @@ class _KanbanNotification:
             async with self._owner_scope():
                 await deliver_wake(self.adapter, text=self.synth, session_id=self.session_key,
                                    profile=self._served_wake_profile(),
-                                   notification_category="diagnostic" if self.wake_diagnostic else "result")
+                                   notification_category="diagnostic" if self.wake_diagnostic else "result",
+                                   notification_identity=self.notification_identity)
             self._log_woke()
             return
         from gateway.session import SessionSource
@@ -669,7 +672,8 @@ class _KanbanNotification:
                 raise RuntimeError(f"Kanban wake profile {self.sub_profile!r} no longer exists")
         async with _async_profile_runtime_scope(self.runner._resolve_profile_home_for_source(_source)):
             await deliver_wake(self.adapter, text=self.synth, session_id=self.session_key, source=_source,
-                               notification_category="diagnostic" if self.wake_diagnostic else "result")
+                               notification_category="diagnostic" if self.wake_diagnostic else "result",
+                               notification_identity=self.notification_identity)
         self._log_woke()
 
     async def _send_event(self, ev: Any, msg: str) -> bool:
@@ -772,12 +776,9 @@ class _KanbanNotification:
                 return
             # All text pings delivered (or skipped for non-push / wake-only).
             original_events = self.d["events"]
-            from gateway.warning_notifications import warning_notifications_enabled
-            split = not warning_notifications_enabled(self.platform_str)
-            wake_groups = ([original_events] if not split else [
-                [ev for ev in original_events if diagnostic_event(ev)],
-                [ev for ev in original_events if not diagnostic_event(ev)],
-            ])
+            # A claim window is mutable on rewind. Each durable event is its own immutable input,
+            # in event order, including when diagnostic presentation is disabled.
+            wake_groups = [[ev] for ev in original_events]
             wake_payloads = []
             for events in wake_groups:
                 if not events:
@@ -788,7 +789,13 @@ class _KanbanNotification:
                     self.format_event(ev)
                 self.build_wake_text()
                 if self.wake_kinds:
-                    wake_payloads.append((self.synth, self.wake_diagnostic, self.wake_kinds))
+                    ev = events[0]
+                    identity = dict(board=self.d.get('board_identity') or self.board_slug or '',
+                                    task_id=self.task_id, event_id=ev.id, platform=self.platform_str,
+                                    chat_id=self.sub['chat_id'], thread_id=self.sub.get('thread_id') or '',
+                                    notifier_profile=self.sub_profile, rendered_from_task=True,
+                                    payload={'kind': ev.kind, 'payload': ev.payload or {}})
+                    wake_payloads.append((self.synth, self.wake_diagnostic, self.wake_kinds, identity))
             self.d = {**self.d, "events": original_events}
         is_push = self.is_push_adapter
         from gateway.wake import WakeNotAccepted
@@ -796,7 +803,7 @@ class _KanbanNotification:
         # A requested wake is required even when its passive ping already landed.
         if wake_payloads:
             try:
-                for self.synth, self.wake_diagnostic, self.wake_kinds in wake_payloads:
+                for self.synth, self.wake_diagnostic, self.wake_kinds, self.notification_identity in wake_payloads:
                     await self.wake()
                 self.clear_failures()
             except WakeNotAccepted:
