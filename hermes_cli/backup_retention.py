@@ -15,7 +15,7 @@ import socket
 import stat
 import tempfile
 import time
-from contextlib import contextmanager
+from contextlib import ExitStack, contextmanager
 
 logger = logging.getLogger(__name__)
 PARTIAL_TTL = 24 * 60 * 60
@@ -175,13 +175,19 @@ def reap_partials(roots, lock):
                 if not (p / '.backup.lock').is_file():
                     continue
                 with lock(p, timeout_seconds=0):
-                    shutil.rmtree(p)
+                    pass
+                # Close the in-tree Windows handle before deletion. The caller
+                # still holds the install lock; the proven-dead owner cannot
+                # resume, and a live/reused PID was excluded above.
+                shutil.rmtree(p)
             except (OSError, ValueError, KeyError, TypeError, BackupInProgressError):
                 continue
 
 
 def quick_directory_files(directory):
     """Do not even descend into runtime trees or follow source directory links."""
+    if directory.is_symlink() or is_reparse(directory):
+        return
     def walk_error(exc):
         raise exc
     for base, dirs, files in os.walk(directory, followlinks=False, onerror=walk_error):
@@ -246,5 +252,8 @@ def prepare_capture(home, scope, selected, max_file_size, budget, lock):
         yield None
         return
     # Exceptions in the copy body intentionally leave an owned crash partial.
-    with lock(stage):
-        yield stage, roots
+    with ExitStack() as lease:
+        lease.enter_context(lock(stage))
+        # Publisher closes only this lease before tree mutation; the install
+        # and home locks remain held until prepare_capture has exited.
+        yield stage, roots, lease.close

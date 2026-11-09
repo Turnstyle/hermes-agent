@@ -1254,10 +1254,11 @@ def create_quick_snapshot(
                 if prepared is None:
                     print("  ⚠ Snapshot refused: byte budget or accounting uncertainty; recovery preserved")
                     return None
-                staging, roots = prepared
+                staging, roots, close_staging_lease = prepared
                 return _create_quick_snapshot_locked(
                     label=label, hermes_home=home, keep=keep,
                     max_file_size=max_file_size, staging_dir=staging, budget_roots=roots,
+                    close_staging_lease=close_staging_lease,
                 )
 
 
@@ -1266,7 +1267,7 @@ def _create_quick_snapshot_locked(
     hermes_home: Optional[Path] = None,
     keep: Optional[int] = None,
     max_file_size: Optional[int] = None,
-    *, staging_dir: Path, budget_roots: list[Path],
+    *, staging_dir: Path, budget_roots: list[Path], close_staging_lease: Callable[[], None],
 ) -> Optional[str]:
     """Create a quick state snapshot of critical files.
 
@@ -1428,6 +1429,7 @@ def _create_quick_snapshot_locked(
         )
 
     if not manifest:
+        close_staging_lease()
         shutil.rmtree(staging_dir, ignore_errors=True)
         if failed_dbs:
             # Distinguish "nothing to snapshot" from "state.db present but unreadable"
@@ -1466,6 +1468,9 @@ def _create_quick_snapshot_locked(
             elif path.is_file():
                 os.chmod(path, 0o600)
 
+    # No open in-tree lease may span rename/deletion on Windows. Both outer
+    # locks still fence cooperating captures/reapers, including rejection.
+    close_staging_lease()
     # Re-account actual staged bytes before publication. The candidate cannot
     # replace any protected recovery until it is published successfully.
     try:
