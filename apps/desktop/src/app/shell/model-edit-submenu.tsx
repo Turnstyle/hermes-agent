@@ -10,7 +10,7 @@ import {
 } from '@/components/ui/dropdown-menu'
 import { Switch } from '@/components/ui/switch'
 import { useI18n } from '@/i18n'
-import { isThinkingEnabled, REASONING_EFFORTS, resolveReasoningEffort } from '@/lib/reasoning-effort'
+import { isThinkingEnabled, resolveReasoningEffort, supportedReasoningEfforts } from '@/lib/reasoning-effort'
 
 // Hermes' real reasoning levels live in lib/reasoning-effort; `none` is owned
 // by the Thinking toggle, not the radio.
@@ -63,6 +63,7 @@ interface ModelEditSubmenuProps {
    *  routes, whose upstream rejects a disable — the toggle is hidden rather
    *  than offered as a control that silently does nothing. */
   canDisableReasoning?: boolean
+  supportedEfforts?: string[] | null
   /** The profile's configured default effort — what an unset row inherits.
    *  Passed in (not read from a store) so this submenu stays pure. */
   defaultEffort: string
@@ -109,7 +110,8 @@ function ModelEditSubmenuBody({
   isActive,
   onSelectModel,
   onSetOptions,
-  reasoning
+  reasoning,
+  supportedEfforts
 }: ModelEditSubmenuProps) {
   const { t } = useI18n()
   const copy = t.shell.modelOptions
@@ -167,7 +169,7 @@ function ModelEditSubmenuBody({
           <DropdownMenuSeparator className="mx-0" />
           <DropdownMenuLabel className={dropdownMenuSectionLabel}>{copy.effort}</DropdownMenuLabel>
           <DropdownMenuRadioGroup onValueChange={value => onSetOptions({ effort: value })} value={effortValue}>
-            {REASONING_EFFORTS.map(value => (
+            {supportedReasoningEfforts(supportedEfforts).map(value => (
               <DropdownMenuRadioItem
                 className={dropdownMenuRow}
                 key={value}

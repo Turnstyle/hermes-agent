@@ -448,6 +448,8 @@ export interface ModelCapabilities {
   can_disable_reasoning?: boolean
   fast: boolean
   reasoning: boolean
+  /** Route-owned effort levels; absent metadata keeps the generic scale. */
+  supported_efforts?: string[] | null
 }
 
 export interface ModelOptionsResponse {

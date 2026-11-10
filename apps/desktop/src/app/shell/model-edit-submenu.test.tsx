@@ -24,6 +24,8 @@ afterEach(() => {
 
 // Render the submenu inside an open menu/sub so its content (switches) mounts.
 function renderSubmenu(opts: {
+  canDisableReasoning?: boolean
+  supportedEfforts?: string[] | null
   defaultEffort?: string
   effort?: string
   fastControl: FastControl
@@ -38,6 +40,8 @@ function renderSubmenu(opts: {
         <DropdownMenuSub open>
           <DropdownMenuSubTrigger>edit</DropdownMenuSubTrigger>
           <ModelEditSubmenu
+            canDisableReasoning={opts.canDisableReasoning}
+            supportedEfforts={opts.supportedEfforts}
             defaultEffort={opts.defaultEffort ?? 'medium'}
             effort={opts.effort ?? 'medium'}
             fastControl={opts.fastControl}
@@ -127,5 +131,46 @@ describe('ModelEditSubmenu reports edits without performing them', () => {
     fireEvent.click(screen.getByRole('switch'))
 
     expect(onSelectModel).toHaveBeenCalledWith('m1-fast')
+  })
+})
+
+describe('route levels preserve reasoning gates', () => {
+  it('keeps off on Thinking and inherits the profile default', () => {
+    const onSetOptions = vi.fn()
+    renderSubmenu({
+      defaultEffort: 'high',
+      effort: '',
+      fastControl: { kind: 'none' },
+      onSetOptions,
+      reasoning: true,
+      supportedEfforts: ['low', 'medium', 'high']
+    })
+    expect(screen.getByRole('menuitemradio', { name: 'High' }).getAttribute('aria-checked')).toBe('true')
+    expect(screen.queryByRole('menuitemradio', { name: /none|off/i })).toBeNull()
+    fireEvent.click(screen.getByRole('switch'))
+    expect(onSetOptions).toHaveBeenCalledWith({ effort: 'none' })
+  })
+
+  it('hides Thinking on mandatory routes while keeping allowed levels', () => {
+    renderSubmenu({
+      canDisableReasoning: false,
+      fastControl: { kind: 'none' },
+      onSetOptions: vi.fn(),
+      reasoning: true,
+      supportedEfforts: ['low', 'medium', 'high']
+    })
+    expect(screen.queryByRole('switch')).toBeNull()
+    expect(screen.getAllByRole('menuitemradio').map(item => item.textContent)).toEqual(['Low', 'Medium', 'High'])
+  })
+
+  it('hides all reasoning controls for nonreasoning models even with metadata', () => {
+    renderSubmenu({
+      fastControl: { kind: 'none' },
+      onSetOptions: vi.fn(),
+      reasoning: false,
+      supportedEfforts: ['low', 'medium', 'high']
+    })
+    expect(screen.queryByRole('switch')).toBeNull()
+    expect(screen.queryByRole('menuitemradio')).toBeNull()
   })
 })

@@ -7,7 +7,8 @@ import {
   REASONING_EFFORT_VALUES,
   REASONING_EFFORTS,
   reasoningEffortLabel,
-  resolveReasoningEffort
+  resolveReasoningEffort,
+  supportedReasoningEfforts
 } from './reasoning-effort'
 
 describe('reasoning-effort', () => {
@@ -50,4 +51,29 @@ describe('reasoning-effort', () => {
     expect(resolveReasoningEffort('none')).toBe('')
     expect(resolveReasoningEffort('bogus')).toBe(DEFAULT_REASONING_EFFORT)
   })
+})
+
+describe('route-owned effort metadata', () => {
+  it('orders, deduplicates and excludes off and unknown values', () => {
+    expect(supportedReasoningEfforts(['high', 'none', 'low', 'high', 'future', 'medium'])).toEqual([
+      'low',
+      'medium',
+      'high'
+    ])
+  })
+
+  it.each([undefined, null, 42, 'low', {}, [], ['future'], ['none']])(
+    'preserves the generic scale for unusable metadata %j',
+    capability => {
+      expect(supportedReasoningEfforts(capability)).toEqual([
+        'minimal',
+        'low',
+        'medium',
+        'high',
+        'xhigh',
+        'max',
+        'ultra'
+      ])
+    }
+  )
 })
