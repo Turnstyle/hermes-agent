@@ -52,3 +52,14 @@ export function resolveReasoningEffort(effort: string, fallback: string = DEFAUL
 
   return isReasoningEffort(value) ? value : DEFAULT_REASONING_EFFORT
 }
+
+/** Use route-owned levels when known, otherwise preserve the generic scale. */
+export function supportedReasoningEfforts(supported: unknown): readonly ReasoningEffort[] {
+  if (!Array.isArray(supported)) {
+    return REASONING_EFFORTS
+  }
+
+  const efforts = REASONING_EFFORTS.filter(value => supported.includes(value))
+
+  return efforts.length ? efforts : REASONING_EFFORTS
+}

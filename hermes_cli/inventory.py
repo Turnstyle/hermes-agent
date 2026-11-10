@@ -269,11 +269,36 @@ def _reasoning_catalog_reader(slug: str):
     return read
 
 
+def _local_gemini_efforts(model: str, base_url: str | None) -> list[str] | None:
+    """The local Gemini bridge serves only these three reasoning levels."""
+    from urllib.parse import urlsplit
+
+    if model not in ("gemini-4-argon", "gemini-3.8-flash") or not isinstance(base_url, str):
+        return None
+    # urlsplit strips some control characters; reject them before parsing.
+    if any(c.isspace() or ord(c) < 32 or ord(c) == 127 for c in base_url) or "?" in base_url or "#" in base_url:
+        return None
+    try:
+        url = urlsplit(base_url)
+        matches = (
+            url.scheme == "http"
+            and url.hostname in ("127.0.0.1", "localhost", "::1")
+            and url.netloc.rsplit(":", 1)[0].lower() in ("127.0.0.1", "localhost", "[::1]")
+            and url.port == 8931
+            and url.path in ("/v1", "/v1/")
+            and url.username is None
+            and url.password is None
+        )
+    except ValueError:
+        return None
+    return ["low", "medium", "high"] if matches else None
+
+
 def _apply_capabilities(rows: list[dict]) -> None:
     """Attach ``{model: {fast, reasoning, ...}}`` per row. ``reasoning`` defaults True when the catalog is
     silent (the dial is a no-op on models that ignore it; hiding it from a capable model is worse). A
     serving aggregator's detail overrides models.dev (adds ``can_disable_reasoning``). ``supported_efforts``
-    is deliberately NOT forwarded — it under-reports levels that work."""
+    from aggregators is deliberately NOT forwarded — it under-reports levels that work."""
     from hermes_cli.models import model_supports_fast_mode
 
     try:
@@ -309,6 +334,10 @@ def _apply_capabilities(rows: list[dict]) -> None:
                     entry["reasoning"] = False
                 elif detail:
                     entry["can_disable_reasoning"] = not detail.get("mandatory")
+
+            efforts = _local_gemini_efforts(model, row.get("api_url"))
+            if efforts is not None:
+                entry["supported_efforts"] = efforts
 
             caps[model] = entry
 
