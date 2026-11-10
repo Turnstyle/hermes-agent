@@ -578,49 +578,68 @@ describe('ModelMenuPanel refresh reconcile × guarded-switch confirm handshake',
   })
 })
 
-
 describe('composer route-owned reasoning levels', () => {
-  it.each(['gemini-4-argon', 'gemini-3.8-flash'])(
-    'edits active %s through the catalog submenu', async model => {
-      $currentProvider.set('custom')
-      $currentModel.set(model)
-      getGlobalModelOptions.mockResolvedValue({ providers: [{
-        slug: 'custom', name: 'Local', models: [model],
-        capabilities: { [model]: { fast: false, reasoning: true, supported_efforts: ['low', 'medium', 'high'] } }
-      }] })
-      const { content, requestGateway } = renderPanel()
-      await content.findByText('Local')
-      const row = screen.getAllByRole('menuitem').filter(item => item.getAttribute('aria-haspopup') === 'menu')[0]
-      fireEvent.keyDown(row, { key: 'ArrowRight' })
-      const radios = await screen.findAllByRole('menuitemradio')
-      expect(radios.map(item => item.textContent)).toEqual(['Low', 'Medium', 'High'])
-      fireEvent.click(radios[2])
-      expect(requestGateway).toHaveBeenCalledWith('config.set', {
-        key: 'reasoning', session_id: 'runtime-1', value: 'high'
-      })
-    }
-  )
+  it.each(['gemini-4-argon', 'gemini-3.8-flash'])('edits active %s through the catalog submenu', async model => {
+    $currentProvider.set('custom')
+    $currentModel.set(model)
+    getGlobalModelOptions.mockResolvedValue({
+      providers: [
+        {
+          slug: 'custom',
+          name: 'Local',
+          models: [model],
+          capabilities: { [model]: { fast: false, reasoning: true, supported_efforts: ['low', 'medium', 'high'] } }
+        }
+      ]
+    })
+    const { content, requestGateway } = renderPanel()
+    await content.findByText('Local')
+    const row = screen.getAllByRole('menuitem').filter(item => item.getAttribute('aria-haspopup') === 'menu')[0]
+    fireEvent.keyDown(row, { key: 'ArrowRight' })
+    const radios = await screen.findAllByRole('menuitemradio')
+    expect(radios.map(item => item.textContent)).toEqual(['Low', 'Medium', 'High'])
+    fireEvent.click(radios[2])
+    expect(requestGateway).toHaveBeenCalledWith('config.set', {
+      key: 'reasoning',
+      session_id: 'runtime-1',
+      value: 'high'
+    })
+  })
 })
 
-
 describe('composer capability isolation', () => {
-  it.each(['claude-opus-4.6', 'unknown-model'])(
-    'does not borrow Gemini levels for active %s', async model => {
-      $currentProvider.set('custom')
-      $currentModel.set(model)
-      getGlobalModelOptions.mockResolvedValue({ providers: [{
-        slug: 'custom', name: 'Local', models: ['gemini-4-argon', model],
-        capabilities: { 'gemini-4-argon': {
-          fast: false, reasoning: true, supported_efforts: ['low', 'medium', 'high']
-        } }
-      }] })
-      const { content } = renderPanel()
-      await content.findByText('Local')
-      const rows = screen.getAllByRole('menuitem').filter(item => item.getAttribute('aria-haspopup') === 'menu')
-      fireEvent.keyDown(rows[1], { key: 'ArrowRight' })
-      const radios = await screen.findAllByRole('menuitemradio')
-      expect(radios.map(item => item.textContent))
-        .toEqual(['Minimal', 'Low', 'Medium', 'High', 'Extra High', 'Max', 'Ultra'])
-    }
-  )
+  it.each(['claude-opus-4.6', 'unknown-model'])('does not borrow Gemini levels for active %s', async model => {
+    $currentProvider.set('custom')
+    $currentModel.set(model)
+    getGlobalModelOptions.mockResolvedValue({
+      providers: [
+        {
+          slug: 'custom',
+          name: 'Local',
+          models: ['gemini-4-argon', model],
+          capabilities: {
+            'gemini-4-argon': {
+              fast: false,
+              reasoning: true,
+              supported_efforts: ['low', 'medium', 'high']
+            }
+          }
+        }
+      ]
+    })
+    const { content } = renderPanel()
+    await content.findByText('Local')
+    const rows = screen.getAllByRole('menuitem').filter(item => item.getAttribute('aria-haspopup') === 'menu')
+    fireEvent.keyDown(rows[1], { key: 'ArrowRight' })
+    const radios = await screen.findAllByRole('menuitemradio')
+    expect(radios.map(item => item.textContent)).toEqual([
+      'Minimal',
+      'Low',
+      'Medium',
+      'High',
+      'Extra High',
+      'Max',
+      'Ultra'
+    ])
+  })
 })

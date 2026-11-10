@@ -53,17 +53,27 @@ describe('reasoning-effort', () => {
   })
 })
 
-
 describe('route-owned effort metadata', () => {
   it('orders, deduplicates and excludes off and unknown values', () => {
-    expect(supportedReasoningEfforts(['high', 'none', 'low', 'high', 'future', 'medium']))
-      .toEqual(['low', 'medium', 'high'])
+    expect(supportedReasoningEfforts(['high', 'none', 'low', 'high', 'future', 'medium'])).toEqual([
+      'low',
+      'medium',
+      'high'
+    ])
   })
 
   it.each([undefined, null, 42, 'low', {}, [], ['future'], ['none']])(
-    'preserves the generic scale for unusable metadata %j', capability => {
-      expect(supportedReasoningEfforts(capability))
-        .toEqual(['minimal', 'low', 'medium', 'high', 'xhigh', 'max', 'ultra'])
+    'preserves the generic scale for unusable metadata %j',
+    capability => {
+      expect(supportedReasoningEfforts(capability)).toEqual([
+        'minimal',
+        'low',
+        'medium',
+        'high',
+        'xhigh',
+        'max',
+        'ultra'
+      ])
     }
   )
 })

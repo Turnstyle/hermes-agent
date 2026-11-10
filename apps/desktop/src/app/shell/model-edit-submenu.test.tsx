@@ -134,12 +134,17 @@ describe('ModelEditSubmenu reports edits without performing them', () => {
   })
 })
 
-
 describe('route levels preserve reasoning gates', () => {
   it('keeps off on Thinking and inherits the profile default', () => {
     const onSetOptions = vi.fn()
-    renderSubmenu({ defaultEffort: 'high', effort: '', fastControl: { kind: 'none' },
-      onSetOptions, reasoning: true, supportedEfforts: ['low', 'medium', 'high'] })
+    renderSubmenu({
+      defaultEffort: 'high',
+      effort: '',
+      fastControl: { kind: 'none' },
+      onSetOptions,
+      reasoning: true,
+      supportedEfforts: ['low', 'medium', 'high']
+    })
     expect(screen.getByRole('menuitemradio', { name: 'High' }).getAttribute('aria-checked')).toBe('true')
     expect(screen.queryByRole('menuitemradio', { name: /none|off/i })).toBeNull()
     fireEvent.click(screen.getByRole('switch'))
@@ -147,15 +152,24 @@ describe('route levels preserve reasoning gates', () => {
   })
 
   it('hides Thinking on mandatory routes while keeping allowed levels', () => {
-    renderSubmenu({ canDisableReasoning: false, fastControl: { kind: 'none' },
-      onSetOptions: vi.fn(), reasoning: true, supportedEfforts: ['low', 'medium', 'high'] })
+    renderSubmenu({
+      canDisableReasoning: false,
+      fastControl: { kind: 'none' },
+      onSetOptions: vi.fn(),
+      reasoning: true,
+      supportedEfforts: ['low', 'medium', 'high']
+    })
     expect(screen.queryByRole('switch')).toBeNull()
     expect(screen.getAllByRole('menuitemradio').map(item => item.textContent)).toEqual(['Low', 'Medium', 'High'])
   })
 
   it('hides all reasoning controls for nonreasoning models even with metadata', () => {
-    renderSubmenu({ fastControl: { kind: 'none' }, onSetOptions: vi.fn(),
-      reasoning: false, supportedEfforts: ['low', 'medium', 'high'] })
+    renderSubmenu({
+      fastControl: { kind: 'none' },
+      onSetOptions: vi.fn(),
+      reasoning: false,
+      supportedEfforts: ['low', 'medium', 'high']
+    })
     expect(screen.queryByRole('switch')).toBeNull()
     expect(screen.queryByRole('menuitemradio')).toBeNull()
   })
