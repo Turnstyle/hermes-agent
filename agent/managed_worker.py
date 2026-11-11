@@ -331,12 +331,24 @@ def execute(frame, channel):
     # The owner RPC below imports gateway/config modules (hermes_cli.config, providers,
     # hermes_cli.plugins) transitively; the policy must already be frozen when they load.
     bind_worker_policy(frame)
-    from agent.runtime_session_store import RuntimeSessionStore, WorkerRPC
+    from agent.runtime_session_store import WorkerRPC
     scope = dict(frame['scope'])
     rpc = WorkerRPC(frame['home'])
     adopted = rpc('worker.adopt', **{k: v for k, v in scope.items() if k != 'epoch'})
     if adopted['owner_epoch'] != scope['epoch']:
         raise RuntimeError('stale_epoch')
+    # Exec loses the owner's ContextVars. Bind the adopted profile before native
+    # plugin discovery; the child's environment alone is not a runtime scope.
+    from hermes_constants import reset_hermes_home_override, set_hermes_home_override
+    home_token = set_hermes_home_override(frame['home'])
+    try:
+        return _execute_adopted(frame, channel, rpc, scope, adopted)
+    finally:
+        reset_hermes_home_override(home_token)
+
+
+def _execute_adopted(frame, channel, rpc, scope, adopted):
+    from agent.runtime_session_store import RuntimeSessionStore
     store = RuntimeSessionStore(rpc, scope, outbox_dir(frame['home'], scope['execution_id']), adopted)
     from gateway.session_kanban import bind_worker_context
     bind_worker_context(frame)

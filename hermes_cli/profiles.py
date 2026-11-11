@@ -2006,6 +2006,26 @@ def current_profile_name(default: str | None = None) -> str | None:
         return default
 
 
+def is_orchestrator_profile(profile_name: str | None = None) -> bool:
+    """Whether the resolved or given profile is configured in kanban.orchestrator_profiles,
+    outside delegated child context."""
+    try:
+        from agent.delegation_context import is_delegated_child_process_context
+        if is_delegated_child_process_context():
+            return False
+        pname = profile_name or current_profile_name()
+        if not pname:
+            return False
+        from hermes_cli.config import load_config_readonly
+        cfg = load_config_readonly()
+        orch_profiles = cfg.get("kanban", {}).get("orchestrator_profiles") or []
+        if isinstance(orch_profiles, (list, set, tuple)):
+            return pname in orch_profiles
+        return False
+    except Exception:
+        return False
+
+
 # Export / Import
 
 def _inside_git_checkout(path: Path) -> bool:

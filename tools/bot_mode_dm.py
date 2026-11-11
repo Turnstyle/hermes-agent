@@ -126,16 +126,20 @@ def message_agent_tool_schema() -> dict:
 
 def message_agent_authorized(agent: Any) -> bool:
     """The ``message_agent`` gate: a protocol-enabled agent whose session is a managed
-    Bot-Mode canonical Bot Chat. Session-stable, so it is prompt-cache safe to re-evaluate
+    Bot-Mode local- chat session. Session-stable, so it is prompt-cache safe to re-evaluate
     on every tool-snapshot rebuild. Never raises."""
     try:
         if not getattr(agent, "_bot_mode_protocol", True):
             return False
-        from tools.bot_mode_probe import BOT_CHAT_TITLE, is_bot_mode_managed
-
-        # Managed-install check, NOT section non-emptiness: a SOUL.md carrying the
-        # legacy protocol text gets an empty section but must still get the tool.
-        return _session_title(agent) == BOT_CHAT_TITLE and is_bot_mode_managed(_agent_home(agent))
+        from agent.delegation_context import is_delegated_child_process_context
+        if is_delegated_child_process_context():
+            return False
+        from tools.bot_mode_probe import is_bot_mode_managed
+        home = _agent_home(agent)
+        if not is_bot_mode_managed(home):
+            return False
+        chat_id = _session_chat_id(agent)
+        return str(chat_id or "").startswith("local-")
     except Exception:  # pragma: no cover — must never break a turn
         logger.debug("message_agent_authorized failed", exc_info=True)
         return False
@@ -243,17 +247,21 @@ def message_agent_tool(target: str = "", message: str = "", task_id: Optional[st
     ``agent`` is the calling AIAgent — used for the Bot Chat gate and sender identity."""
     home = _agent_home(agent)
     try:
+        from agent.delegation_context import is_delegated_child_process_context
+        if is_delegated_child_process_context():
+            return _err("message_agent is not available in delegated child process context. Do not retry.")
         from tools.bot_mode_probe import (
-            BOT_CHAT_TITLE, NO_REPLY_MARKER, _display_name, _handle, _hermes_root, _peers,
+            NO_REPLY_MARKER, _display_name, _handle, _hermes_root, _peers,
             _profile_name as _self_profile_name, _roster, is_bot_mode_managed,
         )
 
-        if _session_title(agent) != BOT_CHAT_TITLE:
-            return _err("message_agent is only available in a Bot Mode 'Bot Chat' session. "
-                        "This session is not one; do not retry.")
         if not is_bot_mode_managed(home):
             return _err("This install is not Bot-Mode-managed (no bot roster); "
                         "message_agent is unavailable. Do not retry.")
+        chat_id = _session_chat_id(agent)
+        if not str(chat_id or "").startswith("local-"):
+            return _err("message_agent is only available in a Bot Mode 'Bot Chat' (local-) session. "
+                        "This session is not one; do not retry.")
     except Exception as exc:  # pragma: no cover — defensive
         return _err(f"Bot Mode gate check failed: {exc}")
     from hermes_cli.observability.shared_metrics_signals import record_feature_used
@@ -1012,6 +1020,32 @@ def _agent_home(agent: Any) -> str:
         if db_path:
             return str(Path(db_path).parent)
     return _default_home()
+
+
+def _session_chat_id(agent: Any) -> str:
+    chat_id = getattr(agent, "chat_id", None) or getattr(agent, "_chat_id", None)
+    if chat_id:
+        return str(chat_id).strip()
+    with contextlib.suppress(Exception):
+        sdb, sid = getattr(agent, "_session_db", None), getattr(agent, "session_id", None)
+        if sdb and sid:
+            if hasattr(sdb, "get_session"):
+                session = sdb.get_session(sid)
+                if isinstance(session, dict):
+                    cid = session.get("chat_id")
+                    if cid:
+                        return str(cid).strip()
+            if hasattr(sdb, "get_session_chat_id"):
+                cid = sdb.get_session_chat_id(sid)
+                if cid:
+                    return str(cid).strip()
+            from tools.bot_mode_probe import BOT_CHAT_TITLE
+            if hasattr(sdb, "get_session_title") and sdb.get_session_title(sid) == BOT_CHAT_TITLE:
+                return "local-bot-chat"
+    from tools.bot_mode_probe import BOT_CHAT_TITLE
+    if getattr(agent, "_session_title_hint", None) == BOT_CHAT_TITLE:
+        return "local-bot-chat"
+    return ""
 
 
 def _session_title(agent: Any) -> str:

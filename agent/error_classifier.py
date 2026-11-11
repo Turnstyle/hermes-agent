@@ -1361,7 +1361,11 @@ _STATUS_HANDLERS: dict[int, Callable[[_Ctx], Verdict]] = {
     403: _status_403, 404: _status_404, 408: lambda c: _V_TIMEOUT, 413: lambda c: _V_PAYLOAD_TOO_LARGE,
     422: lambda c: _classify_image_tool_422(c),
     429: _status_429, 500: _status_5xx, 502: _status_5xx,
-    503: lambda c: _first_match(c.msg, _OVERFLOW_AS_5XX_RULES) or _V_OVERLOADED,
+    # Broker upstream-auth absence is not overload or a bad relay client key.
+    503: lambda c: (_v(_R.auth, retryable=False, should_fallback=False,
+                       error_context={"upstream_auth_unavailable": True})
+                    if (c.provider_slug == "fleet-relay" or c.provider_slug.startswith("fleet-relay-")) and c.code == "auth_unavailable" else
+                    _first_match(c.msg, _OVERFLOW_AS_5XX_RULES) or _V_OVERLOADED),
     529: lambda c: _first_match(c.msg, _OVERFLOW_AS_5XX_RULES) or _V_OVERLOADED,
 }
 

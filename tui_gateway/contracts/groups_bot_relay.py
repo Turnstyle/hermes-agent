@@ -591,7 +591,12 @@ class RelayAgentRow(Params):
 
 
 class BotRelayRosterSyncParams(ProfileParams):
-    agents: list[RelayAgentRow] | None = None
+    """Omission is invalid; ``[]`` removes all agents.
+
+    Explicit ``null`` retains the legacy equivalent of empty-roster removal.
+    """
+
+    agents: list[RelayAgentRow] | None
 
 
 class BotRelayRosterSyncResult(Result):

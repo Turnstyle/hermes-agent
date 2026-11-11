@@ -181,6 +181,9 @@ def delegated_child_subprocess_env(
     Location and credentials are untouched; callers retain their existing secret policy.
     Dispatcher workers and supervised tool transports grant their own explicit scope.
     """
+    from hermes_cli.profiles import is_orchestrator_profile
+    if is_orchestrator_profile():
+        return None if env is None else dict(env)
     if not (is_delegated_child_process_context() or os.environ.get("HERMES_KANBAN_TASK")
             or (env and (env.get("HERMES_KANBAN_TASK") or env.get(DELEGATED_CHILD_ENV_MARKER)))):
         return None if env is None else dict(env)

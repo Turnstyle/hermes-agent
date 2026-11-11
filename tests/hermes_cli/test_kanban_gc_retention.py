@@ -132,6 +132,22 @@ def test_cmd_gc_never_removes_the_workspaces_root_itself(board):
     assert (sibling / "work.txt").exists()
 
 
+@pytest.mark.parametrize("schema", ["missing_comments", "missing_comment_body", "missing_task_result"])
+def test_open_card_citations_fail_closed(schema, tmp_path):
+    import sqlite3
+    from hermes_cli import kanban_db_workspace as kbw
+
+    with sqlite3.connect(tmp_path / "citation-schema.db") as conn:
+        if schema == "missing_task_result":
+            conn.execute("CREATE TABLE tasks(id TEXT, status TEXT, body TEXT)")
+        else:
+            conn.execute("CREATE TABLE tasks(id TEXT, status TEXT, body TEXT, result TEXT)")
+        if schema == "missing_comment_body":
+            conn.execute("CREATE TABLE task_comments(task_id TEXT)")
+        citations = kbw.open_card_citations(conn)
+        assert kbw.is_cited_by_open_card(citations, "t_12345678", "/unmentioned")
+
+
 def _shared_scratch(conn) -> tuple[str, str, Path]:
     archived = kb.create_task(conn, title="archived sharer")
     live = kb.create_task(conn, title="live sharer")
@@ -221,3 +237,116 @@ def test_cleanup_workspace_keeps_scratch_when_other_boards_cannot_be_listed(boar
         kbw._cleanup_workspace(conn, archived)
         assert _deferred_reasons(conn, archived) == ["shared", "shared", "unknown"]
     assert (shared / "note.txt").read_text(encoding="utf-8") == "still needed"
+
+
+def _done_scratch_with_sentinel(conn, directory_name: str) -> tuple[str, Path]:
+    task_id = kb.create_task(conn, title=directory_name, workspace_kind="scratch")
+    workspace = kb.workspaces_root() / directory_name
+    workspace.mkdir(parents=True)
+    (workspace / "sentinel.txt").write_text(directory_name, encoding="utf-8")
+    with kb.write_txn(conn):
+        conn.execute(
+            "UPDATE tasks SET status='done', workspace_kind='scratch', "
+            "workspace_path=? WHERE id=?",
+            (str(workspace), task_id),
+        )
+    return task_id, workspace
+
+
+@pytest.mark.parametrize(
+    ("citation_location", "citation_kind", "keep_parent"),
+    [
+        pytest.param("body", "id", True, id="body-id"),
+        pytest.param("comment", "id", True, id="comment-id"),
+        pytest.param("body", "path", True, id="body-path-without-id"),
+        pytest.param("comment", "path", True, id="comment-path-without-id"),
+        pytest.param("result", "id", True, id="result-id"),
+        pytest.param("result", "path", True, id="result-path-without-id"),
+        pytest.param("body", "none", False, id="uncited-parent-collected"),
+    ],
+)
+def test_cleanup_workspace_parent_citation_retention(
+    board, citation_location, citation_kind, keep_parent,
+):
+    from hermes_cli import kanban_db_workspace as kbw
+
+    with kbc.connect_closing() as conn:
+        parent, parent_ws = _done_scratch_with_sentinel(conn, "parent-receipts")
+        child, child_ws = _done_scratch_with_sentinel(conn, "child-output")
+        source = kb.create_task(conn, title="unrelated open citation")
+        assert parent not in str(parent_ws)
+        citation = {"id": parent, "path": str(parent_ws), "none": "No references."}[citation_kind]
+        with kb.write_txn(conn):
+            conn.execute(
+                "INSERT INTO task_links(parent_id, child_id) VALUES (?, ?)",
+                (parent, child),
+            )
+            conn.execute("UPDATE tasks SET status='ready' WHERE id=?", (source,))
+            if citation_location in ("body", "result"):
+                conn.execute(
+                    f"UPDATE tasks SET {citation_location}=? WHERE id=?", (citation, source),
+                )
+            else:
+                conn.execute(
+                    "INSERT INTO task_comments(task_id, author, body, created_at) "
+                    "VALUES (?, ?, ?, ?)",
+                    (source, "test", citation, 1),
+                )
+
+        kbw._cleanup_workspace(conn, child)
+
+    assert not child_ws.exists()
+    if keep_parent:
+        assert (parent_ws / "sentinel.txt").read_text(encoding="utf-8") == "parent-receipts"
+    else:
+        assert not parent_ws.exists()
+
+
+def test_cleanup_workspace_keeps_parent_when_citations_unknown(board, monkeypatch):
+    from hermes_cli import kanban_db_workspace as kbw
+
+    with kbc.connect_closing() as conn:
+        parent, parent_ws = _done_scratch_with_sentinel(conn, "parent-receipts")
+        child, child_ws = _done_scratch_with_sentinel(conn, "child-output")
+        with kb.write_txn(conn):
+            conn.execute(
+                "INSERT INTO task_links(parent_id, child_id) VALUES (?, ?)",
+                (parent, child),
+            )
+        monkeypatch.setattr(kbw, "open_card_citations", lambda connection: None)
+
+        kbw._cleanup_workspace(conn, child)
+
+    assert not child_ws.exists()
+    assert (parent_ws / "sentinel.txt").read_text(encoding="utf-8") == "parent-receipts"
+
+
+def test_parent_cleanup_reuses_open_card_citation_snapshot(board, monkeypatch):
+    from hermes_cli import kanban_db_workspace as kbw
+
+    real_open_card_citations = kbw.open_card_citations
+    calls = []
+
+    def snapshot(connection):
+        calls.append(connection)
+        return real_open_card_citations(connection)
+
+    with kbc.connect_closing() as conn:
+        cited, cited_ws = _done_scratch_with_sentinel(conn, "cited-parent-receipts")
+        uncited, uncited_ws = _done_scratch_with_sentinel(conn, "uncited-parent-output")
+        child, child_ws = _done_scratch_with_sentinel(conn, "child-output")
+        source = kb.create_task(conn, title="unrelated open citation", body=cited)
+        with kb.write_txn(conn):
+            conn.executemany(
+                "INSERT INTO task_links(parent_id, child_id) VALUES (?, ?)",
+                [(cited, child), (uncited, child)],
+            )
+            conn.execute("UPDATE tasks SET status='ready' WHERE id=?", (source,))
+        monkeypatch.setattr(kbw, "open_card_citations", snapshot)
+
+        kbw._try_cleanup_parent_workspaces(conn, child)
+
+        assert calls == [conn]
+    assert (cited_ws / "sentinel.txt").read_text(encoding="utf-8") == "cited-parent-receipts"
+    assert not uncited_ws.exists()
+    assert (child_ws / "sentinel.txt").read_text(encoding="utf-8") == "child-output"

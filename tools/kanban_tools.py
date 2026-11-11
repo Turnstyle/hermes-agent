@@ -85,6 +85,9 @@ def _visible(*, to_env_worker: bool) -> bool:
     (HERMES_KANBAN_TASK) per flag; else the profile toolset decides."""
     if _is_delegated_child_context():
         return False
+    from hermes_cli.profiles import is_orchestrator_profile
+    if is_orchestrator_profile():
+        return _profile_has_kanban_toolset()
     if os.environ.get("HERMES_KANBAN_TASK") and _is_dispatcher_owned_worker():
         return to_env_worker
     return _profile_has_kanban_toolset()
@@ -256,6 +259,9 @@ def _enforce_worker_task_ownership(tid: str) -> None:
     a buggy or prompt-injected worker that passed an explicit ``task_id`` for some other task could corrupt
     sibling or cross-tenant runs (see #19534).
     """
+    from hermes_cli.profiles import is_orchestrator_profile
+    if is_orchestrator_profile():
+        return
     env_tid = os.environ.get("HERMES_KANBAN_TASK")
     if env_tid and tid != env_tid:
         raise _Reject(
@@ -282,8 +288,10 @@ def _worker_guard(tool_name: str, args: dict) -> str:
     _reject_delegated_child_mutation(tool_name)
     tid = _require_task_id(args)
     _enforce_worker_task_ownership(tid)
+    from hermes_cli.profiles import is_orchestrator_profile
     if (
-        tool_name in _RUN_LIFECYCLE_TOOLS
+        not is_orchestrator_profile()
+        and tool_name in _RUN_LIFECYCLE_TOOLS
         and os.environ.get("HERMES_KANBAN_TASK")
         and _worker_run_id(tid) is None
     ):
@@ -301,6 +309,9 @@ def _worker_guard(tool_name: str, args: dict) -> str:
 def _require_orchestrator_tool(tool_name: str) -> None:
     """The check_fn already hides orchestrator tools from workers; this catches
     a stale registration or test harness routing a worker here anyway."""
+    from hermes_cli.profiles import is_orchestrator_profile
+    if is_orchestrator_profile():
+        return
     if os.environ.get("HERMES_KANBAN_TASK"):
         raise _Reject(
             f"{tool_name} is orchestrator-only; dispatcher-spawned workers must use "

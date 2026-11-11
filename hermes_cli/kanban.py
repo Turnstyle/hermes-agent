@@ -227,6 +227,9 @@ def _is_delegated_child_cli_mutation(args: argparse.Namespace) -> bool:
             return False
     elif action not in _DELEGATED_CHILD_DENIED_ACTIONS:
         return False
+    from hermes_cli.profiles import is_orchestrator_profile
+    if is_orchestrator_profile():
+        return False
     from agent.delegation_context import kanban_path_is_fenced
 
     return kanban_path_is_fenced(kb.kanban_home()) or kanban_path_is_fenced(kb.kanban_db_path())
@@ -1018,7 +1021,8 @@ def _cmd_schedule(args: argparse.Namespace) -> int:
 
 
 def _cmd_unblock(args: argparse.Namespace) -> int:
-    if os.environ.get("HERMES_KANBAN_TASK"):
+    from hermes_cli.profiles import is_orchestrator_profile
+    if os.environ.get("HERMES_KANBAN_TASK") and not is_orchestrator_profile():
         return _err("kanban unblock is orchestrator-only; workers must hand off their assigned task")
     ids, rc = _require_ids(args)
     if rc:

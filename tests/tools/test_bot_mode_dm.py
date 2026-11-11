@@ -143,6 +143,27 @@ def test_config_toggle_disables_injection(tmp_path):
 
 def test_schema_never_in_global_registry():
     """message_agent must not be registered/toolset-reachable anywhere."""
+
+
+def test_message_agent_local_chat_id_gate(tmp_path):
+    home = _managed_home(tmp_path)
+    # local- chat_id is authorized even with non-"Bot Chat" title (e.g. Advisor)
+    agent_local = _FakeAgent(home, title="Advisor")
+    agent_local._chat_id = "local-desktop-1"
+    assert bot_mode_dm.ensure_message_agent_tool(agent_local) is True
+
+    # non-local (e.g. Slack/API) chat_id is refused even if titled "Bot Chat"
+    agent_slack = _FakeAgent(home, title="Bot Chat")
+    agent_slack._chat_id = "C01234567"
+    assert bot_mode_dm.ensure_message_agent_tool(agent_slack) is False
+
+    # delegated child process context is refused
+    from agent.delegation_context import delegated_child_context
+    with delegated_child_context("child-sess"):
+        assert bot_mode_dm.message_agent_authorized(agent_local) is False
+        agent_fresh = _FakeAgent(home, title="Advisor")
+        agent_fresh._chat_id = "local-desktop-1"
+        assert bot_mode_dm.ensure_message_agent_tool(agent_fresh) is False
     from tools.registry import registry
 
     assert bot_mode_dm.MESSAGE_AGENT_TOOL_NAME not in getattr(registry, "_tools", {})

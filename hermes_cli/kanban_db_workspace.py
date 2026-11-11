@@ -8,6 +8,7 @@ late-bound via ``_kb`` (import-cycle breaking) so monkeypatching
 from __future__ import annotations
 
 import os
+import re
 import shutil
 import sqlite3
 import subprocess
@@ -24,6 +25,45 @@ if TYPE_CHECKING:
     from hermes_cli.kanban_db import Task
 
 _REMOVABLE_KINDS = ("scratch", "worktree")
+
+# None means the citation snapshot is unknown: callers must keep every candidate.
+OpenCardCitations = Optional[tuple[set[str], str]]
+
+
+def open_card_citations(conn: sqlite3.Connection) -> OpenCardCitations:
+    """Snapshot IDs and text cited by this board's open cards and their comments.
+
+    Only done/archived cards are closed for citation retention. A missing table,
+    column or other SQLite read failure makes the snapshot unknown, not empty;
+    old/incomplete schemas must never turn a failed safety check into a delete.
+    """
+    try:
+        text = [
+            row[0] for row in conn.execute(
+                "SELECT coalesce(body,'') || ' ' || coalesce(result,'') "
+                "FROM tasks WHERE status NOT IN ('done','archived')"
+            )
+        ]
+        text.extend(
+            row[0] or "" for row in conn.execute(
+                "SELECT c.body FROM task_comments c JOIN tasks t ON t.id=c.task_id "
+                "WHERE t.status NOT IN ('done','archived')"
+            )
+        )
+    except sqlite3.Error:
+        return None
+    combined = "\n".join(text)
+    return set(re.findall(r"t_(?:fk_)?[0-9a-f]{8}", combined)), combined
+
+
+def is_cited_by_open_card(
+    citations: OpenCardCitations, task_id: str, workspace_path: Path | str | None
+) -> bool:
+    """Keep on unknown evidence, an ID citation, or a literal workspace path."""
+    if citations is None:
+        return True
+    ids, text = citations
+    return task_id in ids or bool(workspace_path and str(workspace_path) in text)
 
 
 def _path_key(path: Path | str | None) -> str:
@@ -367,7 +407,7 @@ def _cleanup_workspace(conn: sqlite3.Connection, task_id: str) -> None:
     remote-tracking ref); ``dir`` is intentionally preserved."""
     try:
         row = conn.execute(_WORKSPACE_ROW_SQL, (task_id,)).fetchone()
-        if not row:
+        if not row or not _is_terminal_task(conn, task_id):
             return
         kind: Optional[str] = row["workspace_kind"]
         path: Optional[str] = row["workspace_path"]
@@ -395,7 +435,12 @@ def _cleanup_workspace(conn: sqlite3.Connection, task_id: str) -> None:
             _try_cleanup_parent_workspaces(conn, task_id)
             return
         wp = Path(path)
-        if wp.is_dir():
+        if wp.is_symlink():
+            _kb._log.debug(
+                "Refusing to remove symlink scratch workspace for task %s: %s",
+                task_id, wp,
+            )
+        elif wp.is_dir():
             # Containment guard: a board's ``default_workdir`` can pair
             # ``workspace_kind='scratch'`` with a user path pointing at a real
             # source tree; without this, completion would rmtree the user's data.
@@ -504,6 +549,7 @@ def _try_cleanup_parent_workspaces(conn: sqlite3.Connection, task_id: str) -> No
     See #33774.
     """
     try:
+        citations = open_card_citations(conn)
         parents = conn.execute(
             "SELECT parent_id FROM task_links WHERE child_id = ?",
             (task_id,),
@@ -519,6 +565,8 @@ def _try_cleanup_parent_workspaces(conn: sqlite3.Connection, task_id: str) -> No
             ):
                 continue
             ws_path = row["workspace_path"]
+            if is_cited_by_open_card(citations, parent_id, ws_path):
+                continue
             if row["workspace_kind"] == "worktree":
                 if _defer_shared_worktree_cleanup(conn, parent_id, ws_path):
                     continue
