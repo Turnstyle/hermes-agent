@@ -23,8 +23,9 @@ def git(root, *args):
 
 
 @pytest.fixture
-def source(tmp_path, monkeypatch):
-    home, origin, checkout = (tmp_path / name for name in ("home", "origin", "checkout"))
+def source(tmp_path, monkeypatch, fake_project_root):
+    home, origin = tmp_path / "home", tmp_path / "origin"
+    checkout = fake_project_root
     home.mkdir()
     origin.mkdir()
     monkeypatch.setenv("HERMES_HOME", str(home))
@@ -42,8 +43,6 @@ def source(tmp_path, monkeypatch):
         commits.append(git(origin, "rev-parse", "HEAD"))
     git(tmp_path, "clone", str(origin), str(checkout))
     git(checkout, "checkout", "--detach", commits[0])
-    monkeypatch.setattr(main, "PROJECT_ROOT", checkout)
-    monkeypatch.setattr("hermes_cli.config.get_project_root", lambda: checkout)
     parser = argparse.ArgumentParser()
     build_update_parser(parser.add_subparsers(), cmd_update=main.cmd_update)
     opts = update_cmd._UpdateOptions(pre_update_version=None, gw_input_fn=None,

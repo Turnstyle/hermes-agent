@@ -23,7 +23,7 @@ def _swap_leftovers(root):
 
 
 @pytest.fixture
-def zip_update(tmp_path, monkeypatch, isolated_source_completion):
+def zip_update(tmp_path, monkeypatch, isolated_source_completion, fake_project_root):
     home = tmp_path / "home"
     active = home / ".hermes"
     sibling = active / "profiles/other"
@@ -42,8 +42,7 @@ def zip_update(tmp_path, monkeypatch, isolated_source_completion):
     original_jobs = {"jobs": [{"id": "keep-me", "prompt": "retained schedule"}]}
     jobs.write_text(json.dumps(original_jobs), encoding="utf-8")
 
-    root = tmp_path / "checkout"
-    root.mkdir()
+    root = fake_project_root
     (root / "pyproject.toml").write_text('[project]\nversion="1.0"\n', encoding="utf-8")
     (root / "payload.txt").write_text("old", encoding="utf-8")
     for name in ("tools/code.py", "apps/desktop/source.js", "apps/desktop/release/Hermes.exe",
@@ -61,7 +60,6 @@ def zip_update(tmp_path, monkeypatch, isolated_source_completion):
         out.comment = b"8192da90e0afb20010a1c2f5da83db305d05ac5a"  # git archive's commit identity
     # Only redirect transport: extraction, staging, dirty recheck and swap run.
     monkeypatch.setattr("urllib.request.urlretrieve", lambda url, dst: urlretrieve(archive.as_uri(), dst))
-    monkeypatch.setattr(main, "PROJECT_ROOT", root)
     events = []
     token = {"resume_needed": True, "profiles": {}, "unmapped": []}
     plan = UpdatePlan(install_method="git", expected_version="1.0", profiles=["default", "other"],
@@ -443,21 +441,19 @@ def test_installed_app_without_a_checkout_build_is_still_rebuilt(zip_update, mon
     assert built == [rebuilt]
 
 
-def test_unpinned_zip_update_owes_the_restart_for_the_archive_commit(tmp_path, monkeypatch):
+def test_unpinned_zip_update_owes_the_restart_for_the_archive_commit(tmp_path, monkeypatch, fake_project_root):
     """A branch ZIP (no target SHA) still names its commit: GitHub archives carry it as the ZIP comment
     (``git archive``). The restart debt and the completion are armed for that commit, never for ''."""
     from hermes_cli import update_cmd_commit
 
     sha = "8192da90e0afb20010a1c2f5da83db305d05ac5a"
-    root = tmp_path / "checkout"
-    root.mkdir()
+    root = fake_project_root
     (root / "payload.txt").write_text("old", encoding="utf-8")
     archive = tmp_path / "source.zip"
     with zipfile.ZipFile(archive, "w") as out:
         out.writestr("hermes-agent-main/payload.txt", "new")
         out.comment = sha.encode()
     monkeypatch.setattr("urllib.request.urlretrieve", lambda url, dst: urlretrieve(archive.as_uri(), dst))
-    monkeypatch.setattr(main, "PROJECT_ROOT", root)
     monkeypatch.setattr(update_cmd_zip, "_abort_zip_update_if_dirty_tree", lambda: None)
     armed, completed = [], []
     monkeypatch.setattr(update_cmd_commit, "arm_commit_obligations", lambda _root, expected: armed.append(expected))
@@ -470,21 +466,19 @@ def test_unpinned_zip_update_owes_the_restart_for_the_archive_commit(tmp_path, m
 
 @pytest.mark.parametrize(("comment", "pinned"), [
     (b"", None), (b"main", None), (b"a" * 40, "c" * 40), (b"", "c" * 40)])
-def test_a_zip_that_does_not_name_its_commit_is_refused_before_the_swap(tmp_path, monkeypatch, comment, pinned):
+def test_a_zip_that_does_not_name_its_commit_is_refused_before_the_swap(tmp_path, monkeypatch, fake_project_root, comment, pinned):
     """S4: the installed identity must come from the downloaded bytes (``git archive``'s ZIP comment).
     No comment, a malformed one, or one naming another commit than the pinned target: no live rename,
     no obligation armed, never an empty durable SHA."""
     from hermes_cli import update_cmd_commit
 
-    root = tmp_path / "checkout"
-    root.mkdir()
+    root = fake_project_root
     (root / "payload.txt").write_text("old", encoding="utf-8")
     archive = tmp_path / "source.zip"
     with zipfile.ZipFile(archive, "w") as out:
         out.writestr("hermes-agent-main/payload.txt", "new")
         out.comment = comment
     monkeypatch.setattr("urllib.request.urlretrieve", lambda url, dst: urlretrieve(archive.as_uri(), dst))
-    monkeypatch.setattr(main, "PROJECT_ROOT", root)
     armed = []
     monkeypatch.setattr(update_cmd_commit, "arm_commit_obligations", lambda _root, expected: armed.append(expected))
     with pytest.raises(SystemExit) as error:

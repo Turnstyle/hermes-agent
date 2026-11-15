@@ -161,6 +161,45 @@ if _hermes_home_points_at_production(os.environ.get("HERMES_HOME", "")):
     os.environ["HERMES_TEST_SANDBOX_HOME"] = _SESSION_HERMES_HOME
     atexit.register(shutil.rmtree, _SESSION_HERMES_HOME, True)
 
+def _retarget_setup_logging_off_guarded_custom_home():
+    """Send import-time log files to TMPDIR when HERMES_HOME is a custom guarded root.
+
+    The custom home stays on the deny list. This does not sandbox every HERMES_HOME
+    and does not exempt that home from ``_REAL_HERMES_ROOT_CANDIDATES``.
+    """
+    import hermes_logging
+
+    original = hermes_logging.setup_logging
+    log_home = Path(tempfile.mkdtemp(prefix="hermes-import-log-home-"))
+    atexit.register(shutil.rmtree, log_home, True)
+    pre = _PRE_SANDBOX_HERMES_HOME
+
+    def setup_logging(*args, **kwargs):
+        home = kwargs.get("hermes_home")
+        if home is None:
+            from hermes_constants import get_hermes_home
+            home = get_hermes_home()
+        sandbox = os.environ.get("HERMES_TEST_SANDBOX_HOME", "")
+        if pre and not _hermes_home_points_at_production(pre):
+            resolved = Path(home).expanduser().resolve()
+            pre_resolved = Path(pre).expanduser().resolve()
+            sandbox_resolved = Path(sandbox).expanduser().resolve() if sandbox else None
+            if resolved == pre_resolved and resolved != sandbox_resolved:
+                kwargs = dict(kwargs)
+                kwargs["hermes_home"] = log_home
+        return original(*args, **kwargs)
+
+    hermes_logging.setup_logging = setup_logging
+    return original
+
+
+_ORIGINAL_SETUP_LOGGING = _retarget_setup_logging_off_guarded_custom_home()
+
+
+def pytest_collection_finish(session):
+    import hermes_logging
+    hermes_logging.setup_logging = _ORIGINAL_SETUP_LOGGING
+
 # PYTHONPYCACHEPREFIX is a bytecode-mirror escape hatch: when set (the
 # bundled desktop app exports it as %LOCALAPPDATA%\hermes\pycache),
 # importlib/pytest write .pyc files to <prefix>/<absolute source path>
@@ -260,6 +299,11 @@ from tests._fixtures.live_system_guard import (
     _live_system_guard,
 )
 from tests._fixtures.model_peer import model_peer  # fixture registers here
+from tests.checkout_integrity import (
+    start_checkout_guard as _start_checkout_guard,
+    pytest_sessionfinish,
+    pytest_unconfigure as _checkout_unconfigure,
+)
 from tests._fixtures.platform_gating import _platforms_gate_reason, _reject_contradictory_platform_marks
 
 
@@ -1191,9 +1235,19 @@ def require_mcp_2_sdk():
         pytest.skip(f"requires mcp=={pinned} (found {found}); install the [mcp] extra")
 
 
+def pytest_sessionstart(session):
+    # rootpath can be an external probe directory; protect the source checkout.
+    _start_checkout_guard(session, PROJECT_ROOT)
+
+
 def pytest_unconfigure(config):
-    _reap_session_hermes_processes(config)
-    _remove_relocated_basetemp(config)
+    try:
+        _reap_session_hermes_processes(config)
+        _remove_relocated_basetemp(config)
+    finally:
+        import hermes_logging
+        hermes_logging.setup_logging = _ORIGINAL_SETUP_LOGGING
+        _checkout_unconfigure(config)
 
 
 @pytest.hookimpl(trylast=True)  # after _pytest.tmpdir has built config._tmp_path_factory

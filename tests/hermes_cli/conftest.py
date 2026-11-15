@@ -124,6 +124,9 @@ def _discharge_host_update_obligation():
     """
 
     def _clear() -> None:
+        from hermes_cli.update_cmd_commit import begin_update_attempt
+
+        begin_update_attempt()
         try:
             from hermes_cli.update_host_obligation import clear_host_obligation
 
@@ -187,3 +190,24 @@ def probe_root(tmp_path):
     """
     (tmp_path / "hermes_bootstrap.py").write_text("", encoding="utf-8")
     return tmp_path
+
+
+@pytest.fixture
+def fake_project_root(tmp_path, monkeypatch):
+    """An isolated checkout directory under tmp_path, replacing every PROJECT_ROOT seam."""
+    import sys
+
+    from hermes_cli import config, main, update_cmd, update_cmd_commit
+
+    fake_root = tmp_path / "checkout"
+    if not fake_root.is_relative_to(tmp_path):
+        raise AssertionError("fake checkout escaped tmp_path")
+    fake_root.mkdir(parents=True, exist_ok=True)
+    monkeypatch.setattr(main, "PROJECT_ROOT", fake_root)
+    if "hermes_cli.main" in sys.modules:
+        monkeypatch.setattr(sys.modules["hermes_cli.main"], "PROJECT_ROOT", fake_root)
+    monkeypatch.setattr(update_cmd, "_m", lambda: main)
+    monkeypatch.setattr(config, "get_project_root", lambda: fake_root)
+    update_cmd_commit.begin_update_attempt()
+    yield fake_root
+    update_cmd_commit.begin_update_attempt()

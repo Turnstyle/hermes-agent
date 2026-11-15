@@ -7,30 +7,20 @@ model / API quota / browser pool from being overwhelmed by a fan-out.
 """
 from __future__ import annotations
 
-import os
-import sys
-import tempfile
-
 import pytest
 
 
 @pytest.fixture()
-def isolated_kanban_home_with_profiles(monkeypatch):
-    """Spin up a fresh HERMES_HOME with kanban DB + alpha/beta profiles."""
-    test_home = tempfile.mkdtemp(prefix="kanban_per_profile_cap_test_")
+def isolated_kanban_home_with_profiles(tmp_path, monkeypatch):
+    """Use tmp-owned state without invalidating other tests' imported facades."""
+    test_home = tmp_path / "kanban-home"
     for prof in ("alpha", "beta", "default"):
-        os.makedirs(os.path.join(test_home, "profiles", prof), exist_ok=True)
-        with open(os.path.join(test_home, "profiles", prof, "config.yaml"), "w") as fh:
-            fh.write("{}\n")  # identity marker: a bare dir is not a profile
-    monkeypatch.setenv("HERMES_HOME", test_home)
-    for mod in list(sys.modules.keys()):
-        if mod.startswith("hermes_cli") or mod.startswith("hermes_state") or mod == "hermes_constants":
-            del sys.modules[mod]
+        profile = test_home / "profiles" / prof
+        profile.mkdir(parents=True)
+        (profile / "config.yaml").write_text("{}\n", encoding="utf-8")
+    monkeypatch.delenv("HERMES_KANBAN_HOME", raising=False)
+    monkeypatch.setenv("HERMES_HOME", str(test_home))
     from hermes_cli import kanban_db
-    from hermes_cli import kanban_db_dispatch
-    # The module purge above discards the conftest's memory-sample neutralizer;
-    # re-apply it so the host's live memory pressure cannot cap this tick.
-    monkeypatch.setattr(kanban_db_dispatch, "_system_memory_sample", dict)
     yield kanban_db
 
 
