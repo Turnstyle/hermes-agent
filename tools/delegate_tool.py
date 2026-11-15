@@ -506,11 +506,13 @@ def _build_children(
 
 def _routes_for(task_list: list[dict[str, Any]], cfg: dict[str, Any], credentials_cfg: Optional[dict[str, Any]],
                 parent_agent: Any) -> tuple[list[Any], Optional[str]]:
-    """Per-task routes: an internal caller's explicit ``credentials_cfg`` (e.g. /review → auxiliary.review) owns
-    every task's route; otherwise the active delegation provider decides each one."""
-    from tools.delegate_tool_routes import resolve_task_routes, route_for_config
-    if credentials_cfg is None:
-        return resolve_task_routes(task_list, cfg, parent_agent)
+    """Per-task routes: an internal caller's ``credentials_cfg`` (e.g. /review → auxiliary.review) that pins a route
+    owns every task's route; otherwise the active delegation provider decides each one, with a policy-only block's
+    effort/tier applied on top."""
+    from tools.delegate_tool_routes import resolve_task_routes, route_for_config, route_policy
+    policy = route_policy(credentials_cfg)
+    if policy is not None:
+        return resolve_task_routes(task_list, cfg, parent_agent, policy)
     try:
         route = route_for_config(credentials_cfg, parent_agent)
     except ValueError as exc:

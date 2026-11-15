@@ -359,7 +359,7 @@ Dispatch prints only “Review started. Results will return here.” The live su
 
 ### Review model
 
-By default the reviewer runs on your main model. To pin a dedicated review model, set `auxiliary.review` in `config.yaml`:
+By default the reviewer takes the same route as other subagents (the `delegation` section and its backend, which is your main model unless you pin one there). To pin a dedicated review model, set `auxiliary.review` in `config.yaml`:
 
 ```yaml
 auxiliary:
@@ -368,7 +368,9 @@ auxiliary:
     model: anthropic/claude-opus-4.6   # a strong reviewer model
 ```
 
-Credentials resolve exactly like a `delegation.provider` pin (full runtime-provider bundle: base_url, api key, api_mode). `provider: auto` with an empty `model` means "inherit the main agent's model" — the default.
+Credentials resolve exactly like a `delegation.provider` pin (full runtime-provider bundle: base_url, api key, api_mode). `provider: auto` with an empty `model` means "use the subagent route" — the default.
+
+`auxiliary.review.reasoning_effort` and `extra_body.service_tier` set the reviewer's effort and speed tier. Without a route pin they change only that: the reviewer keeps the `delegation` route, its backend and its `fallback_providers` (an explicit `[]` included), and replaces just the route's effort and tier. An effort that is not a level (`auto`, a typo) is ignored with a logged warning, so the route's own effort applies.
 
 `/review` is deliberately separate from `/refine`: `/refine` reviews the conversation to update memory and skills, `/review` reviews the *work product* the conversation created.
 
@@ -595,7 +597,7 @@ delegate_task(
 
 **Cost warning:** With `max_spawn_depth: 3` and `max_concurrent_children: 3`, the tree can reach 3×3×3 = 27 concurrent leaf agents. Each extra level multiplies spend — raise `max_spawn_depth` intentionally.
 
-**One-shot runs are capped separately.** `hermes chat -q` / `--oneshot` sessions may spawn at most `delegation.oneshot_max_children` subagents in total (default `2`, `0` = unlimited). A one-shot run has no later turn to receive results, and in benchmark trajectories most of its spawns were "independently review my own work" rather than parallel work — each such child re-pays a cold system prompt and re-reads the repo. Interactive and gateway sessions are unaffected. Because a one-shot joins its children inside the `delegate_task` call, its schema leaves out the live-control parameters (`action` list/steer/stop, `subagent_id`, `message`).
+**One-shot runs are capped separately.** `hermes chat -q` / `--oneshot` sessions may spawn at most `delegation.oneshot_max_children` subagents in total (default `10`, matching `max_concurrent_children`; `0` = unlimited; a value saved in `config.yaml` is never rewritten). A one-shot run has no later turn to receive results, and in benchmark trajectories most of its spawns were "independently review my own work" rather than parallel work — each such child re-pays a cold system prompt and re-reads the repo. Interactive and gateway sessions are unaffected. Because a one-shot joins its children inside the `delegate_task` call, its schema leaves out the live-control parameters (`action` list/steer/stop, `subagent_id`, `message`).
 
 ## Finite chat runs
 

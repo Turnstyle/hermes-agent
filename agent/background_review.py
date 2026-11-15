@@ -863,25 +863,6 @@ def _same_model_parity_kwargs(agent: Any) -> dict[str, Any]:
     return kwargs
 
 
-def _warn_ignored_reasoning_effort(agent: Any, task_cfg: Optional[dict[str, Any]] = None) -> None:
-    """One-shot user-visible notice: ``auxiliary.background_review.reasoning_effort`` is IGNORED on
-    the same-model path (#104116). The fork inherits the parent's ``reasoning_config`` verbatim so
-    its request bytes keep the parent's prompt-cache prefix (#30532: a diverged ``thinking`` field
-    on the fork-birth request re-created a large share of the cache); the no-op used to be silent,
-    so a user who set the key saw no feedback at all. Gated on the parent so a nudge-per-turn
-    session warns once, not per fork."""
-    effort = str(_background_review_task_config(task_cfg).get("reasoning_effort") or "").strip()
-    if not effort or getattr(agent, "_warned_bg_review_reasoning_effort", False):
-        return
-    agent._warned_bg_review_reasoning_effort = True
-    message = t("display.review.reasoning_effort_warning", effort=effort)
-    emit = getattr(agent, "_emit_warning", None)
-    if callable(emit):
-        with suppress(Exception):
-            emit(message)
-    logger.warning("%s", message)
-
-
 def _detach_fork_compression(review_agent: Any) -> None:
     """Detached in-memory compaction for a fork sharing the parent's session_id. Disabling
     compression (the old guard against compacting the parent's live session) removed the only
@@ -913,12 +894,11 @@ def _detach_fork_compression(review_agent: Any) -> None:
         review_agent._review_defer_compaction_before_first_response = True
 
 
-def _routed_reasoning_config(task_cfg: Optional[dict[str, Any]]) -> Optional[dict[str, Any]]:
-    """``reasoning_config`` for a ROUTED fork from ``auxiliary.background_review.reasoning_effort``
-    (#94825). The routed branch never inherits the parent's effort (its vocabulary may be invalid for
-    the routed provider), but an explicit per-task pin is the user's choice for THAT model and must
-    win over provider defaults, as every other aux task already does via ``_get_task_extra_body``.
-    None = unset (provider default); an unknown level warns and falls through to the default."""
+def _slot_reasoning_config(task_cfg: Optional[dict[str, Any]]) -> Optional[dict[str, Any]]:
+    """``reasoning_config`` from an explicit ``auxiliary.background_review.reasoning_effort``: the review
+    slot's own choice, so it wins over the parent's effort (same-model fork) or the provider default
+    (routed fork, #94825), as every other aux task's does via ``_get_task_extra_body``. None = unset;
+    an unknown level warns and is ignored."""
     effort = _background_review_task_config(task_cfg).get("reasoning_effort")
     if effort is None or effort == "":
         return None
@@ -926,19 +906,41 @@ def _routed_reasoning_config(task_cfg: Optional[dict[str, Any]]) -> Optional[dic
     parsed = parse_reasoning_effort(effort)
     if parsed is None:
         logger.warning(
-            "auxiliary.background_review.reasoning_effort %r is not a valid level (none, %s) — using "
-            "the routed provider's default", effort, ", ".join(VALID_REASONING_EFFORTS),
+            "auxiliary.background_review.reasoning_effort %r is not a valid level (none, %s) — ignoring it",
+            effort, ", ".join(VALID_REASONING_EFFORTS),
         )
     return parsed
 
 
+def _slot_service_tier(agent: Any, rt: dict[str, Any], task_cfg: Optional[dict[str, Any]]) -> Optional[dict[str, Any]]:
+    """``task_service_tier`` keys for an explicit ``auxiliary.background_review.extra_body.service_tier`` on
+    the fork's route (``default``/``normal`` = normal: the parent's fast tier is removed), checked like
+    ``/fast`` and a delegation route's tier. None = unset; a tier the route cannot serve warns and keeps
+    the route's own."""
+    extra_body = _background_review_task_config(task_cfg).get("extra_body")
+    word = str(extra_body.get("service_tier") or "").strip() if isinstance(extra_body, dict) else ""
+    if not word:
+        return None
+    creds = {"model": rt.get("model"), "request_overrides": dict(rt.get("request_overrides") or {})}
+    if rt.get("routed"):
+        creds.update(provider=rt.get("provider"), base_url=rt.get("base_url"), api_key=rt.get("api_key"))
+    from tools.delegate_tool_tuning import task_service_tier
+    try:
+        return task_service_tier(word, creds, agent)
+    except ValueError as e:
+        logger.warning("auxiliary.background_review.extra_body.service_tier: %s — keeping the route's tier", e)
+        return None
+
+
 def _fork_init_kwargs(agent: Any, rt: dict[str, Any], routed: bool, max_iterations: int,
-                      task_cfg: Optional[dict[str, Any]] = None) -> dict[str, Any]:
+                      task_cfg: Optional[dict[str, Any]] = None, *, slot_policy: bool = False,
+                      tier: Optional[dict[str, Any]] = None) -> dict[str, Any]:
     """AIAgent constructor kwargs for the review fork. skip_memory=True: an external memory plugin
     scoped to the parent's session_id would leak the harness prompt into the user's real memory
     namespace; built-in MEMORY.md/USER.md state is re-bound by the caller. Toolsets match the
     parent so ``tools[]`` is byte-identical (Anthropic's cache key includes it); the runtime
-    whitelist restricts dispatch."""
+    whitelist restricts dispatch. ``slot_policy``: the explicit slot effort and *tier* also apply on
+    the same-model path (background_review forks; /btw keeps the parent's request)."""
     kwargs: dict[str, Any] = {
         "model": rt.get("model") or agent.model, "max_iterations": max_iterations, "quiet_mode": True,
         "platform": agent.platform, "provider": rt.get("provider") or agent.provider,
@@ -954,8 +956,12 @@ def _fork_init_kwargs(agent: Any, rt: dict[str, Any], routed: bool, max_iteratio
         kwargs.update(acp_command=rt["command"], acp_args=rt.get("args") or [])
     if not routed:
         kwargs.update(_same_model_parity_kwargs(agent))
-    elif (routed_cfg := _routed_reasoning_config(task_cfg)) is not None:
-        kwargs["reasoning_config"] = routed_cfg
+    if (routed or slot_policy) and (slot_reasoning := _slot_reasoning_config(task_cfg)) is not None:
+        kwargs["reasoning_config"] = slot_reasoning
+    if tier is not None:
+        kwargs["request_overrides"] = tier["request_overrides"]
+        if tier["service_tier"]:
+            kwargs["service_tier"] = tier["service_tier"]
     return kwargs
 
 
@@ -992,12 +998,16 @@ def build_cache_parity_fork(
     # OAuth-only providers, session-scoped creds and credential pools.
     _rt = _resolve_review_runtime(agent, task_cfg)
     _routed = bool(_rt.get("routed"))
-    # A configured effort is dropped on the same-model path (cache parity) — say so once, visible,
-    # instead of leaving the set-but-ignored key invisible (#104116). Routed forks honor it
-    # (_routed_reasoning_config).
-    if not _routed and write_origin == "background_review":
-        _warn_ignored_reasoning_effort(agent, task_cfg)
-    review_agent = AIAgent(**_fork_init_kwargs(agent, _rt, _routed, max_iterations, task_cfg))
+    # Unset slot effort/tier (the default) keeps the same-model fork's request identical to the
+    # parent's; an explicit one is this slot's policy on every route, paid for with a cold prefix.
+    slot_policy = write_origin == "background_review"
+    tier = _slot_service_tier(agent, _rt, task_cfg) if slot_policy else None
+    review_agent = AIAgent(**_fork_init_kwargs(
+        agent, _rt, _routed, max_iterations, task_cfg, slot_policy=slot_policy, tier=tier))
+    if tier is not None:
+        # Construction can merge a custom provider's extra_body (and its tier) back in.
+        from tools.delegate_tool_tuning import pin_child_service_tier
+        pin_child_service_tier(review_agent, tier)
     review_agent._memory_write_origin = review_agent._memory_write_context = write_origin
     # Fork-turn log tag: the fork shares the parent's session_id (and model on the
     # same-model path), so its turn-start/turn-exit log lines are otherwise

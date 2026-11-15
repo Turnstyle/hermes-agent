@@ -519,12 +519,13 @@ def _inherit_launch_model(path) -> bool:
     model_cfg = launch_cfg.get("model") or {}
     if not (model_cfg.get("provider") and model_cfg.get("default")):
         return False
-    # A custom endpoint travels with the model it backs (same seed as the CLI path). It is
+    # A custom endpoint travels with the model it backs, and explicit text auxiliary policy with the
+    # endpoints it names (same seed as the CLI path). It is
     # written BEFORE the pin: the pin validates the pick inside the new profile, and an empty profile
     # rejects a provider it has not been told about ("Unknown provider").
     # Seeded from the RAW launch file so a ${VAR} api_key travels as the ref, not its value.
     seed = _lazy("hermes_cli.profile_model_seed", "launch_model_seed")(read_user_config_raw())
-    if seed.get("providers") or seed.get("custom_providers"):
+    if seed.get("providers") or seed.get("custom_providers") or seed.get("auxiliary"):
         from hermes_cli.config import save_config
         merge = _lazy("hermes_cli.profile_model_seed", "merge_endpoint_seed")
         with _hermes_home_scope(path):

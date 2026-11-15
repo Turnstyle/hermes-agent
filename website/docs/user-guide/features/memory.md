@@ -418,11 +418,11 @@ review keeps running on the main model with the full warm-cache replay.
 
 ### Same-model review reasoning
 
-A review using the same model as the parent **always inherits the parent's reasoning effort**. Setting `auxiliary.background_review.reasoning_effort` does not override it, whether the route is `auto` or explicitly selects the parent provider/model.
+By default a review using the same model as the parent **inherits the parent's reasoning effort and speed tier**. Reasoning settings, the system prompt, the full conversation snapshot, and tool definitions stay byte-identical to the parent at fork birth so the review can reuse its prompt-cache prefix.
 
-Reasoning settings, the system prompt, the full conversation snapshot, and tool definitions stay byte-identical to the parent at fork birth so the review can reuse its prompt-cache prefix. Changing only the review's thinking level would break that parity. There is no independent-effort switch for same-model reviews.
+Setting `auxiliary.background_review.reasoning_effort` and/or `auxiliary.background_review.extra_body.service_tier` makes that the review's own policy, on the same-model path too. For example, `reasoning_effort: medium` with `service_tier: default` reviews at medium effort on the normal tier while the main chat stays on `high` and fast. Each key applies only what it names: an effort alone keeps the parent's tier, and a tier alone keeps the parent's effort. The trade-off is one cold prompt prefix per same-model review, because the review's thinking settings no longer match the parent's. `/btw` side questions are not affected.
 
-To reduce review work without changing the main conversation's effort, adjust `memory.nudge_interval` / `skills.creation_nudge_interval`, disable automatic reviews as described below, or route reviews to a different model. A different-model route uses a digest and does not share the parent's warm prefix; on that route `auxiliary.background_review.reasoning_effort` IS honored (unset = the routed provider's default). A one-time warning is printed when the key is set but the review stays on the main model. These frequency and routing controls do not decouple same-model reasoning.
+To reduce review work without changing the main conversation, you can also adjust `memory.nudge_interval` / `skills.creation_nudge_interval`, disable automatic reviews as described below, or route reviews to a different model. A different-model route uses a digest and does not share the parent's warm prefix; there, unset `reasoning_effort` means the routed provider's default.
 
 ### Disabling automatic reviews (`enabled`)
 

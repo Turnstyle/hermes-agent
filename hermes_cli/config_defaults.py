@@ -752,8 +752,8 @@ DEFAULT_CONFIG = {
         "approval": _aux(30),   # classifier — a fast/cheap model is recommended
         # /review reviewer: a full subagent on the async delegation rail, credentials resolved like
         # delegation.provider pins. "auto" + "" = main agent's model. api_mode forces transport:
-        # chat_completions | anthropic_messages | codex_responses.
-        "review": {"provider": "auto", "model": "", "base_url": "", "api_key": "", "api_mode": ""},
+        # chat_completions | anthropic_messages | codex_responses. reasoning_effort / extra_body.service_tier apply unpinned too.
+        "review": {"provider": "auto", "model": "", "base_url": "", "api_key": "", "api_mode": "", "reasoning_effort": "", "extra_body": {}},
         "mcp": _aux(30),
         # prefer_fast_model opts in to the provider fast tier; auto otherwise = main model.
         "title_generation": {
@@ -789,15 +789,15 @@ DEFAULT_CONFIG = {
         # the SUM of replayed input tokens over the review loop (iterations capped at 16); the loop
         # stops before crossing it. When unset, the runtime derives a budget from the active model
         # context window. <= 0 = unlimited.
-        # reasoning_effort is IGNORED while the review stays on the main model: the fork inherits the
-        # conversation's reasoning config verbatim so its request bytes keep the parent's warm
-        # prompt-cache prefix (#30532). Set provider/model below to route the review to another model
-        # if you want a different effort level; a one-time warning says so when the key is set.
+        # Unset reasoning_effort / extra_body.service_tier: a main-model review inherits the
+        # conversation's reasoning and tier verbatim so its request bytes keep the parent's warm
+        # prompt-cache prefix (#30532). Setting either is this slot's own policy on every route; on the
+        # main model that review pays a cold prefix.
         "background_review": {"enabled": True, **_aux(120)},
-        # No reasoning_effort on MoA blocks by design — configured PER SLOT in the preset
-        # (moa.presets.<name>.reference_models[].reasoning_effort / aggregator.reasoning_effort).
-        "moa_reference": _aux(900, reasoning_effort=False),
-        "moa_aggregator": _aux(900, reasoning_effort=False),
+        # MoA task defaults (agent/moa_loop.py) under each preset slot's own reasoning_effort; extra_body.service_tier
+        # replaces the tier the slot's endpoint or the main request carried. Unset = per-slot only, as before.
+        "moa_reference": _aux(900),
+        "moa_aggregator": _aux(900),
     },
 
     "display": {
@@ -1366,9 +1366,9 @@ DEFAULT_CONFIG = {
         "max_spawn_depth": 1,  # 1 = flat, 2 = orchestrator→leaf, 3+ = deeper
         "orchestrator_enabled": True,  # kill switch for role="orchestrator"
         # Total subagents a finite one-shot run (hermes chat -q / --oneshot) may spawn; 0 = unlimited.
-        # Each child re-pays a cold system prompt and re-explores the repo, and one-shot spawns are mostly
-        # "review my own work" rather than parallel work (agent/oneshot_footprint.py).
-        "oneshot_max_children": 2,
+        # Matches max_concurrent_children (one full batch); each child re-pays a cold system prompt
+        # (agent/oneshot_footprint.py). No migration: a saved value is the user's cap, never rewritten.
+        "oneshot_max_children": 10,
         # Subagent threads ALWAYS resolve approvals non-interactively (the parent TUI owns stdin;
         # input() from a worker would deadlock). false = auto-deny, true = auto-approve "once"; both
         # log a warning audit line. true only for trusted batch work.

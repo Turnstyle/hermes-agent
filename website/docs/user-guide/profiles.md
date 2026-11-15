@@ -65,6 +65,7 @@ hermes profile create mybot
 ```
 
 Creates a fresh profile with bundled skills seeded. Run `mybot setup` to configure API keys, model, and gateway tokens.
+The new profile starts on the current profile's model and its endpoint entry, plus any explicit `auxiliary:` policy for text side tasks (review, background review, curator, MoA, compression, …) with the endpoint entries (or exact `providers.<built-in>` tuning) those blocks name. `${VAR}` references are copied as references, never as values. Vision/voice blocks, delegation caps and everything else start from the defaults.
 
 If you plan to use this profile as a kanban worker (or want the kanban orchestrator to route work to it), pass `--description "<role>"` at create time so the orchestrator knows what it's good at:
 

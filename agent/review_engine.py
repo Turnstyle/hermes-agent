@@ -137,8 +137,11 @@ def build_review_task(snapshot: list[dict[str, str]], user_prompt: str = "", loa
 
 
 def _load_review_credentials_cfg() -> Optional[dict[str, Any]]:
-    """``auxiliary.review`` as a delegation-credentials dict, or None when unconfigured (provider auto/empty
-    and no model/base_url) so the reviewer inherits the parent's credentials."""
+    """``auxiliary.review`` as a delegation-credentials dict, or None when unconfigured (provider auto/empty,
+    no model/base_url, no effort/tier) so the reviewer takes the ``delegation`` route. The slot's
+    ``reasoning_effort`` and ``extra_body.service_tier`` (the generic auxiliary schema) are carried even
+    without a route pin: such a policy-only block keeps the ``delegation`` route (backend, model, fallback
+    chain) and replaces only its effort and tier (``tools.delegate_tool_routes.route_policy``)."""
     try:
         from hermes_cli.config import load_config_readonly
         review = (load_config_readonly().get("auxiliary") or {}).get("review") or {}
@@ -150,7 +153,13 @@ def _load_review_credentials_cfg() -> Optional[dict[str, Any]]:
     cfg = {k: str(review.get(k) or "").strip() for k in ("provider", "model", "base_url", "api_key", "api_mode")}
     if cfg["provider"].lower() == "auto":
         cfg["provider"] = ""
-    if not (cfg["provider"] or cfg["model"] or cfg["base_url"]):
+    # Raw effort: a YAML ``false`` disables thinking and must not read as unset.
+    if review.get("reasoning_effort") not in (None, ""):
+        cfg["reasoning_effort"] = review["reasoning_effort"]
+    extra_body = review.get("extra_body") if isinstance(review.get("extra_body"), dict) else {}
+    if str(extra_body.get("service_tier") or "").strip():
+        cfg["service_tier"] = str(extra_body["service_tier"]).strip()
+    if not (cfg["provider"] or cfg["model"] or cfg["base_url"] or "reasoning_effort" in cfg or "service_tier" in cfg):
         return None
     return cfg
 

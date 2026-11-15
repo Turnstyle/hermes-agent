@@ -1,5 +1,6 @@
-"""Copy the model and its selected custom endpoint into a new profile, and merge that endpoint
-over same-identity entries the new profile already has."""
+"""Copy the model, its selected custom endpoint and the explicit text auxiliary policy (with the
+endpoints that policy names) into a new profile, and merge those endpoints over same-identity
+entries the new profile already has."""
 
 from hermes_cli.config import _expand_env_vars, find_provider_entry
 from hermes_cli.config_providers import _normalize_custom_provider_entry
@@ -64,43 +65,105 @@ def _source_of(cfg: dict, resolved: dict):
     return None
 
 
+# Text side-LLM tasks whose explicit policy (route, reasoning effort, speed tier) a fresh profile
+# takes with the model, so its review/curator/MoA/compression calls run where the launch profile's
+# do. Non-text slots (vision, voice) and delegation caps stay per-profile.
+_SEEDED_AUX_TASKS = (
+    "review", "background_review", "curator", "moa_reference", "moa_aggregator", "compression",
+    "approval", "mcp", "title_generation", "memory_query_rewrite", "triage_specifier",
+    "kanban_decomposer", "profile_describer", "goal_judge", "group_router", "monitor",
+)
+
+
+def _explicit_aux_policy(block) -> bool:
+    """True when an ``auxiliary.<task>`` block sets a route, an effort or request fields; a block
+    left at ``auto`` / ``""`` inherits the main model anyway and is not seeded."""
+    if not isinstance(block, dict):
+        return False
+    provider = str(block.get("provider") or "").strip().lower()
+    return bool(
+        provider not in ("", "auto")
+        or str(block.get("model") or "").strip()
+        or str(block.get("base_url") or "").strip()
+        or block.get("reasoning_effort") not in (None, "")
+        or block.get("extra_body")
+    )
+
+
+def _seed_endpoint(seed: dict, source_cfg: dict, view: dict, selected: dict) -> None:
+    """Add the raw ``providers:`` / ``custom_providers:`` entry *selected* came from to *seed*."""
+    found = _source_of(view, selected)
+    if found is None:
+        return
+    section, where = found
+    if section == "providers":
+        seed.setdefault("providers", {})[where] = source_cfg["providers"][where]
+    elif (entry := source_cfg["custom_providers"][where]) not in seed.setdefault("custom_providers", []):
+        seed["custom_providers"].append(entry)
+
+
+def _exact_tuning(source_cfg: dict, provider: str):
+    """The exact ``providers.<built-in>`` entry a built-in *provider* reads for its tuning, else None.
+    Bare ``custom`` runs as provider ``custom`` and reads ``providers.custom`` tuning too."""
+    requested = _normalize_custom_provider_name(provider)
+    providers = source_cfg.get("providers")
+    exact = providers.get(provider) if isinstance(providers, dict) else None
+    if (
+        isinstance(exact, dict)
+        and requested not in {"", "auto"}
+        and (requested == "custom" or _shadowed_by_builtin(requested))
+    ):
+        return exact
+    return None
+
+
+def _seed_model_endpoint(seed: dict, source_cfg: dict, view: dict, provider: str) -> None:
+    selected = _resolve(provider, view)
+    if selected is not None:
+        _seed_endpoint(seed, source_cfg, view, selected)
+    elif (exact := _exact_tuning(source_cfg, provider)) is not None:
+        seed["providers"] = {provider: exact}
+
+
+def _seed_aux_policy(seed: dict, source_cfg: dict, view: dict) -> None:
+    """Explicit text ``auxiliary.<task>`` blocks, as written, plus the named endpoints they route to and
+    a built-in provider's exact ``providers.<built-in>`` tuning (a ``base_url`` pin needs no entry).
+    Entries already seeded (the model's) are kept, never replaced."""
+    aux = source_cfg.get("auxiliary")
+    if not isinstance(aux, dict):
+        return
+    policy = {task: aux[task] for task in _SEEDED_AUX_TASKS if _explicit_aux_policy(aux.get(task))}
+    if not policy:
+        return
+    seed["auxiliary"] = policy
+    for block in policy.values():
+        provider = _requested_provider(block)
+        if provider and provider.strip().lower() not in ("auto", "main"):
+            selected = _resolve(provider, view)
+            if selected is not None:
+                _seed_endpoint(seed, source_cfg, view, selected)
+            elif (exact := _exact_tuning(source_cfg, provider)) is not None:
+                seed.setdefault("providers", {}).setdefault(provider, exact)
+
+
 def launch_model_seed(source_cfg: dict) -> dict:
     """The config a fresh profile needs to run the launch profile's model: its ``model`` block plus
     the endpoint definition it points at. ``model.provider: custom:lab`` alone is "Unknown provider"
     on the first turn. The selected ``providers:`` or ``custom_providers:`` entry is copied as
     written (``${VAR}`` refs stay refs), and an exact ``providers.<built-in>`` / ``providers.custom``
-    key travels for its tuning even without a URL. ``{}`` when the launch profile has no model."""
+    key travels for its tuning even without a URL. The launch profile's explicit text auxiliary
+    policy travels with the endpoints it names (``_SEEDED_AUX_TASKS``). ``{}`` when the launch
+    profile has no model."""
     model_cfg = source_cfg.get("model")
     if not model_cfg:
         return {}
     seed = {"model": model_cfg}
-    provider = _requested_provider(model_cfg)
-    if provider is None:
-        return seed
-    requested = _normalize_custom_provider_name(provider)
-    providers = source_cfg.get("providers")
-    providers = providers if isinstance(providers, dict) else {}
     # Resolve and locate on ONE view so the found key/index addresses the raw entry.
     view = _routing_view(source_cfg)
-    selected = _resolve(provider, view)
-    if selected is None:
-        exact = providers.get(provider)
-        # Bare ``custom`` runs as provider ``custom`` and reads ``providers.custom`` tuning too.
-        if (
-            isinstance(exact, dict)
-            and requested not in {"", "auto"}
-            and (requested == "custom" or _shadowed_by_builtin(requested))
-        ):
-            seed["providers"] = {provider: exact}
-        return seed
-    found = _source_of(view, selected)
-    if found is not None:
-        section, where = found
-        seed[section] = (
-            {where: providers[where]}
-            if section == "providers"
-            else [source_cfg["custom_providers"][where]]
-        )
+    provider = _requested_provider(model_cfg)
+    if provider is not None:
+        _seed_model_endpoint(seed, source_cfg, view, provider)
+    _seed_aux_policy(seed, source_cfg, view)
     return seed
 
 
@@ -121,7 +184,8 @@ def merge_endpoint_seed(dst_cfg: dict, seed: dict) -> dict:
     same-identity entry guarantees each of them lands on the inherited endpoint. A URL-less tuning
     seed (``providers.custom``) claims no identity and replaces only its own key. Dropped entries
     include URL-less or disabled ones sharing a name (e.g. ``providers.openrouter`` tuning under a
-    custom endpoint named OpenRouter); this only runs for a new profile without a model."""
+    custom endpoint named OpenRouter); this only runs for a new profile without a model. Seeded
+    ``auxiliary`` blocks fill only the tasks the destination does not set."""
     seed_providers = seed.get("providers") or {}
     seed_custom = seed.get("custom_providers") or []
     provider = _requested_provider(seed.get("model"))
@@ -146,4 +210,8 @@ def merge_endpoint_seed(dst_cfg: dict, seed: dict) -> dict:
             e for e in (dst_custom if isinstance(dst_custom, list) else [])
             if not claimed & _aliases(e)
         ]
+    seed_aux = seed.get("auxiliary") or {}
+    if seed_aux:
+        dst_aux = dst_cfg.get("auxiliary")
+        merged["auxiliary"] = {**seed_aux, **(dst_aux if isinstance(dst_aux, dict) else {})}
     return merged
