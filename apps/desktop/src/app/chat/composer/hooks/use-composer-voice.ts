@@ -271,6 +271,8 @@ export function useComposerVoice({
 
   const liveConversation = useVoiceLiveConversation({
     activeToolLabel,
+    inFlightResponseId: () =>
+      $messages.get().findLast(message => message.role === 'assistant' && !message.hidden && message.pending)?.id ?? null,
     busyInputMode,
     beforeMicOpen: () => wakePauseBarrierRef.current ?? undefined,
     busy,

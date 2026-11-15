@@ -37,6 +37,8 @@ interface VoiceLiveConversationOptions {
    *  persisted row), `voiceContext` the recent spoken exchange for the model. */
   onSubmit: (text: string, voiceContext: string) => Promise<void> | void
   pendingResponse: (continuingReplyId?: null | string) => PendingVoiceResponse | null
+  /** The pending bubble can exist before it has text or the speech feed sees it. */
+  inFlightResponseId?: () => null | string
   consumePendingResponse: (includePending?: boolean) => void
   /** Text turns to seed the live model with when the session opens. */
   seedHistory: () => LiveHistoryMessage[]
@@ -112,6 +114,7 @@ export function useVoiceLiveConversation({
   onStopWord,
   onSubmit,
   pendingResponse,
+  inFlightResponseId,
   consumePendingResponse,
   seedHistory,
   activeToolLabel,
@@ -161,6 +164,7 @@ export function useVoiceLiveConversation({
     onStopWord,
     onSubmit,
     pendingResponse,
+    inFlightResponseId,
     consumePendingResponse,
     seedHistory
   })
@@ -174,6 +178,7 @@ export function useVoiceLiveConversation({
     onStopWord,
     onSubmit,
     pendingResponse,
+    inFlightResponseId,
     consumePendingResponse,
     seedHistory
   }
@@ -326,6 +331,8 @@ export function useVoiceLiveConversation({
             spokenLengthRef.current = 0
             latest.current.consumePendingResponse()
           } else {
+            // Capture before admission can append a user row after this bubble.
+            spokenResponseIdRef.current ??= latest.current.inFlightResponseId?.() ?? null
             latest.current.consumePendingResponse(false)
           }
 
