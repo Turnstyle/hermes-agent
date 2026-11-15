@@ -75,6 +75,10 @@ async def worker_child_request(connection, ref, params):
     from gateway.session_worker import _SCOPE, _claim, _verify
     if set(params) != _SCOPE | {'epoch', 'sequence', 'operation', 'payload'}:
         raise RuntimeStoreError('invalid_params')
+    custody = params['operation'] == 'custody.maker_observation'
+    if custody:
+        from gateway.session_custody_operation import require_custody_actor
+        require_custody_actor(connection)
     claim = _claim(connection, ref, params)
     if 'worker:adopt' not in connection.actor.capabilities:
         raise RuntimeStoreError('permission_denied')
@@ -82,6 +86,9 @@ async def worker_child_request(connection, ref, params):
     authority = connection.authority
 
     def reserve():
+        if custody:
+            from gateway.session_custody_operation import custody_receipt
+            return custody_receipt(connection, ref, params)
         refused, limits = None, (0, 0)
         try:
             authority._require_admission_open()
@@ -94,4 +101,31 @@ async def worker_child_request(connection, ref, params):
         return apply_worker_receipt(authority.db, **{key: params[key] for key in (
             'epoch', 'execution_id', 'session_id', 'generation', 'sequence', 'operation', 'payload')},
             handlers={'child.reserve': handler})
+    if custody:
+        from gateway.session_custody_operation import arm_custody_guard
+        from gateway.session_runtime_workers import tracked_write
+        def armed(result):
+            arm_custody_guard(authority)
+            return result
+        return await tracked_write(authority, reserve, then=armed)
     return await asyncio.to_thread(reserve)
+
+
+def reserve_reference_child(authority, launch, scope, identity, principal):
+    """Owner-only fixed operation, absent from RPC dispatch and delegated worker payloads."""
+    from gateway.session_custody_child import _validate_parent
+    _validate_parent(authority, launch, scope)
+    authority._require_admission_open()
+    limits = delegation_limits(authority, scope['execution_id'], scope['session_id'])
+    def write(conn):
+        from hermes_state_runtime import _epoch
+        _epoch(conn, scope['epoch'])
+        _validate_parent(authority, launch, scope, conn=conn)
+        result = reserve_child_execution(authority.db, conn, scope['session_id'],
+            {'secret': secrets.token_urlsafe(32)}, epoch=scope['epoch'], execution_id=scope['execution_id'],
+            identity=dict(profile_id=scope['profile_id'], pid=identity[0], birth=identity[1]),
+            principal=principal, limits=limits, refused=None)
+        if 'refused' in result:
+            raise RuntimeStoreError(result['refused'])
+        return result['child']
+    return authority.db._execute_write(write, patience_s=0)

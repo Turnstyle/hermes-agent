@@ -149,6 +149,8 @@ def physical_workers(authority):
 
 
 def stop_authority_work(authority):
+    from gateway.session_custody_operation import forget_custody
+    forget_custody(authority)
     from gateway.run_runtime import stop_authority_turns
     from agent.interrupt_compat import request_hard_interrupt
     stop_authority_turns(authority, in_process=True)

@@ -587,24 +587,42 @@ async def _spawn_registered_worker(authority, ref, row):
     interrupted result is already recorded). The generation stays marked spawning until registration."""
     spawning = _mark_spawning(authority, ref, row)
     generation = row.get('generation')
+    from gateway.session_custody_observation import producer
+    capture = producer(authority)
+    if capture is not None:
+        capture.forget_maker(authority)
+    attempt = capture.begin(authority, ref, row) if capture is not None else None
     try:
         env = await asyncio.to_thread(_worker_env, authority)
         cwd = (await asyncio.to_thread(Path(__file__).resolve)).parents[1]
         from gateway.session_worker_spawn import acquire_process
         from gateway.session_managed_worker_log import worker_log_path
         log_path = worker_log_path(authority.profile_id)
-        process = await acquire_process(subprocess.Popen, [sys.executable, '-m', 'agent.managed_worker'],
+        from gateway.session_custody_observation import capture_spawn
+        captured = []
+        def spawn(args, **kwargs):
+            process, launch = capture_spawn(authority, subprocess.Popen, args, attempt=attempt, reference_cwd=cwd, **kwargs)
+            captured.append(launch)
+            return process
+        process = await acquire_process(spawn, [sys.executable, '-m', 'agent.managed_worker'],
             cwd=cwd, stdin=subprocess.PIPE, env=env, stdout=subprocess.PIPE,
             stderr=subprocess.DEVNULL if log_path is None else subprocess.PIPE, **WORKER_POPEN)
     except asyncio.CancelledError:
+        if capture is not None:
+            capture.cancel(attempt)
         # acquire_process owns late-child cleanup; no bootstrap or reservation was sent.
         spawning.pop(ref.session_id, None)
         _interrupted_before_bootstrap(authority, row, _latched_stop_cause(authority, ref.session_id, generation))
         return None
     except BaseException:
+        if capture is not None:
+            capture.cancel(attempt)
         spawning.pop(ref.session_id, None)
         raise
     worker = ManagedWorker(process)
+    worker._custody_launch = captured[0] if captured else None
+    worker._custody_attempt = attempt
+    worker._custody_reference = worker._custody_launch.reference if worker._custody_launch is not None else None
     if log_path is not None:
         worker.drain_stderr(log_path)
     workers = getattr(authority, '_managed_workers', None)
@@ -626,6 +644,22 @@ async def admit_managed(authority, ref, row, policy):
         authority.pending_results[row['admission_id']] = {'result': result, 'usage': {}}
         return result['final_response']
     return await execute_managed(authority, ref, row, policy)
+
+
+async def _complete_reference_until_stop(authority, worker, launch, scope, names):
+    """A slow reference hello never owns the maker's Stop acknowledgment clock."""
+    reference = launch.reference
+    completion = asyncio.create_task(reference.complete(authority, launch, scope, names))
+    stopped = asyncio.create_task(worker.stop.wait())
+    try:
+        done, _ = await asyncio.wait({completion, stopped}, return_when=asyncio.FIRST_COMPLETED)
+        if stopped not in done:
+            await completion
+    finally:
+        completion.cancel()
+        stopped.cancel()
+        await asyncio.gather(completion, stopped, return_exceptions=True)
+        await asyncio.to_thread(reference.close)
 
 
 async def execute_managed(authority, ref, row, policy):
@@ -651,10 +685,10 @@ async def execute_managed(authority, ref, row, policy):
     workers = authority._managed_workers
     # A Stop acknowledged during the env/spawn awaits found no worker and was latched for this
     # generation; consume it in the same step that makes the worker reachable to interrupt_managed.
-    authority.adopt_agent(ref.session_id, row['generation'], worker)
     accepted = usage = None
     scope = None
     try:
+        authority.adopt_agent(ref.session_id, row['generation'], worker)
         # The interpreter behind the handle introduces itself first; the owner verifies that
         # identity (alive, same birth, descends from the handle) before reserving for it.
         hello = await worker.next_frame(HELLO_SECONDS, ack=0)
@@ -667,6 +701,12 @@ async def execute_managed(authority, ref, row, policy):
                     admission_id=row['admission_id'], process=process, principal_id=row['principal_id'], hello=hello,
                     worker_subject=owner_worker_subject()))
         worker.worker = (scope['pid'], scope['birth'])
+        worker._reservation_identity = tuple(scope[k] for k in (
+            'profile_id', 'session_id', 'execution_id', 'generation', 'epoch', 'pid', 'birth'))
+        from gateway.session_custody_observation import producer
+        capture = producer(authority)
+        if capture is not None:
+            capture.reserved(authority, getattr(worker, '_custody_launch', None), scope, process)
         # The child reads nothing else until the exact reservation has committed.
         frame = await asyncio.to_thread(_bootstrap, authority, ref, row, policy, scope, text)
         worker.secrets.extend(v for v in (frame['api_key'], scope['secret']) if isinstance(v, str) and v)
@@ -684,6 +724,13 @@ async def execute_managed(authority, ref, row, policy):
                 raise RuntimeStoreError('managed_worker_failed')
             kind = frame.get('type')
             if kind == 'ready' and set(frame) == {'type', 'pid'} and frame['pid'] == scope['pid']:
+                from gateway.session_custody_observation import producer
+                capture = producer(authority)
+                if capture is not None and not worker.stop.is_set():
+                    launch = getattr(worker, '_custody_launch', None)
+                    await asyncio.to_thread(capture.ready, authority, launch, scope)
+                    if launch is not None and launch.reference is not None:
+                        await _complete_reference_until_stop(authority, worker, launch, scope, dict(capture._names))
                 continue
             if kind == 'delta' and set(frame) == {'type', 'text'} and isinstance(frame['text'], str):
                 authority.publish_execution(ref.session_id, row['generation'], 'message.delta', {'text': frame['text']})
@@ -701,9 +748,21 @@ async def execute_managed(authority, ref, row, policy):
             if frame == {'type': 'finished'} and accepted is not None:
                 # 'finished' follows the worker's durable execution.finish: the turn is complete.
                 # A slow or non-zero interpreter exit after it is close()'s cleanup, not a loss.
+                exit_code = None
                 with suppress(subprocess.TimeoutExpired):
-                    await asyncio.to_thread(process.wait, 10)
+                    exit_code = await asyncio.to_thread(process.wait, 10)
                 accepted = _with_stop_cause(accepted, worker)
+                if (exit_code != 0 or worker.stop.is_set() or accepted.get('failed') or accepted.get('interrupted')):
+                    from gateway.session_custody_observation import producer
+                    capture = producer(authority)
+                    if capture is not None:
+                        capture.discard(getattr(worker, '_custody_launch', None))
+                else:
+                    from gateway.session_custody_observation import producer
+                    capture = producer(authority)
+                    if capture is not None:
+                        await asyncio.to_thread(capture.succeeded, authority,
+                            getattr(worker, '_custody_launch', None), scope)
                 # Like in-process execution, settlement belongs to the drain's stream lock.
                 authority.pending_results[row['admission_id']] = {
                     'result': {**accepted, 'local_viewer': True}, 'usage': usage,
@@ -711,6 +770,10 @@ async def execute_managed(authority, ref, row, policy):
                 return accepted['final_response']
             raise RuntimeStoreError('invalid_worker_frame')
     except (Exception, asyncio.CancelledError) as exc:
+        from gateway.session_custody_observation import producer
+        capture = producer(authority)
+        if capture is not None:
+            capture.discard(getattr(worker, '_custody_launch', None))
         import logging
         reason = exc.reason if isinstance(exc, RuntimeStoreError) else type(exc).__name__
         logging.getLogger(__name__).warning('Managed worker lost: %s', reason)
@@ -738,4 +801,12 @@ async def execute_managed(authority, ref, row, policy):
         raise ManagedExecutionUnknown('managed_worker_unknown') from exc
     finally:
         workers.pop(ref.session_id, None)
+        reference = getattr(worker, '_custody_reference', None)
+        if reference is not None:
+            await asyncio.to_thread(reference.close)
+        if getattr(worker, '_custody_launch', None) is None:
+            from gateway.session_custody_observation import producer
+            capture = producer(authority)
+            if capture is not None:
+                capture.cancel(getattr(worker, '_custody_attempt', None))
         await asyncio.to_thread(worker.close)

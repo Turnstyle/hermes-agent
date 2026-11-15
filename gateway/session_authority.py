@@ -1287,6 +1287,8 @@ class SessionAuthority:
             finally:
                 with live.event_stream.lock:
                     self.executing.pop(ref.session_id, None)
+                from gateway.session_custody_operation import forget_custody
+                await asyncio.to_thread(forget_custody, self, admission_id=row['admission_id'])
         except ManagedExecutionUnknown:
             with live.event_stream.lock:
                 live.event_stream.execution = {}
@@ -1450,6 +1452,10 @@ async def initialize_session_authority(runner, *, profile_id, instance_id, db=No
     # yielding, so no other task observes a half-registered authority.
     from pathlib import Path
     db_key = await asyncio.to_thread(Path(db.db_path).resolve)
+    binding = getattr(runner, '_maker_custody_binding', None)
+    if binding is not None and str(binding.authority.profile_id) == str(profile_id):
+        from gateway.session_custody_operation import forget_custody
+        await asyncio.to_thread(forget_custody, binding.authority)
     epoch = await asyncio.to_thread(begin_runtime_epoch, db, instance_id=instance_id)
     # Hot-serve builds a profile while the loop serves the others: both writes stay off it.
     await asyncio.to_thread(recover_session_inputs, db, epoch=epoch)
