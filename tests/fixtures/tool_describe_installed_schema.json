@@ -1,0 +1,318 @@
+{
+  "name": "keys_router_operation",
+  "description": "Claude actions take exactly action, no extra fields. claude_same_account_status: consumed historical reservation returns receipt only, not current custody; otherwise fresh guard then bounded local status. claude_same_account_current_custody: exact action-only; explicit trusted runtime profile tb-keys-router and native nondelegated owned task t_bab77736 required; old t_71fc5d7e reservation metadata must be safe/present and remains unchanged. One observation in flight, fixed guard then bounded same-account-metadata only; no sync, auth/delivery mutation or reservation writes. Native lease/lock/safety effects remain. Snapshot is not provider acceptance or restored access; installed lag returns bounded_delivery_required, never delivers. Unbound runtime profile fails closed; no env/argument profile substitution. claude_same_account_sync: native owned task t_71fc5d7e only; durable once reservation, fixed sync argv, enforced same-account generation and no-renewal policy; independent readback required. Delegated children cannot borrow task identity. Subscription discovery reads fixed bounded metadata sources for five providers; absent, malformed or ambiguous sources fail without fabricated account proof. Readiness validates existing Bucky CPA records for xai/antigravity and fixed local Hermes metadata for nous/cursor. Ollama discovery inspects its exact authorized mapping only. Google credit policy is checked in fixed broker config; no auth-record policy invention. Admit pins an existing record in metadata, without login, token migration or global exclusivity proof. Publish creates an access-only Sheldon record, refuses different existing content, never renews. Separate subscription_receiver_readback(provider,role) reads historical receiver journal metadata only. subscription_receiver_resolve(provider,role,operation_id) reconciles an existing pending write without reapplying. subscription_receiver_publish(provider,account_handle,expected_generation) uses the installed Bucky CPA publisher and Sheldon receiver for CAS access-only rotation, with exact-operation journal readback. Fixed locations, xai/antigravity only; primary adoption journal required, not independent issuance proof. No native grant ingestion or fence/independent receipt creation. Uncertain writes must not be replayed. Entitlement and serving remain unknown. Card-scoped custody operations, no shell or free commands. Never return, print or log private keys or secret values. google_creator_metadata: exact fixed-title item-list metadata only, no caller title/vault/reference, credential body, IAM proof or provisioning. google_provision_validate(request): strict offline plan syntax/scope/hash/expiry validation only; authorization remains unverified and execution_admitted=false. No Google IAM mutation, account/project creation, key minting or API enablement is exposed. See PROVISIONING-MANDATE.md; do not use this route as a provisioning claim. key_create(item): native Ed25519 SSH key generation in keys-router vault; refuses existing item; returns only name, public key and SHA256 public fingerprint. file_sign(item,path): in-memory private-key read from a tagged signing item; exact raw-file-byte Ed25519 signature in base64 and file SHA256. signature_verify(path,signature,public_key OR item): public-only verification, pass/fail and file SHA256. Signing paths must be regular files in a Git worktree rooted inside runtime HERMES_KANBAN_WORKSPACE; no caller workspace override. No symlinks/hard links/devices, max 16 MiB. Honor do_not_retry after ambiguous creation; inspect vault metadata before another attempt. slack_place takes action only and places fixed two Slack references into Sheldon unblock-guru .env with cold backup and verified atomic mode600 replacement. No caller destinations. Named Google service account only, never ADC. op_probe(reference): fixed keys-router-vault read, stdout discarded; returns bounded error category, child exit and provider numeric Retry-After capped at3600s, no automatic retry. auth_list(provider optional): read-only fixed own-profile persisted-local-pool metadata only, names/stable metadata entry keys/row presence/fixed target and explicit truncation; no labels, raw IDs, token fields, native CLI, load_pool, healing or refresh; inherited/root/external identity uninspected, not proof of usable credential or authenticated account. Hermes auth add/priority only for this profile; API-key add only, no OAuth/device flow. box_compare_transfer takes action only: compare fixed Box Integration fields with box-client-id and box-client-secret. Box/secret_add writes remain held pending hash-bound release; only exact fixed Box pairs allowed. No Box values/hashes returned. Do not retry failed writes without metadata verification. hydrawise_login_inspect: exact fixed Login item 5yfdcuqpezb6ox7mhepvjty7hy only; native runtime profile tb-keys-router and owned task t_a6a08479 required, never env/kwargs/argument identity; one fixed metadata read; returns booleans, observed vault id, version and URL count, never the item, URLs or values. hydrawise_login_add_url(expected_vault_id, expected_version): same identity and read under a local lock, exact vault and version preconditions; exact https://app.hydrawise.com/config/login already present is a verified no-op; otherwise one official-SDK website append (fresh re-get must equal the preimage, single put, version N+1 and op readback verified; provider CAS unverified), or a zero-write provider_cas_unverified hold if the SDK runtime is not installed. hydrawise_login_readback(expected_vault_id, expected_version): read-only exact-target verdict. hydrawise_sdk_canary: same identity, no arguments; once-only dummy Login CAS canary in fixed vault 2uadhfojbtwx2zlvpz4tw5375q; any later call returns the recorded status with zero provider calls. Honor do_not_retry; inspect before any retry.",
+  "parameters": {
+    "type": "object",
+    "additionalProperties": false,
+    "allOf": [
+      {
+        "if": {
+          "properties": {
+            "action": {
+              "enum": [
+                "migration_ledger_status",
+                "migration_compare_selftest"
+              ]
+            }
+          },
+          "required": [
+            "action"
+          ]
+        },
+        "then": {
+          "propertyNames": {
+            "enum": [
+              "action"
+            ]
+          }
+        }
+      },
+      {
+        "if": {
+          "properties": {
+            "action": {
+              "const": "jev_reference_inventory"
+            }
+          },
+          "required": [
+            "action"
+          ]
+        },
+        "then": {
+          "propertyNames": {
+            "enum": [
+              "action"
+            ]
+          }
+        }
+      },
+      {
+        "if": {
+          "properties": {
+            "action": {
+              "enum": [
+                "claude_same_account_status",
+                "claude_same_account_sync",
+                "claude_same_account_current_custody"
+              ]
+            }
+          },
+          "required": [
+            "action"
+          ]
+        },
+        "then": {
+          "propertyNames": {
+            "enum": [
+              "action"
+            ]
+          }
+        }
+      },
+      {
+        "if": {
+          "properties": {
+            "action": {
+              "const": "subscription_account_models"
+            }
+          },
+          "required": [
+            "action"
+          ]
+        },
+        "then": {
+          "required": [
+            "action",
+            "provider"
+          ],
+          "propertyNames": {
+            "enum": [
+              "action",
+              "provider"
+            ]
+          },
+          "properties": {
+            "provider": {
+              "const": "antigravity"
+            }
+          }
+        }
+      },
+      {
+        "if": {
+          "properties": {
+            "action": {
+              "enum": [
+                "hydrawise_login_inspect",
+                "hydrawise_sdk_canary"
+              ]
+            }
+          },
+          "required": [
+            "action"
+          ]
+        },
+        "then": {
+          "propertyNames": {
+            "enum": [
+              "action"
+            ]
+          }
+        }
+      },
+      {
+        "if": {
+          "properties": {
+            "action": {
+              "enum": [
+                "hydrawise_login_add_url",
+                "hydrawise_login_readback"
+              ]
+            }
+          },
+          "required": [
+            "action"
+          ]
+        },
+        "then": {
+          "propertyNames": {
+            "enum": [
+              "action",
+              "expected_vault_id",
+              "expected_version"
+            ]
+          },
+          "required": [
+            "action",
+            "expected_vault_id",
+            "expected_version"
+          ]
+        }
+      }
+    ],
+    "properties": {
+      "action": {
+        "type": "string",
+        "enum": [
+          "sm_sync",
+          "sm_rotate",
+          "sm_revoke",
+          "sm_rollback",
+          "op_probe",
+          "secret_describe",
+          "secret_add",
+          "auth_list",
+          "auth_add",
+          "auth_priority",
+          "box_compare_transfer",
+          "box_labels",
+          "slack_place",
+          "key_create",
+          "file_sign",
+          "signature_verify",
+          "google_creator_metadata",
+          "google_provision_validate",
+          "google_account_stage",
+          "google_account_record",
+          "google_provision_status",
+          "google_provision_execute",
+          "cron_custody_attest",
+          "subscription_discover",
+          "subscription_readiness",
+          "subscription_admit",
+          "subscription_publish",
+          "subscription_receiver_readback",
+          "subscription_receiver_resolve",
+          "subscription_receiver_publish",
+          "subscription_account_models",
+          "claude_same_account_status",
+          "claude_same_account_sync",
+          "claude_same_account_current_custody",
+          "migration_ledger_status",
+          "migration_compare_selftest",
+          "jev_reference_inventory",
+          "hydrawise_login_inspect",
+          "hydrawise_login_add_url",
+          "hydrawise_login_readback",
+          "hydrawise_sdk_canary"
+        ],
+        "description": "google_account_stage(request): append/read back a LOCAL planned metadata record, never a created Google account. google_account_record(project_id,service_account_id): exact local record lookup. google_provision_status: installed-versus-live status. google_provision_execute(request): always PRE_LIVE_REVIEW_HOLD, zero transport calls. No live adapter or trusted authorizer; Sheldon fleet-seat-red-team exact-hash review is required before any future live use."
+      },
+      "apply": {
+        "type": "boolean",
+        "default": false,
+        "description": "SM actions only. Explicit apply; plans perform no source/cloud reads."
+      },
+      "row": {
+        "type": "string",
+        "description": "Exact authorized SM mapping row id; lifecycle requires one row."
+      },
+      "previous_version": {
+        "type": "string",
+        "pattern": "^[1-9][0-9]{0,19}$"
+      },
+      "new_version": {
+        "type": "string",
+        "pattern": "^[1-9][0-9]{0,19}$"
+      },
+      "consumer_receipt": {
+        "type": "string",
+        "description": "SM rotation metadata under fixed durable/sm-consumer-readbacks only. Untrusted provenance never releases previous versions."
+      },
+      "reference": {
+        "type": "string"
+      },
+      "secret": {
+        "type": "string"
+      },
+      "provider": {
+        "type": "string",
+        "enum": [
+          "anthropic",
+          "openai",
+          "openrouter",
+          "nous",
+          "openai-codex",
+          "xai",
+          "antigravity",
+          "cursor",
+          "ollama"
+        ]
+      },
+      "account_handle": {
+        "type": "string",
+        "pattern": "^[0-9a-f]{64}$",
+        "description": "Subscription actions only. SHA256 of intended existing account email stripped and casefolded; never a token. Discovery takes no handle."
+      },
+      "role": {
+        "type": "string",
+        "enum": [
+          "primary",
+          "standby"
+        ],
+        "description": "Receiver readback/resolve only; fixed Bucky/Sheldon role."
+      },
+      "operation_id": {
+        "type": "string",
+        "pattern": "^[0-9a-f]{32}$",
+        "description": "Existing pending receiver operation; never credential payload."
+      },
+      "expected_generation": {
+        "type": "integer",
+        "minimum": 0,
+        "maximum": 9007199254740990,
+        "description": "Receiver publish CAS; no automatic rebase or retry."
+      },
+      "entry_id": {
+        "type": "string"
+      },
+      "priority": {
+        "type": "integer",
+        "minimum": 0,
+        "maximum": 1000
+      },
+      "item": {
+        "type": "string",
+        "description": "Signing item title in keys-router vault; native SSH Ed25519 item tagged keys-router-signing."
+      },
+      "path": {
+        "type": "string",
+        "description": "Regular file inside runtime HERMES_KANBAN_WORKSPACE and a Git worktree rooted there; no symlinks, hard links, devices; max 16 MiB."
+      },
+      "public_key": {
+        "type": "string",
+        "description": "OpenSSH Ed25519 public key for signature_verify, instead of item."
+      },
+      "signature": {
+        "type": "string",
+        "description": "Base64 detached Ed25519 signature over raw file bytes."
+      },
+      "project_id": {
+        "type": "string",
+        "description": "Exact existing-project ID for local metadata lookup; not a wildcard or caller path."
+      },
+      "service_account_id": {
+        "type": "string",
+        "description": "Exact service-account ID for local metadata lookup; lookup is not a cloud account observation."
+      },
+      "expected_vault_id": {
+        "type": "string",
+        "pattern": "^[a-z2-7]{26}$",
+        "description": "Hydrawise add_url/readback only: vault ID observed by hydrawise_login_inspect; compared, never used to select a vault."
+      },
+      "expected_version": {
+        "type": "integer",
+        "minimum": 1,
+        "maximum": 2147483647,
+        "description": "Hydrawise add_url/readback only: item version observed by hydrawise_login_inspect; any difference is stale_version."
+      },
+      "request": {
+        "type": "object",
+        "description": "Non-secret strict staged-v1 provisioning request; offline syntax/scope validation only, never authority or live execution. See PROVISIONING-MANDATE.md."
+      }
+    },
+    "required": [
+      "action"
+    ]
+  }
+}

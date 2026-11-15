@@ -2,10 +2,12 @@
 
 Importing runs tool discovery (each tools/*.py self-registers via
 tools.registry.register()); exposes get_tool_definitions() (toolset-filtered
-schemas sent to the model) and handle_function_call() (dispatch with
-hooks/middleware) plus registry pass-throughs.
+schemas sent to the model), get_canonical_tool_definitions() (the same session
+catalog as registered, which the Tool Search bridge serves) and
+handle_function_call() (dispatch with hooks/middleware) plus registry pass-throughs.
 """
 
+import copy
 import os
 import json
 import re
@@ -16,7 +18,7 @@ from contextvars import ContextVar
 import logging
 import threading
 import time
-from typing import Dict, Any, List, Optional, Tuple
+from typing import Callable, Dict, Any, List, Optional, Tuple
 
 from tools.registry import (
     CHECK_FN_CACHE_BYPASS, check_fn_cache_epoch, check_fn_cache_scope, check_fn_verdict_window, discover_builtin_tools,
@@ -197,6 +199,7 @@ _LEGACY_TOOLSET_MAP = {
 # the earliest check_fn verdict it was filtered on (registry.check_fn_verdict_window):
 # a hit never re-runs the checks, so without that expiry an MCP server that dropped
 # and reconnected without re-registering would stay hidden for the life of the process.
+# get_canonical_tool_definitions() shares the memo under its own key form.
 _tool_defs_cache: dict[tuple, list[dict[str, Any]]] = {}
 _tool_defs_expiry: dict[tuple, float] = {}  # cache key -> time.monotonic() deadline
 _tool_defs_cache_lock = threading.Lock()
@@ -207,6 +210,9 @@ _tool_defs_cache_lock = threading.Lock()
 # handful of distinct platform/toolset combos a gateway actually serves) while keeping the cap small.
 # (#19251)
 _TOOL_DEFS_CACHE_MAX = 8
+# Memo key forms: the provider wire definitions (sanitized, sent to the model) and the canonical ones
+# the Tool Search bridge serves never share an entry.
+_WIRE_FORM, _CANONICAL_FORM = "wire", "canonical"
 
 
 def _clear_tool_defs_cache() -> None:
@@ -226,19 +232,43 @@ def _live_tool_defs_entry(cache_key: tuple) -> Optional[list[dict[str, Any]]]:
 
 def get_tool_definitions(enabled_toolsets: Optional[list[str]] = None, disabled_toolsets: Optional[list[str]] = None,
                          quiet_mode: bool = False, skip_tool_search_assembly: bool = False) -> list[dict[str, Any]]:
-    """Tool definitions for model API calls, filtered by toolset.
+    """Provider wire definitions for model API calls, filtered by toolset.
 
     enabled_toolsets None = all; disabled_toolsets are subtracted after enabling.
     quiet_mode suppresses status prints and enables memoization.
-    skip_tool_search_assembly returns raw schemas for every enabled tool — only
-    the tool_search bridge should use it (it reads the real, uncollapsed catalog).
+    skip_tool_search_assembly returns every enabled tool un-collapsed (no tool_search
+    bridge) but still in wire form, provider sanitizer applied — listing surfaces
+    (/tools) read it. The bridge serves :func:`get_canonical_tool_definitions`.
     """
     def compute():
         return _compute_tool_definitions(enabled_toolsets, disabled_toolsets, quiet_mode,
                                          skip_tool_search_assembly=skip_tool_search_assembly)
     if not quiet_mode:
         return compute()
-    cache_key = _tool_defs_cache_key(enabled_toolsets, disabled_toolsets, skip_tool_search_assembly)
+    return _memoized_tool_definitions(
+        _tool_defs_cache_key(enabled_toolsets, disabled_toolsets, skip_tool_search_assembly, _WIRE_FORM), compute)
+
+
+def get_canonical_tool_definitions(enabled_toolsets: Optional[list[str]] = None,
+                                   disabled_toolsets: Optional[list[str]] = None) -> list[dict[str, Any]]:
+    """The session's tool definitions as registered, for the Tool Search bridge (search/describe/call).
+
+    Same toolset selection, check_fn availability, profile scope, schema overrides and dynamic
+    rewrites as :func:`get_tool_definitions`, never assembled and never through the provider wire
+    sanitizer: that drops shapes strict backends reject in a tool declaration (a top-level ``allOf``
+    holding a tool's conditional contract), while tool_describe hands the schema back as a tool
+    result, where the model needs all of it. Always quiet; memoized under its own key form.
+    """
+    def compute():
+        # A copy: the memo outlives the call, and these defs share nested dicts with live registry entries.
+        return copy.deepcopy(_canonical_tool_definitions(enabled_toolsets, disabled_toolsets, quiet_mode=True))
+    return _memoized_tool_definitions(
+        _tool_defs_cache_key(enabled_toolsets, disabled_toolsets, True, _CANONICAL_FORM), compute)
+
+
+def _memoized_tool_definitions(cache_key: Optional[tuple],
+                               compute: Callable[[], list[dict[str, Any]]]) -> list[dict[str, Any]]:
+    """The quiet-mode memo both definition forms go through; ``cache_key`` None bypasses it."""
     # Cache the freshly-computed list, but hand callers a shallow copy so downstream mutations (e.g.
     # run_agent appending memory/LCM tool schemas to self.tools) don't poison the cache. Without this, a
     # long-lived Gateway process accumulates duplicate tool names across agent inits and providers that
@@ -272,13 +302,15 @@ def get_tool_definitions(enabled_toolsets: Optional[list[str]] = None, disabled_
 
 def _tool_defs_cache_key(
     enabled_toolsets: Optional[list[str]], disabled_toolsets: Optional[list[str]], skip_tool_search_assembly: bool,
+    form: str,
 ) -> Optional[tuple]:
-    """Memo key for get_tool_definitions, or None when caching must be bypassed.
+    """Memo key for the tool definitions, or None when caching must be bypassed.
 
-    Covers every argument plus everything that changes the result without one:
+    Covers every argument, the definition form included (wire and canonical lists
+    never share an entry), plus everything that changes the result without one:
     registry generation, check_fn cache epoch, config.yaml stat signature (dynamic
     schemas), kanban context, profile scope. check_fn verdicts expire the entry
-    itself (see get_tool_definitions).
+    itself (see _memoized_tool_definitions).
     """
     profile_scope = check_fn_cache_scope()
     if profile_scope == CHECK_FN_CACHE_BYPASS:
@@ -292,7 +324,7 @@ def _tool_defs_cache_key(
     return (
         registry.current_scope_key(), frozenset(enabled_toolsets) if enabled_toolsets is not None else None,
         frozenset(disabled_toolsets) if disabled_toolsets else None, registry._generation, cfg_fp,
-        bool(os.environ.get("HERMES_KANBAN_TASK")), bool(skip_tool_search_assembly),
+        bool(os.environ.get("HERMES_KANBAN_TASK")), bool(skip_tool_search_assembly), form,
         _is_delegated_child_context(), _is_dispatcher_owned_worker(), profile_scope, check_fn_cache_epoch(),
     )
 
@@ -510,9 +542,10 @@ _TOOL_SEARCH_LISTING_FORMS = {
 }
 
 
-def _compute_tool_definitions(enabled_toolsets: Optional[list[str]] = None, disabled_toolsets: Optional[list[str]] = None,
-                              quiet_mode: bool = False, skip_tool_search_assembly: bool = False) -> list[dict[str, Any]]:
-    """Uncached implementation of :func:`get_tool_definitions`."""
+def _canonical_tool_definitions(enabled_toolsets: Optional[list[str]], disabled_toolsets: Optional[list[str]],
+                                quiet_mode: bool) -> list[dict[str, Any]]:
+    """Selected, available, dynamically rewritten definitions as registered: the stage both forms
+    share. Nested dicts are the registry entries' own, so callers copy or sanitize before handing out."""
     tools_to_include = _select_tool_names(enabled_toolsets, disabled_toolsets, quiet_mode)
     # Selection is per schema, not per process/profile. Kanban's local checks
     # are uncached; the outer definitions cache already keys on this selection.
@@ -525,6 +558,13 @@ def _compute_tool_definitions(enabled_toolsets: Optional[list[str]] = None, disa
     if not quiet_mode:
         print(f"🛠️  Final tool selection ({len(filtered_tools)} tools): {', '.join(_last_resolved_tool_names)}"
               if filtered_tools else "🛠️  No tools selected (all filtered out or unavailable)")
+    return filtered_tools
+
+
+def _compute_tool_definitions(enabled_toolsets: Optional[list[str]] = None, disabled_toolsets: Optional[list[str]] = None,
+                              quiet_mode: bool = False, skip_tool_search_assembly: bool = False) -> list[dict[str, Any]]:
+    """Uncached implementation of :func:`get_tool_definitions`: the canonical stage in wire form."""
+    filtered_tools = _canonical_tool_definitions(enabled_toolsets, disabled_toolsets, quiet_mode)
     # Normalize schema shapes llama.cpp's grammar converter rejects (bare
     # "type": "object", string-valued nodes from malformed MCP servers).
     try:
@@ -726,11 +766,12 @@ def _dispatch_bridge_tool(function_name: str, function_args: dict[str, Any],
         return None
     if not ts.is_bridge_tool(function_name):
         return None
-    # Un-collapsed catalog scoped to the session's toolsets, so a restricted
-    # session (subagent, kanban worker) can't reach the whole registry via the bridge.
+    # Un-collapsed canonical catalog scoped to the session's toolsets, so a restricted
+    # session (subagent, kanban worker) can't reach the whole registry via the bridge
+    # and tool_describe serves each schema whole, not its provider wire form.
     try:
-        current_defs = get_tool_definitions(enabled_toolsets=enabled_toolsets, disabled_toolsets=disabled_toolsets,
-                                            quiet_mode=True, skip_tool_search_assembly=True) or []
+        current_defs = get_canonical_tool_definitions(enabled_toolsets=enabled_toolsets,
+                                                      disabled_toolsets=disabled_toolsets) or []
     except Exception:
         current_defs = []
     args = function_args or {}

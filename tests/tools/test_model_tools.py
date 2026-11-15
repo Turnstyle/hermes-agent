@@ -489,19 +489,19 @@ class TestBridgeDispatch:
 
 
     def test_tool_call_bad_args_error(self):
-        with patch("model_tools.get_tool_definitions", return_value=[]):
+        with patch("model_tools.get_canonical_tool_definitions", return_value=[]):
             result = json.loads(handle_function_call("tool_call", {}))
         assert result.get("error")
 
     def test_tool_call_rejects_out_of_scope_and_unwraps_in_scope(self):
         import tools.tool_search as ts
-        with patch("model_tools.get_tool_definitions", return_value=[]), \
+        with patch("model_tools.get_canonical_tool_definitions", return_value=[]), \
              patch.object(ts, "resolve_underlying_call", return_value=("mcp_x", {"a": 1}, None)), \
              patch.object(ts, "scoped_deferrable_names", return_value=frozenset()):
             result = json.loads(handle_function_call("tool_call", {"name": "mcp_x"}))
         assert result.get("error")
 
-        with patch("model_tools.get_tool_definitions", return_value=[]), \
+        with patch("model_tools.get_canonical_tool_definitions", return_value=[]), \
              patch.object(ts, "resolve_underlying_call", return_value=("mcp_x", {"a": 1}, None)), \
              patch.object(ts, "scoped_deferrable_names", return_value=frozenset({"mcp_x"})), \
              patch.object(ts, "validate_deferred_call_args", return_value=None), \
@@ -562,17 +562,17 @@ def test_tool_defs_cache_key_sees_config_replacement_with_pinned_mtime(tmp_path)
     import os
     import shutil
 
-    from model_tools import _tool_defs_cache_key
+    from model_tools import _WIRE_FORM, _tool_defs_cache_key
     from tests.waiting import wait_for_ctime_tick
 
     cfg = tmp_path / "config.yaml"
     cfg.write_text("mcp_servers:\n  aa: {command: a}\n", encoding="utf-8")
     with patch("hermes_cli.config.get_config_path", return_value=cfg):
-        before = _tool_defs_cache_key(None, None, False)
+        before = _tool_defs_cache_key(None, None, False, _WIRE_FORM)
         st = cfg.stat()
         wait_for_ctime_tick(tmp_path, st.st_ctime_ns)
         other = tmp_path / "other.yaml"
         other.write_text("mcp_servers:\n  bb: {command: b}\n", encoding="utf-8")
         shutil.copy2(other, cfg)
         os.utime(cfg, ns=(st.st_atime_ns, st.st_mtime_ns))
-        assert _tool_defs_cache_key(None, None, False) != before
+        assert _tool_defs_cache_key(None, None, False, _WIRE_FORM) != before

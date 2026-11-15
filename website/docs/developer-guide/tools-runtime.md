@@ -117,6 +117,10 @@ The main entry point is `model_tools.get_tool_definitions(enabled_toolsets, disa
 
 5. **Dynamic schema patching** — after filtering, schemas such as `execute_code`, `browser_cdp` and `delegate_task` are dynamically adjusted to only reference tools that actually passed filtering (prevents model hallucination of unavailable tools).
 
+6. **Provider wire form** — `tools/schema_sanitizer.sanitize_tool_schemas()` rewrites shapes strict backends reject in a tool declaration (nullable unions, provider-illegal property keys, top-level `allOf`/`anyOf`/`oneOf`/`enum`/`not`), then Tool Search assembly collapses deferrable tools behind the bridge unless `skip_tool_search_assembly=True`.
+
+The Tool Search bridge (`tool_search` / `tool_describe` / `tool_call`) reads `model_tools.get_canonical_tool_definitions(enabled_toolsets, disabled_toolsets)` instead: steps 1–5 only, never sanitized, memoized under its own key form. `tool_describe` therefore returns a deferred tool's whole schema, and `tool_call` arguments are still validated against the registered schema before dispatch.
+
 ### Legacy toolset names
 
 Old toolset names with `_tools` suffixes (e.g., `web_tools`, `terminal_tools`) are mapped to their modern tool names via `_LEGACY_TOOLSET_MAP` for backward compatibility.

@@ -86,7 +86,10 @@ def _entry_search_text(td: dict[str, Any], source_label: str = "") -> str:
     name = name.removeprefix("mcp__")
     name_words = re.sub(r"[_.:-]", " ", name)
     extra = source_label if source_label and source_label not in name_words.split() else ""
-    param_names = " ".join(((fn.get("parameters") or {}).get("properties") or {}).keys())
+    # The bridge reads canonical (unsanitized) defs: one plugin's malformed shape must not break search.
+    params = fn.get("parameters")
+    props = params.get("properties") if isinstance(params, dict) else None
+    param_names = " ".join(props) if isinstance(props, dict) else ""
     return f"{name_words} {extra} {fn.get('description', '') or ''} {param_names}"
 
 
