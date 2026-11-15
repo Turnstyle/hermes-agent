@@ -2,10 +2,10 @@ import { atom } from 'nanostores'
 
 export type BusyInputMode = 'interrupt' | 'queue' | 'steer'
 
-export function normalizeBusyInputMode(value: unknown): BusyInputMode {
+export function normalizeBusyInputMode(value: unknown, fallback: BusyInputMode = 'interrupt'): BusyInputMode {
   const mode = typeof value === 'string' ? value.trim().toLowerCase() : ''
 
-  return mode === 'steer' || mode === 'queue' ? mode : 'interrupt'
+  return mode === 'steer' || mode === 'queue' || mode === 'interrupt' ? mode : fallback
 }
 
 export function busyInputOwnerKey(connectionId?: string | null, profile?: string | null): string {

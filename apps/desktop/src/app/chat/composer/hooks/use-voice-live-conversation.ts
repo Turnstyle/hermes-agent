@@ -4,6 +4,7 @@ import { useI18n } from '@/i18n'
 import { sanitizeTextForSpeech } from '@/lib/speech-text'
 import { type LiveHistoryMessage, type LiveTranscriptFragment, VoiceLiveSession } from '@/lib/voice-live'
 import { isVoiceStopCommand } from '@/lib/voice-stop-word'
+import type { BusyInputMode } from '@/store/busy-input-mode'
 import { notify, notifyError } from '@/store/notifications'
 
 import { useComposerScope } from '../scope'
@@ -25,6 +26,7 @@ interface PendingVoiceResponse {
 
 interface VoiceLiveConversationOptions {
   busy: boolean
+  busyInputMode?: BusyInputMode | null
   enabled: boolean
   onFatalError?: () => void
   /** Interrupt the in-flight Hermes turn (Stop-button seam). Fired when a new
@@ -34,8 +36,8 @@ interface VoiceLiveConversationOptions {
   /** Submit a Hermes turn: `text` is the user's last words (the bubble and the
    *  persisted row), `voiceContext` the recent spoken exchange for the model. */
   onSubmit: (text: string, voiceContext: string) => Promise<void> | void
-  pendingResponse: () => PendingVoiceResponse | null
-  consumePendingResponse: () => void
+  pendingResponse: (continuingReplyId?: null | string) => PendingVoiceResponse | null
+  consumePendingResponse: (includePending?: boolean) => void
   /** Text turns to seed the live model with when the session opens. */
   seedHistory: () => LiveHistoryMessage[]
   /** Names of tools currently running in the turn (quiet progress for the voice). */
@@ -103,6 +105,7 @@ export function liveEndedMessage(
  */
 export function useVoiceLiveConversation({
   busy,
+  busyInputMode,
   enabled,
   onFatalError,
   onInterrupt,
@@ -150,6 +153,7 @@ export function useVoiceLiveConversation({
   const wasEnabledRef = useRef(enabled)
 
   const latest = useRef({
+    busyInputMode,
     activeToolLabel,
     beforeMicOpen,
     onFatalError,
@@ -162,6 +166,7 @@ export function useVoiceLiveConversation({
   })
 
   latest.current = {
+    busyInputMode,
     activeToolLabel,
     beforeMicOpen,
     onFatalError,
@@ -306,19 +311,27 @@ export function useVoiceLiveConversation({
             return
           }
 
-          // A newer request supersedes an in-flight turn: stop it so the answer
-          // the voice speaks is for what the user asked last.
-          if (busyRef.current) {
+          const continuing = busyRef.current && latest.current.busyInputMode !== 'interrupt'
+
+          if (busyRef.current && latest.current.busyInputMode === 'interrupt') {
             void latest.current.onInterrupt?.()
           }
 
           setDelegation(delegationId)
-          spokenResponseIdRef.current = null
-          spokenLengthRef.current = 0
+
+          // A steer can append to the same assistant message. Keep its spoken
+          // cursor and leave the pending bubble visible to later feed ticks.
+          if (!continuing) {
+            spokenResponseIdRef.current = null
+            spokenLengthRef.current = 0
+            latest.current.consumePendingResponse()
+          } else {
+            latest.current.consumePendingResponse(false)
+          }
+
           lastToolLabelRef.current = null
           turnObservedRef.current = false
           submittedAtRef.current = Date.now()
-          latest.current.consumePendingResponse()
           refreshStatus()
           void Promise.resolve(latest.current.onSubmit(prompt, voiceContext)).catch(error => {
             notifyError(error, voiceCopy.liveDelegationFailed)
@@ -402,7 +415,7 @@ export function useVoiceLiveConversation({
         session.think(delegationId, `Hermes is working: ${tool}. Not done yet.`)
       }
 
-      const response = latest.current.pendingResponse()
+      const response = latest.current.pendingResponse(spokenResponseIdRef.current)
 
       if (response) {
         turnObservedRef.current = true

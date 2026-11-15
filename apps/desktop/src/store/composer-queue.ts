@@ -45,6 +45,9 @@ export interface QueuedPromptEntry {
    *  owner that predates them. Projected from the pending snapshot, never set locally. */
   serverControls?: string[]
   text: string
+  /** Live voice context must follow a legacy queue entry until it drains. */
+  surface?: 'voice-live'
+  voiceContext?: string
   /** What the queue panel and the sent bubble show, when it differs from the
    *  text the agent receives. A queued `/skill` invocation carries the whole
    *  expanded skill body as `text` — the UI shows the invocation instead.
@@ -76,6 +79,9 @@ export interface EnqueueQueuedPromptPayload {
   /** Stable id to reuse (a canonical submission id), else one is minted. */
   id?: string
   text: string
+  /** Live voice context must follow a legacy queue entry until it drains. */
+  surface?: 'voice-live'
+  voiceContext?: string
   attachments: ComposerAttachment[]
   displayText?: string
   displayKind?: 'hidden'
@@ -396,6 +402,7 @@ export const enqueueQueuedPrompt = (
   const entry: QueuedPromptEntry = {
     id: payload.id ?? nextId(),
     text: payload.text,
+    ...(payload.surface ? { surface: payload.surface, voiceContext: payload.voiceContext } : {}),
     ...(payload.displayText ? { displayText: payload.displayText } : {}),
     ...(payload.displayKind ? { displayKind: payload.displayKind } : {}),
     attachments: cloneAttachments(payload.attachments),

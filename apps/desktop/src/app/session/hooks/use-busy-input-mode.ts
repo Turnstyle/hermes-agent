@@ -18,11 +18,14 @@ import { sessionTileOwnerRoute } from '@/store/session-states'
 export function useBusyInputMode({
   sessionId,
   storedSessionId,
-  requestGateway
+  requestGateway,
+  voice = false
 }: {
   sessionId: string | null
   storedSessionId: string | null
   requestGateway: GatewayRequester
+  /** Voice uses the explicit display setting; an absent setting must not cancel work. */
+  voice?: boolean
 }): BusyInputMode | null {
   const config = useStore($busyInputConfig)
   const connection = useStore($connection)
@@ -40,12 +43,12 @@ export function useBusyInputMode({
   const targetProfile = route && typeof route === 'object' ? route.targetProfile : undefined
   const owner = busyInputOwnerKey(connectionId, targetProfile || ownerProfile)
 
-  const [loaded, setLoaded] = useState<{ owner: string; connection: typeof connection; sessionId: string; mode: BusyInputMode } | null>(
+  const [loaded, setLoaded] = useState<{ owner: string; connection: typeof connection; sessionId: string; voice: boolean; mode: BusyInputMode } | null>(
     null
   )
 
   const canonical = serverOwnsComposerQueue(sessionId ?? storedSessionId)
-  const configured = !canonical && config?.owner === owner && config.connection === connection ? config.mode : null
+  const configured = !voice && !canonical && config?.owner === owner && config.connection === connection ? config.mode : null
 
   useEffect(() => {
     if (configured !== null || !sessionId || gatewayState !== 'open') {
@@ -59,13 +62,19 @@ export function useBusyInputMode({
 
     const load = () => {
       attempts += 1
-      void requestForSessionProfile<{ value?: unknown }>(ownerRoute, requestGateway, 'config.get', {
-        key: 'busy',
+      void requestForSessionProfile<{ value?: unknown; config?: { display?: { busy_input_mode?: unknown } } }>(ownerRoute, requestGateway, 'config.get', {
+        key: voice ? 'full' : 'busy',
         session_id: sessionId
       })
         .then(result => {
-          if (!cancelled && result && Object.hasOwn(result, 'value')) {
-            setLoaded({ owner, connection, sessionId, mode: normalizeBusyInputMode(result.value) })
+          if (!cancelled && result && (voice || Object.hasOwn(result, 'value'))) {
+            // The effective busy getter defaults GUI sessions to interrupt. Read
+            // the explicit display setting so missing voice policy stays queued.
+            const mode = voice
+              ? normalizeBusyInputMode(result.config?.display?.busy_input_mode, 'queue')
+              : normalizeBusyInputMode(result.value)
+
+            setLoaded({ owner, connection, sessionId, voice, mode })
           }
         })
         .catch(() => {
@@ -89,12 +98,13 @@ export function useBusyInputMode({
     ownerProfile,
     requestGateway,
     sessionId,
-    targetProfile
+    targetProfile,
+    voice
   ])
 
   if (gatewayState !== 'open') {
     return null
   }
 
-  return configured ?? (loaded?.owner === owner && loaded.connection === connection && loaded.sessionId === sessionId ? loaded.mode : null)
+  return configured ?? (loaded?.owner === owner && loaded.connection === connection && loaded.sessionId === sessionId && loaded.voice === voice ? loaded.mode : null)
 }

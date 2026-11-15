@@ -206,6 +206,13 @@ export function ChatBar({
     requestGateway: requestBusyConfig
   })
 
+  const voiceBusyInputMode = useBusyInputMode({
+    sessionId: sessionId ?? null,
+    storedSessionId: queueSessionKey ?? null,
+    requestGateway: requestBusyConfig,
+    voice: true
+  })
+
   // Status items (subagents, background processes) are keyed by the RUNTIME
   // session id — gateway events and process.list both speak that id. Only the
   // queue uses the stored-session fallback key (prompts can queue pre-resume).
@@ -1095,12 +1102,15 @@ export function ChatBar({
     voiceStatus
   } = useComposerVoice({
     busy,
+    busyInputMode: voiceBusyInputMode,
+    queueSessionKey: activeQueueSessionKey,
+    onSteer,
     clearDraft,
     disabled,
     focusInput,
     insertText,
     maxRecordingSeconds,
-    // Voice barge-in mid-generation halts the run like the Stop button.
+    // Explicit interrupt mode and chained barge-in use the Stop-button seam.
     onInterrupt: haltRun,
     onSubmit,
     onTranscribeAudio,
