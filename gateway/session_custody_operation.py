@@ -84,7 +84,24 @@ class _Binding:
     guard: object = None
 
 
-def forget_custody(authority, *, admission_id=None, expected=None, owner_conn=None):
+def _binding_is_live(binding, owner_conn):
+    """Validate the installed admission while the caller holds its owner lock."""
+    authority = binding.authority
+    if binding.epoch != authority.epoch:
+        return False
+    native = AdmittedObservation(authority, binding.ref, binding.admission_id, owner_conn=owner_conn)
+    try:
+        with native._owner_transaction():
+            with AdmittedObservation(authority, binding.ref, binding.admission_id,
+                                     owner_conn=authority.db._conn).lease() as lease:
+                authority._require_admission_open()
+                _request(lease)
+    except RuntimeStoreError:
+        return False
+    return True
+
+
+def forget_custody(authority, *, admission_id=None, expected=None, owner_conn=None, stale_only=False):
     """End only this authority's custody admission, including idle owner teardown."""
     runner = authority.runner
     if owner_conn is not None and (owner_conn is not authority.db._conn or not owner_conn.in_transaction):
@@ -94,6 +111,8 @@ def forget_custody(authority, *, admission_id=None, expected=None, owner_conn=No
         if (binding is None or binding.authority is not authority
                 or expected is not None and binding is not expected
                 or admission_id is not None and binding.admission_id != admission_id):
+            return
+        if stale_only and _binding_is_live(binding, owner_conn):
             return
         del runner._maker_custody_binding
         if getattr(runner, '_maker_custody_capture', None) is binding.capture:
@@ -180,7 +199,6 @@ def custody_receipt(connection, ref, params):
         binding = getattr(authority.runner, '_maker_custody_binding', None)
         if binding is not None and (binding.epoch != authority.epoch
                 or binding.admission_id != native._admission_id):
-            forget_custody(authority)
             raise RuntimeStoreError('stale_kanban_claim')
         result = apply_worker_receipt(authority.db, **{k: params[k] for k in (
             'epoch', 'execution_id', 'session_id', 'generation', 'sequence', 'operation', 'payload')},
@@ -189,7 +207,7 @@ def custody_receipt(connection, ref, params):
         return result
     except RuntimeStoreError as exc:
         if exc.reason in ('permission_denied', 'stale_kanban_claim', 'stale_epoch', 'stale_generation', 'not_found'):
-            forget_custody(authority)
+            forget_custody(authority, stale_only=True)
         raise
     finally:
         # A failed receipt commit must not leave an unreceipted in-memory installation.

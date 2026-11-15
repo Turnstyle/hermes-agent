@@ -231,14 +231,73 @@ def test_malicious_comparison_exception_is_redacted(dispatch, custody_source, ca
     asyncio.run(scenario())
 
 
-@pytest.mark.parametrize('change', ['epoch', 'generation', 'claim', 'run_end'])
-def test_stale_observe_forgets_capture_and_replay_denied(dispatch, custody_source, change):
+@pytest.mark.parametrize('rejection', ['requested_epoch', 'unrelated_task'])
+def test_rejected_receipt_preserves_live_capture(dispatch, custody_source, monkeypatch, rejection):
+    from gateway import session_custody_operation as operation
+    from gateway.session_admission import admission_fingerprint
+    from gateway.session_worker import _SCOPE, worker_request
+    from hermes_state_runtime import _secret_digest
+    monkeypatch.setattr(operation, 'arm_custody_guard', lambda a: None)
+    native = dispatch.native
+
+    async def scenario():
+        assert await dispatch.send(ATTACH) == {'attached': True}
+        capture = native.auth.runner._maker_custody_capture
+        if rejection == 'requested_epoch':
+            with pytest.raises(native.obs.RuntimeStoreError, match='stale_epoch'):
+                await dispatch.send({'phase': 'observe'}, epoch=2, sequence=2)
+        else:
+            ref = NS(session_id='unrelated-session')
+            params = dispatch.params | dict(session_id=ref.session_id,
+                execution_id='admission-worker:unrelated-admission', payload={'phase': 'observe'})
+            claim = admission_fingerprint(canonical_target=ref.session_id,
+                payload={k: params[k] for k in _SCOPE} | {'principal': dispatch.actor.subject})
+            native.auth.db.create_session(ref.session_id, 'kanban')
+            native.owner.execute('UPDATE sessions SET runtime_generation=2 WHERE id=?', (ref.session_id,))
+            native.owner.execute('INSERT INTO session_admissions(admission_id,request_id,principal_id,'
+                'target_session_id,lineage_json,payload_json,payload_digest,intent,status,owner_epoch,generation) '
+                "VALUES('unrelated-admission','kanban:[\"fleet\",\"unrelated-task\",8]',"
+                "'synthetic-principal',?,'[]','{}','synthetic-digest','queue','started',1,2)",
+                (ref.session_id,))
+            native.owner.execute('INSERT INTO worker_executions(execution_id,session_id,kind,status,'
+                "owner_epoch,generation,adoption_digest) VALUES(?,?,'compute','running',1,2,?)",
+                (params['execution_id'], ref.session_id, _secret_digest(claim)))
+            native.owner.commit()
+            native.auth.executing[ref.session_id] = 2
+            unrelated_policy = NS(source='kanban', kanban_json=json.dumps(
+                native.context | dict(task_id='unrelated-task', run_id=8)))
+            monkeypatch.setattr(native.managed, 'managed_policy',
+                lambda a, r: unrelated_policy if r.session_id == ref.session_id else native.policy)
+            with pytest.raises(native.obs.RuntimeStoreError, match='permission_denied'):
+                await worker_request(dispatch.connection, ref, params, operation='persist')
+        with native.lease().lease():
+            pass
+        assert getattr(native.auth.runner, '_maker_custody_capture', None) is capture
+        observed = await dispatch.send({'phase': 'observe'}, sequence=2)
+        assert observed['status'] == 'projected_witnesses'
+        assert await dispatch.send({'phase': 'detach'}, sequence=3) == {'detached': True}
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize('change', ['epoch', 'db_epoch', 'generation', 'claim', 'run_end',
+                                    'admission_end', 'request'])
+def test_stale_observe_forgets_capture_and_replay_denied(dispatch, custody_source, monkeypatch, change):
+    from gateway import session_custody_operation as operation
+    monkeypatch.setattr(operation, 'arm_custody_guard', lambda a: None)
     async def scenario():
         assert await dispatch.send(ATTACH) == {'attached': True}
         if change == 'epoch':
             dispatch.native.auth.epoch = 2
         elif change == 'generation':
             dispatch.native.auth.executing.clear()
+        elif change in ('db_epoch', 'admission_end', 'request'):
+            statement = {
+                'db_epoch': 'UPDATE runtime_epoch SET epoch=2',
+                'admission_end': 'UPDATE session_admissions SET status="terminal"',
+                'request': 'UPDATE session_admissions SET request_id="other"',
+            }[change]
+            dispatch.native.owner.execute(statement)
+            dispatch.native.owner.commit()
         else:
             column, value = ('claim_expires', 0) if change == 'claim' else ('status', 'done')
             dispatch.native.board.execute(f'UPDATE tasks SET {column}=?', (value,))
