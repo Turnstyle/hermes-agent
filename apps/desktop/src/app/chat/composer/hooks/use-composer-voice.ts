@@ -14,6 +14,7 @@ import {
 import { CONVERSATION_LEASE, READ_ALOUD_LEASE, syncTtsLease } from '@/lib/tts-lease'
 import { toLiveHistory } from '@/lib/voice-live'
 import { clearWakeIndicator, syncWakeIndicatorWithVoice } from '@/lib/wake-indicator'
+import type { BusyInputMode } from '@/store/busy-input-mode'
 import { $voiceConversationStartRequest, takeVoiceConversationStart } from '@/store/composer'
 import { resetBrowseState } from '@/store/composer-input-history'
 import { recordFeatureUse } from '@/store/desktop-metrics'
@@ -30,6 +31,7 @@ import { onComposerDictationRequest, onComposerVoiceToggleRequest } from '../foc
 import { useComposerScope, useComposerSurfaceId } from '../scope'
 import type { ChatBarProps } from '../types'
 
+import { submitBusyLiveVoiceTurn } from './live-voice-submit'
 import { useAutoSpeakReplies } from './use-auto-speak-replies'
 import { useVoiceConversation } from './use-voice-conversation'
 import { useVoiceLiveConversation } from './use-voice-live-conversation'
@@ -37,6 +39,9 @@ import { useVoiceRecorder } from './use-voice-recorder'
 
 interface UseComposerVoiceArgs {
   busy: boolean
+  busyInputMode?: BusyInputMode | null
+  queueSessionKey?: ChatBarProps['queueSessionKey']
+  onSteer?: ChatBarProps['onSteer']
   clearDraft: () => void
   disabled: boolean
   focusInput: () => void
@@ -61,6 +66,9 @@ interface UseComposerVoiceArgs {
  */
 export function useComposerVoice({
   busy,
+  busyInputMode,
+  queueSessionKey,
+  onSteer,
   clearDraft,
   disabled,
   focusInput,
@@ -158,15 +166,22 @@ export function useComposerVoice({
    * in order — narration interims AND the final answer, not just whichever
    * bubble happens to be last. See `collectUnspokenTurnSpeech`.
    */
-  const pendingTurnResponse = () => {
+  const pendingTurnResponse = (continuingReplyId?: null | string) => {
     const messages = $messages.get()
+    const continuingIndex = continuingReplyId ? messages.findIndex(message => message.id === continuingReplyId) : -1
+
+    // An accepted steer inserts a user row after the running assistant bubble.
+    // Keep reading that bubble's deltas even when it precedes the newest user.
+    if (continuingIndex >= 0) {
+      return collectUnspokenTurnSpeech(messages.slice(continuingIndex).filter(message => message.role !== 'user'), null)
+    }
 
     return collectUnspokenTurnSpeech(messages, resolveSpokenReply(sessionId, messages)?.id ?? null)
   }
 
-  const consumePendingResponse = () => {
+  const consumePendingResponse = (includePending = true) => {
     const messages = $messages.get()
-    const last = messages.findLast(m => m.role === 'assistant' && !m.hidden)
+    const last = messages.findLast(m => m.role === 'assistant' && !m.hidden && (includePending || !m.pending))
 
     if (last) {
       markAssistantIdSpoken(sessionId, messages, last.id)
@@ -187,6 +202,20 @@ export function useComposerVoice({
   /** A GPT-Live delegation → Hermes turn. The bubble and the persisted row are
    *  what the user said; the transcript window rides the model input only. */
   const submitLiveDelegation = async (text: string, voiceContext: string) => {
+    // Voice follows the busy policy so a spoken follow-up cannot cancel work
+    // that the user's queue/steer setting keeps running for typed input.
+    if (busyRef.current && busyInputMode !== 'interrupt') {
+      return submitBusyLiveVoiceTurn({
+        mode: busyInputMode === 'steer' ? 'steer' : 'queue',
+        text,
+        voiceContext,
+        sessionId,
+        queueSessionKey,
+        onSteer,
+        onSubmit
+      })
+    }
+
     triggerHaptic('submit')
     resetBrowseState(sessionId)
     clearDraft()
@@ -242,6 +271,9 @@ export function useComposerVoice({
 
   const liveConversation = useVoiceLiveConversation({
     activeToolLabel,
+    inFlightResponseId: () =>
+      $messages.get().findLast(message => message.role === 'assistant' && !message.hidden && message.pending)?.id ?? null,
+    busyInputMode,
     beforeMicOpen: () => wakePauseBarrierRef.current ?? undefined,
     busy,
     consumePendingResponse,

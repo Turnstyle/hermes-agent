@@ -9,7 +9,7 @@ const reactUi: TestProjectConfiguration = {
     // Keep padding regressions observable instead of mocking the stylesheet away.
     css: { include: [/status-stack\.css$/] },
     setupFiles: ['./vitest.setup.ts'],
-    include: ['src/**/*.test.{ts,tsx}'],
+    include: ['src/**/*.test.{ts,tsx}', 'tests/**/*.test.{ts,tsx}'],
     globals: true,
     // React 19.1+ stubs `react`.act to undefined in the production build;
     // @testing-library/react's act() delegates to it and throws

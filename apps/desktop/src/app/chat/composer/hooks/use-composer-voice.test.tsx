@@ -58,6 +58,11 @@ vi.mock('@/store/composer', () => ({
   takeVoiceConversationStart: vi.fn(() => false)
 }))
 
+vi.mock('@/store/composer-queue', () => ({
+  enqueueQueuedPrompt: vi.fn(),
+  serverOwnsComposerQueue: () => false
+}))
+
 vi.mock('@/store/composer-input-history', () => ({
   resetBrowseState: mocks.resetBrowseState
 }))

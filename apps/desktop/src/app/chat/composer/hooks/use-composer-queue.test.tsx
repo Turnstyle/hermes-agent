@@ -114,6 +114,17 @@ describe('useComposerQueue park integration', () => {
     setSessionsLoading(true)
   })
 
+  it('drains a refused legacy voice steer with its original surface and context', async () => {
+    enqueueQueuedPrompt(SESSION_KEY, {
+      text: 'voice follow-up', attachments: [], surface: 'voice-live', voiceContext: 'User: original exchange'
+    })
+    const { onSubmit } = renderQueueHook()
+    await waitFor(() => expect(onSubmit).toHaveBeenCalledWith('voice follow-up', expect.objectContaining({
+      surface: 'voice-live', voiceContext: 'User: original exchange', fromQueue: true,
+      sessionId: 'rt-session-queue-hook', storedSessionId: SESSION_KEY
+    })))
+  })
+
   it('admits native Queue through submit and retains an uncertain draft without a local replay', async () => {
     $connection.set({ mode: 'local', wsUrl: 'ws://localhost/api/ws?native_dial=unminted' } as HermesConnection)
     const draftRef = { current: 'durable queue' }

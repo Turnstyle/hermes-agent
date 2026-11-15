@@ -523,6 +523,7 @@ export function useComposerQueue({
           const accepted = await Promise.resolve(
             onSubmit(resolved.transportText, {
               attachments: entry.attachments,
+              ...(entry.surface ? { surface: entry.surface, voiceContext: entry.voiceContext } : {}),
               ...(resolved.displayText ? { displayText: resolved.displayText } : {}),
               ...(entry.displayKind ? { displayKind: entry.displayKind } : {}),
               fromQueue: true,
