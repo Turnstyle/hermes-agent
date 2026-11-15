@@ -140,7 +140,7 @@ class TestUpdatePathE2E:
 
 
     @pytest.mark.live_system_guard_bypass
-    def test_main_update_check_crypto_absent_in_sys_modules(self) -> None:
+    def test_main_update_check_crypto_absent_in_sys_modules(self, tmp_path) -> None:
         """Decisive invariant: invoking main() with argv=['hermes','update','--check']
         leaves cryptography.hazmat.bindings._rust absent from sys.modules.
 
@@ -205,14 +205,15 @@ print('PASS: main() update --check path never loaded cryptography._rust')
 sys.exit(0)
 """
         repo_root = Path(__file__).parent.parent.parent
-        probe = repo_root / "_test_main_update_crypto_probe.py"
+        probe = tmp_path / "_test_main_update_crypto_probe.py"
         probe.write_text(script)
         try:
             result = subprocess.run(
-                [sys.executable, probe.name],
+                [sys.executable, str(probe)],
                 capture_output=True,
                 text=True,
                 cwd=str(repo_root),
+                env={**os.environ, "PYTHONPATH": str(repo_root)},
                 timeout=60,
                 check=False,
             )

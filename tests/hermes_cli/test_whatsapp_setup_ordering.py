@@ -84,7 +84,7 @@ def test_aborted_setup_does_not_enable_whatsapp(isolated_home, monkeypatch):
     )
 
 
-def test_existing_pairing_skip_branch_enables_whatsapp(isolated_home, monkeypatch):
+def test_existing_pairing_skip_branch_enables_whatsapp(isolated_home, monkeypatch, tmp_path):
     """User runs ``hermes whatsapp`` with an existing paired session and
     chooses "no, keep my session" at the re-pair prompt.  The env var
     should be (re-)written to true so the gateway picks WhatsApp back up,
@@ -111,26 +111,21 @@ def test_existing_pairing_skip_branch_enables_whatsapp(isolated_home, monkeypatc
 
     monkeypatch.setattr("builtins.input", fake_input)
     monkeypatch.setattr("hermes_cli.main._require_tty", lambda *_a, **_kw: None)
-    # Skip the bridge npm install — we're testing setup-ordering, not bridge
-    # bootstrapping.  Pretend node_modules exists (Path.exists -> True for that
-    # specific check is hard to scope, so instead pretend npm install would
-    # succeed silently if reached).
+    # Exercise the real resolver/writability probe against a tmp-owned install.
+    from gateway.platforms import whatsapp_common
+    install_root = tmp_path / "install"
+    bridge = install_root / "scripts" / "whatsapp-bridge"
+    (bridge / "node_modules").mkdir(parents=True)
+    (bridge / "bridge.js").write_text("// bridge\n")
+    monkeypatch.setattr(
+        whatsapp_common, "__file__",
+        str(install_root / "gateway" / "platforms" / "whatsapp_common.py"),
+    )
     monkeypatch.setattr(
         "subprocess.run",
         lambda *_a, **_kw: MagicMock(returncode=0, stderr=""),
     )
     monkeypatch.setattr("shutil.which", lambda _name: "/usr/bin/npm")
-    # Patch (bridge_dir / "node_modules").exists() by stubbing Path.exists
-    # to True for that one specific subpath.  Easier: pre-create it as a
-    # symlink to /tmp.  But we can't write to the repo.  Instead, stub
-    # Path.exists wholesale to True for node_modules; the creds.json check
-    # in the same function still works because we wrote it ourselves.
-    _orig_exists = Path.exists
-    def _stub_exists(self):
-        if self.name == "node_modules":
-            return True
-        return _orig_exists(self)
-    monkeypatch.setattr(Path, "exists", _stub_exists)
 
     buf = io.StringIO()
     with redirect_stdout(buf):

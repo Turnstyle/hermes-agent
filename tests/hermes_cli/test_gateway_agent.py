@@ -625,18 +625,15 @@ def test_first_turn_on_a_rebuilt_gateway_agent_keeps_the_exact_figure(make_agent
     assert agent._turn_base_usage_anchor["base_count"] == 3  # anchored after the ask: no estimated delta
 
 
-def test_native_image_parts_are_staged_and_submitted_as_attachments(make_agent):
+def test_native_image_parts_are_staged_and_submitted_as_attachments(make_agent, tmp_path):
     """Main hands run_conversation OpenAI content parts for a vision model (images read locally);
     prompt.submit takes text + attachments, so each image is staged with image.attach_bytes first."""
     from agent.image_routing import build_native_content_parts
     import base64
-    import tempfile
-    from pathlib import Path
     png = base64.b64decode("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAIAAACQd1PeAAAADElEQVR4nGNg+M8AAAICAQB7CYF4AAAAAElFTkSuQmCC")
-    with tempfile.TemporaryDirectory(dir=Path(__file__).parent) as tmp:
-        path = Path(tmp) / "pixel.png"
-        path.write_bytes(png)
-        parts, skipped = build_native_content_parts("what is this?", [str(path)])
+    path = tmp_path / "pixel.png"
+    path.write_bytes(png)
+    parts, skipped = build_native_content_parts("what is this?", [str(path)])
     assert not skipped
     agent, client = make_agent([frame("message.complete", {"text": "a pixel", "outcome": "completed"})])
     original = client.rpc

@@ -75,12 +75,11 @@ sys.exit(0)
             f"stderr: {result.stderr}"
         )
 
-    def test_update_check_no_cryptography(self) -> None:
+    def test_update_check_no_cryptography(self, tmp_path) -> None:
         """Running hermes update --check should NOT load cryptography._rust."""
-        # Write a small script in the repo root so hermes_cli is importable,
-        # and use a filename that doesn't trigger the live-system guard.
+        # Keep probe output temporary and import the checkout explicitly.
         repo_root = Path(__file__).parent.parent.parent
-        script = repo_root / "_test_lazy_secrets_check.py"
+        script = tmp_path / "_test_lazy_secrets_check.py"
         script.write_text(
             """
 import sys
@@ -98,11 +97,11 @@ sys.exit(0)
         )
         try:
             result = subprocess.run(
-                [sys.executable, script.name],
+                [sys.executable, str(script)],
                 capture_output=True,
                 text=True,
                 cwd=str(repo_root),
-                env={**os.environ, "PYTHONDONTWRITEBYTECODE": "1"},
+                env={**os.environ, "PYTHONDONTWRITEBYTECODE": "1", "PYTHONPATH": str(repo_root)},
                 check=False,
             )
             assert result.returncode == 0, (
