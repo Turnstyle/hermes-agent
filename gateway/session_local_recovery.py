@@ -120,7 +120,37 @@ def owned_receipt(authority, sid):
         raise ValueError('identity mismatch')
     source = local_source(authority, chat_id, receipt['principal_id'])
     route = authority.runner.session_store._generate_session_key(source)
-    return receipt, source, route, _checked_entry(authority, receipt, source, route)
+    cutover = receipt['route'] != route
+    if cutover:
+        source, route = _standalone_receipt_source(authority, receipt, source)
+    entry = _checked_entry(authority, receipt, source, route)
+    if cutover:
+        # Wire-invisible proof, published only after receipt/entry/row validation. Every later
+        # build_session_key caller must keep this namespace even with multiplexing disabled.
+        source._local_receipt_profile = source.profile
+    return receipt, source, route, entry
+
+
+def _standalone_receipt_source(authority, receipt, source):
+    """A formerly served LOCAL route in its own named home, never a namespace migration.
+
+    The reverse (agent:main in a served secondary) remains refused: multiplexed key-to-DB
+    resolution assigns main to the launch store, so retaining that key would cross homes.
+    """
+    from gateway.session import build_session_key
+    from hermes_cli.profiles import profile_matches_home
+
+    parts = receipt['route'].split(':', 2)
+    home = Path(authority.db.db_path).resolve().parent
+    if (source.profile is not None
+            or getattr(authority.runner.session_store.config, 'multiplex_profiles', False)
+            or len(parts) != 3 or parts[0] != 'agent' or parts[1] in ('main', 'default')
+            or parts[1] != home.name
+            or Path(authority.profile_id).resolve() != home
+            or not profile_matches_home(parts[1], home)):
+        raise ValueError('route mismatch')
+    source.profile = parts[1]
+    return source, build_session_key(source, profile=source.profile)
 
 
 def unused_session(conn, session_id):

@@ -702,6 +702,11 @@ def build_session_key(
     """
     if detached := detached_route_of(source):
         return detached
+    # An owned LOCAL receipt can outlive multiplex -> standalone cutover. Its checked
+    # namespace is private provenance, never a profile supplied by an incoming peer.
+    receipt_profile = getattr(source, '_local_receipt_profile', None)
+    if source.platform == Platform.LOCAL and isinstance(receipt_profile, str) and receipt_profile == source.profile:
+        profile = receipt_profile
     is_dm = source.chat_type == "dm"
     chat_id = source.chat_id
     if is_dm and source.platform == Platform.WHATSAPP:
