@@ -229,13 +229,65 @@ def _slot_reasoning_config(slot: dict[str, Any]) -> dict[str, Any] | None:
         return None
 
 
-def _aggregator_reasoning_config(aggregator: dict[str, Any]) -> dict[str, Any] | None:
-    """Aggregator reasoning config: slot > per-model > global (shared chokepoint).
+def _task_policy(task: str) -> tuple[Any, str]:
+    """``(reasoning_effort, extra_body.service_tier)`` of ``auxiliary.<task>`` (``moa_reference`` /
+    ``moa_aggregator``): the task-level defaults under every preset slot. ``(None, "")`` when unset."""
+    try:
+        from agent.auxiliary_task_config import _get_auxiliary_task_config
+        task_cfg = _get_auxiliary_task_config(task)
+    except Exception:  # pragma: no cover - bad config must not break MoA
+        logger.warning("auxiliary.%s config could not be read — ignoring its MoA task policy", task, exc_info=True)
+        return None, ""
+    body = task_cfg.get("extra_body")
+    return task_cfg.get("reasoning_effort"), str(body.get("service_tier") or "").strip() if isinstance(body, dict) else ""
 
-    References deliberately do NOT fall back: inheriting a global ``xhigh`` into
+
+def _task_reasoning_config(task: str) -> dict[str, Any] | None:
+    """``auxiliary.<task>.reasoning_effort`` as runtime config; None when unset or invalid (warned)."""
+    effort = _task_policy(task)[0]
+    if effort is None or effort == "":
+        return None
+    from hermes_constants import parse_reasoning_effort
+    parsed = parse_reasoning_effort(effort)
+    if parsed is None:
+        logger.warning("auxiliary.%s.reasoning_effort %r is not a valid level — ignoring it", task, effort)
+    return parsed
+
+
+def _reference_reasoning_config(slot: dict[str, Any]) -> dict[str, Any] | None:
+    """Reference reasoning config: slot > ``auxiliary.moa_reference``. No global fallback: inheriting a
+    global ``xhigh`` into every advisor would multiply cost."""
+    cfg = _slot_reasoning_config(slot)
+    return cfg if cfg is not None else _task_reasoning_config("moa_reference")
+
+
+def _task_tier_extra_body(task: str, extra_body: Any) -> Any:
+    """*extra_body* for one MoA call. An explicit ``auxiliary.<task>.extra_body.service_tier`` is that task's
+    tier, so the tier the slot's endpoint (or the main request) carried is dropped: ``call_llm`` merges the
+    task's body UNDER the caller's, and a leftover caller tier would win."""
+    if not isinstance(extra_body, dict) or not _task_policy(task)[1]:
+        return extra_body
+    from tools.delegate_tool_tuning import without_service_tier
+    return without_service_tier(extra_body) or None
+
+
+def _call_runtime(task: str, runtime: dict[str, Any]) -> dict[str, Any]:
+    """*runtime* (a cached ``_slot_runtime`` snapshot, never mutated) with the task's tier policy applied."""
+    if "extra_body" not in runtime:
+        return runtime
+    return {**runtime, "extra_body": _task_tier_extra_body(task, runtime["extra_body"])}
+
+
+def _aggregator_reasoning_config(aggregator: dict[str, Any]) -> dict[str, Any] | None:
+    """Aggregator reasoning config: slot > ``auxiliary.moa_aggregator`` > per-model > global (shared
+    chokepoint).
+
+    References deliberately do NOT fall back to the global: inheriting a global ``xhigh`` into
     every advisor would multiply cost.
     """
     cfg = _slot_reasoning_config(aggregator)
+    if cfg is None:
+        cfg = _task_reasoning_config("moa_aggregator")
     if cfg is not None:
         return cfg
     try:
@@ -419,7 +471,8 @@ def _run_reference(
     """Call one reference model; return ``(label, text, accounting)``. Never raises:
     a failed reference becomes a labelled ``[failed: …]`` note. Runs in a thread pool."""
     label = _slot_label(slot)
-    runtime = _slot_runtime(slot)
+    runtime = _call_runtime("moa_reference", _slot_runtime(slot))
+    reasoning_config = _reference_reasoning_config(slot)
     trace_fields = {"model": slot.get("model"), "provider": runtime.get("provider") or slot.get("provider"), "temperature": temperature}
     # The advisory view already stripped the agent's system prompt; this is the only one.
     messages = [{"role": "system", "content": _REFERENCE_SYSTEM_PROMPT}, *ref_messages]
@@ -446,14 +499,14 @@ def _run_reference(
                 response = call_llm(
                     task="moa_reference", messages=trimmed, temperature=temperature,
                     max_tokens=max_tokens,
-                    timeout=reference_timeout, reasoning_config=_slot_reasoning_config(slot),
+                    timeout=reference_timeout, reasoning_config=reasoning_config,
                     extra_headers=initiator_headers, **runtime,
                 )
         else:
             response = call_llm(
                 task="moa_reference", messages=trimmed, temperature=temperature,
                 max_tokens=max_tokens,
-                timeout=reference_timeout, reasoning_config=_slot_reasoning_config(slot),
+                timeout=reference_timeout, reasoning_config=reasoning_config,
                 extra_headers=initiator_headers, **runtime,
             )
         output_text = _extract_text(response) or "(empty response)"
@@ -963,7 +1016,7 @@ def aggregate_moa_context(
     )
 
     agg_label = _slot_label(aggregator)
-    agg_runtime = _slot_runtime(aggregator)
+    agg_runtime = _call_runtime("moa_aggregator", _slot_runtime(aggregator))
     _touch_fanout_progress(
         agent, f"MoA: synthesizing aggregator guidance ({agg_label})"
     )
@@ -1226,7 +1279,8 @@ class MoAChatCompletions:
             if api_kwargs.get("timeout") is not None:
                 stream_kwargs["timeout"] = api_kwargs["timeout"]
         # Pop the runtime's extra_body so the explicit kwarg never collides with **agg_runtime.
-        agg_extra_body = _merge_slot_extra_body(agg_runtime.pop("extra_body", None), api_kwargs.get("extra_body"))
+        agg_extra_body = _task_tier_extra_body("moa_aggregator", _merge_slot_extra_body(
+            agg_runtime.pop("extra_body", None), api_kwargs.get("extra_body")))
         destination = destination_key(agg_runtime)
         # Facades built via __new__ (tests, swaps) have no __init__ state.
         remembered = getattr(self, "_merge_same_role_destinations", None)

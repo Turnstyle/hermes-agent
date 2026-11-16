@@ -39,6 +39,10 @@ from agent.auxiliary_client import (
     _unwrap_data_envelope,
 )
 
+from tests._fixtures.update_recovery_metadata import isolated_update_recovery_metadata
+
+pytestmark = pytest.mark.usefixtures("isolated_update_recovery_metadata")
+
 
 def _jwt_with_claims(claims: dict) -> str:
     header = base64.urlsafe_b64encode(b'{"alg":"none","typ":"JWT"}').decode().rstrip("=")
@@ -2759,21 +2763,6 @@ class TestAuxiliaryTaskExtraBody:
 
 
 
-
-
-    @pytest.mark.parametrize("moa_task", ["moa_reference", "moa_aggregator"])
-    def test_moa_tasks_reject_task_level_reasoning_effort(self, moa_task, caplog):
-        """MoA reasoning is per-slot in the preset — the auxiliary-task
-        shorthand is ignored with a warning pointing at the preset config."""
-        from agent.auxiliary_client import _get_task_extra_body
-
-        config = {"auxiliary": {moa_task: {"reasoning_effort": "xhigh"}}}
-        with patch("hermes_cli.config.load_config", return_value=config), patch("hermes_cli.config.load_config_readonly", return_value=config), \
-             caplog.at_level(logging.WARNING, logger="agent.auxiliary_client"):
-            result = _get_task_extra_body(moa_task)
-
-        assert "reasoning" not in result
-        assert any(rec.levelno == logging.WARNING for rec in caplog.records)
 
 
     def test_anthropic_aux_client_forwards_extra_body_reasoning(self):

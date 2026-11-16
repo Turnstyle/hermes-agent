@@ -14,6 +14,10 @@ from pathlib import Path
 
 import pytest
 
+from tests._fixtures.update_recovery_metadata import isolated_update_recovery_metadata
+
+pytestmark = pytest.mark.usefixtures("isolated_update_recovery_metadata")
+
 
 @pytest.fixture
 def curator_env(tmp_path, monkeypatch):

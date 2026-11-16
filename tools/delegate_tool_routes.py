@@ -307,11 +307,13 @@ def _route_one(provider: DelegationProvider, declared: dict[str, dict[str, Any]]
 
 
 def resolve_task_routes(task_list: list[dict[str, Any]], config: Mapping[str, Any], parent_agent: Any,
-                        ) -> tuple[list[TaskRoute], Optional[str]]:
+                        policy: Optional[Mapping[str, Any]] = None) -> tuple[list[TaskRoute], Optional[str]]:
     """One :class:`TaskRoute` per task from the backend the session's ``delegate_task`` was built from (else
     ``delegation.backend``), or ``([], error)`` when that backend cannot run (fails closed, never another backend).
     A task the backend cannot route gets a route with ``error`` set; its siblings are unaffected. Identical routes
-    resolve credentials once per call (the default backend resolves exactly once)."""
+    resolve credentials once per call (the default backend resolves exactly once). ``policy`` (see
+    :func:`route_policy`) replaces only its effort/tier keys on each route; model, endpoint, backend and fallback
+    owner stay the route's. A profile route keeps its profile's own policy."""
     from agent.delegation_backends import pinned_backend
     if pinned := pinned_backend(parent_agent):
         config = {**config, "backend": pinned}
@@ -326,14 +328,37 @@ def resolve_task_routes(task_list: list[dict[str, Any]], config: Mapping[str, An
         try:
             route = _route_one(provider, declared, i, task, config)
             _check_backend_effort(i, route, config)
-            routes.append(_route_to_task_route(route, parent_agent, cache, config, provider.name))
+            routes.append(_route_to_task_route({**route, **(policy or {})}, parent_agent, cache, config, provider.name))
         except ValueError as exc:  # DelegationRouteError, the credential resolver's and the tier check's refusals
             routes.append(TaskRoute({}, {}, backend=provider.name, error=str(exc)))
     return routes, None
 
 
+def route_policy(routing_cfg: Optional[Mapping[str, Any]]) -> Optional[dict[str, Any]]:
+    """The effort/tier an internal caller's block applies on the delegation backend's route when it pins no route
+    (no provider, model or base_url): a policy-only ``auxiliary.review`` tunes the reviewer, it never moves it off
+    ``delegation.*`` onto the parent's model and fallback chain. ``{}`` for no block; None = the block owns the
+    route (:func:`route_for_config`). An effort that is no level (``auto``, a typo) is dropped with a warning, so
+    the route's own effort still applies instead of the parent's."""
+    if routing_cfg is None:
+        return {}
+    if any(str(routing_cfg.get(k) or "").strip() for k in ("provider", "model", "base_url")):
+        return None
+    policy = {k: routing_cfg[k] for k in ("reasoning_effort", "service_tier") if k in routing_cfg}
+    from hermes_constants import parse_reasoning_effort
+    if "reasoning_effort" in policy and parse_reasoning_effort(policy["reasoning_effort"]) is None:
+        logger.warning("reasoning_effort %r is not a valid level; keeping the delegation route's effort",
+                       policy.pop("reasoning_effort"))
+    return policy
+
+
 def route_for_config(routing_cfg: dict[str, Any], parent_agent: Any) -> TaskRoute:
     """The route an internal caller's explicit config block describes (``/review`` ->
-    ``auxiliary.review``); bypasses the provider, as those callers own their route."""
+    ``auxiliary.review``); bypasses the provider, as those callers own their route. The block's own
+    ``service_tier`` / ``reasoning_effort`` apply exactly as on a backend route (unset = inherit)."""
     from tools.delegate_tool import _resolve_delegation_credentials  # the facade is the patch seam
-    return TaskRoute(_resolve_delegation_credentials(routing_cfg, parent_agent), routing_cfg)
+    creds = _resolve_delegation_credentials(routing_cfg, parent_agent)
+    if routing_cfg.get("service_tier") not in (None, ""):
+        from tools.delegate_tool_tuning import task_service_tier
+        creds = {**creds, **task_service_tier(str(routing_cfg["service_tier"]), creds, parent_agent)}
+    return TaskRoute(creds, routing_cfg, routing_cfg.get("reasoning_effort"))

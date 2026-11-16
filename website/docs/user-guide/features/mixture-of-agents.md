@@ -207,7 +207,29 @@ moa:
         reasoning_effort: high
 ```
 
-Omit `reasoning_effort` to use the provider/Hermes default for that slot.
+Omit `reasoning_effort` to use the task default below, or the provider/Hermes default for that slot.
+
+### Task defaults (`auxiliary.moa_reference` / `auxiliary.moa_aggregator`)
+
+These two auxiliary blocks set defaults for every preset. A slot's own `reasoning_effort` always wins.
+`reasoning_effort` on the block fills slots that set none (a value that is not a level, such as `auto`, is
+ignored with a logged warning). `extra_body.service_tier` replaces the speed tier the slot's endpoint or the
+main request carried. It is sent to the endpoint as written, not translated like `/fast` words: `default` is
+the normal tier on OpenAI-compatible endpoints, while `normal` or `fast` would be sent literally:
+
+```yaml
+auxiliary:
+  moa_reference:
+    reasoning_effort: medium
+    extra_body: {service_tier: default}
+  moa_aggregator:
+    reasoning_effort: medium
+    extra_body: {service_tier: default}
+```
+
+With both blocks unset, nothing changes: references use the provider default (a global
+`agent.reasoning_effort` never leaks into advisors), and the aggregator falls back to the global
+effort.
 
 ## Terminal preset management
 

@@ -1056,7 +1056,9 @@ def _resolve_review_runtime(cfg: dict[str, Any]) -> _ReviewRuntimeBinding:
         logger.info("curator: using deprecated curator.auxiliary.{provider,model} config — please migrate to auxiliary.curator.{provider,model}")
         return _slot(str(legacy["provider"]), str(legacy["model"]), legacy)
     main = _subdict(cfg, "model")
-    return _ReviewRuntimeBinding(main.get("provider") or "auto", main.get("default") or main.get("model") or "", None, None, {})
+    # The main route still takes the slot's extra_body (its speed tier included), as every other aux task does.
+    return _ReviewRuntimeBinding(main.get("provider") or "auto", main.get("default") or main.get("model") or "", None, None,
+                                 _merge_request_overrides({}, task.get("extra_body")))
 
 
 def _resolve_review_provider() -> tuple:
@@ -1075,13 +1077,31 @@ def _resolve_review_provider() -> tuple:
             explicit_api_key=binding.explicit_api_key, explicit_base_url=binding.explicit_base_url,
         )
         provider = rp.get("provider") or binding.provider
-        overrides = _merge_request_overrides(rp.get("request_overrides"), binding.request_overrides.get("extra_body"))
+        runtime_overrides = rp.get("request_overrides")
+        if "service_tier" in (binding.request_overrides.get("extra_body") or {}):
+            # The slot's tier replaces the route's (e.g. the primary's fast tier), never sits beside it.
+            from tools.delegate_tool_tuning import without_service_tier
+            runtime_overrides = without_service_tier(runtime_overrides)
+        overrides = _merge_request_overrides(runtime_overrides, binding.request_overrides.get("extra_body"))
         if isinstance(rp.get("model"), str) and rp["model"].strip():
             model_name = rp["model"].strip()
     except Exception as e:
         logger.warning("curator: auxiliary.curator.provider '%s' (model '%s') could not be resolved: %s — the review "
                        "runs on the main model instead", getattr(binding, "provider", None), model_name, e)
     return rp, model_name, provider, overrides
+
+
+def _review_reasoning_config(cfg: dict[str, Any], model_name: str) -> Optional[dict]:
+    """``auxiliary.curator.reasoning_effort`` when set (raw: YAML ``false`` disables), else the main chokepoint."""
+    from hermes_constants import parse_reasoning_effort, resolve_reasoning_config
+    effort = _subdict(cfg, "auxiliary", "curator").get("reasoning_effort")
+    if effort not in (None, ""):
+        parsed = parse_reasoning_effort(effort)
+        if parsed is not None:
+            return parsed
+        logger.warning("curator: auxiliary.curator.reasoning_effort %r is not a valid level — using the main "
+                       "reasoning config", effort)
+    return resolve_reasoning_config(cfg, model_name)
 
 
 def _run_llm_review(prompt: str) -> dict[str, Any]:
@@ -1102,7 +1122,6 @@ def _run_llm_review(prompt: str) -> dict[str, Any]:
         if isinstance(acp_command, str) and acp_command:
             agent_kwargs.update(acp_command=acp_command, acp_args=list(rp.get("args") or []))
         from hermes_cli.config import load_config_readonly
-        from hermes_constants import resolve_reasoning_config
 
         review_agent = AIAgent(
             model=model_name, provider=provider, api_key=rp.get("api_key"), base_url=rp.get("base_url"),
@@ -1110,7 +1129,8 @@ def _run_llm_review(prompt: str) -> dict[str, Any]:
             request_overrides=request_overrides, **agent_kwargs,
             # Same chokepoint as every other surface: without it ``agent.reasoning_effort`` never reaches
             # the review fork and the transport applies its default effort (a 400 on non-reasoning models).
-            reasoning_config=resolve_reasoning_config(load_config_readonly(), model_name),
+            # ``auxiliary.curator.reasoning_effort`` wins when set, as on every generic aux task.
+            reasoning_config=_review_reasoning_config(load_config_readonly(), model_name),
             # No ``terminal``: a shell mv/cp/rm under the skills tree writes bytes
             # with NO ledger entry, so rollback would restore a hollow skill. Every
             # mutation goes through ledgered skill_manage; dropping the toolset
