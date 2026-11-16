@@ -158,6 +158,12 @@ def _other_board_uses_path(db_file: Path, task_id: str, key: str) -> bool:
     other = sqlite3.connect(uri, uri=True, timeout=1.0)
     try:
         other.row_factory = sqlite3.Row
+        # Empty files and unrelated SQLite databases cannot hold task workspaces.
+        # Inspect the schema rather than file size: a WAL may hold a live board.
+        if other.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='tasks' COLLATE NOCASE"
+        ).fetchone() is None:
+            return False
         return _conn_uses_path(other, task_id, key, exclude_task_id=False)
     finally:
         other.close()

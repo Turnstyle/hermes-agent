@@ -303,7 +303,7 @@ def _cmd_watch(args: argparse.Namespace) -> int:
 
 
 def _cmd_gc(args: argparse.Namespace) -> int:
-    """Remove archived tasks' scratch workspaces, old events, and old worker logs."""
+    """Remove archived/deferred terminal workspaces, old events, and old worker logs."""
     import shutil
     event_days = getattr(args, "event_retention_days", 30)
     log_days = getattr(args, "log_retention_days", 30)
@@ -314,7 +314,10 @@ def _cmd_gc(args: argparse.Namespace) -> int:
     with kbc.connect_closing() as conn:
         rows = conn.execute(
             "SELECT id, workspace_kind, workspace_path, branch_name FROM tasks "
-            "WHERE status = 'archived'"
+            "WHERE status = 'archived' OR ("
+            f"workspace_kind = 'scratch' AND status IN {kbw._TERMINAL_STATUSES_SQL} "
+            "AND EXISTS (SELECT 1 FROM task_events e WHERE e.task_id = tasks.id "
+            "AND e.kind = 'workspace_cleanup_deferred_shared'))"
         ).fetchall()
         for row in rows:
             if row["workspace_kind"] == "worktree":
@@ -336,6 +339,9 @@ def _cmd_gc(args: argparse.Namespace) -> int:
             # Cheap existence/symlink check first: most rows were already cleaned at
             # completion, and rmtree refuses a symlink (so it must not be counted).
             if not path.is_dir() or path.is_symlink() or not kbw._is_managed_scratch_path(path):
+                continue
+            # A retry must preserve the completion hook's child-artifact hold.
+            if kbw._has_active_children(conn, row["id"]):
                 continue
             if kbw._defer_shared_workspace_cleanup(conn, row["id"], path):
                 continue

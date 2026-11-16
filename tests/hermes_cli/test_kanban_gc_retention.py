@@ -221,3 +221,140 @@ def test_cleanup_workspace_keeps_scratch_when_other_boards_cannot_be_listed(boar
         kbw._cleanup_workspace(conn, archived)
         assert _deferred_reasons(conn, archived) == ["shared", "shared", "unknown"]
     assert (shared / "note.txt").read_text(encoding="utf-8") == "still needed"
+
+
+@pytest.mark.parametrize("sibling_kind", ["empty", "unrelated", "locked", "corrupt", "bad-tasks"])
+def test_cleanup_distinguishes_absent_tasks_from_unreadable_board(board, monkeypatch, sibling_kind):
+    import sqlite3
+    from hermes_cli import kanban_db_workspace as kbw
+
+    # No worker is spawned by this fixture; exercise only filesystem cleanup.
+    monkeypatch.setattr(kbw, "_cleanup_worker_tmux", lambda *args: None)
+    sibling = kb.boards_root() / "other" / "kanban.db"
+    sibling.parent.mkdir(parents=True)
+    sibling.touch()
+    blocker = None
+    if sibling_kind in {"unrelated", "locked", "bad-tasks"}:
+        blocker = sqlite3.connect(sibling)
+        blocker.execute("CREATE TABLE unrelated (id TEXT)")
+        if sibling_kind == "bad-tasks":
+            blocker.execute("CREATE TABLE tasks (id TEXT)")
+        blocker.commit()
+        if sibling_kind == "locked":
+            blocker.execute("BEGIN EXCLUSIVE")
+    elif sibling_kind == "corrupt":
+        sibling.write_bytes(b"not a sqlite database")
+    try:
+        before = sibling.read_bytes()
+        with kbc.connect_closing() as conn:
+            ws = _archived_scratch_workspace(conn)
+            tid = ws.name
+            with kb.write_txn(conn):
+                conn.execute("UPDATE tasks SET workspace_path=? WHERE id=?", (str(ws), tid))
+            kbw._cleanup_workspace(conn, tid)
+            unreadable = sibling_kind in {"locked", "corrupt", "bad-tasks"}
+            assert ws.exists() is unreadable
+            assert _deferred_reasons(conn, tid) == (["unknown"] if unreadable else [])
+        # The sibling is inspected read-only, never initialized or repaired.
+        assert sibling.read_bytes() == before
+    finally:
+        if blocker is not None:
+            blocker.close()
+
+
+@pytest.mark.parametrize("status", ["done", "failed", "cancelled"])
+def test_gc_retries_deferred_terminal_scratch_without_losing_safety(board, status, capsys):
+    from hermes_cli import kanban_db_workspace as kbw
+
+    with kbc.connect_closing() as conn:
+        tid, live, ws = _shared_scratch(conn)
+        child = kb.create_task(conn, title="still needs parent artifacts")
+        unmarked = kb.create_task(conn, title="not deferred")
+        active = kb.create_task(conn, title="not terminal")
+        dir_task = kb.create_task(conn, title="user directory")
+        outside_task = kb.create_task(conn, title="outside scratch")
+        kept = kb.workspaces_root() / unmarked
+        kept.mkdir()
+        active_ws = kb.workspaces_root() / active
+        active_ws.mkdir()
+        user_dir = kb.workspaces_root() / dir_task
+        user_dir.mkdir()
+        outside = board / "user-source"
+        outside.mkdir()
+        with kb.write_txn(conn):
+            conn.execute("UPDATE tasks SET status=? WHERE id=?", (status, tid))
+            for task, kind, path in [(unmarked, "scratch", kept), (dir_task, "dir", user_dir),
+                                     (outside_task, "scratch", outside)]:
+                conn.execute("UPDATE tasks SET status=?, workspace_kind=?, workspace_path=? WHERE id=?",
+                             (status, kind, str(path), task))
+            conn.execute("UPDATE tasks SET workspace_path=? WHERE id=?", (str(active_ws), active))
+            for task in (dir_task, outside_task, active):
+                kb._append_event(conn, task, "workspace_cleanup_deferred_shared", {"reason": "unknown"})
+            assert kbw._defer_shared_workspace_cleanup(conn, tid, ws)
+    # A prior event is not permission to delete a still-shared workspace.
+    assert kanban_ops._cmd_gc(_args(0, 0)) == 0
+    assert ws.exists()
+    with kbc.connect_closing() as conn, kb.write_txn(conn):
+        conn.execute("UPDATE tasks SET status='done' WHERE id=?", (live,))
+        conn.execute("INSERT INTO task_links (parent_id, child_id) VALUES (?, ?)", (tid, child))
+    assert kanban_ops._cmd_gc(_args(0, 0)) == 0
+    assert ws.exists()  # live children still need the terminal parent's artifacts
+    with kbc.connect_closing() as conn, kb.write_txn(conn):
+        conn.execute("UPDATE tasks SET status='done' WHERE id=?", (child,))
+    capsys.readouterr()
+    assert kanban_ops._cmd_gc(_args(0, 0)) == 0
+    assert not ws.exists()
+    assert "1 workspace(s)" in capsys.readouterr().out
+    assert kept.exists() and user_dir.exists() and outside.exists() and active_ws.exists()
+    # A historical event must not count or recreate a workspace already removed.
+    assert kanban_ops._cmd_gc(_args(0, 0)) == 0
+    assert "0 workspace(s)" in capsys.readouterr().out
+
+
+def test_gc_retries_unknown_after_sibling_becomes_empty(board):
+    sibling = kb.boards_root() / "other" / "kanban.db"
+    sibling.parent.mkdir(parents=True)
+    sibling.write_bytes(b"not a sqlite database")
+    with kbc.connect_closing() as conn:
+        tid, live, ws = _shared_scratch(conn)
+        with kb.write_txn(conn):
+            conn.execute("UPDATE tasks SET status='done' WHERE id=?", (live,))
+        # The first GC attempt records a real unreadable-board deferral.
+    assert kanban_ops._cmd_gc(_args(0, 0)) == 0
+    with kbc.connect_closing() as conn:
+        assert _deferred_reasons(conn, tid) == ["unknown"]
+        with kb.write_txn(conn):
+            conn.execute("UPDATE tasks SET status='done' WHERE id=?", (tid,))
+    assert ws.exists()
+    sibling.write_bytes(b"")
+    assert kanban_ops._cmd_gc(_args(0, 0)) == 0
+    assert not ws.exists()
+    assert sibling.read_bytes() == b""
+
+
+@pytest.mark.parametrize("wal", [False, True])
+def test_cleanup_preserves_workspace_used_by_readable_sibling(board, monkeypatch, wal):
+    import sqlite3
+    from hermes_cli import kanban_db_workspace as kbw
+
+    monkeypatch.setattr(kbw, "_cleanup_worker_tmux", lambda *args: None)
+    sibling = kb.boards_root() / "other" / "kanban.db"
+    sibling.parent.mkdir(parents=True)
+    with kbc.connect_closing() as conn:
+        ws = _archived_scratch_workspace(conn)
+        tid = ws.name
+        with kb.write_txn(conn):
+            conn.execute("UPDATE tasks SET workspace_path=? WHERE id=?", (str(ws), tid))
+        other = sqlite3.connect(sibling)
+        try:
+            if wal:
+                assert other.execute("PRAGMA journal_mode=WAL").fetchone()[0] == "wal"
+            other.execute("CREATE TABLE tasks (id TEXT, status TEXT, workspace_kind TEXT, workspace_path TEXT)")
+            # IDs can collide across boards; the sibling row must not be excluded.
+            other.execute("INSERT INTO tasks VALUES (?, 'running', 'dir', ?)", (tid, str(ws)))
+            other.commit()
+            kbw._cleanup_workspace(conn, tid)
+            assert ws.exists()
+            assert _deferred_reasons(conn, tid) == ["shared"]
+        finally:
+            other.close()
