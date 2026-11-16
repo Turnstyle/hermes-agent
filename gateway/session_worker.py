@@ -68,7 +68,7 @@ async def worker_request(connection, ref, params, *, operation):
     if operation == "persist" and isinstance(params.get("operation"), str) and params["operation"].startswith("delegation."):
         from gateway.session_worker_delegation import worker_delegation_request
         return await worker_delegation_request(connection, ref, params)
-    if operation == "persist" and params.get("operation") == "child.reserve":
+    if operation == "persist" and params.get("operation") in ("child.reserve", "custody.maker_observation"):
         from gateway.session_worker_child import worker_child_request
         return await worker_child_request(connection, ref, params)
     extra = {'register': {'kind'}, 'adopt': set(), 'persist': {'epoch', 'sequence', 'operation', 'payload'}}[operation]

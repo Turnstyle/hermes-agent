@@ -1015,6 +1015,8 @@ class SessionDB(
         BEGIN IMMEDIATE takes the WAL write lock up front so contention surfaces
         immediately; on locked/busy the Python lock is released, a jitter slept,
         and the WHOLE callback retried — *fn* must stay idempotent under retry."""
+        from hermes_state_observation import deny_observation_write
+        deny_observation_write(self)
         if patience_s is None:
             patience_s = self._WRITE_PATIENCE_S
         deadline = time.monotonic() + patience_s
