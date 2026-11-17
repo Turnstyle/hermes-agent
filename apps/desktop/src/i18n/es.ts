@@ -428,10 +428,7 @@ export const esOverrides = {
     updateReadyMessageUnknown: 'Hay una nueva actualización disponible.',
     seeWhatsNew: 'Ver novedades',
     mcp: {
-      needsAuthTitle: 'El servidor MCP necesita re-autenticación',
-      needsAuthMessage: name => `${name} MCP necesita re-autenticación.`,
-      errorTitle: 'Servidor MCP inalcanzable',
-      errorMessage: name => `${name} MCP falló su verificación de salud.`,
+      // Cached-state warnings use the English fallback until translated.
       signIn: 'Iniciar sesión',
       view: 'Ver',
       disable: 'Desactivar',

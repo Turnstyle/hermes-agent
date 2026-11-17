@@ -1483,10 +1483,21 @@ def _(rid, params: dict) -> dict:
                        or hc.hermes_home_key() == hc.hermes_home_key(hc.get_process_hermes_home()))
     safe = ("name", "transport", "tools", "connected", "disabled", "status", "needs_auth")
     servers = _tools_mod("tools.mcp_tool_discovery").get_mcp_status(configured, include_runtime=include_runtime)
-    return _ok(rid, {"servers": [
-        {**{k: e[k] for k in safe if k in e}, "source": "plugin" if plugins[e["name"]] is not None else "config",
-         "plugin": plugins[e["name"]]} for e in servers
-    ], "checked_at": int(time.time() * 1000)})
+    reasons = _tools_mod("tui_gateway.contracts.tools_mcp_plugins").McpFailureReason
+    allowed_reasons = {reason.value: reason.value for reason in reasons}
+    rows = []
+    for entry in servers:
+        row = {k: entry[k] for k in safe if k in entry}
+        row.update(source="plugin" if plugins[entry["name"]] is not None else "config",
+                   plugin=plugins[entry["name"]])
+        if entry.get("status") == "failed":
+            # Revalidate at the RPC boundary: internal rows may contain raw, unsafe text.
+            reason = entry.get("failure_reason")
+            row["failure_reason"] = (allowed_reasons.get(reason, "unknown")
+                                     if isinstance(reason, str) else "unknown")
+        rows.append(row)
+    return _ok(rid, {"servers": rows, "checked_at": int(time.time() * 1000),
+                     "status_source": "cached_runtime"})
 
 
 @_mcp_rpc("add")

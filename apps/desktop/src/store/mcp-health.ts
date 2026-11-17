@@ -80,6 +80,27 @@ export const isLocalMcpServer = (server: McpServerEntry): boolean =>
 
 type RuntimeRow = McpServersStatusResult['servers'][number]
 
+// Only allowlisted reasons select copy. Missing reasons from older backends,
+// future reason strings and raw backend errors all use the generic fallback.
+function failureMessageKey(reason: unknown): string {
+  switch (reason) {
+    case 'auth':
+      return 'notifications.mcp.needsAuthMessage'
+    case 'timeout':
+      return 'notifications.mcp.timeoutMessage'
+    case 'invalid_endpoint':
+      return 'notifications.mcp.invalidEndpointMessage'
+    case 'connection':
+      return 'notifications.mcp.connectionMessage'
+    case 'missing_executable':
+      return 'notifications.mcp.missingExecutableMessage'
+    case 'parked':
+      return 'notifications.mcp.parkedMessage'
+    default:
+      return 'notifications.mcp.errorMessage'
+  }
+}
+
 /** One status row → health. Only a FAILED connect is unhealthy; connecting,
  *  lazy and never-tried servers have nothing to report yet. */
 export function healthOf(row: RuntimeRow, server: McpServerEntry): McpHealthStatus {
@@ -149,7 +170,7 @@ async function disableServer(sourceKey: string, name: string): Promise<void> {
   }
 }
 
-function recordResult(sourceKey: string, name: string, status: McpHealthStatus): void {
+function recordResult(sourceKey: string, name: string, status: McpHealthStatus, failureReason: unknown): void {
   const key = `${sourceKey}::${name}`
   const previous = lastStatus.get(key) ?? null
   lastStatus.set(key, status)
@@ -169,7 +190,7 @@ function recordResult(sourceKey: string, name: string, status: McpHealthStatus):
     },
     id: `mcp-health-${key}`,
     kind: 'warning',
-    message: translateNow(needsAuth ? 'notifications.mcp.needsAuthMessage' : 'notifications.mcp.errorMessage', name),
+    message: translateNow(needsAuth ? 'notifications.mcp.needsAuthMessage' : failureMessageKey(failureReason), name),
     secondaryAction: {
       label: translateNow('notifications.mcp.disable'),
       onClick: () => void disableServer(sourceKey, name)
@@ -220,7 +241,7 @@ async function sweep(): Promise<void> {
     const server = servers[row.name]
 
     if (server && serverEnabled(server)) {
-      recordResult(sourceKey, row.name, healthOf(row, server))
+      recordResult(sourceKey, row.name, healthOf(row, server), row.failure_reason)
     }
   }
 }

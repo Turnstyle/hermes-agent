@@ -174,6 +174,58 @@ def _mcp_call_failed_message(exc: BaseException) -> str:
     return _sanitize_error(f"MCP call failed: {type(root).__name__}: {_exc_str(root)}")
 
 
+def _mcp_failure_reason(exc: BaseException) -> str:
+    """Closed status reason from typed evidence only; never inspect exception text.
+
+    This is deliberately separate from the retry classifier: UI guidance must not
+    change CLI retry/parking behavior. Walk every group/chain node with the existing
+    cycle-safe bounded helper. Specific causes outrank generic transport wrappers.
+    HTTP 404/405 here means the final failed transport, not an instruction to skip
+    the existing Streamable-HTTP -> SSE fallback. Other HTTP failures (e.g. 500)
+    do not establish a bad endpoint or a network failure and remain unknown.
+    """
+    nodes = _iter_exception_nodes(exc)
+    auth_types, http_types = _get_auth_error_types()
+    sdk = _core.sdk_httpx()
+
+    def http_types_for(*names):
+        return tuple(dict.fromkeys(
+            [getattr(sdk, name) for name in names if sdk is not None and hasattr(sdk, name)]
+            + _optional_types("httpx", *names)))
+
+    timeout_types = (TimeoutError, *http_types_for("TimeoutException"))
+    invalid_types = (InvalidMcpUrlError, NonMcpEndpointError,
+                     *http_types_for("InvalidURL", "UnsupportedProtocol"))
+    connection_types = (ConnectionError, *http_types_for("NetworkError", "ProxyError", "RemoteProtocolError"),
+                        *_optional_types("anyio", "BrokenResourceError", "ClosedResourceError", "EndOfStream"))
+    statuses = [node.response.status_code for node in nodes if isinstance(node, http_types)]
+
+    if (any(isinstance(node, auth_types) and not isinstance(node, http_types) for node in nodes)
+            or any(status in (401, 403) for status in statuses)):
+        return "auth"
+    if any(isinstance(node, timeout_types) for node in nodes):
+        return "timeout"
+    if (any(isinstance(node, invalid_types) for node in nodes)
+            or any(status in (404, 405) for status in statuses)):
+        return "invalid_endpoint"
+    if any(isinstance(node, FileNotFoundError)
+           or isinstance(node, OSError) and node.errno == errno.ENOENT for node in nodes):
+        return "missing_executable"
+    # The SDK can erase a rejection into JSON-RPC INTERNAL_ERROR, then the
+    # transport adds a diagnostic ConnectionError wrapper. Neither proves a
+    # network failure. The last-response recorder may predate a successful OAuth
+    # retry, so do not resurrect its possibly stale status or parse wrapper text.
+    if any(getattr(getattr(node, "error", None), "code", None) == -32603 for node in nodes):
+        return "unknown"
+    if any(isinstance(node, connection_types)
+           or isinstance(node, OSError) and node.errno in {
+               errno.ECONNREFUSED, errno.ECONNRESET, errno.ECONNABORTED,
+               errno.EHOSTUNREACH, errno.ENETUNREACH, errno.EPIPE,
+           } for node in nodes):
+        return "connection"
+    return "unknown"
+
+
 def _classify_mcp_failure(exc: BaseException) -> str:
     """``'permanent'`` (``run()`` parks instead of burning the retry ladder: auth 401/403,
     NonMcpEndpointError, InvalidMcpUrlError, missing stdio command, native addon built for another

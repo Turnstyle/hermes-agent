@@ -427,10 +427,7 @@ export const frOverrides = {
     updateReadyMessageUnknown: 'Une nouvelle mise à jour est disponible.',
     seeWhatsNew: 'Voir les nouveautés',
     mcp: {
-      needsAuthTitle: 'Le serveur MCP nécessite une nouvelle authentification',
-      needsAuthMessage: name => `${name} nécessite une nouvelle authentification MCP.`,
-      errorTitle: 'Serveur MCP inaccessible',
-      errorMessage: name => `${name} a échoué à la vérification de l'état MCP.`,
+      // Cached-state warnings use the English fallback until translated.
       signIn: 'Se connecter',
       view: 'Afficher',
       disable: 'Désactiver',

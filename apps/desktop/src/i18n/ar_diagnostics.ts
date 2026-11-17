@@ -46,10 +46,7 @@ export const arDiagnostics = {
     updateReadyMessageUnknown: 'يتوفر تحديث جديد.',
     seeWhatsNew: 'عرض الجديد',
     mcp: {
-      needsAuthTitle: 'خادم MCP يحتاج إلى إعادة المصادقة',
-      needsAuthMessage: name => `يحتاج ${name} MCP إلى إعادة المصادقة.`,
-      errorTitle: 'تعذر الوصول إلى خادم MCP',
-      errorMessage: name => `فشل فحص سلامة ${name} MCP.`,
+      // Cached-state warnings use the English fallback until translated.
       signIn: 'تسجيل الدخول',
       view: 'عرض',
       disable: 'تعطيل',

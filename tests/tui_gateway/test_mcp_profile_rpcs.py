@@ -59,6 +59,78 @@ def _read_yaml(path: Path) -> dict:
         return yaml.safe_load(f) or {}
 
 
+@pytest.mark.parametrize("reason", [
+    "auth", "timeout", "invalid_endpoint", "connection", "missing_executable", "parked", "unknown",
+])
+def test_status_projects_closed_reason_without_raw_diagnostics(hermes_root, monkeypatch, reason):
+    import json
+    from tools import mcp_tool_discovery as discovery
+
+    canary = ("Authorization: Bearer HEADER_CANARY "
+              "https://USER_CANARY:PASS_CANARY@example.invalid/mcp?token=QUERY_CANARY "
+              'body={"secret":"BODY_CANARY"}')
+    _result(_call("mcp.servers.add", {
+        "profile": "work", "name": "safe", "config": {"command": "safe-bin"},
+    }))
+    row = {"name": "safe", "transport": "stdio", "tools": 0, "connected": False,
+           "disabled": False, "status": "failed", "needs_auth": reason == "auth",
+           "failure_reason": reason, "error": canary, "headers": {"Authorization": canary},
+           "url": canary, "body": canary, "checked_at": 1}
+    monkeypatch.setattr(discovery, "get_mcp_status", lambda *a, **kw: [row])
+    monkeypatch.setattr("time.time", lambda: 1234.5)
+
+    def forbidden(*a, **kw):
+        pytest.fail("status RPC must not perform an active probe")
+
+    monkeypatch.setattr(discovery, "_connect_server", forbidden)
+    monkeypatch.setattr(discovery, "probe_mcp_server_tools", forbidden)
+    payload = _result(_call("mcp.servers.status", {"profile": "work"}))
+    assert payload["status_source"] == "cached_runtime"
+    # This is the read's observation time, not the cached row's old probe timestamp.
+    assert payload["checked_at"] == 1234500
+    assert payload["servers"][0]["failure_reason"] == reason
+    assert set(payload["servers"][0]) <= {
+        "name", "transport", "tools", "connected", "disabled", "status", "needs_auth",
+        "failure_reason", "source", "plugin",
+    }
+    assert "CANARY" not in json.dumps(payload)
+
+
+@pytest.mark.parametrize("invalid", [
+    "Authorization: Bearer REASON_CANARY", "https://u:p@example.invalid/?key=REASON_CANARY",
+    "AUTH", " auth", "timeout\nREASON_CANARY", "", None, 401, ["auth"], {"auth": "REASON_CANARY"},
+])
+def test_status_revalidates_untrusted_failure_reason(hermes_root, monkeypatch, invalid):
+    from tools import mcp_tool_discovery as discovery
+
+    _result(_call("mcp.servers.add", {
+        "profile": "work", "name": "safe", "config": {"command": "safe-bin"},
+    }))
+    monkeypatch.setattr(discovery, "get_mcp_status", lambda *a, **kw: [{
+        "name": "safe", "transport": "stdio", "status": "failed", "failure_reason": invalid,
+        "error": "RAW_ERROR_CANARY",
+    }])
+    payload = _result(_call("mcp.servers.status", {"profile": "work"}))
+    # Implementations may omit invalid optional input or normalize it to the closed unknown code.
+    assert payload["servers"][0].get("failure_reason") in (None, "unknown")
+    assert "CANARY" not in str(payload)
+
+
+def test_status_supports_older_runtime_rows_without_reason(hermes_root, monkeypatch):
+    from tools import mcp_tool_discovery as discovery
+
+    _result(_call("mcp.servers.add", {
+        "profile": "work", "name": "safe", "config": {"command": "safe-bin"},
+    }))
+    monkeypatch.setattr(discovery, "get_mcp_status", lambda *a, **kw: [{
+        "name": "safe", "transport": "stdio", "status": "failed", "error": "RAW_ERROR_CANARY",
+    }])
+    payload = _result(_call("mcp.servers.status", {"profile": "work"}))
+    assert payload["status_source"] == "cached_runtime"
+    assert payload["servers"][0].get("failure_reason") in (None, "unknown")
+    assert "CANARY" not in str(payload)
+
+
 def test_add_lands_in_named_profile_only(hermes_root):
     root = hermes_root
     resp = _call(
@@ -172,6 +244,9 @@ def test_status_reports_parked_servers_and_flags_rejected_oauth(hermes_root):
     assert (rows["expired"]["status"], rows["expired"]["needs_auth"]) == ("failed", True)
     assert (rows["offline"]["status"], rows["offline"]["needs_auth"]) == ("failed", False)
     assert (rows["dropped"]["status"], rows["dropped"]["needs_auth"]) == ("failed", False)
+    assert rows["expired"]["failure_reason"] == "auth"
+    assert rows["dropped"]["failure_reason"] == "parked"
+    assert payload["status_source"] == "cached_runtime"
     assert "Unauthorized" not in str(payload) and "attempts" not in str(payload)
 
 

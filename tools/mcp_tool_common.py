@@ -27,6 +27,26 @@ class _OriginProxy:
 _core = _OriginProxy()
 _MISSING = object()
 
+# Closed, credential-free vocabulary shared by cached runtime status consumers.
+_MCP_FAILURE_REASONS = frozenset({
+    "auth", "timeout", "invalid_endpoint", "connection", "missing_executable", "parked", "unknown",
+})
+
+
+class _CachedMcpFailure(str):
+    """Keep CLI text unchanged while carrying a safe reason with its existing cache entry.
+
+    Using the same value (rather than a parallel ledger) makes scope rekeying, reset,
+    shutdown and success eviction atomic with the existing error/park bookkeeping.
+    Plain legacy strings remain valid and status consumers use a conservative fallback.
+    """
+
+    def __new__(cls, text: str, failure_reason: str):
+        value = super().__new__(cls, text)
+        value.failure_reason = (failure_reason if isinstance(failure_reason, str)
+                                and failure_reason in _MCP_FAILURE_REASONS else "unknown")
+        return value
+
 
 def mcp_field(obj, snake: str, camel: str, default=None):
     """Read an MCP model field across the 1.x -> 2.x rename to snake_case. Pydantic aliases

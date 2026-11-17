@@ -8,6 +8,8 @@ Every ``mcp.servers.*``, ``mcp.catalog``, ``skills.manage`` and ``plugins.manage
 
 from __future__ import annotations
 
+from typing import Literal
+
 from pydantic import Field
 
 from .base import JsonValue, Params, Result, WireEnum
@@ -414,6 +416,18 @@ class McpRuntimeStatus(WireEnum):
     configured = "configured"
 
 
+class McpFailureReason(WireEnum):
+    """Closed, non-sensitive categories; never raw errors, headers, or exception text."""
+
+    auth = "auth"
+    timeout = "timeout"
+    invalid_endpoint = "invalid_endpoint"
+    connection = "connection"
+    missing_executable = "missing_executable"
+    parked = "parked"
+    unknown = "unknown"
+
+
 class McpServerRuntimeRow(Result):
     """Safe projection of ``tools.mcp_tool_discovery.get_mcp_status`` rows."""
 
@@ -427,11 +441,14 @@ class McpServerRuntimeRow(Result):
     plugin: str | None = None
     # Parked on a rejected OAuth credential (older backends omit it).
     needs_auth: bool = False
+    failure_reason: McpFailureReason | None = None
 
 
 class McpServersStatusResult(Result):
     servers: list[McpServerRuntimeRow]
+    # Observation read time, not the time any connection or failure was tested.
     checked_at: int
+    status_source: Literal["cached_runtime"]
 
 
 method("mcp.servers.status", params=ProfileParams, result=McpServersStatusResult,

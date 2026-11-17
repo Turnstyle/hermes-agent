@@ -453,6 +453,11 @@ export interface Translations extends NoticeTranslations {
       needsAuthMessage: (name: string) => string
       errorTitle: string
       errorMessage: (name: string) => string
+      timeoutMessage: (name: string) => string
+      invalidEndpointMessage: (name: string) => string
+      connectionMessage: (name: string) => string
+      missingExecutableMessage: (name: string) => string
+      parkedMessage: (name: string) => string
       signIn: string
       view: string
       disable: string
