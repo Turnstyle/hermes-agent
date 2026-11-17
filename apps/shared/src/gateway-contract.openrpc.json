@@ -22954,6 +22954,20 @@
         "title": "McpCatalogResult",
         "type": "object"
       },
+      "McpFailureReason": {
+        "description": "Closed, non-sensitive categories; never raw errors, headers, or exception text.",
+        "enum": [
+          "auth",
+          "timeout",
+          "invalid_endpoint",
+          "connection",
+          "missing_executable",
+          "parked",
+          "unknown"
+        ],
+        "title": "McpFailureReason",
+        "type": "string"
+      },
       "McpOauthCallbackParams": {
         "additionalProperties": false,
         "properties": {
@@ -23414,6 +23428,17 @@
             "default": false,
             "title": "Needs Auth",
             "type": "boolean"
+          },
+          "failure_reason": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/McpFailureReason"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null
           }
         },
         "required": [
@@ -23806,11 +23831,17 @@
           "checked_at": {
             "title": "Checked At",
             "type": "integer"
+          },
+          "status_source": {
+            "const": "cached_runtime",
+            "title": "Status Source",
+            "type": "string"
           }
         },
         "required": [
           "servers",
-          "checked_at"
+          "checked_at",
+          "status_source"
         ],
         "title": "McpServersStatusResult",
         "type": "object"

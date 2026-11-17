@@ -1,6 +1,8 @@
 // @vitest-environment jsdom
 import { afterEach, describe, expect, it, vi } from 'vitest'
 
+import { TRANSLATIONS } from '../i18n/catalog'
+
 const mocks = vi.hoisted(() => {
   const makeAtom = <T>(initial: T) => {
     let value = initial
@@ -35,6 +37,7 @@ const mocks = vi.hoisted(() => {
     getHermesConfigRecord: vi.fn(),
     notify: vi.fn(),
     mcpStatus: vi.fn(),
+    gatewayRequests: vi.fn(),
     setMcpServerEnabled: vi.fn().mockResolvedValue({ ok: true })
   }
 })
@@ -49,10 +52,13 @@ vi.mock('@/api/client', () => ({
 }))
 
 vi.mock('@/store/gateway', () => ({
-  requestGatewayForAgent: (connectionId: null | string, profile: string, method: string) =>
-    method === 'mcp.servers.status'
+  requestGatewayForAgent: (connectionId: null | string, profile: string, method: string) => {
+    mocks.gatewayRequests(connectionId, profile, method)
+
+    return method === 'mcp.servers.status'
       ? mocks.mcpStatus(connectionId, profile)
       : Promise.reject(new Error(`unexpected ${method}`))
+  }
 }))
 
 vi.mock('@/i18n', () => ({
@@ -101,11 +107,122 @@ afterEach(() => {
   mocks.getHermesConfigRecord.mockReset()
   mocks.notify.mockReset()
   mocks.mcpStatus.mockReset()
+  mocks.gatewayRequests.mockReset()
   mocks.setMcpServerEnabled.mockClear()
 })
 
 type McpHealthModule = Awaited<ReturnType<typeof importMcpHealth>>
 const importMcpHealth = () => import('./mcp-health')
+
+describe('cached warning copy in bundled locales', () => {
+  it.each(Object.entries(TRANSLATIONS))(
+    'uses truthful cached-state copy in %s',
+    (_locale: string, translations: (typeof TRANSLATIONS)['en']) => {
+      const copy = translations.notifications.mcp
+      const keys = [
+        'errorMessage',
+        'needsAuthMessage',
+        'timeoutMessage',
+        'invalidEndpointMessage',
+        'connectionMessage',
+        'missingExecutableMessage',
+        'parkedMessage'
+      ] as const
+
+      for (const key of keys) {
+        const message = copy[key]('svc')
+        expect(message).toContain('cached')
+        expect(message).toContain('No new connection check was run.')
+        expect(message).not.toMatch(/failed its health check|automatic retries are paused/i)
+      }
+    }
+  )
+})
+
+describe('cached failure diagnostics', () => {
+  const canary =
+    'Authorization: Bearer HEADER_CANARY https://USER_CANARY:PASS_CANARY@example.invalid/?token=QUERY_CANARY body=BODY_CANARY'
+
+  const prepare = (name: string, reason?: unknown) => {
+    window.localStorage.clear()
+    mocks.getHermesConfigRecord.mockResolvedValue({
+      mcp_servers: { [name]: { url: 'https://example.invalid/mcp' } }
+    })
+    const payload = statusOf([name, 'failed'])
+    mocks.mcpStatus.mockResolvedValue({
+      ...payload,
+      status_source: 'cached_runtime',
+      servers: payload.servers.map(row => ({
+        ...row,
+        ...(reason === undefined ? {} : { failure_reason: reason }),
+        error: canary,
+        headers: { Authorization: canary },
+        body: canary
+      }))
+    })
+  }
+
+  it.each([
+    ['auth', 'needsAuthMessage'],
+    ['timeout', 'timeoutMessage'],
+    ['invalid_endpoint', 'invalidEndpointMessage'],
+    ['connection', 'connectionMessage'],
+    ['missing_executable', 'missingExecutableMessage'],
+    ['parked', 'parkedMessage']
+  ])(
+    'uses fixed localized copy for %s, never backend error text or probes',
+    async (reason: string, messageKey: string) => {
+      prepare(`reason-${reason}`, reason)
+      startMcpHealthChecker()
+      mocks.gatewayState.set('open')
+      await flush()
+      await flush()
+      expect(mocks.notify).toHaveBeenCalledTimes(1)
+      const toast = mocks.notify.mock.calls[0][0]
+
+      // translateNow returns its key in this test: a reason must choose fixed i18n copy.
+      expect(toast.message).toBe(`notifications.mcp.${messageKey}`)
+      expect(JSON.stringify(toast)).not.toContain('CANARY')
+      expect(mocks.gatewayRequests.mock.calls.map((call: unknown[]) => call[2])).toEqual(['mcp.servers.status'])
+    }
+  )
+
+  let fallbackId = 0
+
+  it.each([undefined, 'unknown', canary, { reason: canary }, 401])(
+    'keeps generic old-backend fallback for absent, unknown or untrusted code %j',
+    async (reason: unknown) => {
+      prepare(`fallback-${fallbackId++}`, reason)
+      startMcpHealthChecker()
+      mocks.gatewayState.set('open')
+      await flush()
+      await flush()
+      expect(mocks.notify).toHaveBeenCalledTimes(1)
+      expect(mocks.notify.mock.calls[0][0].message).toBe('notifications.mcp.errorMessage')
+      expect(JSON.stringify(mocks.notify.mock.calls[0][0])).not.toContain('CANARY')
+    }
+  )
+
+  it('keeps failure transitions isolated between same-named profiles', async () => {
+    prepare('profile-reason', 'timeout')
+    startMcpHealthChecker()
+    mocks.activeProfile.set('reason-profile-a')
+    mocks.gatewayState.set('open')
+    await flush()
+    await flush()
+    mocks.activeProfile.set('reason-profile-b')
+    await flush()
+    await flush()
+    expect(mocks.notify).toHaveBeenCalledTimes(2)
+    expect(mocks.mcpStatus).toHaveBeenCalledWith(null, 'reason-profile-a')
+    expect(mocks.mcpStatus).toHaveBeenCalledWith(null, 'reason-profile-b')
+    expect(mocks.notify.mock.calls[0][0].id).not.toBe(mocks.notify.mock.calls[1][0].id)
+    mocks.activeProfile.set('reason-profile-a')
+    await flush()
+    await flush()
+    expect(mocks.notify).toHaveBeenCalledTimes(2)
+  })
+})
 
 describe('shouldNotify', () => {
   const DAY = 24 * 60 * 60 * 1000

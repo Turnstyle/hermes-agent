@@ -132,10 +132,7 @@ export const jaOverrides = {
     updateReadyMessageUnknown: '新しい更新が利用可能です。',
     seeWhatsNew: '新機能を見る',
     mcp: {
-      needsAuthTitle: 'MCP サーバーの再認証が必要です',
-      needsAuthMessage: name => `${name} MCP の再認証が必要です。`,
-      errorTitle: 'MCP サーバーに接続できません',
-      errorMessage: name => `${name} MCP のヘルスチェックに失敗しました。`,
+      // Cached-state warnings use the English fallback until translated.
       signIn: 'サインイン',
       view: '表示',
       disable: '無効化',

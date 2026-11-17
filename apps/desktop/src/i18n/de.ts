@@ -425,10 +425,7 @@ export const deOverrides = {
     updateReadyMessageUnknown: 'Ein neues Update ist verfügbar.',
     seeWhatsNew: 'Neues ansehen',
     mcp: {
-      needsAuthTitle: 'MCP-Server braucht erneute Authentifizierung',
-      needsAuthMessage: name => `${name} MCP braucht erneute Authentifizierung.`,
-      errorTitle: 'MCP-Server nicht erreichbar',
-      errorMessage: name => `${name} MCP hat den Health-Check nicht bestanden.`,
+      // Cached-state warnings use the English fallback until translated.
       signIn: 'Anmelden',
       view: 'Anzeigen',
       disable: 'Deaktivieren',

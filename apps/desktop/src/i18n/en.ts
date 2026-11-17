@@ -417,10 +417,22 @@ export const en: Translations = {
     updateReadyMessageAppInstaller: 'A new version of Hermes is ready. Update now and Windows will finish it for you.',
     seeWhatsNew: "See what's new",
     mcp: {
-      needsAuthTitle: 'MCP server needs re-authentication',
-      needsAuthMessage: name => `${name} MCP needs re-authentication.`,
-      errorTitle: 'MCP server unreachable',
-      errorMessage: name => `${name} MCP failed its health check.`,
+      needsAuthTitle: 'MCP cached sign-in warning',
+      needsAuthMessage: name =>
+        `${name} MCP last cached connection state indicates an authentication or authorization issue. Review sign-in and access on the MCP page. No new connection check was run.`,
+      errorTitle: 'MCP cached connection warning',
+      errorMessage: name =>
+        `${name} MCP last cached connection state indicates a problem. Open the MCP page to inspect the server. No new connection check was run.`,
+      timeoutMessage: name =>
+        `${name} MCP last cached connection attempt timed out. Check your network and retry from the MCP page. No new connection check was run.`,
+      invalidEndpointMessage: name =>
+        `${name} MCP last cached connection state indicates an invalid endpoint. Inspect the configured endpoint on the MCP page. No new connection check was run.`,
+      connectionMessage: name =>
+        `${name} MCP last cached connection attempt failed. Check your network and whether the server is available, then retry from the MCP page. No new connection check was run.`,
+      missingExecutableMessage: name =>
+        `${name} MCP last cached connection state indicates a missing executable. Check that the configured command is installed and available to the backend. No new connection check was run.`,
+      parkedMessage: name =>
+        `${name} MCP last cached connection state is parked. Open the MCP page to inspect or reconnect it. No new connection check was run.`,
       signIn: 'Sign in',
       view: 'View',
       disable: 'Disable',

@@ -4338,6 +4338,7 @@ export type McpServerSource = 'config' | 'plugin'
 export interface McpServersStatusResult {
   servers: McpServerRuntimeRow[]
   checked_at: number
+  status_source: 'cached_runtime'
 }
 /** Safe projection of ``tools.mcp_tool_discovery.get_mcp_status`` rows. */
 export interface McpServerRuntimeRow {
@@ -4350,8 +4351,11 @@ export interface McpServerRuntimeRow {
   source: McpServerSource
   plugin?: string | null
   needs_auth?: boolean
+  failure_reason?: McpFailureReason | null
 }
 export type McpRuntimeStatus = 'connected' | 'disabled' | 'connecting' | 'failed' | 'lazy' | 'configured'
+/** Closed, non-sensitive categories; never raw errors, headers, or exception text. */
+export type McpFailureReason = 'auth' | 'timeout' | 'invalid_endpoint' | 'connection' | 'missing_executable' | 'parked' | 'unknown'
 /** ``preset`` (catalog id) and/or ``config`` (url/command/args/env/headers/auth/tools); a ``bearer_token`` is written to the profile's .env, only the header template persists. */
 export interface McpServersAddParams {
   profile?: string | null

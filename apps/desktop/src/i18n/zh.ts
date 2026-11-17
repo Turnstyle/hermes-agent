@@ -219,10 +219,7 @@ export const zhOverrides = {
     updateReadyMessageAppInstaller: 'Hermes 新版本已就绪。现在更新，Windows 会自动完成。',
     seeWhatsNew: '查看更新内容',
     mcp: {
-      needsAuthTitle: 'MCP 服务器需要重新认证',
-      needsAuthMessage: name => `${name} MCP 需要重新认证。`,
-      errorTitle: 'MCP 服务器无法连接',
-      errorMessage: name => `${name} MCP 健康检查失败。`,
+      // Cached-state warnings use the English fallback until translated.
       signIn: '登录',
       view: '查看',
       disable: '禁用',

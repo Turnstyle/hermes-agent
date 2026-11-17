@@ -8,7 +8,7 @@ import logging
 import time
 from dataclasses import dataclass
 from typing import Optional
-from tools.mcp_tool_common import _core, _get_lifecycle_seconds, _jittered, _resolve_tool_timeout
+from tools.mcp_tool_common import _CachedMcpFailure, _core, _get_lifecycle_seconds, _jittered, _resolve_tool_timeout
 from tools import mcp_tool_errors as _errors
 from tools import mcp_tool_registration as _registration
 from tools import mcp_tool_sampling as _sampling
@@ -22,6 +22,7 @@ class _RetryBudget:
 
     initial_retries: int = 0
     backoff: float = 1.0
+    failure_reason: Optional[str] = None
 
 
 class MCPServerRunMixin:
@@ -199,7 +200,8 @@ class MCPServerRunMixin:
         # (#57129). An explicit _reconnect_event.set() (OAuth recovery, manual /mcp refresh) still wakes us
         # immediately.
         self._was_parked = True
-        self._park_reason = revival_reason
+        self._park_reason = _CachedMcpFailure(
+            revival_reason, getattr(revival_reason, "failure_reason", "parked"))
         self._deregister_tools()
         self._reconnect_event.clear()
         paused = False
@@ -378,6 +380,9 @@ class MCPServerRunMixin:
     async def _on_clean_return(self, lifecycle_reason: str, budget: _RetryBudget) -> bool:
         """Clean transport return: shutdown, stdio recycle, or a requested rebuild (not a failure
         for the retry counters)."""
+        # No typed exception this cycle: a later clean rapid-drop must not reuse
+        # a previous attempt's failure when the retry budget is exhausted.
+        budget.failure_reason = None
         if self._shutdown_event.is_set():
             return False
         if lifecycle_reason == "recycle":
@@ -419,7 +424,7 @@ class MCPServerRunMixin:
     async def _park_and_rearm(self, revival_reason: str, budget: _RetryBudget) -> bool:
         """Park; on revival leave ONE probe per wake so a still-dead server re-parks instead of
         burning 5 rapid retries. False on shutdown."""
-        if await self._park(revival_reason):
+        if await self._park(_CachedMcpFailure(revival_reason, budget.failure_reason or "parked")):
             return False
         self._reconnect_retries, budget.backoff = _core._MAX_RECONNECT_RETRIES, 1.0
         return True
@@ -427,7 +432,7 @@ class MCPServerRunMixin:
     async def _park_initial_failure(self, exc: Exception, revival_reason: str, budget: _RetryBudget) -> bool:
         """Publish ``exc`` to ``start()``, park, and on revival reset every counter. False on shutdown."""
         self._publish_error(exc)
-        if await self._park(revival_reason):
+        if await self._park(_CachedMcpFailure(revival_reason, budget.failure_reason or "parked")):
             return False
         budget.initial_retries = self._reconnect_retries = 0
         budget.backoff = 1.0
@@ -442,6 +447,7 @@ class MCPServerRunMixin:
     async def _on_transport_error(self, exc: Exception, budget: _RetryBudget) -> bool:
         """Transport raised: classify, then run the initial-connect or reconnect ladder. False = exit."""
         # Unwrap anyio TaskGroup wrappers: the group's str() hides the root cause.
+        budget.failure_reason = _errors._mcp_failure_reason(exc)
         root = _errors._unwrap_exception_group(exc)
         failure_class = _errors._classify_mcp_failure(root)
         if self._is_recycled_stdio():

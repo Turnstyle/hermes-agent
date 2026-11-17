@@ -12,7 +12,7 @@ import time
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Dict, List, Optional, Set, Tuple
-from tools.mcp_tool_common import _core, _parse_boolish, mcp_server_enabled
+from tools.mcp_tool_common import _CachedMcpFailure, _MCP_FAILURE_REASONS, _core, _parse_boolish, mcp_server_enabled
 from tools import mcp_tool_config as _config
 from tools import mcp_tool_errors as _errors
 from tools import mcp_tool_lifecycle as _lifecycle
@@ -218,7 +218,7 @@ def _resolve_server_lazy(name: str, config: dict) -> bool:
 
 def _note_connect_failure(name: str, exc: BaseException) -> str:
     """Record a failed connect (under ``_lock``): error text for status, cooldown stamp."""
-    message = _errors._format_connect_error(exc)
+    message = _CachedMcpFailure(_errors._format_connect_error(exc), _errors._mcp_failure_reason(exc))
     with _core._lock:
         key = _server_key(name)
         _core._server_connecting.discard(key)
@@ -495,7 +495,8 @@ def _run_discovery_pass(new_servers: dict[str, dict]) -> None:
                 for _sn in stale:
                     _core._server_connecting.discard(_server_key(_sn))
                     _core._server_connect_errors.setdefault(
-                        _server_key(_sn), f"Connection attempt {how} during discovery")
+                        _server_key(_sn), _CachedMcpFailure(
+                            f"Connection attempt {how} during discovery", _errors._mcp_failure_reason(_e)))
                     # Its attempt is still running on the MCP loop; without a cooldown the next
                     # reconcile tick would spawn a second one beside it.
                     _record_connect_failure(_sn)
@@ -823,7 +824,8 @@ def is_mcp_tool_parallel_safe(tool_name: str) -> bool:
 
 def get_mcp_status(configured: Optional[dict[str, dict]] = None, *, include_runtime: bool = True) -> list[dict]:
     """Per-server status dicts for banner/TUI: name, transport, tools, connected, disabled,
-    status (connected / disabled / connecting / failed / lazy / configured) and error for failed.
+    status (connected / disabled / connecting / failed / lazy / configured), error for failed,
+    and a closed, credential-free failure_reason for failed rows only.
     Reads cached runtime state only; never connects.
 
     ``lazy`` is a registered-but-not-spawned server (``lazy: true``, tools from the schema
@@ -842,7 +844,10 @@ def get_mcp_status(configured: Optional[dict[str, dict]] = None, *, include_runt
             # Runtime state belongs to the profile that adopted it; under a multiplexer only that
             # profile's view may show it, and ``include_runtime=False`` hides the launch profile's
             # servers from a status read scoped to a different profile.
-            return include_runtime and _core._server_visible_in_scope(key, current_scope)
+            # Failed first connects have an owner in the connection key but have
+            # not reached adoption, so no teardown-owner entry exists yet.
+            return include_runtime and (_key_visible_in_scope(key, current_scope)
+                                        or _core._server_visible_in_scope(key, current_scope))
 
         active_servers = {_key_name(k): s for k, s in _core._servers.items() if visible(k)}
         connecting = {_key_name(k) for k in _core._server_connecting if visible(k)}
@@ -875,12 +880,23 @@ def get_mcp_status(configured: Optional[dict[str, dict]] = None, *, include_runt
                               else len(server._tools))
             if server._sampling:
                 entry["sampling"] = dict(server._sampling.metrics)
-        elif status == "failed" and name in connect_errors:
-            entry["error"] = connect_errors[name]
+        elif status == "failed":
+            if name in connect_errors:
+                entry["error"] = connect_errors[name]
+            # Post-connect parks have no initial-connect cache entry. Never
+            # classify old CLI text, which may contain URLs or credentials.
+            reason = getattr(getattr(server, "_park_reason", None), "failure_reason", None) if parked else None
+            if not isinstance(reason, str) or reason not in _MCP_FAILURE_REASONS or reason == "unknown":
+                reason = getattr(connect_errors.get(name), "failure_reason", None)
+            entry["failure_reason"] = (reason if isinstance(reason, str) and reason in _MCP_FAILURE_REASONS
+                                       and reason != "unknown" else "parked" if parked else "unknown")
         elif status == "lazy":
             entry["tools"] = lazy_tools[name]
         # Parked on a rejected OAuth credential: the one failure only the user can fix (sign in again).
         entry["needs_auth"] = bool(server is not None and not live and server._auth_park is not None)
+        if status == "failed" and entry["needs_auth"]:
+            # This parked-auth state is typed evidence even for legacy plain-string parks.
+            entry["failure_reason"] = "auth"
         result.append(entry)
     return result
 

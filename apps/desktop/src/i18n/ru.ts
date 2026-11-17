@@ -122,10 +122,7 @@ export const ruOverrides = {
     updateReadyMessageUnknown: 'Доступно новое обновление.',
     seeWhatsNew: 'Смотреть, что нового',
     mcp: {
-      needsAuthTitle: 'Серверу MCP требуется повторная аутентификация',
-      needsAuthMessage: name => `Для MCP ${name} требуется повторная аутентификация.`,
-      errorTitle: 'Сервер MCP недоступен',
-      errorMessage: name => `MCP ${name} не прошёл проверку работоспособности.`,
+      // Cached-state warnings use the English fallback until translated.
       signIn: 'Войти',
       view: 'Просмотр',
       disable: 'Отключить',

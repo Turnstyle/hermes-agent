@@ -25,10 +25,7 @@ export const zhHantDiagnostics = {
     updateReadyMessageUnknown: '有新更新可用。',
     seeWhatsNew: '查看新增內容',
     mcp: {
-      needsAuthTitle: 'MCP 伺服器需要重新驗證',
-      needsAuthMessage: name => `${name} MCP 需要重新驗證。`,
-      errorTitle: 'MCP 伺服器無法連線',
-      errorMessage: name => `${name} MCP 健康檢查失敗。`,
+      // Cached-state warnings use the English fallback until translated.
       signIn: '登入',
       view: '檢視',
       disable: '停用',
