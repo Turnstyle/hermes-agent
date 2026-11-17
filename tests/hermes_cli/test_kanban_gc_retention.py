@@ -262,10 +262,40 @@ def test_cleanup_distinguishes_absent_tasks_from_unreadable_board(board, monkeyp
             blocker.close()
 
 
-@pytest.mark.parametrize("status", ["done", "failed", "cancelled"])
-def test_gc_retries_deferred_terminal_scratch_without_losing_safety(board, status, capsys):
+def test_gc_recovers_parent_after_child_link_is_deleted(board, monkeypatch, capsys):
     from hermes_cli import kanban_db_workspace as kbw
 
+    # No workers exist in this fixture; do not probe host tmux sessions.
+    monkeypatch.setattr(kbw, "_cleanup_worker_tmux", lambda *args: None)
+    with kbc.connect_closing() as conn:
+        parent = kb.create_task(conn, title="scratch parent")
+        child = kb.create_task(conn, title="child", parents=[parent])
+        ws = kbw.resolve_workspace(kb.get_task(conn, parent))
+        kbw.set_workspace_path(conn, parent, ws)
+        (ws / "handoff.txt").write_text("child still needs this")
+        assert kb.complete_task(conn, parent, summary="handoff")
+        assert ws.is_dir()
+        assert _deferred_reasons(conn, parent) == []
+    # Even without a shared-cleanup event, a linked active child holds the dir.
+    assert kanban_ops._cmd_gc(_args(0, 0)) == 0
+    assert (ws / "handoff.txt").read_text() == "child still needs this"
+    with kbc.connect_closing() as conn:
+        # Reproduce sync removing the local edge, not an intentional unlink.
+        with kb.write_txn(conn):
+            conn.execute("DELETE FROM task_links WHERE parent_id=? AND child_id=?", (parent, child))
+        assert kb.complete_task(conn, child, summary="child finished")
+        assert ws.is_dir()  # child completion can no longer find its parent
+        assert _deferred_reasons(conn, parent) == []
+    capsys.readouterr()
+    assert kanban_ops._cmd_gc(_args(0, 0)) == 0
+    assert not ws.exists()
+    assert "1 workspace(s)" in capsys.readouterr().out
+    assert kanban_ops._cmd_gc(_args(0, 0)) == 0
+    assert "0 workspace(s)" in capsys.readouterr().out
+
+
+@pytest.mark.parametrize("status", ["done", "failed", "cancelled", "archived"])
+def test_gc_retries_deferred_terminal_scratch_without_losing_safety(board, status, capsys):
     with kbc.connect_closing() as conn:
         tid, live, ws = _shared_scratch(conn)
         child = kb.create_task(conn, title="still needs parent artifacts")
@@ -290,10 +320,13 @@ def test_gc_retries_deferred_terminal_scratch_without_losing_safety(board, statu
             conn.execute("UPDATE tasks SET workspace_path=? WHERE id=?", (str(active_ws), active))
             for task in (dir_task, outside_task, active):
                 kb._append_event(conn, task, "workspace_cleanup_deferred_shared", {"reason": "unknown"})
-            assert kbw._defer_shared_workspace_cleanup(conn, tid, ws)
-    # A prior event is not permission to delete a still-shared workspace.
+            assert _deferred_reasons(conn, tid) == []
+    # No prior event is needed, but a still-shared workspace must be held.
     assert kanban_ops._cmd_gc(_args(0, 0)) == 0
     assert ws.exists()
+    assert not kept.exists()  # terminal scratch with no deferral event is eligible
+    with kbc.connect_closing() as conn:
+        assert _deferred_reasons(conn, tid) == ["shared"]
     with kbc.connect_closing() as conn, kb.write_txn(conn):
         conn.execute("UPDATE tasks SET status='done' WHERE id=?", (live,))
         conn.execute("INSERT INTO task_links (parent_id, child_id) VALUES (?, ?)", (tid, child))
@@ -305,10 +338,48 @@ def test_gc_retries_deferred_terminal_scratch_without_losing_safety(board, statu
     assert kanban_ops._cmd_gc(_args(0, 0)) == 0
     assert not ws.exists()
     assert "1 workspace(s)" in capsys.readouterr().out
-    assert kept.exists() and user_dir.exists() and outside.exists() and active_ws.exists()
+    assert user_dir.exists() and outside.exists() and active_ws.exists()
     # A historical event must not count or recreate a workspace already removed.
     assert kanban_ops._cmd_gc(_args(0, 0)) == 0
     assert "0 workspace(s)" in capsys.readouterr().out
+
+
+@pytest.mark.require_symlinks
+@pytest.mark.parametrize("status", ["done", "failed", "cancelled", "archived"])
+def test_gc_keeps_terminal_scratch_symlink_without_deferred_event(board, status):
+    with kbc.connect_closing() as conn:
+        tid = kb.create_task(conn, title="symlink scratch")
+        target = kb.workspaces_root() / "symlink-target"
+        target.mkdir(parents=True)
+        (target / "note.txt").write_text("do not remove")
+        link = kb.workspaces_root() / tid
+        link.symlink_to(target, target_is_directory=True)
+        with kb.write_txn(conn):
+            conn.execute("UPDATE tasks SET status=?, workspace_path=? WHERE id=?",
+                         (status, str(link), tid))
+        assert _deferred_reasons(conn, tid) == []
+    assert kanban_ops._cmd_gc(_args(0, 0)) == 0
+    assert link.is_symlink()
+    assert (target / "note.txt").read_text() == "do not remove"
+
+
+def test_gc_keeps_scratch_used_by_terminal_parent_on_another_board(board):
+    kb.create_board("other")
+    with kbc.connect_closing() as conn:
+        ws = _archived_scratch_workspace(conn)
+        with kb.write_txn(conn):
+            conn.execute("UPDATE tasks SET workspace_path=? WHERE id=?", (str(ws), ws.name))
+    with kbc.connect_closing(board="other") as other:
+        parent = kb.create_task(other, title="terminal sharer", workspace_path=str(ws))
+        child = kb.create_task(other, title="active child", parents=[parent])
+        with kb.write_txn(other):
+            other.execute("UPDATE tasks SET status='done' WHERE id=?", (parent,))
+    assert kanban_ops._cmd_gc(_args(0, 0)) == 0
+    assert (ws / "scratch.txt").read_text() == "keep me"
+    with kbc.connect_closing(board="other") as other, kb.write_txn(other):
+        other.execute("UPDATE tasks SET status='done' WHERE id=?", (child,))
+    assert kanban_ops._cmd_gc(_args(0, 0)) == 0
+    assert not ws.exists()
 
 
 def test_gc_retries_unknown_after_sibling_becomes_empty(board):

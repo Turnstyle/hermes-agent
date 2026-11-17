@@ -303,7 +303,7 @@ def _cmd_watch(args: argparse.Namespace) -> int:
 
 
 def _cmd_gc(args: argparse.Namespace) -> int:
-    """Remove archived/deferred terminal workspaces, old events, and old worker logs."""
+    """Remove archived worktrees, terminal scratch dirs, old events and worker logs."""
     import shutil
     event_days = getattr(args, "event_retention_days", 30)
     log_days = getattr(args, "log_retention_days", 30)
@@ -312,12 +312,12 @@ def _cmd_gc(args: argparse.Namespace) -> int:
     scratch_root = kb.workspaces_root()
     removed_ws = 0
     with kbc.connect_closing() as conn:
+        # Child-held cleanup writes no event, and removed links can prevent the
+        # completion hook's retry. Event retention must not decide eligibility.
         rows = conn.execute(
             "SELECT id, workspace_kind, workspace_path, branch_name FROM tasks "
             "WHERE status = 'archived' OR ("
-            f"workspace_kind = 'scratch' AND status IN {kbw._TERMINAL_STATUSES_SQL} "
-            "AND EXISTS (SELECT 1 FROM task_events e WHERE e.task_id = tasks.id "
-            "AND e.kind = 'workspace_cleanup_deferred_shared'))"
+            f"workspace_kind = 'scratch' AND status IN {kbw._TERMINAL_STATUSES_SQL})"
         ).fetchall()
         for row in rows:
             if row["workspace_kind"] == "worktree":

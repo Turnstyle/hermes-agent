@@ -87,16 +87,14 @@ def _is_terminal_task(conn: sqlite3.Connection, task_id: str) -> bool:
 
 
 _OTHER_LIVE_PATHS_SQL = (
-    "SELECT workspace_path FROM tasks "
+    "SELECT id, status, workspace_path FROM tasks "
     "WHERE id != ? AND workspace_path IS NOT NULL "
-    f"AND status NOT IN {_TERMINAL_STATUSES_SQL}"
 )
 # Sibling boards mint their own ids, so the id being cleaned up here can
 # name a different live task there. Do not exclude it.
 _ANY_LIVE_PATHS_SQL = (
-    "SELECT workspace_path FROM tasks "
+    "SELECT id, status, workspace_path FROM tasks "
     "WHERE workspace_path IS NOT NULL "
-    f"AND status NOT IN {_TERMINAL_STATUSES_SQL}"
 )
 
 
@@ -115,7 +113,11 @@ def _conn_uses_path(
             other_key = _path_key(Path(other).expanduser().resolve(strict=False))
         except OSError:
             continue
-        if other_key == key:
+        if other_key != key:
+            continue
+        # A terminal sharer still owns handoff artifacts while children run.
+        # Otherwise GC could remove a held parent's dir through another row.
+        if row["status"] not in {"done", "archived", "failed", "cancelled"} or _has_active_children(conn, row["id"]):
             return True
     return False
 
