@@ -4781,6 +4781,17 @@ export interface CanonicalShellExecParams {
   command: string
   profile?: string | null
 }
+export interface ConfigSecretProvenanceParams {
+  session_id: string
+  old_home: string
+  action?: 'preview' | 'apply' | 'rollback'
+}
+export interface ConfigSecretProvenanceResult {
+  session_id: string
+  status: 'preview' | 'applied' | 'unchanged' | 'rolled_back'
+  preimage_key: string | null
+  execution_generation: number
+}
 export interface PromptReceiptParams {
   session_id: string
   admission_id: string
@@ -7219,6 +7230,8 @@ export interface CanonicalRpcMethods {
   'session.mutate': { params: SessionMutateParams; result: SessionMutateResult }
   /** Local operator only: the owner deletes the ended sessions `hermes sessions prune` selected, skipping busy sessions and retained reset owners. */
   'session.prune': { params: SessionPruneParams; result: SessionPruneResult }
+  /** Native operator recovery of one adopted local config-secret reference, with atomic preimage and guarded rollback. */
+  'session.recover_config_secret_provenance': { params: ConfigSecretProvenanceParams; result: ConfigSecretProvenanceResult }
   'session.redirect': { params: CanonicalCorrectionParams; result: CanonicalCorrectionResult }
   'session.resume': { params: CanonicalResumeParams; result: CanonicalSnapshot }
   /** The session.usage dict on demand: what main's classic CLI read off its agent. */
@@ -7282,6 +7295,7 @@ export const CANONICAL_RPC_METHODS = [
   'session.list',
   'session.mutate',
   'session.prune',
+  'session.recover_config_secret_provenance',
   'session.redirect',
   'session.resume',
   'session.stats',

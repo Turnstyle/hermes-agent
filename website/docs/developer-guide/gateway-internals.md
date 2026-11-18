@@ -1004,6 +1004,53 @@ Plugins that load after the adapters connected (install/enable from the CLI, Des
 - **Scope limit** — handlers only. Tools and system-prompt sections of a late plugin wait for the next
   session (prompt-cache invariant); portable MCP servers wait for `mcp.reload`. Nothing un-wires on disable.
 
+## Exact-session config-secret provenance recovery
+
+The native `hermes-gateway-v1` method `session.recover_config_secret_provenance`
+repairs one adopted local session whose frozen `profile-config-v1` reference still
+names a previous sibling profile home. It requires a native bootstrap connection
+with `session:operator`. The serving authority and its persistence handle must
+name the same actual home. Browser grants cannot use this operation.
+
+The parameters are `session_id`, `old_home`, and `action`. `session_id` is the exact
+adopted conversation ID, not a title, prefix, or later compression segment.
+`old_home` is an absolute, normalized sibling path under the owner's `profiles`
+directory. The operation never opens that old home. `action` is `preview` by
+default, `apply`, or `rollback`. The destination comes from the serving store;
+there is no destination parameter.
+
+The policy and legacy-binding receipts must agree on their session, legacy ID,
+principal, and outer home. Their route, origin, rows, and lineage must belong to
+this owner. Both outer homes may already be correct, or both may name `old_home`.
+The nested reference must name this exact session and carry either the paired
+old home/profile identity or the current identity. Mixed identities and unrelated
+homes refuse. The session must be idle, without queued or unknown work or a live
+transcript lease.
+
+`preview` validates the candidate through normal frozen-credential recovery and
+writes nothing. `apply` uses the same validation, including fingerprints and
+endpoint bindings. It changes only the nested home/profile and, when stale, the
+two outer home identities. It preserves reference entries, policy hashes,
+endpoint bindings, other receipt fields, lineage, and message rows. The native
+transaction stores both receipt postimages and the original raw pair under
+`gateway.config_secret_provenance.v1:<session_id>`, then advances the execution
+generation. Runtime publication uses `publish_local_policy` without evicting the
+agent. An already-correct reference returns `unchanged` without a preimage write.
+
+The result contains `session_id`, `status`, `preimage_key`, and
+`execution_generation`. Status is `preview`, `applied`, `unchanged`, or
+`rolled_back`. A repeated apply returns `unchanged` and repeats runtime
+publication if needed.
+
+Rollback uses the same method, exact `session_id`, and `old_home`, with
+`action: "rollback"`. It restores both raw preimages in one native transaction
+and republishes the stored policy. The preimage remains available. Rollback
+refuses if either receipt, the execution generation, or the target transcript
+revision has moved since recovery. A repeated rollback returns `unchanged`.
+Rollback deliberately restores the stale provenance, so ordinary credential
+recovery then refuses it again. One retained preimage is supported per session;
+an apply after rollback refuses rather than replacing that preimage.
+
 ## Related Docs
 
 - [Session Storage](./session-storage.md)
