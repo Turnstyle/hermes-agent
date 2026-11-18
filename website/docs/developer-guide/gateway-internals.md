@@ -1045,8 +1045,15 @@ publication if needed.
 Rollback uses the same method, exact `session_id`, and `old_home`, with
 `action: "rollback"`. It restores both raw preimages in one native transaction
 and republishes the stored policy. The preimage remains available. Rollback
-refuses if either receipt, the execution generation, or the target transcript
-revision has moved since recovery. A repeated rollback returns `unchanged`.
+requires the expected raw receipt pair, execution generation, target runtime
+revision, and transcript witness to match. The witness covers every segment in the
+validated local lineage, including compression ancestors. It records the ordered
+segment IDs, active row count, highest active message ID, and summed
+`transcript_revision`. The native writer connection captures and compares this
+witness, so appends, deletions, deactivations, and in-place content edits refuse
+rollback even when the runtime revision stays unchanged. Older preimages without
+a transcript witness refuse rollback.
+A repeated rollback returns `unchanged` while these checks still hold.
 Rollback deliberately restores the stale provenance, so ordinary credential
 recovery then refuses it again. One retained preimage is supported per session;
 an apply after rollback refuses rather than replacing that preimage.

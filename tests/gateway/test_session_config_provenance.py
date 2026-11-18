@@ -1,5 +1,6 @@
 """Exact owner recovery preserves history and credential guards, including an already-correct outer owner."""
 
+import itertools
 import json
 from types import SimpleNamespace
 
@@ -7,9 +8,11 @@ import pytest
 
 from gateway.session_policy import policy_for_source, restore_policy
 from gateway.session_policy_credentials import PREFIX, recover_config_secrets
+from persistence.conversation.lineage import CompressionChild
 from persistence.conversation.messages import NewMessage
 from persistence.core.errors import AuthorityRefusal
 from tests.fixtures.storage_holder import policy_key, raw_holder
+from tests.fixtures.storage_read import session_row
 from tests.fixtures.storage_seed import seed_session
 
 METHOD = 'session.recover_config_secret_provenance'
@@ -24,9 +27,25 @@ def _state(store):
                                  (policy_key(SID), LEGACY_KEY, PREIMAGE_KEY)))
 
 
-def _history(store):
+def _history(store, session_id=SID):
     with raw_holder(store.persistence)._read_ctx() as conn:
-        return [tuple(row) for row in conn.execute('SELECT * FROM messages WHERE session_id=? ORDER BY id', (SID,))]
+        return [tuple(row) for row in conn.execute('SELECT * FROM messages WHERE session_id=? ORDER BY id', (session_id,))]
+
+
+def _compress_lineage(db):
+    lineage = [SID, 'compressed-middle', 'compressed-tip']
+    for parent, child in itertools.pairwise(lineage):
+        assert db.coordination.try_acquire_compression_lock(session_id=parent, holder='fixture')
+        try:
+            db.lineage.publish_compression_child(parent,
+                CompressionChild(session_id=child, source=db.sessions.get(parent).source),
+                [NewMessage(role='user', content='retained user'),
+                 NewMessage(role='assistant', content='retained assistant')],
+                compression_lock_holder='fixture')
+        finally:
+            db.coordination.release_compression_lock(session_id=parent, holder='fixture')
+    assert list(db.bindings.receipt(SID).lineage) == lineage
+    return lineage
 
 
 async def _fixture(tmp_path, monkeypatch, outer='current', count=2):
@@ -141,6 +160,101 @@ async def test_exact_owner_recovers_and_rolls_back_without_changing_history(tmp_
         again = await _rpc(peer, old_home, 'rollback')
         assert again.get('result', {}).get('status') == 'unchanged', again
         assert _state(store) == restored
+    finally:
+        await peer.close()
+        store.close_all_db_handles()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('segment,mutation', [
+    ('single', 'append'), ('single', 'rewrite'), ('single', 'deactivate'), ('single', 'delete'),
+    (SID, 'rewrite'), (SID, 'deactivate'), (SID, 'delete'),
+    ('compressed-middle', 'rewrite'), ('compressed-middle', 'deactivate'), ('compressed-middle', 'delete'),
+    ('compressed-tip', 'append'), ('compressed-tip', 'rewrite'),
+    ('compressed-tip', 'deactivate'), ('compressed-tip', 'delete'),
+])
+async def test_rollback_refuses_native_transcript_mutations(tmp_path, monkeypatch, segment, mutation):
+    store, peer, old_home, _config = await _fixture(tmp_path, monkeypatch)
+    db = store.persistence
+    try:
+        lineage = [SID] if segment == 'single' else _compress_lineage(db)
+        target = SID if segment == 'single' else segment
+        applied = await _rpc(peer, old_home)
+        assert applied.get('result', {}).get('status') == 'applied', applied
+        revisions = {sid: session_row(db, sid)['runtime_revision'] for sid in lineage}
+        original = db.messages.conversation_revision(lineage[-1], include_lineage=True)
+        row_id = db.messages.active_message_ids(target)[0]
+        mutations = {
+            'append': lambda: db.messages.append_batch(target, [NewMessage(role='user', content='new input')]),
+            'rewrite': lambda: db.messages.set_user_message_content(target, row_id, 'rewritten user input'),
+            'deactivate': lambda: db.messages.deactivate_message(target, row_id),
+            'delete': lambda: db.messages.clear_transcript(target),
+        }
+        mutations[mutation]()
+        assert {sid: session_row(db, sid)['runtime_revision'] for sid in lineage} == revisions
+        current = db.messages.conversation_revision(lineage[-1], include_lineage=True)
+        assert current != original
+        if mutation == 'rewrite':
+            assert (current.active_count, current.max_active_id) == (original.active_count, original.max_active_id)
+            assert current.transcript_revision > original.transcript_revision
+        before = _state(store)
+        history = {sid: _history(store, sid) for sid in lineage}
+        generation = session_row(db, SID)['runtime_generation']
+        reply = await _rpc(peer, old_home, 'rollback')
+        assert reply.get('error', {}).get('data', {}).get('reason') == 'revision_conflict', reply
+        assert _state(store) == before
+        assert {sid: _history(store, sid) for sid in lineage} == history
+        assert session_row(db, SID)['runtime_generation'] == generation
+    finally:
+        await peer.close()
+        store.close_all_db_handles()
+
+
+@pytest.mark.asyncio
+async def test_unchanged_compressed_lineage_can_roll_back(tmp_path, monkeypatch):
+    store, peer, old_home, _config = await _fixture(tmp_path, monkeypatch)
+    try:
+        lineage = _compress_lineage(store.persistence)
+        before = _state(store)
+        history = {sid: _history(store, sid) for sid in lineage}
+        applied = await _rpc(peer, old_home)
+        assert applied.get('result', {}).get('status') == 'applied', applied
+        rolled = await _rpc(peer, old_home, 'rollback')
+        assert rolled.get('result', {}).get('status') == 'rolled_back', rolled
+        restored = _state(store)
+        assert {key: restored[key] for key in before} == before
+        assert {sid: _history(store, sid) for sid in lineage} == history
+        again = await _rpc(peer, old_home, 'rollback')
+        assert again.get('result', {}).get('status') == 'unchanged', again
+        assert _state(store) == restored
+    finally:
+        await peer.close()
+        store.close_all_db_handles()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('rolled_back', [False, True])
+async def test_rollback_refuses_preimage_without_transcript_witness(tmp_path, monkeypatch, rolled_back):
+    store, peer, old_home, _config = await _fixture(tmp_path, monkeypatch)
+    try:
+        applied = await _rpc(peer, old_home)
+        assert applied.get('result', {}).get('status') == 'applied', applied
+        if rolled_back:
+            rolled = await _rpc(peer, old_home, 'rollback')
+            assert rolled.get('result', {}).get('status') == 'rolled_back', rolled
+
+        def remove_witness(conn):
+            record = json.loads(conn.execute('SELECT value FROM state_meta WHERE key=?', (PREIMAGE_KEY,)).fetchone()[0])
+            record.pop('transcript_witness', None)
+            conn.execute('UPDATE state_meta SET value=? WHERE key=?', (json.dumps(record), PREIMAGE_KEY))
+        raw_holder(store.persistence)._execute_write(remove_witness)
+        before, history = _state(store), _history(store)
+        generation = session_row(store.persistence, SID)['runtime_generation']
+        reply = await _rpc(peer, old_home, 'rollback')
+        assert reply.get('error', {}).get('data', {}).get('reason') == 'revision_conflict', reply
+        assert _state(store) == before
+        assert _history(store) == history
+        assert session_row(store.persistence, SID)['runtime_generation'] == generation
     finally:
         await peer.close()
         store.close_all_db_handles()

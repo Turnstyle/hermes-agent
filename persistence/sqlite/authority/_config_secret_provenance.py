@@ -9,6 +9,7 @@ from persistence.core.errors import AuthorityRefusal
 from ..conversation._store.local import POLICY_PREFIX
 from ..conversation._store.local_lineage import validate_local_lineage
 from ..conversation._store.local_migration import LEGACY_PREFIX
+from ..conversation._store.messages import conversation_revision_on
 from ._runtime import _epoch, _json, _session
 from ._runtime_guards import require_idle
 
@@ -113,19 +114,24 @@ def recover(holder, *, epoch, session_id, old_home, home, route, origin, action,
     def write(conn):
         _epoch(conn, epoch)
         keys, raw, receipt, legacy, target = _pair(conn, session_id, route, origin, home, old_home)
-        require_idle(holder, conn, list({session_id, target}))
+        lineage = receipt.get('lineage', [session_id])
+        require_idle(holder, conn, lineage)
         generation = _session(conn, session_id)['runtime_generation']
         saved = conn.execute('SELECT value FROM state_meta WHERE key=?', (preimage_key,)).fetchone()
         record = _object(saved[0]) if saved else None
         if record is not None and record['old_home'] != old_home:
             raise AuthorityRefusal('admission_conflict')
+        # JSON arrays represent the native revision tuple over the validated lineage.
+        ids, count, max_id, revision = conversation_revision_on(conn, lineage)
+        witness = [list(ids), count, max_id, revision]
         if action == 'rollback':
             if record is None:
                 raise AuthorityRefusal('not_found')
             candidate, changed = _candidate(*map(_object, record['before']), session_id, old_home, home)
             if not changed or candidate != list(map(_object, record['after'])):
                 raise AuthorityRefusal('storage_unavailable')
-            if record['target_revision'] != _session(conn, target)['runtime_revision']:
+            if (record['target_revision'] != _session(conn, target)['runtime_revision']
+                    or record.get('transcript_witness') != witness):
                 raise AuthorityRefusal('revision_conflict')
             status, new_generation = _restore(conn, record, raw, keys, generation, preimage_key)
         else:
@@ -141,7 +147,8 @@ def recover(holder, *, epoch, session_id, old_home, home, route, origin, action,
             new_generation = generation + 1
             record = {'old_home': old_home, 'before': raw, 'after': after,
                       'generation': new_generation, 'rolled_back': False,
-                      'target_revision': _session(conn, target)['runtime_revision']}
+                      'target_revision': _session(conn, target)['runtime_revision'],
+                      'transcript_witness': witness}
             # The preimage and both receipts share the holder's one transaction.
             conn.execute('INSERT INTO state_meta(key,value) VALUES(?,?)', (preimage_key, _json(record)))
             for key, value in zip(keys, after):

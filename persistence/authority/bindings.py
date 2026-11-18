@@ -280,8 +280,10 @@ class SessionBindingRepository(Protocol):
         apply or preview, ``validate_policy`` must validate the candidate with normal credential
         recovery, without writing the store. Apply stores the original raw pair and its postimage
         atomically with both receipts and advances the owner's generation. Preview writes nothing.
-        Rollback restores the raw pair only while postimage and generation still match, retaining
-        the preimage. Repeats are idempotent; a rolled-back recovery cannot overwrite its preimage.
+        Rollback restores the raw pair only while postimage, generation, target runtime revision
+        and the full validated lineage's conversation witness still match in that transaction.
+        A preimage without a transcript witness refuses rollback. The preimage is retained.
+        Repeats are idempotent; a rolled-back recovery cannot overwrite its preimage.
         """
         ...
 

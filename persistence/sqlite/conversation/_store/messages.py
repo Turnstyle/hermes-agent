@@ -1530,10 +1530,15 @@ def conversation_revision(holder: StoreHolder, session_id: str, include_ancestor
     rewind, undo, compaction or rewrite moves it, so a payload derived from the transcript can be
     reused while it holds."""
     ids = _resume_lineage_ids(holder, session_id) if include_ancestors else [session_id]
+    return holder._read_retrying_ioerr(lambda conn: conversation_revision_on(conn, ids))
+
+
+def conversation_revision_on(conn, ids: list[str]) -> tuple:
+    """The native conversation witness over explicit ids on the caller's transaction connection."""
     marks = _placeholders(ids)
-    row = holder._read_one(
+    row = conn.execute(
         f"SELECT COUNT(*), COALESCE(MAX(id), 0), (SELECT COALESCE(SUM(transcript_revision), 0) FROM sessions"
-        f" WHERE id IN ({marks})) FROM messages WHERE session_id IN ({marks}) AND active = 1", (*ids, *ids))
+        f" WHERE id IN ({marks})) FROM messages WHERE session_id IN ({marks}) AND active = 1", (*ids, *ids)).fetchone()
     return (tuple(ids), int(row[0]), int(row[1]), int(row[2]))
 
 
