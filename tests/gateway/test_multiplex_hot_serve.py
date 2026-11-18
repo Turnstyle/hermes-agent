@@ -287,7 +287,18 @@ async def test_created_then_credentialed_profile_is_served_without_restart(tmp_p
         # 1. Created while running, no token yet: served (routes/prefixes/cron), zero adapters, and the
         #    reservation grew to include it (the next restart's reserve, the served set, the cron ticker).
         gamma_dir = _mkprofile(home, "gamma")
-        result = await runner.reconcile_served_profiles()
+        loop_thread = threading.get_ident()
+        hashed = []
+
+        def record_hash(profile_home):
+            hashed.append((profile_home, threading.get_ident()))
+            return profile_serve_signature(profile_home)
+
+        with patch("gateway.run_profile_reconcile.profile_serve_signature", record_hash):
+            result = await runner.reconcile_served_profiles(reason="watcher")
+        # Alpha is a watcher candidate. Gamma gets its signature before connecting.
+        assert {path for path, _ in hashed} == {alpha_dir, gamma_dir}
+        assert all(thread != loop_thread for _, thread in hashed)
         assert result["added"] == ["gamma"]
         assert _served_record(home) == ["default", "alpha", "gamma"]
         assert _reserved_names(runner) == ["alpha", "default", "gamma"]

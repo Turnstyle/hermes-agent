@@ -5,6 +5,7 @@ import json
 from pathlib import Path
 import threading
 import time
+from unittest.mock import patch
 
 import pytest
 
@@ -60,6 +61,7 @@ def mux(tmp_path, monkeypatch, request):
 
 
 def test_hosted_lifecycle_serves_and_stops_every_authority(mux):
+    from gateway import session_hosted_service
     from gateway.run_runtime import recover_gateway_native_sessions
     from gateway.session_hosted_service import stop_hosted_service
 
@@ -70,7 +72,9 @@ def test_hosted_lifecycle_serves_and_stops_every_authority(mux):
     assert all(services.values()), 'each served profile needs its own hosted service'
     assert len({id(s) for s in services.values()}) == len(homes)
     assert all(s.runtime.status()['running'] for s in services.values())
-    assert call(runner._ensure_hosted_room_worker()) is runner.session_authority.hosted_room_service
+    with patch.object(session_hosted_service, 'owner_scope', wraps=session_hosted_service.owner_scope) as scope:
+        assert call(runner._ensure_hosted_room_worker()) is runner.session_authority.hosted_room_service
+        scope.assert_not_called()
     call(recover_gateway_native_sessions(runner))
     assert all(a.hosted_room_service is services[a.profile_id] for a in runner.session_authorities)
     assert call(stop_hosted_service(runner))
