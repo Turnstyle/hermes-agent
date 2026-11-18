@@ -63,6 +63,7 @@ def build_kanban_policy(connection, params, config):
         skills=skills, goal_mode=task.goal_mode, goal_max_turns=task.goal_max_turns,
         goal_text='\n\n'.join(p for p in (task.title, task.body) if p), context=context,
         max_runtime_seconds=task.max_runtime_seconds, accept_hooks=True)
+    context['selected_toolsets'] = list(policy.toolsets)
     context['db'] = str(path)
     request = json.loads(policy.request_json)
     request.update(source='kanban', board=board, task_id=task.id, run_id=task.current_run_id)

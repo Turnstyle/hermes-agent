@@ -1,3 +1,4 @@
+# health: allow FILE_LINES -- reviewed parent-body packet prerequisite: preserve the retained unblock_task preimage for exact packet application; defer package refactoring.
 """SQLite-backed Kanban board shared across profiles (the cross-profile coordination primitive).
 
 Lives under the shared Hermes root: ``default`` board DB at ``<root>/kanban.db`` (pre-boards
@@ -3554,11 +3555,39 @@ def _landing_status_after_parents(conn: sqlite3.Connection, task_id: str) -> str
     return "ready" if _parents_satisfied(conn, task_id) else "todo"
 
 
-def unblock_task(conn: sqlite3.Connection, task_id: str) -> bool:
+def unblock_task(conn: sqlite3.Connection, task_id: str, *, caller_assignment: Optional[dict] = None) -> bool:
     """``blocked``/``scheduled`` -> its resumable phase (parent re-gated; ``review``
     when that is where it left off), closing any leaked run first."""
-    now = int(time.time())
     with write_txn(conn):
+        now = int(time.time())
+        if caller_assignment is not None:
+            caller = caller_assignment
+            # Read the caller and target under this mutation's IMMEDIATE transaction.
+            # No preflight proof or separate read connection can authorize the commit.
+            actual = next((r[2] for r in conn.execute('PRAGMA database_list') if r[1] == 'main'), '')
+            if not actual or Path(actual).resolve() != Path(caller['db']).resolve():
+                return False
+            row = conn.execute(
+                "SELECT 1 FROM tasks t JOIN task_runs r ON r.id=t.current_run_id "
+                "WHERE t.id=? AND t.status='running' AND t.current_run_id=? "
+                "AND t.claim_lock=? AND t.claim_expires>=? AND t.tenant IS ? "
+                "AND t.assignee IS ? AND r.task_id=t.id AND r.status='running' "
+                "AND r.ended_at IS NULL AND r.claim_lock=t.claim_lock AND r.claim_expires>=?",
+                (caller['task_id'], caller['run_id'], caller['claim_lock'], now,
+                 caller.get('tenant'), caller['profile'], now),
+            ).fetchone()
+            bound = conn.execute(
+                "SELECT payload FROM task_events WHERE task_id=? AND run_id=? "
+                "AND kind='worker_bound' ORDER BY id DESC LIMIT 1",
+                (caller['task_id'], caller['run_id']),
+            ).fetchone()
+            identity = json.loads(bound[0]) if bound else {}
+            if (not row or identity.get('pid') != os.getpid()
+                    or identity.get('claim_lock') != caller['claim_lock']):
+                return False
+            target = get_task(conn, task_id)
+            if target is None or target.tenant != caller.get('tenant'):
+                return False
         resume_status = (
             _resume_status_from_events(conn, task_id)
             if _task_status(conn, task_id) == "blocked"

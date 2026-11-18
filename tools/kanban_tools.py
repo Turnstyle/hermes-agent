@@ -13,6 +13,7 @@ import logging
 import os
 import time
 from contextlib import ExitStack, contextmanager
+from pathlib import Path
 from typing import Any, Callable, Optional
 
 from agent.delegation_context import owned_kanban_task
@@ -79,6 +80,58 @@ def _is_dispatcher_owned_worker() -> bool:
     """False for delegate_task children AND for cron jobs fired in-process from
     a worker — i.e. whenever HERMES_KANBAN_* is present but not ours."""
     return _delegation_ctx("is_dispatcher_owned_worker_context", True)
+
+
+def _has_task_assignment() -> bool:
+    """A frozen task policy cannot fall back to interactive privilege if a pin is missing."""
+    from gateway.session_policy import active_policy
+    policy = active_policy()
+    return bool(os.environ.get("HERMES_KANBAN_TASK")) or (policy is not None and policy.source == "kanban")
+
+
+def _native_parent_context(capability: str = "kanban") -> dict | None:
+    """Owner-frozen capability plus the exact live dispatcher assignment.
+
+    The adopted worker's policy is runtime metadata, not a model argument or
+    a profile-name grant. Descendants cannot borrow it, even in-process.
+    """
+    if _delegation_ctx("is_delegated_child_process_context", True) or not _is_dispatcher_owned_worker():
+        return None
+    try:
+        from gateway.session_policy import active_policy
+        from gateway.session_kanban import _bound_claim_is_live
+        policy = active_policy()
+        if policy is None or policy.source != "kanban" or capability not in policy.toolsets:
+            return None
+        context = json.loads(policy.kanban_json or "null")
+        if not isinstance(context, dict) or capability not in context.get('selected_toolsets', ()):
+            return None
+        pins = {"HERMES_KANBAN_TASK": "task_id", "HERMES_KANBAN_RUN_ID": "run_id",
+                "HERMES_KANBAN_CLAIM_LOCK": "claim_lock", "HERMES_KANBAN_DB": "db"}
+        if any(not context.get(field) or str(context[field]) != os.environ.get(env)
+               for env, field in pins.items()):
+            return None
+        return context if _bound_claim_is_live(context) else None
+    except (KeyError, TypeError, ValueError, OSError):
+        return None
+
+
+def _require_parent_board_arg(args: dict) -> None:
+    """Reject foreign routing before connect() could initialize another board."""
+    if _has_task_assignment():
+        context = _native_parent_context()
+        _check(context and args.get("board") in (None, "", context.get("board")),
+               "board is outside the live native parent assignment")
+
+
+def _require_assigned_board(conn) -> None:
+    """An opted-in parent routes its assigned board, never another board."""
+    if not _has_task_assignment():
+        return
+    context = _native_parent_context()
+    actual = next((row[2] for row in conn.execute("PRAGMA database_list") if row[1] == "main"), "")
+    _check(context and actual and Path(actual).resolve() == Path(context["db"]).resolve(),
+           "board is outside the live native parent assignment")
 
 
 def _visible(*, to_env_worker: bool) -> bool:

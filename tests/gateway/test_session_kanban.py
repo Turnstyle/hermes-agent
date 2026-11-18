@@ -8,7 +8,8 @@ import pytest
 from tests.gateway.fixtures.storage_handles import close_storage_handles, storage_handle
 
 
-def test_claim_freezes_task_policy_and_rejects_forgery(tmp_path, monkeypatch):
+@pytest.mark.parametrize("selected", [False, True])
+def test_claim_freezes_task_policy_and_rejects_forgery(tmp_path, monkeypatch, selected):
     from hermes_cli import kanban_db as kb
     from hermes_cli.kanban_db_connect import connect
     from gateway.session_contract import SessionActor
@@ -34,13 +35,15 @@ def test_claim_freezes_task_policy_and_rejects_forgery(tmp_path, monkeypatch):
     connection = SimpleNamespace(authority=SimpleNamespace(profile_id=str(tmp_path)), actor=actor, native_owner=True)
     params = dict(board='owned', task_id=task.id, run_id=task.current_run_id, claim_lock=task.claim_lock)
     from gateway.session_kanban import build_kanban_policy
-    config = {'model': {'default': 'loop-model', 'provider': 'custom'}, 'platform_toolsets': {'cli': ['terminal', 'file']},
+    config = {'model': {'default': 'loop-model', 'provider': 'custom'}, 'platform_toolsets': {'cli': ['terminal', 'file'] + (['kanban'] if selected else [])},
               'agent': {'coding_context': 'focus'}}  # the worktree must not collapse a worker into the coding posture
     policy, _secrets = build_kanban_policy(connection, params, config)
     context = json.loads(policy.kanban_json)
     assert policy.source == 'kanban' and policy.cwd == str(workspace)
     assert policy.model == task.model_override and policy.provider == task.provider_override
     assert {'kanban', 'terminal', 'file'} <= set(policy.toolsets)
+    assert ('kanban' in context['selected_toolsets']) is selected
+    assert {'terminal', 'file'} <= set(context['selected_toolsets'])
     assert context['task_id'] == task.id and context['run_id'] == task.current_run_id
     assert context['board'] == 'owned' and context['claim_lock'] == task.claim_lock
     assert context['skills'] == ['owned-skill'] and context['goal_mode'] and context['goal_max_turns'] == 3
