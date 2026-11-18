@@ -483,6 +483,7 @@ async def handle_ws(ws: Any, *, auth_identity: dict | None = None, subprotocol: 
         # dispatch() may schedule long handlers on the pool; it returns None then and the worker
         # writes the response itself via transport.write (a separate thread, so that is the safe
         # path). Inline handlers return the response dict, written here from the loop.
+        dispatch_started = time.monotonic()
         try:
             resp = await _dispatch_request(authority_connection, req, req_method, transport)
         # health: allow BLE001 -- dispatch boundary: logs the traceback (_log.exception) and answers -32603
@@ -493,8 +494,28 @@ async def handle_ws(ws: Any, *, auth_identity: dict | None = None, subprotocol: 
                          "ws dispatch-crash reply send failed peer=%s id=%s method=%s", peer, req_id, req_method)
             return
         if resp is not None:
-            await _reply(resp, "send_failed_after_response",
-                         "ws response send failed peer=%s id=%s method=%s", peer, req_id, req_method)
+            if req_method != 'worker.persist':
+                await _reply(resp, "send_failed_after_response",
+                             "ws response send failed peer=%s id=%s method=%s", peer, req_id, req_method)
+                return
+            send_started = time.monotonic()
+            sent = False
+            try:
+                await _reply(resp, "send_failed_after_response",
+                             "ws response send failed peer=%s id=%s method=%s", peer, req_id, req_method)
+                sent = True
+            finally:
+                # Do not log request params: they contain the adoption secret and payload.
+                coordinates = req.get('params') or {}
+                # The canonical contract validates these fields; still bound malformed input.
+                coordinates = coordinates if isinstance(coordinates, dict) else {}
+                _log.info('worker.persist response id=%s execution=%s sequence=%s sent=%s '
+                          'send_ms=%.3f handler_ms=%.3f',
+                          req_id if type(req_id) is int else 'noninteger',
+                          str(coordinates.get('execution_id', ''))[:160],
+                          coordinates.get('sequence') if type(coordinates.get('sequence')) is int else 'invalid', sent,
+                          (time.monotonic() - send_started) * 1000,
+                          (send_started - dispatch_started) * 1000)
 
     async def _dispatch_concurrent_read(req: Any) -> None:
         async with concurrent_read_slots:

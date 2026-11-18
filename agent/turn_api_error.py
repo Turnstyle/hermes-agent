@@ -79,6 +79,12 @@ def handle_api_error(
     if agent.thinking_callback:
         agent.thinking_callback("")
 
+    from agent.runtime_session_failure import persistence_failure_result
+    persistence_result = persistence_failure_result(agent, None)
+    if persistence_result is not None:
+        return _verdict('return', {**persistence_result, 'messages': messages, 'api_calls': api_call_count,
+                                   'final_response': ''})
+
     _recovered, active_system_prompt = recover_before_classification(
         agent, api_error, messages=messages, api_messages=api_messages, api_kwargs=api_kwargs,
         active_system_prompt=active_system_prompt,

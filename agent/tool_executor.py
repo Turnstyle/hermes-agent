@@ -615,6 +615,8 @@ def _run_tool_activity_heartbeat(
 
 def _run_with_activity_heartbeat(agent, function_name: str, fn):
     """Run ``fn()`` under the activity heartbeat; covers both executor paths."""
+    from agent.runtime_session_failure import require_worker_persistence
+    require_worker_persistence(agent)
     stop = threading.Event()
     thread = threading.Thread(
         # Keep the gateway turn-inactivity watchdog from abandoning a turn whose tool call runs silently for
@@ -692,6 +694,8 @@ def _dispatch_authorized_once(
     ``begin_execution`` (concurrent start-order gate) is advanced exactly once on every
     path so later-ordered workers keep moving; blocked calls advance it without a callback.
     """
+    from agent.runtime_session_failure import require_worker_persistence
+    require_worker_persistence(agent)
     def _advance_start_order(callback=None) -> None:
         if begin_execution is not None:
             begin_execution(callback)
@@ -1018,6 +1022,8 @@ def _begin_tool_execution(agent, ref: _ToolCallRef, display_index: int | None) -
 
     agent._current_tool = function_name
     agent._touch_activity(f"executing tool: {function_name}")
+    from agent.runtime_session_failure import require_worker_persistence
+    require_worker_persistence(agent)
     _set_worker_activity_callback(agent)
 
     if agent.tool_progress_callback:

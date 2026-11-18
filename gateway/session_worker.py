@@ -6,6 +6,8 @@ the owner on its parent's receipt stream (gateway/session_worker_child.py), neve
 import asyncio
 import hmac
 import os
+import logging
+import time
 
 from gateway.session_admission import admission_fingerprint
 from hermes_state_runtime import (
@@ -62,6 +64,21 @@ def _verify(connection, ref, params, claim):
             raise RuntimeStoreError('permission_denied')
 
 
+def verify_worker_claim(connection, ref, params):
+    """Authenticate every request, including an exact retry on a newly ticketed socket."""
+    started = time.monotonic()
+    claim = _claim(connection, ref, params)
+    if 'worker:adopt' not in connection.actor.capabilities:
+        raise RuntimeStoreError('permission_denied')
+    _verify(connection, ref, params, claim)
+    if 'sequence' in params:
+        logging.getLogger(__name__).info(
+            'worker.persist verified execution=%s generation=%s epoch=%s session=%s sequence=%s verify_ms=%.3f',
+            params['execution_id'], params['generation'], params['epoch'], params['session_id'],
+            params['sequence'], (time.monotonic() - started) * 1000)
+    return claim
+
+
 async def worker_request(connection, ref, params, *, operation):
     from gateway.session_authorities import require_serving
     require_serving(connection.authority)  # adopt/persist would write with the released epoch
@@ -74,9 +91,9 @@ async def worker_request(connection, ref, params, *, operation):
     extra = {'register': {'kind'}, 'adopt': set(), 'persist': {'epoch', 'sequence', 'operation', 'payload'}}[operation]
     if set(params) != _SCOPE | extra:
         raise RuntimeStoreError('invalid_params')
-    claim = _claim(connection, ref, params)
     authority = connection.authority
     if operation == 'register':
+        claim = _claim(connection, ref, params)
         authority._require_admission_open()
     scope = {key: params[key] for key in ('execution_id', 'session_id', 'generation')}
     if operation == 'register':
@@ -87,15 +104,25 @@ async def worker_request(connection, ref, params, *, operation):
             raise RuntimeStoreError('unsupported_producer')
         return await asyncio.to_thread(register_worker_execution, authority.db, epoch=authority.epoch,
             **scope, kind='compute', adoption_secret=claim, require_idle=True)
-    if 'worker:adopt' not in connection.actor.capabilities:
-        raise RuntimeStoreError('permission_denied')
-    _verify(connection, ref, params, claim)
+    claim = verify_worker_claim(connection, ref, params)
     if operation == 'adopt':
         return await asyncio.to_thread(adopt_worker_execution, authority.db, epoch=authority.epoch,
                                        **scope, adoption_secret=claim)
-    result = await asyncio.to_thread(mutate_worker_execution, authority.db, epoch=params['epoch'],
-        **scope, sequence=params['sequence'], operation=params['operation'], payload=params['payload'])
+    result = await persist_off_loop(mutate_worker_execution, authority.db, params=params,
+        epoch=params['epoch'], **scope, sequence=params['sequence'],
+        operation=params['operation'], payload=params['payload'])
     if params['operation'] == 'execution.finish':
         # Queued input parked behind this worker; nothing else would restart its FIFO.
         authority.wake_after_worker(params['session_id'])
     return result
+
+
+async def persist_off_loop(fn, *args, params, **kwargs):
+    """Measure owner executor wait separately from the receipt transaction."""
+    queued = time.monotonic()
+    def run():
+        logging.getLogger(__name__).info(
+            'worker.persist transaction_dispatch execution=%s sequence=%s executor_queue_ms=%.3f',
+            params['execution_id'], params['sequence'], (time.monotonic() - queued) * 1000)
+        return fn(*args, **kwargs)
+    return await asyncio.to_thread(run)

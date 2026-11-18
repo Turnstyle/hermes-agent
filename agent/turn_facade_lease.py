@@ -305,6 +305,8 @@ def admit_durable_turn_lease(
     Mutates ``task_context["session_id"]`` and ``agent.session_id`` when the wait forced a resume-id
     reload. Returns an ``early_result`` (interrupted / timed out) instead of a lease when admission
     fails; the caller returns it verbatim."""
+    from agent.runtime_session_failure import require_worker_persistence
+    require_worker_persistence(agent)
     db = getattr(agent, "_session_db", None)
     admission = TurnLeaseAdmission(conversation_history=conversation_history)
     if db is None or not session_id:

@@ -57,7 +57,7 @@ def owner(monkeypatch, tmp_path):
     import hermes_cli.gateway_runtime_discovery as discovery
 
     state = SimpleNamespace(connections=0, tickets=0, requests=[], drop=None, closed=threading.Event(),
-                            pongs=[], flooded=threading.Event(), relay=None, live=None)
+                            pongs=[], flooded=threading.Event(), relay=None, live=None, persist=None)
 
     def handler(ws):
         state.connections += 1
@@ -66,6 +66,7 @@ def owner(monkeypatch, tmp_path):
         for raw in ws:
             request = json.loads(raw)
             state.requests.append(request['method'])
+            result = state.persist(request['params']) if state.persist is not None else None
             if state.drop == 'before_reply':
                 break
             if request['method'] == 'stall':
@@ -77,7 +78,7 @@ def owner(monkeypatch, tmp_path):
                                     'error': {'code': -32000, 'message': 'stale_generation'}}))
                 continue
             ws.send(json.dumps({'jsonrpc': '2.0', 'id': request['id'],
-                                'result': {'n': len(state.requests), **request.get('params', {})}}))
+                                'result': result if state.persist is not None else {'n': len(state.requests), **request.get('params', {})}}))
             if request['method'] == 'flood':
                 # sessions.changed keeps flowing while the worker is busy in a model call; the owner's
                 # keepalive then needs a pong, which a worker that stopped reading never sends.
@@ -136,14 +137,13 @@ def test_reconnects_with_a_fresh_ticket_after_the_owner_drops_it(owner, tmp_path
 
 
 def test_in_flight_call_on_a_dropped_connection_fails_and_is_not_resent(owner, tmp_path):
-    from websockets.exceptions import ConnectionClosed
-    from agent.runtime_session_store import WorkerRPC
+    from agent.runtime_session_store import WorkerRPC, WorkerTransportError
     rpc = WorkerRPC(tmp_path)
     assert rpc('worker.persist') == {'n': 1}
     owner.drop = 'before_reply'
     started = time.monotonic()
     # The write may have landed: the caller sees the transport error (outcome unknown), never a silent retry.
-    with pytest.raises(ConnectionClosed):
+    with pytest.raises(WorkerTransportError):
         rpc('worker.persist')
     assert time.monotonic() - started < 5
     assert owner.requests == ['worker.persist', 'worker.persist']
@@ -175,33 +175,31 @@ def _owner_closes_before_the_frame_is_written(owner, monkeypatch):
     monkeypatch.setattr(client, 'connect', connect)
 
 
-def test_owner_close_between_the_idle_check_and_the_send_redials_and_sends_once(owner, tmp_path, monkeypatch):
-    """websockets raises ConnectionClosed from send only before the frame is written: nothing reached
-    the owner, so the call redials once with a fresh ticket instead of failing as outcome-unknown."""
+def test_owner_close_between_the_idle_check_and_a_nonpersist_send_redials_once(owner, tmp_path, monkeypatch):
     from agent.runtime_session_store import WorkerRPC
     owner.sabotage = 0
     _owner_closes_before_the_frame_is_written(owner, monkeypatch)
     rpc = WorkerRPC(tmp_path)
-    assert rpc('worker.persist') == {'n': 1}
+    assert rpc('probe') == {'n': 1}
     owner.sabotage = 1
-    assert rpc('worker.persist') == {'n': 2}
-    assert owner.requests == ['worker.persist', 'worker.persist']
+    assert rpc('probe') == {'n': 2}
+    assert owner.requests == ['probe', 'probe']
     assert (owner.connections, owner.tickets) == (2, 2)
-    assert rpc('worker.persist') == {'n': 3}
+    assert rpc('probe') == {'n': 3}
     assert owner.connections == 2
 
 
-def test_a_redial_whose_send_also_fails_is_not_retried_again(owner, tmp_path, monkeypatch):
+def test_a_nonpersist_redial_whose_send_also_fails_is_not_retried_again(owner, tmp_path, monkeypatch):
     from websockets.exceptions import ConnectionClosed
     from agent.runtime_session_store import WorkerRPC
     owner.sabotage = 0
     _owner_closes_before_the_frame_is_written(owner, monkeypatch)
     rpc = WorkerRPC(tmp_path)
-    assert rpc('worker.persist') == {'n': 1}
+    assert rpc('probe') == {'n': 1}
     owner.sabotage = 2
     with pytest.raises(ConnectionClosed):
-        rpc('worker.persist')
-    assert owner.requests == ['worker.persist']
+        rpc('probe')
+    assert owner.requests == ['probe']
     assert (owner.connections, owner.tickets) == (2, 2)
     assert rpc.link is None
 
@@ -271,3 +269,28 @@ def test_an_owner_error_reply_keeps_the_connection_for_the_next_call(owner, tmp_
     assert rpc('worker.persist') == {'n': 2}
     assert owner.requests == ['fail', 'worker.persist']
     assert (owner.connections, owner.tickets) == (1, 1)
+
+
+def test_journal_reconciliation_redials_with_a_fresh_ticket_without_action_replay(owner, tmp_path):
+    from agent.runtime_session_store import RuntimeSessionStore, WorkerRPC
+    from hermes_state import SessionDB
+    from hermes_state_runtime import begin_runtime_epoch, register_worker_execution, mutate_worker_execution
+    db = SessionDB(tmp_path / 'state.db')
+    db.create_session('owned', 'cli')
+    scope = dict(epoch=begin_runtime_epoch(db, instance_id='owner'), execution_id='worker', session_id='owned', generation=0)
+    register_worker_execution(db, **scope, kind='compute', adoption_secret='fixture')
+    owner.persist = lambda params: mutate_worker_execution(db, **params)
+    owner.drop = 'before_reply'
+    rpc = WorkerRPC(tmp_path)
+    store = RuntimeSessionStore(rpc, scope, tmp_path / 'outbox')
+    try:
+        store.append_messages_batch('owned', [{'role': 'tool', 'content': 'one terminal result', 'tool_call_id': 'one'}])
+        assert owner.requests == ['worker.persist', 'worker.persist']
+        assert owner.connections == owner.tickets == 2
+        assert [m['content'] for m in db.get_messages_as_conversation('owned')] == ['one terminal result']
+        assert db._read_one('SELECT COUNT(*) FROM worker_receipts')[0] == 1
+        assert store.failure is None and store.journal['pending'] == []
+    finally:
+        store._outbox_owner.close()
+        rpc.close()
+        db.close()

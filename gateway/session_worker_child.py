@@ -71,18 +71,14 @@ def reserve_child_execution(db, conn, session_id, payload, *, epoch, execution_i
 
 async def worker_child_request(connection, ref, params):
     """worker.persist ``child.reserve``: the parent's full claim and assignment are verified first."""
-    import asyncio
-    from gateway.session_worker import _SCOPE, _claim, _verify
+    from gateway.session_worker import _SCOPE, persist_off_loop, verify_worker_claim
     if set(params) != _SCOPE | {'epoch', 'sequence', 'operation', 'payload'}:
         raise RuntimeStoreError('invalid_params')
     custody = params['operation'] == 'custody.maker_observation'
     if custody:
         from gateway.session_custody_operation import require_custody_actor
         require_custody_actor(connection)
-    claim = _claim(connection, ref, params)
-    if 'worker:adopt' not in connection.actor.capabilities:
-        raise RuntimeStoreError('permission_denied')
-    _verify(connection, ref, params, claim)
+    verify_worker_claim(connection, ref, params)
     authority = connection.authority
 
     def reserve():
@@ -108,7 +104,7 @@ async def worker_child_request(connection, ref, params):
             arm_custody_guard(authority)
             return result
         return await tracked_write(authority, reserve, then=armed)
-    return await asyncio.to_thread(reserve)
+    return await persist_off_loop(reserve, params=params)
 
 
 def reserve_reference_child(authority, launch, scope, identity, principal):

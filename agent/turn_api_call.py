@@ -91,6 +91,8 @@ def perform_api_call(
     _use_streaming = _should_stream(agent)
 
     def _perform_api_call(next_api_kwargs):
+        from agent.runtime_session_failure import require_worker_persistence
+        require_worker_persistence(agent)
         if agent.api_mode == "codex_responses":
             from agent.codex_responses_adapter import drops_replay_item_ids
 
