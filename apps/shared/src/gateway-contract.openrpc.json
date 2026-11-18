@@ -13346,6 +13346,77 @@
         "title": "ConfigProviderRef",
         "type": "object"
       },
+      "ConfigSecretProvenanceParams": {
+        "additionalProperties": false,
+        "properties": {
+          "session_id": {
+            "title": "Session Id",
+            "type": "string"
+          },
+          "old_home": {
+            "title": "Old Home",
+            "type": "string"
+          },
+          "action": {
+            "default": "preview",
+            "enum": [
+              "preview",
+              "apply",
+              "rollback"
+            ],
+            "title": "Action",
+            "type": "string"
+          }
+        },
+        "required": [
+          "session_id",
+          "old_home"
+        ],
+        "title": "ConfigSecretProvenanceParams",
+        "type": "object"
+      },
+      "ConfigSecretProvenanceResult": {
+        "additionalProperties": false,
+        "properties": {
+          "session_id": {
+            "title": "Session Id",
+            "type": "string"
+          },
+          "status": {
+            "enum": [
+              "preview",
+              "applied",
+              "unchanged",
+              "rolled_back"
+            ],
+            "title": "Status",
+            "type": "string"
+          },
+          "preimage_key": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Preimage Key"
+          },
+          "execution_generation": {
+            "title": "Execution Generation",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "session_id",
+          "status",
+          "preimage_key",
+          "execution_generation"
+        ],
+        "title": "ConfigSecretProvenanceResult",
+        "type": "object"
+      },
       "ConfigSection": {
         "additionalProperties": false,
         "properties": {
@@ -51077,6 +51148,24 @@
         "name": "result",
         "schema": {
           "$ref": "#/components/schemas/SessionPruneResult"
+        }
+      }
+    },
+    {
+      "name": "session.recover_config_secret_provenance",
+      "summary": "Native operator recovery of one adopted local config-secret reference, with atomic preimage and guarded rollback.",
+      "params": [
+        {
+          "name": "params",
+          "schema": {
+            "$ref": "#/components/schemas/ConfigSecretProvenanceParams"
+          }
+        }
+      ],
+      "result": {
+        "name": "result",
+        "schema": {
+          "$ref": "#/components/schemas/ConfigSecretProvenanceResult"
         }
       }
     },

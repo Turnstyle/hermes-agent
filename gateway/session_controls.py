@@ -101,6 +101,7 @@ _PROFILE_IMPLICIT = frozenset({'session.create', 'session.list', 'session.info',
                                'prompt.steer_queued', 'prompt.replace_queued',
                                'session.interrupt', 'session.events.since', 'session.mutate', 'session.stats',
                                'session.account_usage',
+                               'session.recover_config_secret_provenance',
                                'approval.respond', 'clarify.respond'})
 
 
@@ -269,6 +270,8 @@ class AuthorityConnection:
         handlers['complete.path'] = partial(complete_path, self)
         from gateway.session_prune import prune
         handlers['session.prune'] = partial(prune, self)
+        from gateway.session_config_provenance import recover as recover_config_provenance
+        handlers['session.recover_config_secret_provenance'] = partial(recover_config_provenance, self)
         from gateway.session_usage import account_usage, stats
         handlers['session.stats'] = partial(stats, self)
         handlers['session.account_usage'] = partial(account_usage, self)
@@ -344,6 +347,7 @@ class AuthorityConnection:
         contract = contract or METHODS.get(method)
         authority = self.authority
         if (isinstance(ref.session_id, str) and ref.session_id and not getattr(authority, 'retiring', False)
+                and method != 'session.recover_config_secret_provenance'
                 and ref.profile_id == getattr(authority, 'profile_id', None)
                 and ref.session_id not in getattr(authority, 'sessions', {ref.session_id: None})):
             # A first read of a session recovery never restored: its compression catch-up (#140060)

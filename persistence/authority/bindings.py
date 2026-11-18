@@ -15,7 +15,7 @@ import re
 from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import datetime
-from typing import Optional, Protocol, runtime_checkable
+from typing import Callable, Literal, Optional, Protocol, runtime_checkable
 
 from ..core.identity import JsonValue, SessionId
 from .admissions import AdmissionGate
@@ -24,6 +24,7 @@ from .vocabulary import CRON_REQUEST_PREFIX, OwnerRule
 __all__ = [
     "ApiBinding",
     "BindingMarks",
+    "ConfigSecretProvenanceRecovery",
     "LegacyAdoptionScan",
     "LocalLineage",
     "NewApiBinding",
@@ -202,6 +203,15 @@ class BindingMarks:
 
 
 @dataclass(frozen=True, slots=True)
+class ConfigSecretProvenanceRecovery:
+    """Exact-session provenance recovery outcome; the preimage stays in the same store."""
+
+    status: Literal['preview', 'applied', 'unchanged', 'rolled_back']
+    preimage_key: str | None
+    execution_generation: int
+
+
+@dataclass(frozen=True, slots=True)
 class LegacyAdoptionScan:
     """The legacy local rows ``hermes sessions adopt`` walks: ``session_ids`` every row whose source is a legacy local source, by start time then id; ``marked`` every id holding a creation receipt or a legacy binding."""
 
@@ -257,6 +267,25 @@ class ApiBinding:
 @runtime_checkable
 class SessionBindingRepository(Protocol):
     """Local creation receipts, API bindings and the lineage reads (module docstring); the runtime check is an assembly diagnostic only, never contract coverage."""
+
+    def recover_config_secret_provenance(
+        self, *, epoch: int, session_id: SessionId, old_home: str, route: str, origin: Mapping[str, JsonValue],
+        action: Literal['preview', 'apply', 'rollback'],
+        validate_policy: Callable[[Mapping[str, JsonValue]], None],
+    ) -> ConfigSecretProvenanceRecovery:
+        """Recover one adopted-local pair from an old sibling home to this handle's actual home.
+
+        One native transaction checks epoch, exact policy/legacy pairing, owner route, lineage,
+        idle state and nested reference identity. Only home/profile identities change. Before an
+        apply or preview, ``validate_policy`` must validate the candidate with normal credential
+        recovery, without writing the store. Apply stores the original raw pair and its postimage
+        atomically with both receipts and advances the owner's generation. Preview writes nothing.
+        Rollback restores the raw pair only while postimage, generation, target runtime revision
+        and the full validated lineage's conversation witness still match in that transaction.
+        A preimage without a transcript witness refuses rollback. The preimage is retained.
+        Repeats are idempotent; a rolled-back recovery cannot overwrite its preimage.
+        """
+        ...
 
     def reserve(self, *, epoch: int, binding: NewSessionBinding, client_request: Mapping[str, JsonValue] | None = None, owner: OwnerRule | None) -> ReservedBinding:
         """Reserve the row, the route and the receipt in one write.

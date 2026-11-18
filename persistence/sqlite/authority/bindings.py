@@ -7,14 +7,15 @@ Each verb converts its typed parameters to its body's arguments, runs one body (
 
 from __future__ import annotations
 
-from collections.abc import Mapping
-from typing import Optional
+from collections.abc import Callable, Mapping
+from typing import Literal, Optional
 
 from persistence.authority.runtime import HistoryActor
 from persistence.authority.admissions import AdmissionGate
 from persistence.authority.bindings import (
     ApiBinding,
     BindingMarks,
+    ConfigSecretProvenanceRecovery,
     LegacyAdoptionScan,
     LocalLineage,
     NewApiBinding,
@@ -27,7 +28,7 @@ from persistence.core.identity import JsonValue, SessionId
 from session_rules.legacy_local import login_label
 
 from .._backend import SQLiteStore, register_repository
-from . import _binding_api, _binding_history, _local
+from . import _binding_api, _binding_history, _config_secret_provenance, _local
 from ._runtime import refused
 
 __all__ = ["SQLiteSessionBindingRepository"]
@@ -52,6 +53,16 @@ class SQLiteSessionBindingRepository:
         self._store = store
 
     # Writes
+
+    def recover_config_secret_provenance(
+        self, *, epoch: int, session_id: SessionId, old_home: str, route: str, origin: Mapping[str, JsonValue],
+        action: Literal['preview', 'apply', 'rollback'],
+        validate_policy: Callable[[Mapping[str, JsonValue]], None],
+    ) -> ConfigSecretProvenanceRecovery:
+        with refused():
+            return _config_secret_provenance.recover(self._store.holder(), epoch=epoch, session_id=session_id,
+                           old_home=old_home, home=self._store.scope.profile_dir, route=route, origin=origin,
+                           action=action, validate_policy=validate_policy)
 
     def reserve(self, *, epoch: int, binding: NewSessionBinding, client_request: Mapping[str, JsonValue] | None = None,
                 owner: OwnerRule | None) -> ReservedBinding:

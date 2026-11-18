@@ -22,6 +22,24 @@ from .groups_bot_relay import (
 from .prompt_voice import ClarifyLockParams, ClarifyLockResult
 from .registry import canonical_method, canonical_namespace, method
 
+
+class ConfigSecretProvenanceParams(Params):
+    session_id: str
+    old_home: str
+    action: Literal['preview', 'apply', 'rollback'] = 'preview'
+
+
+class ConfigSecretProvenanceResult(Result):
+    session_id: str
+    status: Literal['preview', 'applied', 'unchanged', 'rolled_back']
+    preimage_key: str | None
+    execution_generation: int
+
+
+canonical_method('session.recover_config_secret_provenance', params=ConfigSecretProvenanceParams,
+                 result=ConfigSecretProvenanceResult,
+                 doc='Native operator recovery of one adopted local config-secret reference, with atomic preimage and guarded rollback.')
+
 # ── admissions ────────────────────────────────────────────────────────────────────────────────
 
 
