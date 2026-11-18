@@ -47,6 +47,10 @@ class WorkerPersistenceError(RuntimeError):
     pass
 
 
+class WorkerTransportError(WorkerPersistenceError):
+    """No owner response was consumed; only a journaled receipt may be reconciled."""
+
+
 def _caller_summary(limit=8):
     """module:function:line of the frames above this store (its own frames skipped), never
     locals or argument values: best-effort callers swallow the guard's raise (#139029)."""
@@ -188,6 +192,8 @@ class WorkerRPC:
                 try:
                     link.send(request_id, message)
                 except ConnectionClosed:
+                    if method == 'worker.persist':
+                        raise
                     # websockets raises this from send only before a complete frame is written (closed
                     # on entry, or the socket write failed): the owner closed the link after the idle
                     # check and never saw this request, so redial and send it once more.
@@ -195,8 +201,14 @@ class WorkerRPC:
                     link = self._connection()
                     link.send(request_id, message)
                 response = link.receive(20)
+            except (TimeoutError, ConnectionError, ConnectionClosed) as exc:
+                self._drop()
+                if method == 'worker.persist':
+                    reason = 'worker_receipt_timeout' if isinstance(exc, TimeoutError) else 'worker_transport_lost'
+                    raise WorkerTransportError(reason) from exc
+                raise
             except BaseException:
-                # Outcome unknown once sent: surface the error and never resend; the next call redials.
+                # Refusals and local failures are never reconciliation authority.
                 self._drop()
                 raise
             if 'error' in response:
@@ -216,9 +228,10 @@ from agent.runtime_session_lifecycle import RuntimeSessionLifecycleMixin
 class RuntimeSessionStore(RuntimeSessionCompressionMixin, RuntimeSessionLifecycleMixin):
     """Synchronous durable results with a private byte-bounded retry journal.
 
-    A failed write remains pending, and failure is sticky until explicit retry or
-    adoption. Local queue acceptance is never returned as canonical commit.
-    Pending journals live outside age-pruned cache trees.
+    Transport ambiguity gets one exact receipt reconciliation. An exhausted retry
+    remains pending across reopen; other failures require explicit retry or adoption.
+    Local queue acceptance is never returned as canonical commit. Pending journals
+    live outside age-pruned cache trees.
     """
     # The process's async-delegation ledger belongs to the adopted execution, never a reserved child.
     binds_delegation_ledger = True
@@ -336,8 +349,9 @@ class RuntimeSessionStore(RuntimeSessionCompressionMixin, RuntimeSessionLifecycl
             try:
                 while self.journal['pending']:
                     entry = self.journal['pending'][0]
-                    result = self.rpc('worker.persist', **self.scope, **entry)
+                    result = self._persist_entry(entry)
                     candidate = dict(self.journal, pending=self.journal['pending'][1:])
+                    candidate.pop('reconciliation_sequence', None)
                     candidate = self._compression_receipt_journal(candidate, result)
                     self._save(candidate)
                     self.scope = candidate['scope']
@@ -348,6 +362,31 @@ class RuntimeSessionStore(RuntimeSessionCompressionMixin, RuntimeSessionLifecycl
                 raise
             self.failure = None
             return results
+
+    def _persist_entry(self, entry):
+        # Persist the retry budget before redialing: reopening an exhausted outbox cannot
+        # silently grant another automatic attempt. No claim, epoch or target is changed.
+        if self.journal.get('reconciliation_sequence') == entry['sequence']:
+            raise WorkerPersistenceError('worker_persistence_reconciliation_exhausted')
+        frozen = json.dumps(dict(self.scope, **entry), allow_nan=False)
+        try:
+            return self.rpc('worker.persist', **json.loads(frozen))
+        except WorkerTransportError:
+            candidate = dict(self.journal, reconciliation_sequence=entry['sequence'])
+            self._save(candidate)
+            self.journal = candidate
+            try:
+                return self.rpc('worker.persist', **json.loads(frozen))
+            except WorkerTransportError as exc:
+                raise WorkerPersistenceError('worker_persistence_transport_unresolved') from exc
+
+    def require_healthy(self):
+        """Wait for any in-flight receipt reconciliation before admitting more work."""
+        with self.lock:
+            if self.failure:
+                raise WorkerPersistenceError(self.failure)
+            if self.journal['pending']:
+                raise WorkerPersistenceError('worker_persistence_pending_receipt')
 
     def adopt(self, epoch):
         """Install only a separately verified worker.adopt result; never self-adopt."""

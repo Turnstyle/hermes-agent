@@ -78,3 +78,35 @@ def test_unprovable_claim_denies_retry_and_goal_continuation(tmp_path, monkeypat
 
     assert result["failed"] and len(agent.calls) == 1 and goal_calls == []
     assert session_kanban.worker_exit_code(path, context) == kb.KANBAN_RATE_LIMIT_EXIT_CODE
+
+
+import pytest
+
+
+@pytest.mark.parametrize('turn_result', [FAILED, {'completed': True, 'final_response': 'best effort'}])
+def test_sticky_persistence_stops_provider_recovery_and_goal_loop(tmp_path, monkeypatch, turn_result):
+    from agent.runtime_session_store import RuntimeSessionStore, WorkerPersistenceError
+    path, context, frame = _claimed_frame(tmp_path, monkeypatch, goal_mode=True)
+    goals, sleeps = [], []
+    monkeypatch.setattr('hermes_cli.goals.run_kanban_goal_loop', lambda **kw: goals.append(kw))
+    monkeypatch.setattr(rec, 'recovery_delay_seconds', lambda attempt: sleeps.append(attempt) or 0)
+    store = RuntimeSessionStore(lambda *a, **kw: (_ for _ in ()).throw(WorkerPersistenceError('persistence_transport_unresolved')),
+                                {'session_id': 's1'}, tmp_path / 'outbox')
+    agent = _Agent([dict(turn_result)])
+    agent._session_db = store
+    original = agent.run_conversation
+    def turn(*args, **kwargs):
+        try:
+            store.touch_session_activity('s1', ts=123)
+        except WorkerPersistenceError:
+            pass  # The activity callback's best-effort caller swallowed it.
+        return original(*args, **kwargs)
+    agent.run_conversation = turn
+    try:
+        result = session_kanban.run_worker_turns(agent, frame, [])
+        assert len(agent.calls) == 1 and goals == [] and sleeps == []
+        assert result['failed'] and result['failure_reason'] == 'persistence'
+        assert result['failure_retryable'] is False
+        assert session_kanban.worker_exit_code(path, context) == 1
+    finally:
+        store._outbox_owner.close()

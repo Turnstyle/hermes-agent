@@ -57,6 +57,8 @@ def _run_kanban_goal_loop_q(cli: HermesCLI, first_response: str, run_turn=None, 
     passes ``cli.chat`` so every follow-up turn keeps the tool activity feed that the Kanban
     worker log is made of. The caller swallows all errors: a broken loop must never wedge a worker.
     """
+    from agent.runtime_session_failure import require_worker_persistence
+    require_worker_persistence(cli.agent)
     from cli import _int_or, _sync_cli_session_id_from_agent
     task_id = (os.environ.get("HERMES_KANBAN_TASK") or "").strip()
     if not task_id:
@@ -81,7 +83,10 @@ def _run_kanban_goal_loop_q(cli: HermesCLI, first_response: str, run_turn=None, 
         return
 
     def _quiet_turn(prompt: str) -> dict:
+        from agent.runtime_session_failure import persistence_failure_result
+        require_worker_persistence(cli.agent)
         result = cli.agent.run_conversation(user_message=prompt, conversation_history=cli.conversation_history)
+        result = persistence_failure_result(cli.agent, result)
         _sync_cli_session_id_from_agent(cli)
         resp = result.get("final_response", "") if isinstance(result, dict) else str(result)
         if resp:
@@ -102,8 +107,13 @@ def _run_kanban_goal_loop_q(cli: HermesCLI, first_response: str, run_turn=None, 
         with _kbc.connect_closing() as c:
             _kb.block_task(c, task_id, reason=reason, expected_run_id=worker_run_id)
 
+    def guarded_turn(prompt):
+        require_worker_persistence(cli.agent)
+        response = (run_turn or _quiet_turn)(prompt)
+        require_worker_persistence(cli.agent)
+        return response
     _run_loop(
-        task_id=task_id, goal_text=goal_text, run_turn=run_turn or _quiet_turn,
+        task_id=task_id, goal_text=goal_text, run_turn=guarded_turn,
         task_status_fn=_task_status, block_fn=_block,
         max_turns=task.goal_max_turns or _DEF_TURNS, first_response=first_response or "",
         log=log or (lambda m: logger.info("%s", m)),
@@ -231,9 +241,15 @@ def _run_quiet_single_query(cli, effective_query, emitter=None):
             )
             _sync_cli_session_id_from_agent(cli)
 
+        from agent.runtime_session_failure import persistence_failure_result
+        def persistence_ok():
+            nonlocal result
+            result = persistence_failure_result(cli.agent, result)
+            return not (isinstance(result, dict) and result.get('failure_reason') == 'persistence')
         _recover_turns(
             _quiet_recover_turn,
             lambda: result,
+            persistence_check=persistence_ok,
             emit=lambda msg: print(msg, file=sys.stderr, flush=True),
         )
         # The turn is over and persisted: the one-shot exit linger that follows protects nested
@@ -317,6 +333,10 @@ def _run_quiet_single_query(cli, effective_query, emitter=None):
             _run_kanban_goal_loop_q(cli, response)
         except Exception as _goal_exc:
             logger.debug("kanban goal loop failed: %s", _goal_exc)
+
+    from agent.runtime_session_failure import persistence_failure_result
+    result = persistence_failure_result(cli.agent, result)
+    _exit_code = _single_query_exit_code(result)
 
     if emitter is None:
         print(f"\nsession_id: {cli.session_id}", file=sys.stderr)
@@ -565,9 +585,16 @@ def _run_single_query_mode(cli, query, image, quiet, oneshot, stream_json: bool 
             response = cli.chat(nudge)
             return response
 
+        from agent.runtime_session_failure import persistence_failure_result
+        def persistence_ok():
+            cli._last_turn_result = persistence_failure_result(getattr(cli, 'agent', None),
+                                                             getattr(cli, '_last_turn_result', None))
+            return not (isinstance(cli._last_turn_result, dict)
+                        and cli._last_turn_result.get('failure_reason') == 'persistence')
         recover_failed_kanban_turns(
             _nonquiet_recover_turn,
             lambda: getattr(cli, "_last_turn_result", None),
+            persistence_check=persistence_ok,
             emit=lambda msg: print(msg, file=sys.stderr, flush=True),
         )
         # Kanban goal_mode on the `-q` path: same judge loop as `-Q`, but each follow-up turn
@@ -583,6 +610,7 @@ def _run_single_query_mode(cli, query, image, quiet, oneshot, stream_json: bool 
                 _run_kanban_goal_loop_chat(cli, response or "")
             except Exception as _goal_exc:
                 logger.debug("kanban goal loop failed: %s", _goal_exc)
+        persistence_ok()
         cli._print_exit_summary(clear_screen=False)
         # Same exit contract as `-Q`: scripts and the Kanban dispatcher read the outcome from
         # the exit code. This path used to fall through to an implicit 0 for every outcome.

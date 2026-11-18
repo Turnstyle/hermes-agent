@@ -4,6 +4,8 @@ No execution, transport, or authority objects live here. Every mutation uses the
 SessionDB transaction owner, including its inode guard and SQLite retry policy.
 """
 import json
+import logging
+import time
 import uuid
 from typing import NamedTuple, Optional
 
@@ -967,7 +969,11 @@ def apply_worker_receipt(db, *, epoch, execution_id, session_id, generation, seq
         raise RuntimeStoreError('invalid_params')
     digest = admission_fingerprint(canonical_target=session_id,
                                   payload={'operation': operation, 'payload': json.loads(encoded)})
+    queued = time.monotonic()
+    entered = body_done = None
     def write(conn):
+        nonlocal entered, body_done
+        entered, body_done = time.monotonic(), None
         _epoch(conn, epoch)
         row = worker_receipt_assignment(conn, execution_id, session_id, generation, sequence, digest)
         if row['owner_epoch'] != epoch:
@@ -980,6 +986,7 @@ def apply_worker_receipt(db, *, epoch, execution_id, session_id, generation, seq
             from hermes_state_runtime_workers import retired_receipt
             if retired_receipt(old['result_json']):
                 raise RuntimeStoreError('stale_generation')  # a terminal execution's read copy
+            body_done = time.monotonic()
             return json.loads(old['result_json'])
         if row['status'] not in ('registered', 'running'):
             raise RuntimeStoreError('stale_generation')
@@ -1001,5 +1008,18 @@ def apply_worker_receipt(db, *, epoch, execution_id, session_id, generation, seq
         if operation == 'execution.finish':
             from hermes_state_runtime_workers import compact_terminal_receipts
             compact_terminal_receipts(conn, execution_id)
+        body_done = time.monotonic()
         return result
-    return db._execute_write(write, patience_s=db._TRANSCRIPT_WRITE_PATIENCE_S)
+    try:
+        result = db._execute_write(write, patience_s=db._TRANSCRIPT_WRITE_PATIENCE_S)
+    finally:
+        finished = time.monotonic()
+        logging.getLogger(__name__).info(
+            'worker.persist transaction execution=%s generation=%s epoch=%s session=%s sequence=%s '
+            'operation=%s queue_ms=%.3f body_ms=%.3f commit_return_ms=%.3f total_ms=%.3f',
+            execution_id, generation, epoch, session_id, sequence, operation,
+            ((entered or finished) - queued) * 1000,
+            ((body_done or finished) - entered) * 1000 if entered is not None else 0,
+            (finished - body_done) * 1000 if body_done is not None else 0,
+            (finished - queued) * 1000)
+    return result

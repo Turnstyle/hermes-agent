@@ -395,15 +395,20 @@ def _run_task_turns(agent, frame, history, context):
         result = agent.run_conversation(nudge, conversation_history=prior or
                                         agent._session_db.get_messages_as_conversation(agent.session_id),
                                         turn_author=KANBAN_TURN_AUTHOR)
+    from agent.runtime_session_failure import persistence_failure_result
+    def persistence_ok():
+        nonlocal result
+        result = persistence_failure_result(agent, result)
+        return not (isinstance(result, dict) and result.get('failure_reason') == 'persistence')
     # Same in-place retry as the one-shot CLI worker (agent/kanban_turn_recovery.py), but the
     # carrier is this frame's bound claim, never the owner process's environment.
     from agent.kanban_turn_recovery import recover_failed_kanban_turns
     recover_failed_kanban_turns(recover, lambda: result, task_id=context['task_id'],
-                                claim_check=lambda: _bound_claim_is_live(context))
+                                claim_check=lambda: _bound_claim_is_live(context), persistence_check=persistence_ok)
     from hermes_cli.turn_exit import turn_exit_code
     # Only a settled turn may continue the goal loop: an exhausted or denied recovery reaches
     # the honest exit path without re-entering the model under an unprovable claim.
-    if not context['goal_mode'] or turn_exit_code(result, kanban_worker=True) != 0:
+    if not persistence_ok() or not context['goal_mode'] or turn_exit_code(result, kanban_worker=True) != 0:
         return result
     from hermes_cli.goals import run_kanban_goal_loop, DEFAULT_MAX_TURNS
     from hermes_cli import kanban_db as kb
@@ -416,9 +421,13 @@ def _run_task_turns(agent, frame, history, context):
             kb.block_task(conn, context['task_id'], reason=reason, expected_run_id=context['run_id'])
     def turn(prompt):
         nonlocal result
+        from agent.runtime_session_failure import require_worker_persistence
+        require_worker_persistence(agent)
         result = agent.run_conversation(prompt, conversation_history=agent._session_db.get_messages_as_conversation(agent.session_id),
                                         turn_author=KANBAN_TURN_AUTHOR)
-        return result.get('final_response', '')
+        result = persistence_failure_result(agent, result)
+        return {'response': result.get('final_response', ''), 'failed': result.get('failed', False),
+                'failure_reason': result.get('failure_reason')}
     run_kanban_goal_loop(task_id=context['task_id'], goal_text=context['goal_text'], run_turn=turn,
         task_status_fn=status, block_fn=block, max_turns=context['goal_max_turns'] or DEFAULT_MAX_TURNS,
         first_response=result.get('final_response', ''))

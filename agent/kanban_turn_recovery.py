@@ -342,6 +342,7 @@ def recover_failed_kanban_turns(
     emit: Optional[Callable[[str], None]] = None,
     claim_check: Optional[Callable[[], bool]] = None,
     task_id: Optional[str] = None,
+    persistence_check: Optional[Callable[[], bool]] = None,
 ) -> int:
     """Retry an authorised kanban worker turn in place; returns attempts made.
 
@@ -360,6 +361,8 @@ def recover_failed_kanban_turns(
     attempts = 0
     check = claim_check or worker_claim_is_live
     while True:
+        if persistence_check is not None and not persistence_check():
+            return attempts
         result = get_result()
         if not should_recover_turn(result, attempt=attempts, task_id=task_id):
             return attempts
@@ -383,6 +386,8 @@ def recover_failed_kanban_turns(
         # dispatcher can reclaim or settle this run while we sleep, and the pre-sleep proof
         # alone would let that one attempt run without live ownership (round-5 finding F1 —
         # TOCTOU window). No proof, no retry; the caller's honest exit still applies.
+        if persistence_check is not None and not persistence_check():
+            return attempts
         if not check():
             _emit_recovery_skipped(emit, task_id)
             return attempts

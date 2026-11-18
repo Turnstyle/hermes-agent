@@ -152,3 +152,40 @@ async def test_a_failed_read_reply_does_not_cancel_the_running_control(rig):
     await asyncio.wait_for(task, 10)
     assert "cancelled:submit" not in log and "done:submit" in log
     assert log[-1] == "teardown"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('fail_send', [False, True])
+async def test_persist_timing_measures_the_actual_response_send(rig, caplog, fail_send):
+    import logging
+    sock, _gates, _log = rig
+    caplog.set_level(logging.INFO, logger='tui_gateway.ws')
+    sending, release = asyncio.Event(), asyncio.Event()
+    original = sock.send_text
+    async def send(line):
+        if json.loads(line).get('id') == 41:
+            sending.set()
+            await release.wait()
+        await original(line)
+    sock.send_text = send
+    if fail_send:
+        sock.fail_ids.add(41)
+    task = asyncio.create_task(ws_mod.handle_ws(sock))
+    request = rpc(41, 'worker.persist')
+    request['params'] = {'execution_id': 'fixture-worker', 'sequence': 7,
+                         'secret': 'never-log-adoption', 'payload': {'text': 'never-log-payload'}}
+    await sock.inbound.put(request)
+    try:
+        await asyncio.wait_for(sending.wait(), timeout=5)
+        assert not any('worker.persist response' in record.message for record in caplog.records)
+        release.set()
+        from tests.waiting import async_wait_until
+        await async_wait_until(lambda: any('worker.persist response' in record.message for record in caplog.records), timeout=5)
+        message = next(record.message for record in caplog.records if 'worker.persist response' in record.message)
+        assert 'execution=fixture-worker sequence=7' in message
+        assert f'sent={not fail_send}' in message and 'send_ms=' in message and 'handler_ms=' in message
+        assert 'never-log' not in caplog.text
+    finally:
+        release.set()
+        await sock.inbound.put(None)
+        await asyncio.wait_for(task, timeout=5)

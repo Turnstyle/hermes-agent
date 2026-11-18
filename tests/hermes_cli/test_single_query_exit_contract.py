@@ -107,3 +107,77 @@ def test_quiet_kanban_worker_exits_tempfail_when_credentials_are_rate_limited(mo
     with pytest.raises(SystemExit) as exc:
         cli._run_single_query_mode(stub, "do the thing", None, True, True)
     assert exc.value.code == expected
+
+
+@pytest.mark.parametrize('quiet', [True, False])
+@pytest.mark.parametrize('provider_failed', [True, False])
+def test_persistence_failure_stops_one_shot_recovery_and_goals(tmp_path, monkeypatch, quiet, provider_failed):
+    from agent import kanban_turn_recovery as rec
+    from agent.runtime_session_store import RuntimeSessionStore
+    calls, goals, delays = [], [], []
+    monkeypatch.setenv('HERMES_KANBAN_TASK', 'fixture-task')
+    monkeypatch.setenv('HERMES_KANBAN_GOAL_MODE', '1')
+    monkeypatch.setattr(rec, 'worker_claim_is_live', lambda: True)
+    monkeypatch.setattr(rec, 'recovery_delay_seconds', lambda attempt: delays.append(attempt) or 0)
+    monkeypatch.setattr(cli, '_should_seed_interactive', lambda *a, **k: False)
+    monkeypatch.setattr(cli, '_collect_query_images', lambda q, i: (q, []))
+    monkeypatch.setattr(cli, '_collect_kanban_task_images', lambda imgs: [])
+    monkeypatch.setattr(cli, '_finalize_single_query', lambda c: None)
+    monkeypatch.setattr(cli, '_run_kanban_goal_loop_q', lambda *a, **k: goals.append('quiet'))
+    monkeypatch.setattr(cli, '_run_kanban_goal_loop_chat', lambda *a, **k: goals.append('chat'))
+    store = RuntimeSessionStore(lambda *a, **k: {}, {'session_id': 'owned'}, tmp_path / 'outbox')
+    def turn(**kwargs):
+        calls.append(kwargs)
+        store.failure = 'worker_persistence_transport_unresolved'
+        return {'failed': provider_failed, 'completed': not provider_failed, 'failure_retryable': True,
+                'failure_reason': 'timeout', 'final_response': 'visible'}
+    agent = SimpleNamespace(_session_db=store, session_id='owned', run_conversation=turn)
+    stub = SimpleNamespace(agent=agent, session_id='owned', conversation_history=[], _single_query_mode=False,
+        _claim_active_session=lambda *a, **k: True, console=SimpleNamespace(print=lambda *a, **k: None),
+        _show_security_advisories=lambda: None, _print_exit_summary=lambda **k: None)
+    def chat(*args, **kwargs):
+        stub._last_turn_result = turn()
+        return 'visible'
+    stub.chat = chat
+    try:
+        with pytest.raises(SystemExit) as exc:
+            if quiet:
+                cli._run_quiet_single_query(stub, 'work')
+            else:
+                cli._run_single_query_mode(stub, 'work', None, False, True)
+        assert exc.value.code == 1
+        assert len(calls) == 1 and goals == [] and delays == []
+    finally:
+        store._outbox_owner.close()
+
+
+@pytest.mark.parametrize('quiet', [True, False])
+def test_goal_persistence_failure_cannot_exit_success_after_swallowed_goal_error(tmp_path, monkeypatch, quiet):
+    from agent.runtime_session_store import RuntimeSessionStore
+    monkeypatch.setenv('HERMES_KANBAN_TASK', 'fixture-task')
+    monkeypatch.setenv('HERMES_KANBAN_GOAL_MODE', '1')
+    monkeypatch.setattr(cli, '_should_seed_interactive', lambda *a, **k: False)
+    monkeypatch.setattr(cli, '_collect_query_images', lambda q, i: (q, []))
+    monkeypatch.setattr(cli, '_collect_kanban_task_images', lambda imgs: [])
+    monkeypatch.setattr(cli, '_finalize_single_query', lambda c: None)
+    store = RuntimeSessionStore(lambda *a, **k: {}, {'session_id': 'owned'}, tmp_path / 'outbox')
+    success = {'final_response': 'visible', 'completed': True}
+    agent = SimpleNamespace(_session_db=store, session_id='owned', run_conversation=lambda **k: dict(success))
+    stub = SimpleNamespace(agent=agent, session_id='owned', conversation_history=[], _single_query_mode=False,
+        _claim_active_session=lambda *a, **k: True, console=SimpleNamespace(print=lambda *a, **k: None),
+        _show_security_advisories=lambda: None, _print_exit_summary=lambda **k: None,
+        chat=lambda *a, **k: 'visible', _last_turn_result=dict(success))
+    def goal(*args, **kwargs):
+        store.failure = 'worker_persistence_transport_unresolved'
+        raise RuntimeError('goal callback failed after persistence became sticky')
+    monkeypatch.setattr(cli, '_run_kanban_goal_loop_q', goal)
+    monkeypatch.setattr(cli, '_run_kanban_goal_loop_chat', goal)
+    try:
+        with pytest.raises(SystemExit) as exc:
+            if quiet:
+                cli._run_quiet_single_query(stub, 'work')
+            else:
+                cli._run_single_query_mode(stub, 'work', None, False, True)
+        assert exc.value.code == 1
+    finally:
+        store._outbox_owner.close()
