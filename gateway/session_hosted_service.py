@@ -256,6 +256,10 @@ async def ensure_hosted_service(runner):
 
 
 async def _ensure_hosted_service(runner, authority):
+    # Entering owner_scope reads the profile's files on every watcher tick.
+    service = getattr(authority, 'hosted_room_service', None)
+    if service is not None and getattr(service, '_transport_installed', False):
+        return
     with owner_scope(authority):
         service = getattr(authority, 'hosted_room_service', None)
         if service is None:

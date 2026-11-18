@@ -232,8 +232,11 @@ class GatewayProfileReconcileMixin:
             retry_parked = reason == "control-socket"
             added = [n for n in live if n not in known and n != active and (retry_parked or n not in parked)]
             removed = [n for n in known if n not in live and n != active]
-            changed = [n for n in live if n in known and n != active and n not in added
-                       and profile_serve_signature(live[n]) != sigs.get(n)]
+            # Each signature reads config.yaml and .env. Batch the watcher reads off the loop.
+            candidates = [n for n in live if n in known and n != active and n not in added]
+            live_signatures = (await asyncio.to_thread(
+                lambda: {n: profile_serve_signature(live[n]) for n in candidates}) if candidates else {})
+            changed = [n for n in candidates if live_signatures[n] != sigs.get(n)]
             current = {n: h for n, h in live.items() if n in known or n == active}
             return await self._apply_profile_changes(
                 current, added, removed, changed, reason=reason, live=live, result=result)
@@ -272,7 +275,7 @@ class GatewayProfileReconcileMixin:
         for name in added + changed:
             # Only acknowledge the configuration observed before connecting;
             # a setup save during an awaited handshake needs another scan.
-            scan_signature = profile_serve_signature(current[name])
+            scan_signature = await asyncio.to_thread(profile_serve_signature, current[name])
             if name in changed:
                 self._drop_stale_platform_verdicts(name)
             try:
