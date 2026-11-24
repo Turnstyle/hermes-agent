@@ -1489,3 +1489,18 @@ Every transition appends a row to `task_events`. Each row carries an optional `r
 ## Out of scope
 
 Kanban is deliberately single-host. `~/.hermes/kanban.db` is a local SQLite file and the dispatcher spawns workers on the same machine. Running a shared board across two hosts is not supported — there's no coordination primitive for "worker X on host A, worker Y on host B," and the crash-detection path assumes PIDs are host-local. If you need multi-host, run an independent board per host and use `delegate_task` / a message queue to bridge them.
+
+### Native parent body compare-and-set
+
+An owner-admitted native dispatcher parent with the frozen `kanban` capability can call
+`kanban_edit_body(task_id, old_body, new_body)` on its assigned board and tenant. Both bodies
+are required exact strings, each limited to 262144 UTF-8 bytes. Whitespace and Unicode are
+preserved. A NULL body does not equal an empty string, and an unchanged replacement is refused.
+A stale body returns `ok: false, code: "body_conflict"` without a write or audit event.
+Success returns `ok: true`, `task_id`, and the exact committed `body`.
+
+The body update and `edited` audit event commit together after the live lease, run, PID,
+board and tenant checks. Status, claims, runs, dependencies, and lifecycle stay unchanged.
+Done and archived targets are refused; use the existing lifecycle route for terminal work.
+Interactive profiles, unselected parents, delegated children, and terminal or execute_code
+descendants cannot borrow this capability.
